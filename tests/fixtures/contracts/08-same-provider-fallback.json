@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "name": "same-provider-fallback",
+  "description": "A Claude run hit a usage limit and continued natively on another Claude account (new run, same session). A Codex run hit a limit where native cross-account resume is unproven, so a linked handoff successor was created. A third case has no eligible account: work is preserved and the owner is notified. No cross-provider or API-billing fallback.",
+  "synthetic": true,
+  "requirements": [
+    "R08",
+    "R04",
+    "R13"
+  ],
+  "cases": [
+    "A12"
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_synth-fb",
+        "harness": "claude",
+        "title": "migration work",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-fb-2",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-fb-2",
+        "session_id": "ses_synth-fb",
+        "node_id": "node_synth-mac",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/home/synth/work/ses_synth-fb",
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "running",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-mac",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "native_ref": {
+          "kind": "claude_session",
+          "id": "00000000-0000-4000-8000-0000000000fb"
+        },
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ],
+        "previous_run_id": "run_synth-fb-1",
+        "continuation_kind": "native_resume"
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synth-fbx",
+        "harness": "codex",
+        "title": "api work (limited)",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-fbx-1",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-fbx-1",
+        "session_id": "ses_synth-fbx",
+        "node_id": "node_synth-linux",
+        "adapter": "codex-synth",
+        "harness": "codex",
+        "cwd": "/home/synth/work/ses_synth-fbx",
+        "runtime": {
+          "harness": "codex",
+          "version": "synthetic"
+        },
+        "account_id": "acct_synth-codex-a",
+        "state": "exited",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-linux",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.steer",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "agent.tools"
+        ]
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synth-fbx2",
+        "harness": "codex",
+        "title": "api work (handoff successor)",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-fbx-2",
+        "lineage": {
+          "forked_from": "ses_synth-fbx",
+          "handoff_note_id": "note_synth-handoff-1"
+        },
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-fbx-2",
+        "session_id": "ses_synth-fbx2",
+        "node_id": "node_synth-linux",
+        "adapter": "codex-synth",
+        "harness": "codex",
+        "cwd": "/home/synth/work/ses_synth-fbx2",
+        "runtime": {
+          "harness": "codex",
+          "version": "synthetic"
+        },
+        "account_id": "acct_synth-codex-b",
+        "state": "starting",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-linux",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.steer",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "agent.tools"
+        ],
+        "previous_run_id": "run_synth-fbx-1",
+        "continuation_kind": "handoff"
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "run_synth-fb-1",
+      "session_id": "ses_synth-fb",
+      "node_id": "node_synth-mac",
+      "adapter": "claude-synth",
+      "harness": "claude",
+      "cwd": "/home/synth/work/ses_synth-fb",
+      "runtime": {
+        "harness": "claude",
+        "version": "synthetic"
+      },
+      "account_id": "acct_synth-claude-c",
+      "state": "exited",
+      "state_reason": "quiesced after usage limit",
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "node:node_synth-mac",
+        "stale": false
+      },
+      "started_at": "2026-10-04T11:30:00Z",
+      "ended_at": "2026-10-04T11:57:00Z",
+      "exit_code": 0,
+      "capabilities": [
+        "attach.native_terminal",
+        "attach.read_only",
+        "input.queue",
+        "input.reconcile",
+        "approvals.answer",
+        "interrupt",
+        "stop",
+        "resume.native",
+        "resume.handoff",
+        "subagents.observe",
+        "transcript.read",
+        "screen.read",
+        "account.isolated_profile",
+        "hooks.events",
+        "agent.tools"
+      ]
+    }
+  ],
+  "notes": [
+    {
+      "note_id": "note_synth-handoff-1",
+      "kind": "handoff",
+      "project_id": null,
+      "session_id": "ses_synth-fbx",
+      "title": "Handoff: api work",
+      "body": "Synthetic handoff: branch api-client, last green commit abc123, next: add retries.",
+      "author": {
+        "kind": "system",
+        "id": "pyre"
+      },
+      "created_at": "2026-10-04T11:58:00Z",
+      "provenance": {
+        "session_id": "ses_synth-fbx",
+        "run_id": "run_synth-fbx-1",
+        "node_id": "node_synth-linux"
+      }
+    }
+  ],
+  "fallbacks": [
+    {
+      "session_id": "ses_synth-fb",
+      "from_run_id": "run_synth-fb-1",
+      "from_account_id": "acct_synth-claude-c",
+      "outcome": "native_resume",
+      "to_account_id": "acct_synth-claude-a",
+      "new_run_id": "run_synth-fb-2",
+      "reason": "usage limit; acct_synth-claude-a eligible (fresh, 22% 5h)",
+      "uncertain_work": false,
+      "planned_at": "2026-10-04T11:57:00Z"
+    },
+    {
+      "session_id": "ses_synth-fbx",
+      "from_run_id": "run_synth-fbx-1",
+      "from_account_id": "acct_synth-codex-a",
+      "outcome": "handoff",
+      "to_account_id": "acct_synth-codex-b",
+      "new_run_id": "run_synth-fbx-2",
+      "reason": "cross-account native resume unproven for codex; created linked successor with handoff",
+      "uncertain_work": true,
+      "planned_at": "2026-10-04T11:58:00Z"
+    },
+    {
+      "session_id": "ses_synth-standalone",
+      "from_run_id": "run_synth-standalone-1",
+      "from_account_id": "acct_synth-claude-a",
+      "outcome": "waiting",
+      "reason": "no eligible anthropic subscription (c exhausted until 13:20Z, b unknown/stale); work preserved",
+      "uncertain_work": false,
+      "planned_at": "2026-10-04T11:59:00Z"
+    }
+  ],
+  "attention": [
+    {
+      "attention_id": "att_synth-pool",
+      "kind": "account_exhausted",
+      "severity": "urgent",
+      "group_key": "pool:anthropic",
+      "object": {
+        "kind": "session",
+        "id": "ses_synth-standalone"
+      },
+      "session_id": "ses_synth-standalone",
+      "project_id": null,
+      "title": "No eligible Claude account",
+      "summary": "Session paused and resumable; earliest reset 13:20Z.",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:59:00Z",
+      "updated_at": "2026-10-04T11:59:00Z",
+      "deep_link": "pyre://session/ses_synth-standalone"
+    }
+  ]
+}

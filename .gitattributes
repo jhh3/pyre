@@ -1,0 +1,16 @@
+# Whitespace exemptions for `git diff --check` (the "Planning documentation"
+# workflow checks the whole tree). Everything else must be clean; fix the
+# source instead of adding a pattern here. These files are verbatim captures,
+# upstream/vendored code, or fixtures where the whitespace is the content.
+
+# Raw terminal byte streams replayed by the Android emulator tests.
+android/app/src/test/resources/tui/*.bin -whitespace
+
+# Gradle wrapper for Windows ships with CRLF line endings.
+android/gradlew.bat whitespace=cr-at-eol
+
+# Vendored Termux terminal view, kept identical to upstream.
+android/termux-terminal/** -whitespace
+
+# Hive workspace fixtures mirror real stream files, including empty "key: " lines.
+integrations/hive/testdata/** -whitespace

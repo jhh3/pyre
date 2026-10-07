@@ -1,0 +1,724 @@
+{
+  "schema_version": 1,
+  "name": "message-delivery-states",
+  "description": "Independent delivery facts: hub storage, runtime delivery, acknowledgement. Accepted means a supported input interface accepted it — not that the agent completed anything.",
+  "synthetic": true,
+  "requirements": [
+    "R04"
+  ],
+  "cases": [
+    "A04",
+    "A05",
+    "A06"
+  ],
+  "nodes": [
+    {
+      "node_id": "node_synth-mac",
+      "name": "synth-mac",
+      "hostname": "synth-mac.local",
+      "ssh_alias": "synth-mac",
+      "platform": "darwin",
+      "arch": "arm64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "subagents.observe",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "hooks.events",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "0.160.0",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.steer",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.5a",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "stop",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-synth",
+        "tmux": "3.5a"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-04T11:00:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 10,
+        "load1": 2.1,
+        "mem_total_mb": 16384,
+        "mem_avail_mb": 6100,
+        "active_runs": 2,
+        "max_runs": 8,
+        "pyre_rss_mb": 38,
+        "pyre_cpu_pct": 0.4,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 18.5,
+        "load5": 2.4,
+        "load15": 2.2,
+        "swap_total_mb": 9216,
+        "swap_used_mb": 7816,
+        "mem_pressure": "warn",
+        "disks": [
+          {
+            "path": "/Users/synth",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 471482,
+            "free_mb": 15510
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_synth-a-1",
+            "session_id": "ses_synth-a",
+            "procs": 11,
+            "rss_mb": 1229.4,
+            "cpu_pct": 35.2,
+            "top": {
+              "pid": 4321,
+              "name": "claude",
+              "rss_mb": 702.1
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_synth-standalone-1",
+            "session_id": "ses_synth-standalone",
+            "procs": 4,
+            "rss_mb": 410,
+            "cpu_pct": 0.3,
+            "top": {
+              "pid": 4400,
+              "name": "claude",
+              "rss_mb": 380.5
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-27T13:20:00Z"
+    },
+    {
+      "node_id": "node_synth-linux",
+      "name": "synth-linux",
+      "hostname": "synth-linux",
+      "ssh_alias": "synth-linux",
+      "platform": "linux",
+      "arch": "amd64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "subagents.observe",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "hooks.events",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "",
+          "available": false,
+          "reason": "codex executable not found on node PATH",
+          "capabilities": [],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.4",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "stop",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-synth",
+        "tmux": "3.4"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-04T07:00:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 32,
+        "load1": 5.5,
+        "mem_total_mb": 123904,
+        "mem_avail_mb": 74000,
+        "active_runs": 1,
+        "max_runs": 16,
+        "pyre_rss_mb": 41,
+        "pyre_cpu_pct": 0.3,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 7.2,
+        "load5": 4.9,
+        "load15": 4.1,
+        "swap_total_mb": 8192,
+        "swap_used_mb": 310,
+        "mem_pressure": "normal",
+        "mem_pressure_some10": 0.4,
+        "disks": [
+          {
+            "path": "/home/synth",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 953869,
+            "free_mb": 612400
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_synth-project-1",
+            "session_id": "ses_synth-project",
+            "procs": 23,
+            "rss_mb": 2310.7,
+            "cpu_pct": 112.5,
+            "top": {
+              "pid": 9001,
+              "name": "go",
+              "rss_mb": 980.2
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_synth-b-1",
+            "session_id": "ses_synth-b",
+            "procs": 6,
+            "rss_mb": 655,
+            "cpu_pct": 1.1,
+            "top": {
+              "pid": 9100,
+              "name": "claude",
+              "rss_mb": 512.3
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-28T06:00:00Z"
+    }
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_synth-a",
+        "harness": "claude",
+        "title": "coordinator",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-a-1",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-a-1",
+        "session_id": "ses_synth-a",
+        "node_id": "node_synth-mac",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/home/synth/work/ses_synth-a",
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-mac",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synth-b",
+        "harness": "claude",
+        "title": "worker",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-b-1",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-b-1",
+        "session_id": "ses_synth-b",
+        "node_id": "node_synth-linux",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/home/synth/work/ses_synth-b",
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "state": "waiting_input",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-linux",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ]
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    }
+  ],
+  "messages": [
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-queued",
+        "operation_id": "op_synth-queued",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "project_id": null,
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: please run the tests when free."
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:50:00Z",
+        "runtime": "queued",
+        "runtime_reason": "recipient busy; waiting for idle turn",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:51:00Z"
+      },
+      "cursor": 1
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-accepted",
+        "operation_id": "op_synth-accepted",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "project_id": null,
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: review artifact ver_synth-report-1."
+        },
+        "attachments": [
+          {
+            "artifact_version_id": "ver_synth-report-1"
+          }
+        ],
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:50:00Z",
+        "runtime": "accepted",
+        "bound_run_id": "run_synth-b-1",
+        "ack": "none",
+        "receipts": [
+          {
+            "message_id": "msg_synth-accepted",
+            "attempt_id": "dlv_synth-1",
+            "session_id": "ses_synth-b",
+            "run_id": "run_synth-b-1",
+            "node_id": "node_synth-linux",
+            "state": "accepted",
+            "evidence": "hook_receipt",
+            "evidence_ref": "hook:UserPromptSubmit:synthetic-1",
+            "observed_at": "2026-10-04T11:51:00Z",
+            "origin_seq": 41
+          }
+        ],
+        "updated_at": "2026-10-04T11:51:00Z"
+      },
+      "cursor": 2
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-replied",
+        "operation_id": "op_synth-replied",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "project_id": null,
+        "thread_id": "thr_synth-status",
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: what's the status?"
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:50:00Z",
+        "runtime": "accepted",
+        "bound_run_id": "run_synth-b-1",
+        "ack": "replied",
+        "ack_ref": "msg_synth-reply",
+        "updated_at": "2026-10-04T11:51:00Z"
+      },
+      "cursor": 3
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-reply",
+        "operation_id": "op_synth-reply",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "project_id": null,
+        "thread_id": "thr_synth-status",
+        "in_reply_to": "msg_synth-replied",
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: tests pass; published ver_synth-report-1."
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:50:00Z",
+        "runtime": "accepted",
+        "bound_run_id": "run_synth-a-1",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:51:00Z"
+      },
+      "cursor": 4
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-rejected",
+        "operation_id": "op_synth-rejected",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "project_id": null,
+        "mode": "steer",
+        "body": {
+          "text": "Synthetic: steer now."
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:50:00Z",
+        "runtime": "rejected",
+        "runtime_reason": "unsupported: adapter does not advertise input.steer",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:51:00Z"
+      },
+      "cursor": 5
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-indeterminate",
+        "operation_id": "op_synth-indeterminate",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "project_id": null,
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: delete the temp branch."
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:50:00Z",
+        "runtime": "indeterminate",
+        "runtime_reason": "node restarted after submitting input and before recording a receipt; no evidence found yet",
+        "bound_run_id": "run_synth-b-1",
+        "ack": "none",
+        "receipts": [
+          {
+            "message_id": "msg_synth-indeterminate",
+            "attempt_id": "dlv_synth-2",
+            "session_id": "ses_synth-b",
+            "run_id": "run_synth-b-1",
+            "node_id": "node_synth-linux",
+            "state": "indeterminate",
+            "evidence": "none",
+            "detail": "crash window",
+            "observed_at": "2026-10-04T11:52:00Z",
+            "origin_seq": 44
+          }
+        ],
+        "updated_at": "2026-10-04T11:51:00Z"
+      },
+      "cursor": 6
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-pending-local",
+        "operation_id": "op_synth-pending-local",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "project_id": null,
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: queued while hub unreachable."
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "pending_local",
+        "runtime": "queued",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:59:00Z"
+      },
+      "cursor": 7
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-doorbell",
+        "operation_id": "op_synth-doorbell",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-a"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "project_id": null,
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: sent while the owner was attached."
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:50:00Z",
+        "runtime": "accepted",
+        "runtime_reason": "doorbell: read with the pyre inbox tool",
+        "bound_run_id": "run_synth-b-1",
+        "ack": "acknowledged",
+        "ack_ref": "op_synth-ack-doorbell",
+        "consumed_at": "2026-10-04T11:51:00Z",
+        "receipts": [
+          {
+            "message_id": "msg_synth-doorbell",
+            "attempt_id": "dlv_synth-3",
+            "session_id": "ses_synth-b",
+            "run_id": "run_synth-b-1",
+            "node_id": "node_synth-linux",
+            "state": "accepted",
+            "evidence": "claude.tool.inbox_read",
+            "evidence_ref": "evt_synth-posttooluse-1",
+            "detail": "doorbell: read with the pyre inbox tool",
+            "observed_at": "2026-10-04T11:51:00Z",
+            "origin_seq": 47,
+            "consumed": true
+          }
+        ],
+        "updated_at": "2026-10-04T11:51:00Z"
+      },
+      "cursor": 8
+    }
+  ],
+  "attention": [
+    {
+      "attention_id": "att_synth-indet",
+      "kind": "indeterminate_delivery",
+      "severity": "urgent",
+      "group_key": "indeterminate:msg_synth-indeterminate",
+      "object": {
+        "kind": "message",
+        "id": "msg_synth-indeterminate"
+      },
+      "session_id": "ses_synth-b",
+      "project_id": null,
+      "title": "Delivery outcome unknown",
+      "summary": "Inspect evidence before reissuing.",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:52:00Z",
+      "updated_at": "2026-10-04T11:52:00Z",
+      "deep_link": "pyre://message/msg_synth-indeterminate"
+    }
+  ]
+}

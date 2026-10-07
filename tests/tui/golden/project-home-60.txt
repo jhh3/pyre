@@ -1,0 +1,30 @@
+ Pyre S 3 · [P Projects] · M · A › Project         ○ synced
+────────────────────────────────────────────────────────────
+Synthetic Outfit
+[Overview]  Docs   Artifacts   Discussion   Sessions
+
+Repos        none (a project needs no repository)
+Updated      8h ago
+
+Sessions · 1
+● working    outfit API client  synth-linux
+
+Artifacts · 1
+Synthetic test report                                v2 · 5m
+
+Brief
+revision 2 · 2m ago · by coordinator
+
+Brief
+
+Goal: X.
+Constraint: keep API stable.
+
+
+
+
+
+
+
+
+ ←→ section                               esc back   ? help

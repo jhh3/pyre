@@ -1,0 +1,19 @@
+{
+  "id": "cnv_123",
+  "title": "Cannot finish connector setup",
+  "state": "open",
+  "priority": true,
+  "source": {
+    "type": "conversation",
+    "author": {"type": "user", "id": "user-42", "name": "Riley Customer"},
+    "body": "The setup modal closed after verification failed."
+  },
+  "contacts": {"contacts": [{"id": "user-42", "name": "Riley Customer", "email": "riley@example.test"}]},
+  "conversation_parts": {
+    "conversation_parts": [
+      {"id": "part-1", "part_type": "comment", "body": "Please keep my entered values so I can retry.", "author": {"type": "user", "name": "Riley Customer"}, "created_at": 1787620000},
+      {"id": "part-2", "part_type": "note", "body": "Internal note: reproduced against the private gateway.", "author": {"type": "admin", "name": "Support Agent"}, "created_at": 1787620300}
+    ]
+  },
+  "updated_at": 1787620400
+}

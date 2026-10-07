@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · [M Machines] · A Accounts                               ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  MACHINES · updated now                           │ synth-linux  ● online
+  STATUS     MACHINE        SEEN  HARNESSES        │
+› ● online   synth-linux     30s  claude ✗codex s… │ Last seen  30s ago
+  ● online   synth-mac       30s  claude codex sh… │ Connected  since 5h ago
+                                                   │ Platform   linux/amd64
+                                                   │ Hostname   synth-linux
+                                                   │ SSH        ssh synth-linux
+                                                   │ Versions   protocol 1 · pyred 0.1.0-synth · tm…
+                                                   │ Resources  load 5.5/32 cpu · mem 72.3 GiB free…
+                                                   │ CPU        █░░░░░░░   7%  load 5.5 4.9 4.1 · 3…
+                                                   │ Memory     ███░░░░░  40%  49G of 121G · pressu…
+                                                   │ Swap       ░░░░░░░░   4%  310M of 8.0G
+                                                   │ Disk       ███░░░░░  36%  598G free of 932G · …
+                                                   │            pyre overhead 41 MiB, 0.3% cpu · sa…
+                                                   │
+                                                   │ Harnesses
+                                                   │ ✓ claude  2.1.289  15 capabilities
+                                                   │ ✗ codex   unavailable: codex executable not fo…
+                                                   │ ✓ shell   tmux 3.4  4 capabilities
+                                                   │
+                                                   │ Sessions by memory
+                                                   │ 2.3G 112%  outfit API client            23 pro…
+                                                   │   655M 1%  worker                       6 proc…
+                                                   │
+                                                   │
+                                                   │
+
+ ↑↓ select   r refresh                                                            esc back   ? help

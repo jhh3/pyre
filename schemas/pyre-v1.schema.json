@@ -1,0 +1,3932 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pyre.invalid/schemas/pyre-v1.schema.json",
+  "$ref": "#/$defs/All",
+  "$defs": {
+    "Account": {
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "rota_ref": {
+          "type": "string"
+        },
+        "provider_ref": {
+          "type": "string"
+        },
+        "plan": {
+          "type": "string"
+        },
+        "per_machine_independent": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "account_id",
+        "provider",
+        "label",
+        "kind",
+        "disabled",
+        "created_at"
+      ]
+    },
+    "AccountAssignment": {
+      "properties": {
+        "assignment_id": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "grant_id": {
+          "type": "string"
+        },
+        "credential_kind": {
+          "type": "string"
+        },
+        "grant_generation": {
+          "type": "integer"
+        },
+        "lease": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "assigned_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "released_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        }
+      },
+      "type": "object",
+      "required": [
+        "assignment_id",
+        "account_id",
+        "grant_generation",
+        "run_id",
+        "session_id",
+        "node_id",
+        "reason",
+        "assigned_at",
+        "freshness"
+      ]
+    },
+    "AccountLease": {
+      "properties": {
+        "lease_id": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "holder": {
+          "type": "string"
+        },
+        "acquired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "released_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "lease_id",
+        "account_id",
+        "node_id",
+        "holder",
+        "acquired_at",
+        "expires_at"
+      ]
+    },
+    "AccountObservation": {
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reporting_node": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "string"
+        },
+        "eligibility": {
+          "type": "string"
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/UsageWindow"
+          },
+          "type": "array"
+        },
+        "reset_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "account_id",
+        "provider",
+        "reporting_node",
+        "observed_at",
+        "source",
+        "confidence",
+        "eligibility",
+        "stale"
+      ]
+    },
+    "AccountPolicy": {
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "prefer": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "mode"
+      ]
+    },
+    "AccountView": {
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/Account"
+        },
+        "latest": {
+          "$ref": "#/$defs/AccountObservation"
+        },
+        "by_node": {
+          "items": {
+            "$ref": "#/$defs/AccountObservation"
+          },
+          "type": "array"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/DeviceGrant"
+          },
+          "type": "array"
+        },
+        "active_assignments": {
+          "items": {
+            "$ref": "#/$defs/AccountAssignment"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "account",
+        "grants",
+        "active_assignments"
+      ]
+    },
+    "AcquireAccountLeaseRequest": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "correlation_id": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "holder": {
+          "type": "string"
+        },
+        "ttl_seconds": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "operation_id",
+        "account_id",
+        "holder"
+      ]
+    },
+    "Address": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "All": {
+      "properties": {
+        "Error": {
+          "$ref": "#/$defs/Error"
+        },
+        "Node": {
+          "$ref": "#/$defs/Node"
+        },
+        "SessionView": {
+          "$ref": "#/$defs/SessionView"
+        },
+        "Run": {
+          "$ref": "#/$defs/Run"
+        },
+        "AttachDescriptor": {
+          "$ref": "#/$defs/AttachDescriptor"
+        },
+        "CommandReceipt": {
+          "$ref": "#/$defs/CommandReceipt"
+        },
+        "InputLease": {
+          "$ref": "#/$defs/InputLease"
+        },
+        "Approval": {
+          "$ref": "#/$defs/Approval"
+        },
+        "MessageView": {
+          "$ref": "#/$defs/MessageView"
+        },
+        "Project": {
+          "$ref": "#/$defs/Project"
+        },
+        "Document": {
+          "$ref": "#/$defs/DocumentWithRevision"
+        },
+        "DocumentProposal": {
+          "$ref": "#/$defs/DocumentProposal"
+        },
+        "Artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "ArtifactVersion": {
+          "$ref": "#/$defs/ArtifactVersion"
+        },
+        "Upload": {
+          "$ref": "#/$defs/Upload"
+        },
+        "PublishReceipt": {
+          "$ref": "#/$defs/PublishReceipt"
+        },
+        "ReviewComment": {
+          "$ref": "#/$defs/ReviewComment"
+        },
+        "Note": {
+          "$ref": "#/$defs/Note"
+        },
+        "LaunchContext": {
+          "$ref": "#/$defs/LaunchContext"
+        },
+        "AccountView": {
+          "$ref": "#/$defs/AccountView"
+        },
+        "FallbackPlan": {
+          "$ref": "#/$defs/FallbackPlan"
+        },
+        "AuditEntry": {
+          "$ref": "#/$defs/AuditEntry"
+        },
+        "AttentionItem": {
+          "$ref": "#/$defs/AttentionItem"
+        },
+        "Event": {
+          "$ref": "#/$defs/Event"
+        },
+        "ListEvents": {
+          "$ref": "#/$defs/ListEventsResponse"
+        },
+        "EnvironmentGen": {
+          "$ref": "#/$defs/EnvironmentGeneration"
+        },
+        "ChangePlan": {
+          "$ref": "#/$defs/ChangePlan"
+        },
+        "ToolVersion": {
+          "$ref": "#/$defs/ToolVersion"
+        },
+        "Connection": {
+          "$ref": "#/$defs/Connection"
+        },
+        "NodeFrame": {
+          "$ref": "#/$defs/NodeFrame"
+        },
+        "HelloResponse": {
+          "$ref": "#/$defs/HelloResponse"
+        },
+        "PairingTicket": {
+          "$ref": "#/$defs/PairingTicket"
+        },
+        "ClientCredential": {
+          "$ref": "#/$defs/ClientCredential"
+        },
+        "NodeActionResult": {
+          "$ref": "#/$defs/NodeActionResult"
+        },
+        "PreviewURL": {
+          "$ref": "#/$defs/PreviewURL"
+        },
+        "MintPreview": {
+          "$ref": "#/$defs/MintPreviewRequest"
+        },
+        "CheckGrant": {
+          "$ref": "#/$defs/CheckGrantRequest"
+        },
+        "GrantDecision": {
+          "$ref": "#/$defs/GrantDecision"
+        },
+        "AccountLease": {
+          "$ref": "#/$defs/AccountLease"
+        },
+        "AcquireLease": {
+          "$ref": "#/$defs/AcquireAccountLeaseRequest"
+        },
+        "StartSession": {
+          "$ref": "#/$defs/StartSessionRequest"
+        },
+        "SendMessage": {
+          "$ref": "#/$defs/SendMessageRequest"
+        },
+        "AnswerApproval": {
+          "$ref": "#/$defs/AnswerApprovalRequest"
+        },
+        "ProposeRevision": {
+          "$ref": "#/$defs/ProposeRevisionRequest"
+        },
+        "BeginUpload": {
+          "$ref": "#/$defs/BeginUploadRequest"
+        },
+        "CreateComment": {
+          "$ref": "#/$defs/CreateCommentRequest"
+        },
+        "FixtureBundle": {
+          "$ref": "#/$defs/FixtureBundle"
+        }
+      },
+      "type": "object",
+      "required": [
+        "Error",
+        "Node",
+        "SessionView",
+        "Run",
+        "AttachDescriptor",
+        "CommandReceipt",
+        "InputLease",
+        "Approval",
+        "MessageView",
+        "Project",
+        "Document",
+        "DocumentProposal",
+        "Artifact",
+        "ArtifactVersion",
+        "Upload",
+        "PublishReceipt",
+        "ReviewComment",
+        "Note",
+        "LaunchContext",
+        "AccountView",
+        "FallbackPlan",
+        "AuditEntry",
+        "AttentionItem",
+        "Event",
+        "ListEvents",
+        "EnvironmentGen",
+        "ChangePlan",
+        "ToolVersion",
+        "Connection",
+        "NodeFrame",
+        "HelloResponse",
+        "PairingTicket",
+        "ClientCredential",
+        "NodeActionResult",
+        "PreviewURL",
+        "MintPreview",
+        "CheckGrant",
+        "GrantDecision",
+        "AccountLease",
+        "AcquireLease",
+        "StartSession",
+        "SendMessage",
+        "AnswerApproval",
+        "ProposeRevision",
+        "BeginUpload",
+        "CreateComment",
+        "FixtureBundle"
+      ]
+    },
+    "Anchor": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "kind",
+        "value"
+      ]
+    },
+    "AnswerApprovalRequest": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "correlation_id": {
+          "type": "string"
+        },
+        "approval_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "option_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "operation_id",
+        "approval_id",
+        "run_id"
+      ]
+    },
+    "Approval": {
+      "properties": {
+        "approval_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/ApprovalOption"
+          },
+          "type": "array"
+        },
+        "allow_text": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "type": "string"
+        },
+        "resolution": {
+          "$ref": "#/$defs/ApprovalResolution"
+        }
+      },
+      "type": "object",
+      "required": [
+        "approval_id",
+        "session_id",
+        "run_id",
+        "request_id",
+        "kind",
+        "title",
+        "allow_text",
+        "created_at",
+        "state"
+      ]
+    },
+    "ApprovalOption": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "ApprovalResolution": {
+      "properties": {
+        "option_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "resolved_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string"
+        },
+        "effect": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "actor",
+        "resolved_at",
+        "source"
+      ]
+    },
+    "Artifact": {
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "latest_version_id": {
+          "type": "string"
+        },
+        "version_count": {
+          "type": "integer"
+        },
+        "created_by": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "project_id",
+        "title",
+        "version_count",
+        "created_by",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "ArtifactVersion": {
+      "properties": {
+        "version_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "previous_version_id": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "author": {
+          "$ref": "#/$defs/Principal"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "note": {
+          "type": "string"
+        },
+        "review_requested": {
+          "type": "boolean"
+        },
+        "content_url": {
+          "type": "string"
+        },
+        "preview_url": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "version_id",
+        "artifact_id",
+        "seq",
+        "digest",
+        "size",
+        "media_type",
+        "filename",
+        "author",
+        "provenance",
+        "created_at",
+        "content_url"
+      ]
+    },
+    "AttachDescriptor": {
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "mechanism": {
+          "type": "string"
+        },
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "url": {
+          "type": "string"
+        },
+        "ticket": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "read_only": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "lease": {
+          "$ref": "#/$defs/InputLease"
+        }
+      },
+      "type": "object",
+      "required": [
+        "run_id",
+        "node_id",
+        "mechanism",
+        "expires_at",
+        "read_only"
+      ]
+    },
+    "Attachment": {
+      "properties": {
+        "artifact_version_id": {
+          "type": "string"
+        },
+        "document_revision_id": {
+          "type": "string"
+        },
+        "note_id": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "AttentionItem": {
+      "properties": {
+        "attention_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "group_key": {
+          "type": "string"
+        },
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "snoozed_until": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deep_link": {
+          "type": "string"
+        },
+        "notification": {
+          "$ref": "#/$defs/NotificationStatus"
+        }
+      },
+      "type": "object",
+      "required": [
+        "attention_id",
+        "kind",
+        "severity",
+        "group_key",
+        "object",
+        "project_id",
+        "title",
+        "state",
+        "count",
+        "created_at",
+        "updated_at",
+        "deep_link"
+      ]
+    },
+    "AuditActor": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "kind"
+      ]
+    },
+    "AuditEntry": {
+      "properties": {
+        "audit_id": {
+          "type": "integer"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "automatic": {
+          "type": "boolean"
+        },
+        "actor": {
+          "$ref": "#/$defs/AuditActor"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "node_name": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "session_title": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "account_label": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "from_account_id": {
+          "type": "string"
+        },
+        "to_account_id": {
+          "type": "string"
+        },
+        "from_note": {
+          "type": "string"
+        },
+        "to_note": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "audit_id",
+        "at",
+        "kind",
+        "action",
+        "automatic",
+        "actor",
+        "summary"
+      ]
+    },
+    "BeginUploadRequest": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "correlation_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "review_requested": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "type": "object",
+      "required": [
+        "operation_id",
+        "filename",
+        "size",
+        "digest",
+        "provenance"
+      ]
+    },
+    "ChangePlan": {
+      "properties": {
+        "plan_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/PlanChange"
+          },
+          "type": "array"
+        },
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/DriftItem"
+          },
+          "type": "array"
+        },
+        "restart_required": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "result_digest": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "plan_id",
+        "node_id",
+        "scope",
+        "changes",
+        "conflicts",
+        "restart_required",
+        "result_digest"
+      ]
+    },
+    "CheckGrantRequest": {
+      "properties": {
+        "connection_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "connection_id",
+        "session_id"
+      ]
+    },
+    "CheckoutBinding": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "repo_id": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "node_id",
+        "path",
+        "mode"
+      ]
+    },
+    "CheckoutRequest": {
+      "properties": {
+        "repo_id": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "mode"
+      ]
+    },
+    "ClientCredential": {
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "client_id",
+        "token"
+      ]
+    },
+    "CommandAck": {
+      "properties": {
+        "command_id": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "command_id",
+        "seq"
+      ]
+    },
+    "CommandReceipt": {
+      "properties": {
+        "command_id": {
+          "type": "string"
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "command_id",
+        "accepted",
+        "outcome",
+        "observed_at"
+      ]
+    },
+    "Connection": {
+      "properties": {
+        "connection_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        },
+        "modes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "availability": {
+          "items": {
+            "$ref": "#/$defs/ConnectionAvailability"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/ConnectionScope"
+        },
+        "generation": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "connection_id",
+        "name",
+        "service",
+        "modes",
+        "availability",
+        "scope",
+        "generation"
+      ]
+    },
+    "ConnectionAvailability": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "node_id",
+        "state",
+        "mode",
+        "verified_at"
+      ]
+    },
+    "ConnectionScope": {
+      "properties": {
+        "access": {
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "CreateCommentRequest": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "correlation_id": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "anchor": {
+          "$ref": "#/$defs/Anchor"
+        },
+        "body": {
+          "type": "string"
+        },
+        "in_reply_to": {
+          "type": "string"
+        },
+        "mentions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "operation_id",
+        "target",
+        "body"
+      ]
+    },
+    "DeliveryReceipt": {
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "evidence_ref": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "origin_seq": {
+          "type": "integer"
+        },
+        "consumed": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "message_id",
+        "attempt_id",
+        "session_id",
+        "run_id",
+        "node_id",
+        "state",
+        "evidence",
+        "observed_at"
+      ]
+    },
+    "DeliveryStatus": {
+      "properties": {
+        "storage": {
+          "type": "string"
+        },
+        "stored_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "runtime": {
+          "type": "string"
+        },
+        "runtime_reason": {
+          "type": "string"
+        },
+        "bound_run_id": {
+          "type": "string"
+        },
+        "ack": {
+          "type": "string"
+        },
+        "ack_ref": {
+          "type": "string"
+        },
+        "consumed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "outcome_ref": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "receipts": {
+          "items": {
+            "$ref": "#/$defs/DeliveryReceipt"
+          },
+          "type": "array"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "storage",
+        "runtime",
+        "ack",
+        "updated_at"
+      ]
+    },
+    "DeviceGrant": {
+      "properties": {
+        "grant_id": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "profile_ref": {
+          "type": "string"
+        },
+        "mechanism": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "profile_dir": {
+          "type": "string"
+        },
+        "max_procs": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "refresh_owner": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "grant_id",
+        "account_id",
+        "node_id",
+        "harness",
+        "profile_ref",
+        "mechanism",
+        "kind",
+        "max_procs",
+        "state",
+        "refresh_owner",
+        "generation",
+        "observed_at"
+      ]
+    },
+    "DiskUsage": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "total_mb": {
+          "type": "integer"
+        },
+        "free_mb": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "path",
+        "roles",
+        "total_mb",
+        "free_mb"
+      ]
+    },
+    "Document": {
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "head_revision_id": {
+          "type": "string"
+        },
+        "head_seq": {
+          "type": "integer"
+        },
+        "created_by": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "document_id",
+        "project_id",
+        "title",
+        "slug",
+        "media_type",
+        "head_revision_id",
+        "head_seq",
+        "created_by",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "DocumentProposal": {
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "base_revision_id": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "author": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "type": "string"
+        },
+        "head_at_conflict": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "proposal_id",
+        "document_id",
+        "base_revision_id",
+        "content",
+        "author",
+        "created_at",
+        "state"
+      ]
+    },
+    "DocumentRevision": {
+      "properties": {
+        "revision_id": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "parent_revision_id": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "author": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "type": "object",
+      "required": [
+        "revision_id",
+        "document_id",
+        "seq",
+        "digest",
+        "size",
+        "author",
+        "created_at"
+      ]
+    },
+    "DocumentWithRevision": {
+      "properties": {
+        "document": {
+          "$ref": "#/$defs/Document"
+        },
+        "revision": {
+          "$ref": "#/$defs/DocumentRevision"
+        }
+      },
+      "type": "object",
+      "required": [
+        "document",
+        "revision"
+      ]
+    },
+    "DriftItem": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "actual": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "path",
+        "kind"
+      ]
+    },
+    "EnvironmentGeneration": {
+      "properties": {
+        "generation_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "runtime_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "config_digests": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/ExtensionRef"
+          },
+          "type": "array"
+        },
+        "plugins": {
+          "items": {
+            "$ref": "#/$defs/ExtensionRef"
+          },
+          "type": "array"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/ExtensionRef"
+          },
+          "type": "array"
+        },
+        "connection_grants": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "values": {
+          "items": {
+            "$ref": "#/$defs/ResolvedValue"
+          },
+          "type": "array"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "previous_id": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "generation_id",
+        "node_id",
+        "profile",
+        "project_id",
+        "created_at",
+        "runtime_versions",
+        "config_digests",
+        "skills",
+        "plugins",
+        "mcp_servers",
+        "connection_grants",
+        "digest"
+      ]
+    },
+    "Error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "ref": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "Event": {
+      "properties": {
+        "event_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "integer"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "origin_seq": {
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "object": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "payload_version": {
+          "type": "integer"
+        },
+        "payload": true,
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ingested_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "event_id",
+        "cursor",
+        "origin",
+        "kind",
+        "object",
+        "project_id",
+        "payload_version",
+        "occurred_at",
+        "ingested_at"
+      ]
+    },
+    "ExtensionRef": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "string"
+        },
+        "managed": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name",
+        "layer",
+        "managed"
+      ]
+    },
+    "FallbackPlan": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "from_run_id": {
+          "type": "string"
+        },
+        "from_account_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "to_account_id": {
+          "type": "string"
+        },
+        "new_run_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "uncertain_work": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "planned_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "session_id",
+        "from_run_id",
+        "from_account_id",
+        "outcome",
+        "reason",
+        "uncertain_work",
+        "planned_at"
+      ]
+    },
+    "FixtureBundle": {
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "requirements": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/Node"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionView"
+          },
+          "type": "array"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/Run"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/MessageView"
+          },
+          "type": "array"
+        },
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/Approval"
+          },
+          "type": "array"
+        },
+        "leases": {
+          "items": {
+            "$ref": "#/$defs/InputLease"
+          },
+          "type": "array"
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/Project"
+          },
+          "type": "array"
+        },
+        "documents": {
+          "items": {
+            "$ref": "#/$defs/Document"
+          },
+          "type": "array"
+        },
+        "revisions": {
+          "items": {
+            "$ref": "#/$defs/DocumentRevision"
+          },
+          "type": "array"
+        },
+        "proposals": {
+          "items": {
+            "$ref": "#/$defs/DocumentProposal"
+          },
+          "type": "array"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "type": "array"
+        },
+        "versions": {
+          "items": {
+            "$ref": "#/$defs/ArtifactVersion"
+          },
+          "type": "array"
+        },
+        "comments": {
+          "items": {
+            "$ref": "#/$defs/ReviewComment"
+          },
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/Note"
+          },
+          "type": "array"
+        },
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/AccountView"
+          },
+          "type": "array"
+        },
+        "observations": {
+          "items": {
+            "$ref": "#/$defs/AccountObservation"
+          },
+          "type": "array"
+        },
+        "fallbacks": {
+          "items": {
+            "$ref": "#/$defs/FallbackPlan"
+          },
+          "type": "array"
+        },
+        "attention": {
+          "items": {
+            "$ref": "#/$defs/AttentionItem"
+          },
+          "type": "array"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "environments": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentGeneration"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/ToolVersion"
+          },
+          "type": "array"
+        },
+        "drift": {
+          "items": {
+            "$ref": "#/$defs/DriftItem"
+          },
+          "type": "array"
+        },
+        "plans": {
+          "items": {
+            "$ref": "#/$defs/ChangePlan"
+          },
+          "type": "array"
+        },
+        "connections": {
+          "items": {
+            "$ref": "#/$defs/Connection"
+          },
+          "type": "array"
+        },
+        "exchanges": {
+          "items": {
+            "$ref": "#/$defs/FixtureExchange"
+          },
+          "type": "array"
+        },
+        "contents": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "required": [
+        "schema_version",
+        "name",
+        "description",
+        "synthetic"
+      ]
+    },
+    "FixtureExchange": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "request": true,
+        "response": true,
+        "error": {
+          "$ref": "#/$defs/Error"
+        },
+        "explanation": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name",
+        "op",
+        "request"
+      ]
+    },
+    "Freshness": {
+      "properties": {
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "observed_at",
+        "source",
+        "stale"
+      ]
+    },
+    "GrantDecision": {
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "allowed",
+        "generation",
+        "reason"
+      ]
+    },
+    "HarnessInfo": {
+      "properties": {
+        "harness": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "probed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "login": {
+          "$ref": "#/$defs/HarnessLogin"
+        }
+      },
+      "type": "object",
+      "required": [
+        "harness",
+        "version",
+        "available",
+        "capabilities",
+        "probed_at"
+      ]
+    },
+    "HarnessLogin": {
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "provider_ref": {
+          "type": "string"
+        },
+        "plan": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "HelloResponse": {
+      "properties": {
+        "protocol": {
+          "type": "integer"
+        },
+        "min_protocol": {
+          "type": "integer"
+        },
+        "hub_id": {
+          "type": "string"
+        },
+        "hub_version": {
+          "type": "string"
+        },
+        "server_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "mock": {
+          "type": "boolean"
+        },
+        "features": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "protocol",
+        "min_protocol",
+        "hub_id",
+        "hub_version",
+        "server_time",
+        "principal",
+        "mock",
+        "features"
+      ]
+    },
+    "InputLease": {
+      "properties": {
+        "lease_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "holder": {
+          "$ref": "#/$defs/Principal"
+        },
+        "acquired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "renewed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "takeover_of": {
+          "type": "string"
+        },
+        "released_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "lease_id",
+        "run_id",
+        "holder",
+        "acquired_at",
+        "renewed_at",
+        "expires_at"
+      ]
+    },
+    "LaunchContext": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "brief_revision_id": {
+          "type": "string"
+        },
+        "references": {
+          "items": {
+            "$ref": "#/$defs/ObjectRef"
+          },
+          "type": "array"
+        },
+        "memory_freshness": {
+          "$ref": "#/$defs/Freshness"
+        }
+      },
+      "type": "object",
+      "required": [
+        "text",
+        "bytes",
+        "truncated",
+        "references"
+      ]
+    },
+    "Lineage": {
+      "properties": {
+        "parent_session_id": {
+          "type": "string"
+        },
+        "forked_from": {
+          "type": "string"
+        },
+        "handoff_note_id": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Link": {
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "title",
+        "url"
+      ]
+    },
+    "ListEventsResponse": {
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": "integer"
+        },
+        "head_cursor": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "events",
+        "next_cursor",
+        "head_cursor"
+      ]
+    },
+    "MessageBody": {
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "text"
+      ]
+    },
+    "MessageEnvelope": {
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "sender": {
+          "$ref": "#/$defs/Principal"
+        },
+        "recipient": {
+          "$ref": "#/$defs/Address"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "in_reply_to": {
+          "type": "string"
+        },
+        "reissues": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "body": {
+          "$ref": "#/$defs/MessageBody"
+        },
+        "attachments": {
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          },
+          "type": "array"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "request_ack": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "schema_version",
+        "message_id",
+        "operation_id",
+        "sender",
+        "recipient",
+        "project_id",
+        "mode",
+        "body",
+        "created_at"
+      ]
+    },
+    "MessageView": {
+      "properties": {
+        "envelope": {
+          "$ref": "#/$defs/MessageEnvelope"
+        },
+        "status": {
+          "$ref": "#/$defs/DeliveryStatus"
+        },
+        "cursor": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "envelope",
+        "status",
+        "cursor"
+      ]
+    },
+    "MintPreviewRequest": {
+      "properties": {
+        "version_id": {
+          "type": "string"
+        },
+        "ttl_seconds": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "version_id"
+      ]
+    },
+    "NativeRef": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "Node": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "ssh_alias": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "harnesses": {
+          "items": {
+            "$ref": "#/$defs/HarnessInfo"
+          },
+          "type": "array"
+        },
+        "versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "connection": {
+          "$ref": "#/$defs/NodeConnection"
+        },
+        "resources": {
+          "$ref": "#/$defs/NodeResources"
+        },
+        "enrolled_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "required": [
+        "node_id",
+        "name",
+        "platform",
+        "arch",
+        "harnesses",
+        "versions",
+        "capabilities",
+        "connection",
+        "resources",
+        "enrolled_at"
+      ]
+    },
+    "NodeActionResult": {
+      "properties": {
+        "command_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "result": true,
+        "error": {
+          "$ref": "#/$defs/Error"
+        }
+      },
+      "type": "object",
+      "required": [
+        "command_id",
+        "outcome"
+      ]
+    },
+    "NodeCommand": {
+      "properties": {
+        "command_id": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "issued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "payload": true
+      },
+      "type": "object",
+      "required": [
+        "command_id",
+        "seq",
+        "kind",
+        "actor",
+        "issued_at",
+        "payload"
+      ]
+    },
+    "NodeConnection": {
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "last_seen_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "connected_since": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "remote_addr": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "state"
+      ]
+    },
+    "NodeFrame": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "hello": {
+          "$ref": "#/$defs/NodeHello"
+        },
+        "welcome": {
+          "$ref": "#/$defs/NodeWelcome"
+        },
+        "report": {
+          "$ref": "#/$defs/NodeReport"
+        },
+        "report_ack": {
+          "$ref": "#/$defs/ReportAck"
+        },
+        "command": {
+          "$ref": "#/$defs/NodeCommand"
+        },
+        "command_ack": {
+          "$ref": "#/$defs/CommandAck"
+        },
+        "error": {
+          "$ref": "#/$defs/Error"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "type",
+        "at"
+      ]
+    },
+    "NodeHello": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "integer"
+        },
+        "min_protocol": {
+          "type": "integer"
+        },
+        "pyred_version": {
+          "type": "string"
+        },
+        "last_command_seq": {
+          "type": "integer"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "harnesses": {
+          "items": {
+            "$ref": "#/$defs/HarnessInfo"
+          },
+          "type": "array"
+        },
+        "versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resources": {
+          "$ref": "#/$defs/NodeResources"
+        },
+        "live_runs": {
+          "items": {
+            "$ref": "#/$defs/Run"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "node_id",
+        "protocol",
+        "min_protocol",
+        "pyred_version",
+        "last_command_seq",
+        "hostname",
+        "platform",
+        "arch",
+        "harnesses",
+        "versions",
+        "capabilities",
+        "resources",
+        "live_runs"
+      ]
+    },
+    "NodeReport": {
+      "properties": {
+        "origin_seq": {
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "payload": true
+      },
+      "type": "object",
+      "required": [
+        "origin_seq",
+        "kind",
+        "at",
+        "payload"
+      ]
+    },
+    "NodeResources": {
+      "properties": {
+        "cpu_count": {
+          "type": "integer"
+        },
+        "load1": {
+          "type": "number"
+        },
+        "mem_total_mb": {
+          "type": "integer"
+        },
+        "mem_avail_mb": {
+          "type": "integer"
+        },
+        "active_runs": {
+          "type": "integer"
+        },
+        "max_runs": {
+          "type": "integer"
+        },
+        "pyre_rss_mb": {
+          "type": "number"
+        },
+        "pyre_cpu_pct": {
+          "type": "number"
+        },
+        "agent_rss_mb": {
+          "type": "number"
+        },
+        "agent_cpu_pct": {
+          "type": "number"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "cpu_pct": {
+          "type": "number"
+        },
+        "load5": {
+          "type": "number"
+        },
+        "load15": {
+          "type": "number"
+        },
+        "swap_total_mb": {
+          "type": "integer"
+        },
+        "swap_used_mb": {
+          "type": "integer"
+        },
+        "mem_pressure": {
+          "type": "string"
+        },
+        "mem_pressure_some10": {
+          "type": "number"
+        },
+        "disks": {
+          "items": {
+            "$ref": "#/$defs/DiskUsage"
+          },
+          "type": "array"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/RunUsage"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "cpu_count",
+        "load1",
+        "mem_total_mb",
+        "mem_avail_mb",
+        "active_runs",
+        "max_runs",
+        "pyre_rss_mb",
+        "pyre_cpu_pct",
+        "agent_rss_mb",
+        "agent_cpu_pct",
+        "observed_at"
+      ]
+    },
+    "NodeSelector": {
+      "properties": {
+        "platform": {
+          "type": "string"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "least_loaded": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "NodeWelcome": {
+      "properties": {
+        "hub_id": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "integer"
+        },
+        "min_protocol": {
+          "type": "integer"
+        },
+        "server_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "committed_report_seq": {
+          "type": "integer"
+        },
+        "heartbeat_seconds": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "hub_id",
+        "protocol",
+        "min_protocol",
+        "server_time",
+        "committed_report_seq",
+        "heartbeat_seconds"
+      ]
+    },
+    "Note": {
+      "properties": {
+        "note_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "author": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "hive_ref": {
+          "type": "string"
+        },
+        "sync_state": {
+          "type": "string"
+        },
+        "promoted_to": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "note_id",
+        "kind",
+        "project_id",
+        "title",
+        "body",
+        "author",
+        "created_at",
+        "provenance"
+      ]
+    },
+    "NotificationStatus": {
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "sent_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "provider",
+        "state"
+      ]
+    },
+    "ObjectRef": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "PairingTicket": {
+      "properties": {
+        "pairing_id": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "hub_url": {
+          "type": "string"
+        },
+        "hub_cert_sha256": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "pairing_id",
+        "code",
+        "hub_url",
+        "expires_at",
+        "uri"
+      ]
+    },
+    "PlanChange": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "diff": {
+          "type": "string"
+        },
+        "backup": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "path",
+        "action"
+      ]
+    },
+    "PreviewURL": {
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "url",
+        "expires_at"
+      ]
+    },
+    "Principal": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "on_behalf_of": {
+          "$ref": "#/$defs/Principal"
+        }
+      },
+      "type": "object",
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "ProcUsage": {
+      "properties": {
+        "pid": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rss_mb": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "pid",
+        "name",
+        "rss_mb"
+      ]
+    },
+    "Project": {
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "brief_document_id": {
+          "type": "string"
+        },
+        "repos": {
+          "items": {
+            "$ref": "#/$defs/RepoBinding"
+          },
+          "type": "array"
+        },
+        "checkouts": {
+          "items": {
+            "$ref": "#/$defs/CheckoutBinding"
+          },
+          "type": "array"
+        },
+        "links": {
+          "items": {
+            "$ref": "#/$defs/Link"
+          },
+          "type": "array"
+        },
+        "env_profile": {
+          "type": "string"
+        },
+        "connections": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "integer"
+        },
+        "created_by": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "project_id",
+        "name",
+        "repos",
+        "checkouts",
+        "archived",
+        "version",
+        "created_by",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "ProposeRevisionRequest": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "correlation_id": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "base_revision_id": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "operation_id",
+        "document_id",
+        "base_revision_id",
+        "content"
+      ]
+    },
+    "Provenance": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PublishReceipt": {
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "version": {
+          "$ref": "#/$defs/ArtifactVersion"
+        }
+      },
+      "type": "object",
+      "required": [
+        "artifact",
+        "version"
+      ]
+    },
+    "RepoBinding": {
+      "properties": {
+        "repo_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "repo_id",
+        "name"
+      ]
+    },
+    "ReportAck": {
+      "properties": {
+        "committed_seq": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "committed_seq"
+      ]
+    },
+    "ResolvedValue": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "string"
+        },
+        "overrode": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "restart_required": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "key",
+        "value",
+        "layer"
+      ]
+    },
+    "ReviewComment": {
+      "properties": {
+        "comment_id": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "anchor": {
+          "$ref": "#/$defs/Anchor"
+        },
+        "author": {
+          "$ref": "#/$defs/Principal"
+        },
+        "body": {
+          "type": "string"
+        },
+        "in_reply_to": {
+          "type": "string"
+        },
+        "mentions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "resolved_by": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "project_id": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "comment_id",
+        "target",
+        "author",
+        "body",
+        "resolved",
+        "created_at",
+        "updated_at",
+        "project_id"
+      ]
+    },
+    "Run": {
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "adapter": {
+          "type": "string"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "checkout": {
+          "$ref": "#/$defs/CheckoutBinding"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeVersion"
+        },
+        "env_generation_id": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "assignment_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "state_reason": {
+          "type": "string"
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "native_ref": {
+          "$ref": "#/$defs/NativeRef"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "previous_run_id": {
+          "type": "string"
+        },
+        "continuation_kind": {
+          "type": "string"
+        },
+        "subagents": {
+          "items": {
+            "$ref": "#/$defs/SubagentObservation"
+          },
+          "type": "array"
+        },
+        "lease": {
+          "$ref": "#/$defs/InputLease"
+        },
+        "pending_approval_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "adapter_data": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "usage": {
+          "$ref": "#/$defs/RunUsage"
+        },
+        "activity": {
+          "$ref": "#/$defs/RunActivity"
+        }
+      },
+      "type": "object",
+      "required": [
+        "run_id",
+        "session_id",
+        "node_id",
+        "adapter",
+        "harness",
+        "cwd",
+        "runtime",
+        "state",
+        "freshness",
+        "started_at",
+        "capabilities"
+      ]
+    },
+    "RunActivity": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "text",
+        "since"
+      ]
+    },
+    "RunUsage": {
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "procs": {
+          "type": "integer"
+        },
+        "rss_mb": {
+          "type": "number"
+        },
+        "cpu_pct": {
+          "type": "number"
+        },
+        "top": {
+          "$ref": "#/$defs/ProcUsage"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "run_id",
+        "procs",
+        "rss_mb",
+        "observed_at"
+      ]
+    },
+    "RuntimeVersion": {
+      "properties": {
+        "harness": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "harness",
+        "version"
+      ]
+    },
+    "SendMessageRequest": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "correlation_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "recipient": {
+          "$ref": "#/$defs/Address"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "in_reply_to": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "body": {
+          "$ref": "#/$defs/MessageBody"
+        },
+        "attachments": {
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          },
+          "type": "array"
+        },
+        "ttl_seconds": {
+          "type": "integer"
+        },
+        "request_ack": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "operation_id",
+        "recipient",
+        "body"
+      ]
+    },
+    "Session": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "created_by": {
+          "$ref": "#/$defs/Principal"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "current_run_id": {
+          "type": "string"
+        },
+        "lineage": {
+          "$ref": "#/$defs/Lineage"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "archived": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "session_id",
+        "harness",
+        "title",
+        "project_id",
+        "created_by",
+        "created_at",
+        "lineage",
+        "archived"
+      ]
+    },
+    "SessionFlag": {
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "attention_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "messages": {
+          "type": "integer"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "level",
+        "reason",
+        "count",
+        "messages",
+        "since"
+      ]
+    },
+    "SessionView": {
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/Session"
+        },
+        "run": {
+          "$ref": "#/$defs/Run"
+        },
+        "node_name": {
+          "type": "string"
+        },
+        "attention": {
+          "type": "integer"
+        },
+        "flag": {
+          "$ref": "#/$defs/SessionFlag"
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        }
+      },
+      "type": "object",
+      "required": [
+        "session",
+        "attention",
+        "freshness"
+      ]
+    },
+    "StartSessionRequest": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "correlation_id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "node_selector": {
+          "$ref": "#/$defs/NodeSelector"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "checkout": {
+          "$ref": "#/$defs/CheckoutRequest"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "env_profile": {
+          "type": "string"
+        },
+        "account_policy": {
+          "$ref": "#/$defs/AccountPolicy"
+        },
+        "initial_prompt": {
+          "type": "string"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include_context": {
+          "type": "boolean"
+        },
+        "parent_session_id": {
+          "type": "string"
+        },
+        "report_to_parent": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "operation_id",
+        "harness",
+        "account_policy"
+      ]
+    },
+    "SubagentObservation": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "id",
+        "state"
+      ]
+    },
+    "ToolVersion": {
+      "properties": {
+        "tool": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "managed": {
+          "type": "boolean"
+        },
+        "installed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "health": {
+          "type": "string"
+        },
+        "in_use_by_runs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "tool",
+        "version",
+        "state",
+        "managed",
+        "installed_at"
+      ]
+    },
+    "Upload": {
+      "properties": {
+        "upload_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "received": {
+          "type": "integer"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "max_bytes": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "upload_id",
+        "size",
+        "received",
+        "digest",
+        "expires_at",
+        "max_bytes",
+        "state"
+      ]
+    },
+    "UsageWindow": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "used_percent": {
+          "type": "number"
+        },
+        "reset_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name",
+        "used_percent"
+      ]
+    }
+  },
+  "title": "Pyre wire contracts v1 (generated from internal/contracts)"
+}

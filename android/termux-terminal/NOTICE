@@ -1,0 +1,27 @@
+Pyre vendored copy of the Termux terminal libraries
+====================================================
+
+Source: https://github.com/termux/termux-app, tag v0.118.3
+        (commit in UPSTREAM-COMMIT), modules terminal-emulator and
+        terminal-view.
+
+Licence: Apache License 2.0 (text in LICENSE). The termux-app repository is
+GPLv3 overall; its LICENSE.md (copied verbatim as UPSTREAM-LICENSE.md) states
+that the terminal-view and terminal-emulator libraries are an exception,
+released under the Apache License 2.0 because they derive from Jack Palevich's
+"Terminal Emulator for Android" (https://github.com/jackpal/Android-Terminal-Emulator,
+Apache-2.0). Upstream ships no per-module LICENSE/NOTICE file; no other Termux
+code (app/, termux-shared/, the GPLv3 parts) is included.
+
+Copyright (C) 2011-2016 Steven Luo, Jack Palevich and contributors (Terminal
+Emulator for Android); Copyright the Termux developers.
+
+Modifications by Pyre (2026-10):
+- com/termux/terminal/TerminalSession.java rewritten as a remote session: the
+  JNI/forkpty subprocess, its threads and the native library were removed;
+  bytes from the Pyre web-terminal relay are fed via feed(), keyboard input and
+  resizes are sent through TerminalSession.RemoteIo. Public API used by
+  TerminalView is unchanged.
+- com/termux/terminal/JNI.java and src/main/jni (native termux.c) removed.
+- Build converted to a Gradle Kotlin DSL Android library module.
+All other files are unmodified upstream sources.

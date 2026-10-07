@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts                               ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  PROJECT                 CONTENTS             AGE │ Synthetic Outfit
+› Synthetic Outfit        0 repos · 1 session   8h │ Repos        none (a project needs no reposito…
+  Synthetic research (no… 0 repos · 0 sessio…   6h │ Updated      8h ago
+                                                   │
+                                                   │ Sessions · 1
+                                                   │ ● working    outfit API client  synth-linux
+                                                   │
+                                                   │ Brief
+                                                   │ revision 2 · 2m ago · by coordinator
+                                                   │
+                                                   │ Brief
+                                                   │
+                                                   │ Goal: X.
+                                                   │ Constraint: keep API stable.
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+
+ enter open   / filter   n new session   ␣␣ find                                             ? help

@@ -1,0 +1,1886 @@
+{
+  "schema_version": 1,
+  "name": "demo-fleet",
+  "description": "Mock-only demo fleet for UI development and screenshots: four nodes (one disconnected, one at capacity), sessions in every run state, project and standalone work, approvals, questions, mail in each delivery state, artifacts, and attention. Entirely synthetic; never runtime evidence.",
+  "synthetic": true,
+  "nodes": [
+    {
+      "node_id": "node_demo-studio",
+      "name": "demo-studio",
+      "hostname": "demo-studio.synthetic",
+      "ssh_alias": "demo-studio",
+      "platform": "darwin",
+      "arch": "arm64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "0.160.0",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read",
+            "input.steer"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.5a",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-demo"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-04T02:00:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 12,
+        "load1": 3.2,
+        "mem_total_mb": 65536,
+        "mem_avail_mb": 30000,
+        "active_runs": 4,
+        "max_runs": 10,
+        "pyre_rss_mb": 35,
+        "pyre_cpu_pct": 0.3,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 22,
+        "load5": 2.9,
+        "load15": 2.5,
+        "swap_total_mb": 4096,
+        "swap_used_mb": 512,
+        "mem_pressure": "normal",
+        "disks": [
+          {
+            "path": "/Users/demo",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 1907729,
+            "free_mb": 801246
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_demo-scratch",
+            "session_id": "ses_demo-scratch",
+            "procs": 5,
+            "rss_mb": 540,
+            "cpu_pct": 0.2,
+            "top": {
+              "pid": 4205,
+              "name": "claude",
+              "rss_mb": 430
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_demo-question",
+            "session_id": "ses_demo-question",
+            "procs": 4,
+            "rss_mb": 310,
+            "top": {
+              "pid": 4204,
+              "name": "codex",
+              "rss_mb": 220
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_demo-shell",
+            "session_id": "ses_demo-shell",
+            "procs": 2,
+            "rss_mb": 6,
+            "cpu_pct": 0.1,
+            "top": {
+              "pid": 4202,
+              "name": "tail",
+              "rss_mb": 2
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-20T14:40:00Z",
+      "labels": {
+        "demo": "true"
+      }
+    },
+    {
+      "node_id": "node_demo-bigbox",
+      "name": "demo-bigbox",
+      "hostname": "demo-bigbox.synthetic",
+      "ssh_alias": "demo-bigbox",
+      "platform": "linux",
+      "arch": "amd64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "0.160.0",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read",
+            "input.steer"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.5a",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-demo"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-02T10:00:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 32,
+        "load1": 11.5,
+        "mem_total_mb": 65536,
+        "mem_avail_mb": 9000,
+        "active_runs": 4,
+        "max_runs": 4,
+        "pyre_rss_mb": 35,
+        "pyre_cpu_pct": 0.3,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 68.4,
+        "load5": 10.2,
+        "load15": 9.8,
+        "swap_total_mb": 8192,
+        "swap_used_mb": 7270,
+        "mem_pressure": "warn",
+        "mem_pressure_some10": 14.2,
+        "disks": [
+          {
+            "path": "/home/demo",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 953869,
+            "free_mb": 57232
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_demo-planner",
+            "session_id": "ses_demo-planner",
+            "procs": 14,
+            "rss_mb": 1843,
+            "cpu_pct": 41,
+            "top": {
+              "pid": 4214,
+              "name": "claude",
+              "rss_mb": 912
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_demo-bench",
+            "session_id": "ses_demo-bench",
+            "procs": 9,
+            "rss_mb": 2650,
+            "cpu_pct": 96,
+            "top": {
+              "pid": 4209,
+              "name": "cargo",
+              "rss_mb": 1610
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_demo-api",
+            "session_id": "ses_demo-api",
+            "procs": 6,
+            "rss_mb": 612,
+            "cpu_pct": 0.4,
+            "top": {
+              "pid": 4206,
+              "name": "claude",
+              "rss_mb": 455
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_demo-docs",
+            "session_id": "ses_demo-docs",
+            "procs": 8,
+            "rss_mb": 980,
+            "cpu_pct": 12,
+            "top": {
+              "pid": 4208,
+              "name": "node",
+              "rss_mb": 402
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-20T14:40:00Z",
+      "labels": {
+        "demo": "true"
+      }
+    },
+    {
+      "node_id": "node_demo-pi",
+      "name": "demo-pi",
+      "hostname": "demo-pi.synthetic",
+      "ssh_alias": "demo-pi",
+      "platform": "linux",
+      "arch": "arm64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "",
+          "available": false,
+          "reason": "codex not installed (synthetic)",
+          "capabilities": [],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.5a",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-demo"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "disconnected",
+        "last_seen_at": "2026-10-04T11:18:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 4,
+        "load1": 0,
+        "mem_total_mb": 65536,
+        "mem_avail_mb": 30000,
+        "active_runs": 1,
+        "max_runs": 2,
+        "pyre_rss_mb": 35,
+        "pyre_cpu_pct": 0.3,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z"
+      },
+      "enrolled_at": "2026-09-20T14:40:00Z",
+      "labels": {
+        "demo": "true"
+      }
+    },
+    {
+      "node_id": "node_demo-laptop",
+      "name": "demo-laptop",
+      "hostname": "demo-laptop.synthetic",
+      "ssh_alias": "demo-laptop",
+      "platform": "darwin",
+      "arch": "arm64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "0.160.0",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read",
+            "input.steer"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.5a",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "questions.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:57:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-demo"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-04T11:45:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 8,
+        "load1": 0.8,
+        "mem_total_mb": 65536,
+        "mem_avail_mb": 30000,
+        "active_runs": 0,
+        "max_runs": 4,
+        "pyre_rss_mb": 35,
+        "pyre_cpu_pct": 0.3,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z"
+      },
+      "enrolled_at": "2026-09-20T14:40:00Z",
+      "labels": {
+        "demo": "true"
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_demo-planner",
+        "harness": "claude",
+        "title": "atlas: plan tile cache",
+        "project_id": "prj_demo-atlas",
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T10:30:00Z",
+        "current_run_id": "run_demo-planner",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-planner",
+        "session_id": "ses_demo-planner",
+        "node_id": "node_demo-bigbox",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/src/atlas",
+        "checkout": {
+          "node_id": "node_demo-bigbox",
+          "path": "/home/demo/src/atlas",
+          "repo_id": "atlas",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "running",
+        "state_reason": "editing cache.go",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T10:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ],
+        "subagents": [
+          {
+            "id": "sub-1",
+            "kind": "Explore",
+            "state": "running",
+            "started_at": "2026-10-04T11:55:00Z",
+            "summary": "searching tile encoders"
+          }
+        ]
+      },
+      "node_name": "demo-bigbox",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-bench",
+        "harness": "codex",
+        "title": "atlas: run benchmarks",
+        "project_id": "prj_demo-atlas",
+        "created_by": {
+          "kind": "session",
+          "id": "ses_demo-planner"
+        },
+        "created_at": "2026-10-04T10:49:00Z",
+        "current_run_id": "run_demo-bench",
+        "lineage": {
+          "parent_session_id": "ses_demo-planner"
+        },
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-bench",
+        "session_id": "ses_demo-bench",
+        "node_id": "node_demo-bigbox",
+        "adapter": "codex-demo",
+        "harness": "codex",
+        "cwd": "/home/demo/src/atlas",
+        "checkout": {
+          "node_id": "node_demo-bigbox",
+          "path": "/home/demo/src/atlas",
+          "repo_id": "atlas",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "codex",
+          "version": "demo"
+        },
+        "state": "waiting_approval",
+        "state_reason": "permission requested",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T10:50:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read",
+          "input.steer"
+        ],
+        "pending_approval_ids": [
+          "apr_demo-bench"
+        ]
+      },
+      "node_name": "demo-bigbox",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-api",
+        "harness": "claude",
+        "title": "atlas: API compatibility review",
+        "project_id": "prj_demo-atlas",
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:08:00Z",
+        "current_run_id": "run_demo-api",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-api",
+        "session_id": "ses_demo-api",
+        "node_id": "node_demo-bigbox",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/src/atlas",
+        "checkout": {
+          "node_id": "node_demo-bigbox",
+          "path": "/home/demo/src/atlas",
+          "repo_id": "atlas",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "waiting_input",
+        "state_reason": "idle at prompt",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:10:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-bigbox",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-docs",
+        "harness": "claude",
+        "title": "atlas: docs pass",
+        "project_id": "prj_demo-atlas",
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:17:00Z",
+        "current_run_id": "run_demo-docs",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-docs",
+        "session_id": "ses_demo-docs",
+        "node_id": "node_demo-bigbox",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/src/atlas",
+        "checkout": {
+          "node_id": "node_demo-bigbox",
+          "path": "/home/demo/src/atlas",
+          "repo_id": "atlas",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "waiting_on_background",
+        "state_reason": "background task running",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:20:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-bigbox",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-encoder",
+        "harness": "claude",
+        "title": "atlas: encoder spike",
+        "project_id": "prj_demo-atlas",
+        "created_by": {
+          "kind": "session",
+          "id": "ses_demo-planner"
+        },
+        "created_at": "2026-10-04T10:56:00Z",
+        "current_run_id": "run_demo-encoder",
+        "lineage": {
+          "parent_session_id": "ses_demo-planner"
+        },
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-encoder",
+        "session_id": "ses_demo-encoder",
+        "node_id": "node_demo-studio",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/src/atlas",
+        "checkout": {
+          "node_id": "node_demo-studio",
+          "path": "/home/demo/src/atlas",
+          "repo_id": "atlas",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "running",
+        "state_reason": "reading encoder.go",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:00:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-studio",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-scratch",
+        "harness": "claude",
+        "title": "scratch: regex helper",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:25:00Z",
+        "current_run_id": "run_demo-scratch",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-scratch",
+        "session_id": "ses_demo-scratch",
+        "node_id": "node_demo-studio",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/work/scratch",
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "waiting_input",
+        "state_reason": "idle at prompt",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-studio",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-question",
+        "harness": "codex",
+        "title": "dotfiles cleanup",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:29:00Z",
+        "current_run_id": "run_demo-question",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-question",
+        "session_id": "ses_demo-question",
+        "node_id": "node_demo-studio",
+        "adapter": "codex-demo",
+        "harness": "codex",
+        "cwd": "/home/demo/work/question",
+        "runtime": {
+          "harness": "codex",
+          "version": "demo"
+        },
+        "state": "waiting_approval",
+        "state_reason": "question pending",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:35:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read",
+          "input.steer"
+        ],
+        "pending_approval_ids": [
+          "apr_demo-question"
+        ]
+      },
+      "node_name": "demo-studio",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-shell",
+        "harness": "shell",
+        "title": "firmware: serial log tail",
+        "project_id": "prj_demo-firmware",
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:33:00Z",
+        "current_run_id": "run_demo-shell",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-shell",
+        "session_id": "ses_demo-shell",
+        "node_id": "node_demo-studio",
+        "adapter": "shell-demo",
+        "harness": "shell",
+        "cwd": "/home/demo/src/firmware",
+        "checkout": {
+          "node_id": "node_demo-studio",
+          "path": "/home/demo/src/firmware",
+          "repo_id": "firmware",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "shell",
+          "version": "demo"
+        },
+        "state": "running",
+        "state_reason": "tail -f (synthetic)",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:40:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "stop",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-studio",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-pi",
+        "harness": "claude",
+        "title": "firmware: sensor driver",
+        "project_id": "prj_demo-firmware",
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T06:52:00Z",
+        "current_run_id": "run_demo-pi",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-pi",
+        "session_id": "ses_demo-pi",
+        "node_id": "node_demo-pi",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/src/firmware",
+        "checkout": {
+          "node_id": "node_demo-pi",
+          "path": "/home/demo/src/firmware",
+          "repo_id": "firmware",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "unknown",
+        "state_reason": "node disconnected; last observed running",
+        "freshness": {
+          "observed_at": "2026-10-04T11:18:00Z",
+          "source": "mock:demo",
+          "stale": true,
+          "reason": "node disconnected"
+        },
+        "started_at": "2026-10-04T07:00:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-pi",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T11:18:00Z",
+        "source": "mock:demo",
+        "stale": true,
+        "reason": "node disconnected"
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-done",
+        "harness": "claude",
+        "title": "release notes",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T05:11:00Z",
+        "current_run_id": "run_demo-done",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-done",
+        "session_id": "ses_demo-done",
+        "node_id": "node_demo-laptop",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/work/done",
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "exited",
+        "state_reason": "exited 0",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T05:20:00Z",
+        "ended_at": "2026-10-04T06:20:00Z",
+        "exit_code": 0,
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-laptop",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-failed",
+        "harness": "codex",
+        "title": "firmware: flaky test bisect",
+        "project_id": "prj_demo-firmware",
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T08:30:00Z",
+        "current_run_id": "run_demo-failed",
+        "lineage": {},
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-failed",
+        "session_id": "ses_demo-failed",
+        "node_id": "node_demo-studio",
+        "adapter": "codex-demo",
+        "harness": "codex",
+        "cwd": "/home/demo/src/firmware",
+        "checkout": {
+          "node_id": "node_demo-studio",
+          "path": "/home/demo/src/firmware",
+          "repo_id": "firmware",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "codex",
+          "version": "demo"
+        },
+        "state": "failed",
+        "state_reason": "exited 1 (synthetic crash)",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T08:40:00Z",
+        "ended_at": "2026-10-04T09:40:00Z",
+        "exit_code": 1,
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read",
+          "input.steer"
+        ]
+      },
+      "node_name": "demo-studio",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_demo-starting",
+        "harness": "claude",
+        "title": "atlas: profile tiles",
+        "project_id": "prj_demo-atlas",
+        "created_by": {
+          "kind": "session",
+          "id": "ses_demo-encoder"
+        },
+        "created_at": "2026-10-04T11:48:00Z",
+        "current_run_id": "run_demo-starting",
+        "lineage": {
+          "parent_session_id": "ses_demo-encoder"
+        },
+        "tags": [
+          "demo"
+        ],
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_demo-starting",
+        "session_id": "ses_demo-starting",
+        "node_id": "node_demo-laptop",
+        "adapter": "claude-demo",
+        "harness": "claude",
+        "cwd": "/home/demo/src/atlas",
+        "checkout": {
+          "node_id": "node_demo-laptop",
+          "path": "/home/demo/src/atlas",
+          "repo_id": "atlas",
+          "mode": "shared",
+          "branch": "main"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "demo"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "starting",
+        "state_reason": "launching",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "mock:demo",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:59:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "questions.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "demo-laptop",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "mock:demo",
+        "stale": false
+      }
+    }
+  ],
+  "messages": [
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_demo-1",
+        "operation_id": "op_demo-1",
+        "sender": {
+          "kind": "session",
+          "id": "ses_demo-planner"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_demo-api"
+        },
+        "project_id": "prj_demo-atlas",
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: please check cache.go keeps the v1 API."
+        },
+        "created_at": "2026-10-04T11:45:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:45:00Z",
+        "runtime": "accepted",
+        "bound_run_id": "run_demo-api",
+        "ack": "replied",
+        "ack_ref": "msg_demo-2",
+        "receipts": [
+          {
+            "message_id": "msg_demo-1",
+            "attempt_id": "dlv_demo-1",
+            "session_id": "ses_demo-api",
+            "run_id": "run_demo-api",
+            "node_id": "node_demo-bigbox",
+            "state": "accepted",
+            "evidence": "mock",
+            "evidence_ref": "mock:demo",
+            "observed_at": "2026-10-04T11:46:00Z"
+          }
+        ],
+        "updated_at": "2026-10-04T11:46:00Z"
+      },
+      "cursor": 1
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_demo-2",
+        "operation_id": "op_demo-2",
+        "sender": {
+          "kind": "session",
+          "id": "ses_demo-api"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_demo-planner"
+        },
+        "project_id": "prj_demo-atlas",
+        "in_reply_to": "msg_demo-1",
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: API unchanged; one deprecation note added."
+        },
+        "created_at": "2026-10-04T11:45:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:45:00Z",
+        "runtime": "queued",
+        "runtime_reason": "recipient busy; waiting for idle turn",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:46:00Z"
+      },
+      "cursor": 2
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_demo-3",
+        "operation_id": "op_demo-3",
+        "sender": {
+          "kind": "session",
+          "id": "ses_demo-planner"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_demo-bench"
+        },
+        "project_id": "prj_demo-atlas",
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: rerun benchmarks after the cache change."
+        },
+        "created_at": "2026-10-04T11:45:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:45:00Z",
+        "runtime": "node_received",
+        "runtime_reason": "recipient waiting on an approval; queued",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:46:00Z"
+      },
+      "cursor": 3
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_demo-4",
+        "operation_id": "op_demo-4",
+        "sender": {
+          "kind": "session",
+          "id": "ses_demo-planner"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_demo-docs"
+        },
+        "project_id": "prj_demo-atlas",
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: drop the old tiles section. [mock:indeterminate]"
+        },
+        "created_at": "2026-10-04T11:45:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:45:00Z",
+        "runtime": "indeterminate",
+        "runtime_reason": "node restarted after submitting input (synthetic)",
+        "bound_run_id": "run_demo-docs",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:46:00Z"
+      },
+      "cursor": 4
+    },
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_demo-owner",
+        "operation_id": "op_demo-owner",
+        "sender": {
+          "kind": "session",
+          "id": "ses_demo-planner"
+        },
+        "recipient": {
+          "kind": "owner",
+          "id": "owner"
+        },
+        "project_id": "prj_demo-atlas",
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: cache design ready; want me to proceed with LRU or ARC?"
+        },
+        "created_at": "2026-10-04T11:54:00Z",
+        "request_ack": true
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T11:54:00Z",
+        "runtime": "not_applicable",
+        "ack": "none",
+        "updated_at": "2026-10-04T11:54:00Z"
+      },
+      "cursor": 5
+    }
+  ],
+  "approvals": [
+    {
+      "approval_id": "apr_demo-bench",
+      "session_id": "ses_demo-bench",
+      "run_id": "run_demo-bench",
+      "request_id": "demo-req-1",
+      "kind": "permission",
+      "title": "Run `go test -bench . ./tiles/...`?",
+      "body": "Shell command requested by the agent (synthetic).",
+      "options": [
+        {
+          "id": "allow",
+          "label": "Allow once",
+          "kind": "allow"
+        },
+        {
+          "id": "allow_always",
+          "label": "Always allow",
+          "kind": "allow_always"
+        },
+        {
+          "id": "deny",
+          "label": "Deny",
+          "kind": "deny"
+        }
+      ],
+      "allow_text": false,
+      "created_at": "2026-10-04T11:56:00Z",
+      "state": "pending"
+    },
+    {
+      "approval_id": "apr_demo-question",
+      "session_id": "ses_demo-question",
+      "run_id": "run_demo-question",
+      "request_id": "demo-req-2",
+      "kind": "question",
+      "title": "Which shell config should I keep?",
+      "body": "Found both .zshrc and .bashrc customizations (synthetic).",
+      "options": [
+        {
+          "id": "zsh",
+          "label": "Keep zsh",
+          "kind": "choice"
+        },
+        {
+          "id": "bash",
+          "label": "Keep bash",
+          "kind": "choice"
+        }
+      ],
+      "allow_text": true,
+      "created_at": "2026-10-04T11:58:00Z",
+      "state": "pending"
+    }
+  ],
+  "projects": [
+    {
+      "project_id": "prj_demo-atlas",
+      "name": "Atlas (demo)",
+      "description": "Synthetic demo project: rewrite the map tile service.",
+      "brief_document_id": "doc_demo-atlas-brief",
+      "repos": [
+        {
+          "repo_id": "atlas",
+          "name": "atlas",
+          "url": "https://example.invalid/demo/atlas.git"
+        }
+      ],
+      "checkouts": [
+        {
+          "node_id": "node_demo-bigbox",
+          "path": "/home/demo/src/atlas",
+          "repo_id": "atlas",
+          "mode": "shared",
+          "branch": "main"
+        }
+      ],
+      "archived": false,
+      "version": 3,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-01T00:40:00Z",
+      "updated_at": "2026-10-04T11:00:00Z"
+    },
+    {
+      "project_id": "prj_demo-firmware",
+      "name": "Firmware (demo)",
+      "description": "Synthetic demo project: sensor firmware and its tooling, across machines.",
+      "repos": [
+        {
+          "repo_id": "firmware",
+          "name": "firmware",
+          "url": "https://example.invalid/demo/firmware.git"
+        }
+      ],
+      "checkouts": [
+        {
+          "node_id": "node_demo-pi",
+          "path": "/home/demo/src/firmware",
+          "repo_id": "firmware",
+          "mode": "shared",
+          "branch": "main"
+        },
+        {
+          "node_id": "node_demo-studio",
+          "path": "/home/demo/src/firmware",
+          "repo_id": "firmware",
+          "mode": "shared",
+          "branch": "main"
+        }
+      ],
+      "archived": false,
+      "version": 1,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-02T10:00:00Z",
+      "updated_at": "2026-10-04T07:00:00Z"
+    }
+  ],
+  "documents": [
+    {
+      "document_id": "doc_demo-atlas-brief",
+      "project_id": "prj_demo-atlas",
+      "title": "Brief",
+      "slug": "brief",
+      "media_type": "text/markdown",
+      "head_revision_id": "rev_demo-brief-2",
+      "head_seq": 2,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-01T00:40:00Z",
+      "updated_at": "2026-10-04T11:00:00Z"
+    }
+  ],
+  "revisions": [
+    {
+      "revision_id": "rev_demo-brief-1",
+      "document_id": "doc_demo-atlas-brief",
+      "seq": 1,
+      "digest": "",
+      "size": 0,
+      "author": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-01T00:40:00Z",
+      "content": "# Atlas brief (demo)\n\nGoal: faster tiles.\n"
+    },
+    {
+      "revision_id": "rev_demo-brief-2",
+      "document_id": "doc_demo-atlas-brief",
+      "seq": 2,
+      "parent_revision_id": "rev_demo-brief-1",
+      "digest": "",
+      "size": 0,
+      "author": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T11:00:00Z",
+      "summary": "add target",
+      "content": "# Atlas brief (demo)\n\nGoal: serve vector tiles under 50 ms p99.\n\n- Keep the public API stable.\n- Benchmarks live in `bench/`.\n"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "art_demo-bench",
+      "project_id": "prj_demo-atlas",
+      "session_id": "ses_demo-bench",
+      "title": "Tile benchmark report (demo)",
+      "latest_version_id": "ver_demo-bench-1",
+      "version_count": 1,
+      "created_by": {
+        "kind": "session",
+        "id": "ses_demo-bench"
+      },
+      "created_at": "2026-10-04T11:30:00Z",
+      "updated_at": "2026-10-04T11:30:00Z"
+    }
+  ],
+  "versions": [
+    {
+      "version_id": "ver_demo-bench-1",
+      "artifact_id": "art_demo-bench",
+      "seq": 1,
+      "digest": "",
+      "size": 0,
+      "media_type": "text/markdown",
+      "filename": "bench.md",
+      "author": {
+        "kind": "session",
+        "id": "ses_demo-bench"
+      },
+      "provenance": {
+        "session_id": "ses_demo-bench",
+        "run_id": "run_demo-bench",
+        "node_id": "node_demo-bigbox",
+        "project_id": "prj_demo-atlas"
+      },
+      "created_at": "2026-10-04T11:30:00Z",
+      "review_requested": true,
+      "content_url": "/v1/content/ver_demo-bench-1"
+    }
+  ],
+  "notes": [
+    {
+      "note_id": "note_demo-decision",
+      "kind": "decision",
+      "project_id": "prj_demo-atlas",
+      "session_id": "ses_demo-planner",
+      "title": "Use an LRU tile cache (demo)",
+      "body": "Synthetic decision: LRU with 512 MiB cap; revisit after benchmarks.",
+      "author": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T10:20:00Z",
+      "provenance": {},
+      "sync_state": "indexed"
+    }
+  ],
+  "attention": [
+    {
+      "attention_id": "att_demo-bench",
+      "kind": "approval",
+      "severity": "urgent",
+      "group_key": "approval:apr_demo-bench",
+      "object": {
+        "kind": "approval",
+        "id": "apr_demo-bench"
+      },
+      "session_id": "ses_demo-bench",
+      "project_id": "prj_demo-atlas",
+      "title": "Approve: go test -bench",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:56:00Z",
+      "updated_at": "2026-10-04T11:56:00Z",
+      "deep_link": "pyre://approval/apr_demo-bench"
+    },
+    {
+      "attention_id": "att_demo-question",
+      "kind": "question",
+      "severity": "urgent",
+      "group_key": "question:apr_demo-question",
+      "object": {
+        "kind": "approval",
+        "id": "apr_demo-question"
+      },
+      "session_id": "ses_demo-question",
+      "project_id": "prj_demo-atlas",
+      "title": "Question: which shell config?",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:58:00Z",
+      "updated_at": "2026-10-04T11:58:00Z",
+      "deep_link": "pyre://approval/apr_demo-question"
+    },
+    {
+      "attention_id": "att_demo-indet",
+      "kind": "indeterminate_delivery",
+      "severity": "urgent",
+      "group_key": "indeterminate_delivery:msg_demo-4",
+      "object": {
+        "kind": "message",
+        "id": "msg_demo-4"
+      },
+      "session_id": "ses_demo-docs",
+      "project_id": "prj_demo-atlas",
+      "title": "Delivery outcome unknown",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:47:00Z",
+      "updated_at": "2026-10-04T11:47:00Z",
+      "deep_link": "pyre://message/msg_demo-4"
+    },
+    {
+      "attention_id": "att_demo-owner",
+      "kind": "message",
+      "severity": "urgent",
+      "group_key": "message:msg_demo-owner",
+      "object": {
+        "kind": "message",
+        "id": "msg_demo-owner"
+      },
+      "session_id": "ses_demo-planner",
+      "project_id": "prj_demo-atlas",
+      "title": "Message from atlas: plan tile cache",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:54:00Z",
+      "updated_at": "2026-10-04T11:54:00Z",
+      "deep_link": "pyre://message/msg_demo-owner"
+    },
+    {
+      "attention_id": "att_demo-review",
+      "kind": "review_ready",
+      "severity": "normal",
+      "group_key": "review_ready:ver_demo-bench-1",
+      "object": {
+        "kind": "artifact_version",
+        "id": "ver_demo-bench-1"
+      },
+      "session_id": "ses_demo-bench",
+      "project_id": "prj_demo-atlas",
+      "title": "Tile benchmark report v1 ready for review",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:30:00Z",
+      "updated_at": "2026-10-04T11:30:00Z",
+      "deep_link": "pyre://artifact_version/ver_demo-bench-1"
+    },
+    {
+      "attention_id": "att_demo-node",
+      "kind": "node",
+      "severity": "normal",
+      "group_key": "node:node_demo-pi",
+      "object": {
+        "kind": "node",
+        "id": "node_demo-pi"
+      },
+      "project_id": null,
+      "title": "demo-pi disconnected 42m ago",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:18:00Z",
+      "updated_at": "2026-10-04T11:18:00Z",
+      "deep_link": "pyre://node/node_demo-pi"
+    },
+    {
+      "attention_id": "att_demo-failed",
+      "kind": "failure",
+      "severity": "normal",
+      "group_key": "failure:ses_demo-failed",
+      "object": {
+        "kind": "session",
+        "id": "ses_demo-failed"
+      },
+      "session_id": "ses_demo-failed",
+      "project_id": null,
+      "title": "firmware: flaky test bisect exited 1",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T09:40:00Z",
+      "updated_at": "2026-10-04T09:40:00Z",
+      "deep_link": "pyre://session/ses_demo-failed"
+    }
+  ],
+  "contents": {
+    "ver_demo-bench-1": "# Benchmark report (demo)\n\n| case | p99 |\n|---|---|\n| z10 | 41 ms |\n| z14 | 63 ms |\n"
+  }
+}

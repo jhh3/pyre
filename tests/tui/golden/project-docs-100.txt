@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts › Project                     ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Synthetic Outfit  ·   Overview  [Docs]  Artifacts   Discussion   Sessions
+
+  DOCUMENTS                                        │ Brief
+› Brief                                   r2 · 2m  │ brief · text/markdown · head r2
+                                                   │
+                                                   │ # Brief
+                                                   │
+                                                   │ Goal: X.
+                                                   │ Constraint: keep API stable.
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+
+ ←→ section   enter read   e edit                                                 esc back   ? help

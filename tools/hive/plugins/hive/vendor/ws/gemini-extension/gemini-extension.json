@@ -1,0 +1,47 @@
+{
+  "name": "ws",
+  "version": "0.6.0",
+  "description": "ws work-stream registry: stream awareness at session start, inbox + channel delivery, and the ws MCP tools.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "ws": {
+      "command": "ws",
+      "args": ["mcp"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ws hook session-start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ws hook user-prompt-submit",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ws hook post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

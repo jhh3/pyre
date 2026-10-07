@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts › Project                               anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Synthetic Outfit  ·  [Overview]  Docs   Artifacts   Discussion   Sessions
+
+Repos        none (a project needs no repository)                        │ Brief
+Updated      8h ago                                                      │ revision 2 · 2m ago · by coordinator
+                                                                         │
+Sessions · 1                                                             │ Brief
+● working    outfit API client  synth-linux                              │
+                                                                         │ Goal: X.
+Artifacts · 1                                                            │ Constraint: keep API stable.
+Synthetic test report                                            v2 · 5m │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+
+ ←→ section                                                                                                                                   esc back   ? help

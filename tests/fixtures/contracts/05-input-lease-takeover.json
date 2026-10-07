@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "name": "input-lease-takeover",
+  "description": "The owner holds a raw-input lease on a run (attached terminal). A second client's raw write is refused with the lease visible; structured peer mail still delivers per adapter semantics; an explicit takeover is recorded.",
+  "synthetic": true,
+  "requirements": [
+    "R02",
+    "R04",
+    "R12"
+  ],
+  "cases": [
+    "A04"
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_synth-leased",
+        "harness": "claude",
+        "title": "pairing session",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-leased",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-leased",
+        "session_id": "ses_synth-leased",
+        "node_id": "node_synth-mac",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/home/synth/work/ses_synth-leased",
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "state": "waiting_input",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-mac",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ],
+        "lease": {
+          "lease_id": "lease_synth-1",
+          "run_id": "run_synth-leased",
+          "holder": {
+            "kind": "owner",
+            "id": "cli_synth-laptop",
+            "name": "owner (synthetic)"
+          },
+          "acquired_at": "2026-10-04T11:57:00Z",
+          "renewed_at": "2026-10-04T12:00:00Z",
+          "expires_at": "2026-10-04T12:02:00Z"
+        }
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    }
+  ],
+  "messages": [
+    {
+      "envelope": {
+        "schema_version": 1,
+        "message_id": "msg_synth-during-lease",
+        "operation_id": "op_synth-during-lease",
+        "sender": {
+          "kind": "session",
+          "id": "ses_synth-peer"
+        },
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-leased"
+        },
+        "project_id": null,
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: FYI the build is green."
+        },
+        "created_at": "2026-10-04T11:50:00Z"
+      },
+      "status": {
+        "storage": "stored",
+        "stored_at": "2026-10-04T12:00:00Z",
+        "runtime": "queued",
+        "runtime_reason": "human holds input lease; queued until the run is idle and unleased or the adapter's structured path accepts",
+        "ack": "none",
+        "updated_at": "2026-10-04T12:00:00Z"
+      },
+      "cursor": 0
+    }
+  ],
+  "leases": [
+    {
+      "lease_id": "lease_synth-1",
+      "run_id": "run_synth-leased",
+      "holder": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "acquired_at": "2026-10-04T11:57:00Z",
+      "renewed_at": "2026-10-04T12:00:00Z",
+      "expires_at": "2026-10-04T12:02:00Z",
+      "released_at": "2026-10-04T12:01:00Z"
+    },
+    {
+      "lease_id": "lease_synth-2",
+      "run_id": "run_synth-leased",
+      "holder": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "acquired_at": "2026-10-04T12:01:00Z",
+      "renewed_at": "2026-10-04T12:01:00Z",
+      "expires_at": "2026-10-04T12:03:00Z",
+      "takeover_of": "lease_synth-1"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "competing acquire without takeover",
+      "op": "leases.acquire",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-lease-2",
+        "run_id": "run_synth-leased"
+      },
+      "error": {
+        "code": "conflict",
+        "message": "run input is leased by owner (synthetic) until 12:02Z",
+        "retryable": false,
+        "ref": {
+          "kind": "input_lease",
+          "id": "lease_synth-1"
+        }
+      }
+    },
+    {
+      "name": "explicit takeover",
+      "op": "leases.acquire",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-lease-3",
+        "run_id": "run_synth-leased",
+        "takeover": true
+      },
+      "response": {
+        "lease_id": "lease_synth-2",
+        "run_id": "run_synth-leased",
+        "holder": {
+          "kind": "owner",
+          "id": "cli_synth-android",
+          "name": "owner phone (synthetic)"
+        },
+        "acquired_at": "2026-10-04T12:01:00Z",
+        "renewed_at": "2026-10-04T12:01:00Z",
+        "expires_at": "2026-10-04T12:03:00Z",
+        "takeover_of": "lease_synth-1"
+      }
+    }
+  ]
+}

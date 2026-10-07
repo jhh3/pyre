@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  pyre-managed: rendered by scripts/install/install.sh from
+  packaging/launchd/dev.jhh3.pyre.pyred.plist.in (Pyre @VERSION@).
+  Per-user LaunchAgent for the Pyre node daemon. Contains no secrets: pyred
+  reads its node credential (0600) from the state directory.
+
+  Stopping or restarting pyred never stops runs. Runs live in Pyre-owned tmux
+  servers that have left pyred's process group; AbandonProcessGroup keeps
+  launchd from killing anything pyred started (runtime REPORT section 10.6,
+  internal/supervisor/doc.go). ProcessType is Standard, not Background,
+  because launchd's background throttling would be inherited by agent runs.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+@PROGRAM_ARGUMENTS@
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@PATH@</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>@HOME@</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>20</integer>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/pyred.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/pyred.err.log</string>
+</dict>
+</plist>

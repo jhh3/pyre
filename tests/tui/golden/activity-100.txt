@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · M Machines · A Accounts › Activity                      ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ACTIVITY · updated now
+ [all 16]  accounts 4   sessions 10   fleet 2   f cycles
+› 04:59 synth-mac   ↻ 'scratch (standalone)' hit a limit on claude-personal-a (weekly 41%); no othe…
+  04:58 synth-linux ↻ switched 'api work (limited)' from codex-personal-a to acct_synth-codex-b — c…
+  04:57 synth-mac   ↻ switched 'migration work' from claude-work-c (5h 100%) to claude-personal-a (…
+  04:30 synth-mac     started 'coordinator' (claude) — by owner (synthetic)
+  04:30 synth-mac     started 'deploy prep' (claude) — by owner (synthetic)
+  04:30 synth-linux   started 'worker' (claude) — by owner (synthetic)
+  04:30 synth-mac     started 'migration work' (claude) — by owner (synthetic)
+  04:30 synth-linux   started 'api work (limited)' (codex) — by owner (synthetic)
+  04:30 synth-linux   started 'api work (handoff successor)' (codex) — by owner (synthetic)
+  04:30 synth-mac     started 'pairing session' (claude) — by owner (synthetic)
+  04:30 synth-linux   started 'long refactor' (claude) — by owner (synthetic)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+'scratch (standalone)' hit a limit on claude-personal-a (weekly 41%); no other account is eligible
+(waiting for a reset) — no eligible anthropic subscription (c exhausted until 13:20Z, b
+unknown/stale); work preserved
+
+When     Sun Oct 4 2026 04:59:00 · 1m ago
+Where    synth-mac  node_synth-mac
+Who      Pyre · automatic (nobody asked)
+What     account.waiting · account
+Why      no eligible anthropic subscription (c exhausted until 13:20Z, b unknown/stale); work
+         preserved
+Session  'scratch (standalone)'  ses_synth-standalone
+Run      run_synth-standalone-1
+
+ ↑↓ select   f filter   r refresh                                                 esc back   ? help

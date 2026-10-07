@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "name": "approval-deeplinks",
+  "description": "A pending permission request, one resolved natively in the terminal (stale phone link must show the existing resolution), and one expired by run replacement.",
+  "synthetic": true,
+  "requirements": [
+    "R13",
+    "R02"
+  ],
+  "cases": [
+    "A18"
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_synth-apr",
+        "harness": "claude",
+        "title": "deploy prep",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-apr",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-apr",
+        "session_id": "ses_synth-apr",
+        "node_id": "node_synth-mac",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/home/synth/work/ses_synth-apr",
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "state": "waiting_approval",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-mac",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ],
+        "pending_approval_ids": [
+          "apr_synth-pending"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    }
+  ],
+  "approvals": [
+    {
+      "approval_id": "apr_synth-pending",
+      "session_id": "ses_synth-apr",
+      "run_id": "run_synth-apr",
+      "request_id": "toolu_synth_01",
+      "kind": "permission",
+      "title": "Run `make deploy-staging`?",
+      "body": "Bash command requested by the agent (synthetic).",
+      "options": [
+        {
+          "id": "allow",
+          "label": "Allow once",
+          "kind": "allow"
+        },
+        {
+          "id": "deny",
+          "label": "Deny",
+          "kind": "deny"
+        }
+      ],
+      "allow_text": false,
+      "created_at": "2026-10-04T11:58:00Z",
+      "state": "pending"
+    },
+    {
+      "approval_id": "apr_synth-resolved",
+      "session_id": "ses_synth-apr",
+      "run_id": "run_synth-apr",
+      "request_id": "toolu_synth_00",
+      "kind": "permission",
+      "title": "Edit config.yaml?",
+      "options": [
+        {
+          "id": "allow",
+          "label": "Allow once",
+          "kind": "allow"
+        },
+        {
+          "id": "deny",
+          "label": "Deny",
+          "kind": "deny"
+        }
+      ],
+      "allow_text": false,
+      "created_at": "2026-10-04T11:40:00Z",
+      "state": "resolved",
+      "resolution": {
+        "option_id": "allow",
+        "actor": {
+          "kind": "system",
+          "id": "native-terminal"
+        },
+        "resolved_at": "2026-10-04T11:41:00Z",
+        "source": "native"
+      }
+    },
+    {
+      "approval_id": "apr_synth-expired",
+      "session_id": "ses_synth-apr",
+      "run_id": "run_synth-apr-old",
+      "request_id": "toolu_synth_old",
+      "kind": "question",
+      "title": "Which branch?",
+      "allow_text": true,
+      "created_at": "2026-10-04T10:30:00Z",
+      "state": "withdrawn"
+    }
+  ],
+  "attention": [
+    {
+      "attention_id": "att_synth-apr",
+      "kind": "approval",
+      "severity": "urgent",
+      "group_key": "approval:apr_synth-pending",
+      "object": {
+        "kind": "approval",
+        "id": "apr_synth-pending"
+      },
+      "session_id": "ses_synth-apr",
+      "project_id": null,
+      "title": "Approve: make deploy-staging",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-04T11:58:00Z",
+      "updated_at": "2026-10-04T11:58:00Z",
+      "deep_link": "pyre://approval/apr_synth-pending"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "answer pending",
+      "op": "approvals.answer",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-apr-1",
+        "approval_id": "apr_synth-pending",
+        "run_id": "run_synth-apr",
+        "option_id": "allow"
+      },
+      "response": {
+        "approval_id": "apr_synth-pending",
+        "session_id": "ses_synth-apr",
+        "run_id": "run_synth-apr",
+        "request_id": "toolu_synth_01",
+        "kind": "permission",
+        "title": "Run `make deploy-staging`?",
+        "body": "Bash command requested by the agent (synthetic).",
+        "options": [
+          {
+            "id": "allow",
+            "label": "Allow once",
+            "kind": "allow"
+          },
+          {
+            "id": "deny",
+            "label": "Deny",
+            "kind": "deny"
+          }
+        ],
+        "allow_text": false,
+        "created_at": "2026-10-04T11:58:00Z",
+        "state": "resolved",
+        "resolution": {
+          "option_id": "allow",
+          "actor": {
+            "kind": "owner",
+            "id": "cli_synth-android",
+            "name": "owner phone (synthetic)"
+          },
+          "resolved_at": "2026-10-04T12:00:00Z",
+          "source": "pyre"
+        }
+      }
+    },
+    {
+      "name": "double tap returns existing result",
+      "op": "approvals.answer",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-apr-1",
+        "approval_id": "apr_synth-pending",
+        "run_id": "run_synth-apr",
+        "option_id": "allow"
+      },
+      "response": {
+        "approval_id": "apr_synth-pending",
+        "session_id": "ses_synth-apr",
+        "run_id": "run_synth-apr",
+        "request_id": "toolu_synth_01",
+        "kind": "permission",
+        "title": "Run `make deploy-staging`?",
+        "body": "Bash command requested by the agent (synthetic).",
+        "options": [
+          {
+            "id": "allow",
+            "label": "Allow once",
+            "kind": "allow"
+          },
+          {
+            "id": "deny",
+            "label": "Deny",
+            "kind": "deny"
+          }
+        ],
+        "allow_text": false,
+        "created_at": "2026-10-04T11:58:00Z",
+        "state": "resolved",
+        "resolution": {
+          "option_id": "allow",
+          "actor": {
+            "kind": "owner",
+            "id": "cli_synth-android",
+            "name": "owner phone (synthetic)"
+          },
+          "resolved_at": "2026-10-04T12:00:00Z",
+          "source": "pyre"
+        }
+      },
+      "explanation": "Same operation_id: stored result returned, runtime answered once."
+    },
+    {
+      "name": "stale link to natively resolved approval",
+      "op": "approvals.answer",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-apr-2",
+        "approval_id": "apr_synth-resolved",
+        "run_id": "run_synth-apr",
+        "option_id": "deny"
+      },
+      "error": {
+        "code": "conflict",
+        "message": "approval already resolved (allow, native terminal)",
+        "retryable": false,
+        "ref": {
+          "kind": "approval",
+          "id": "apr_synth-resolved"
+        }
+      }
+    },
+    {
+      "name": "answer for replaced run",
+      "op": "approvals.answer",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-apr-3",
+        "approval_id": "apr_synth-expired",
+        "run_id": "run_synth-apr-old",
+        "text": "main"
+      },
+      "error": {
+        "code": "expired",
+        "message": "approval withdrawn: its run was replaced",
+        "retryable": false,
+        "ref": {
+          "kind": "approval",
+          "id": "apr_synth-expired"
+        }
+      }
+    }
+  ]
+}

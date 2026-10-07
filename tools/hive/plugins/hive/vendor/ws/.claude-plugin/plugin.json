@@ -1,0 +1,15 @@
+{
+  "name": "ws",
+  "version": "0.6.2",
+  "description": "Work-stream registry for humans and coding agents: register streams, track vision/log/tasks, message streams/hq/#channels (typed envelopes, reply obligations, tmux wake + revive), MCP server, watchdog/doctor, resume anything, one dashboard.",
+  "author": {
+    "name": "John Holliman"
+  },
+  "keywords": [
+    "workflow",
+    "agents",
+    "orchestration",
+    "tasks",
+    "tmux"
+  ]
+}

@@ -1,0 +1,9 @@
+[
+  {
+    "id": 202,
+    "user": {"login": "linus"},
+    "path": "internal/state/store.go",
+    "line": 151,
+    "body": "Keep the version recheck inside the acquired migration lock."
+  }
+]

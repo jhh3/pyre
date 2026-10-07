@@ -1,0 +1,9 @@
+{
+  "name": "outfit",
+  "version": "0.10.7",
+  "description": "Use local connectors, skills, and pasted-link context through outfit.",
+  "author": {
+    "name": "John Holliman"
+  },
+  "repository": "https://github.com/jhh3/outfit"
+}

@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · M Machines · A Accounts › Activity                                anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ACTIVITY · updated now
+ [all 16]  accounts 4   sessions 10   fleet 2   f cycles
+› 04:59        synth-mac   ↻ 'scratch (standalone)' hit a limit on claude-personal-a (weekly 41… │ 'scratch (standalone)' hit a limit on claude-personal-a
+  04:58        synth-linux ↻ switched 'api work (limited)' from codex-personal-a to acct_synth-… │ (weekly 41%); no other account is eligible (waiting for a
+  04:57        synth-mac   ↻ switched 'migration work' from claude-work-c (5h 100%) to claude-p… │ reset) — no eligible anthropic subscription (c exhausted
+  04:30        synth-mac     started 'coordinator' (claude) — by owner (synthetic)               │ until 13:20Z, b unknown/stale); work preserved
+  04:30        synth-mac     started 'deploy prep' (claude) — by owner (synthetic)               │
+  04:30        synth-linux   started 'worker' (claude) — by owner (synthetic)                    │ When     Sun Oct 4 2026 04:59:00 · 1m ago
+  04:30        synth-mac     started 'migration work' (claude) — by owner (synthetic)            │ Where    synth-mac  node_synth-mac
+  04:30        synth-linux   started 'api work (limited)' (codex) — by owner (synthetic)         │ Who      Pyre · automatic (nobody asked)
+  04:30        synth-linux   started 'api work (handoff successor)' (codex) — by owner (synthet… │ What     account.waiting · account
+  04:30        synth-mac     started 'pairing session' (claude) — by owner (synthetic)           │ Why      no eligible anthropic subscription (c exhausted
+  04:30        synth-linux   started 'long refactor' (claude) — by owner (synthetic)             │          until 13:20Z, b unknown/stale); work preserved
+  04:30        synth-linux   started 'outfit API client' (claude) — by owner (synthetic)         │ Session  'scratch (standalone)'  ses_synth-standalone
+  04:30        synth-mac     started 'scratch (standalone)' (claude) — by owner (synthetic)      │ Run      run_synth-standalone-1
+  04:30        synth-mac   ↻ chose claude-personal-a (weekly 41%) for 'scratch (standalone)' — … │ From     claude-personal-a  acct_synth-claude-a (weekly 41%)
+  Sep 27 23:00 synth-linux   machine enrolled — by owner                                         │ To       waiting for a reset
+  Sep 27 06:20 synth-mac     machine enrolled — by owner                                         │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+
+ ↑↓ select   f filter   r refresh                                                                                                             esc back   ? help

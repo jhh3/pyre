@@ -1,0 +1,57 @@
+package cli
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/jhh3/pyre/internal/runtime/claude"
+)
+
+// The tools the Claude adapter pre-approves exist, are the messaging tools
+// for fleet peers, and include nothing that launches, stops, interrupts,
+// answers approvals, duplicates work or publishes.
+func TestPreapprovedPyreToolsAreMessagingOnly(t *testing.T) {
+	byName := map[string]MCPTool{}
+	for _, tl := range MCPTools() {
+		byName["mcp__pyre__"+tl.Name] = tl
+	}
+	want := map[string]bool{"mcp__pyre__send_message": true, "mcp__pyre__inbox": true, "mcp__pyre__get_message": true,
+		"mcp__pyre__ack_message": true, "mcp__pyre__wait_reply": true,
+		"mcp__pyre__get_digest":     true,                                     // read-only catch-up (W-digest)
+		"mcp__pyre__search":         true,                                     // read-only global search (W-search)
+		"mcp__pyre__audit_log":      true,                                     // read-only audit log (W-audit)
+		"mcp__pyre__rename_session": true,                                     // self-only rename (W-names; hub-enforced)
+		"mcp__pyre__flag_attention": true, "mcp__pyre__clear_attention": true} // self-only flag (W-attn; hub-enforced)
+	got := map[string]bool{}
+	for _, name := range claude.PyreMessagingAllowedTools {
+		got[name] = true
+		tl, ok := byName[name]
+		if !ok {
+			t.Errorf("pre-approved %s is not a pyre MCP tool", name)
+			continue
+		}
+		if tl.Annotations == nil || tl.Annotations.DestructiveHint {
+			t.Errorf("pre-approved %s is destructive", name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("%s is not pre-approved", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("unexpected pre-approved tool %s", name)
+		}
+	}
+	for _, name := range claude.DoorbellAllowedTools {
+		if !got[name] {
+			t.Errorf("doorbell tool %s missing from the messaging set", name)
+		}
+	}
+	for _, banned := range []string{"start_session", "stop_session", "interrupt_session", "answer_approval", "reissue_message", "resolve_delivery", "publish", "create_project", "associate_session_project", "archive_session"} {
+		if got["mcp__pyre__"+banned] || strings.Contains(strings.Join(claude.PyreMessagingAllowedTools, ","), banned) {
+			t.Errorf("%s must not be pre-approved", banned)
+		}
+	}
+}

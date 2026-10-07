@@ -1,0 +1,11 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-01T10:00:00.000Z","content":"synthetic"}
+{"type":"user","uuid":"u1","timestamp":"2026-10-01T10:00:01.000Z","message":{"role":"user","content":"SYNTHETIC: please wire up the stripe webhook handler for the demo shop"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-10-01T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I'll add a webhook endpoint that verifies the Stripe signature header."}]}}
+{"type":"assistant","uuid":"a2","timestamp":"2026-10-01T10:00:06.000Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"grep -rn webhook ./synthetic-shop"}}]}}
+{"type":"user","uuid":"u2","timestamp":"2026-10-01T10:00:07.000Z","toolUseResult":{"stdout":"synthetic tool output mentioning zebra"},"message":{"role":"user","content":[{"type":"tool_result","content":"synthetic tool output mentioning zebra"}]}}
+this line is not json and is not counted
+{"type":"user","uuid":"u3","timestamp":"2026-10-01T10:00:08.000Z","isMeta":true,"message":{"role":"user","content":"meta caveat about giraffes"}}
+{"type":"assistant","uuid":"a3","timestamp":"2026-10-01T10:00:09.000Z","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"sidechain subagent text about pelicans"}]}}
+{"type":"system","subtype":"turn_duration","durationMs":4200,"timestamp":"2026-10-01T10:00:10.000Z"}
+{"type":"user","uuid":"u4","timestamp":"2026-10-01T10:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"[pyre-msg:msg_synthetic01] from session: the deploy of the invoice service is green"}]}}
+{"type":"assistant","uuid":"a4","timestamp":"2026-10-01T10:01:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Noted: invoice service deploy is green; closing the webhook task."}]}}

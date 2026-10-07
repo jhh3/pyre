@@ -1,0 +1,15 @@
+{
+  "name": "hive",
+  "owner": { "name": "John Holliman" },
+  "metadata": {
+    "description": "Hive: unified session memory, workstreams, worktrees & lifecycle for coding agents"
+  },
+  "plugins": [
+    {
+      "name": "hive",
+      "source": "./plugins/hive",
+      "description": "Every agent session born registered, continuously checkpointed, enriched in minutes, and synced across machines - memory (jhh3-mem), workstreams (ws), worktrees (wt), and git vaults, unified.",
+      "category": "workflow"
+    }
+  ]
+}

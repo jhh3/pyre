@@ -1,0 +1,10 @@
+# Pyre MCP server for Codex. Either merge into a per-session CODEX_HOME
+# config.toml, or pass on the command line without touching user config:
+#
+#   codex -c 'mcp_servers.pyre.command="pyre"' -c 'mcp_servers.pyre.args=["mcp"]'
+#
+# The server inherits PYRE_SOCKET / PYRE_SESSION_TOKEN / PYRE_SESSION_ID from
+# the session environment, so tools act as the session, not the owner.
+[mcp_servers.pyre]
+command = "pyre"
+args = ["mcp"]

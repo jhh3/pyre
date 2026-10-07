@@ -1,0 +1,12 @@
+openapi: 3.1.0
+info: {title: Public GitHub subset, version: 1.0.0}
+servers: [{url: 'https://api.github.com/'}]
+paths:
+  /repos/{owner}/{repo}/issues/{number}:
+    get:
+      operationId: get_issue
+      summary: Read one public issue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: number, in: path, required: true, schema: {type: integer}}

@@ -1,0 +1,31 @@
+{
+  "description": "Load enabled connectors and resolve supported pasted links through the local outfit runtime.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "outfit-core session context --hook auto",
+            "timeout": 5,
+            "statusMessage": "Loading local outfit connectors"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "outfit-core context hook --host auto",
+            "timeout": 13,
+            "statusMessage": "Resolving linked resources"
+          }
+        ]
+      }
+    ]
+  }
+}
+

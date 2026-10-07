@@ -1,0 +1,13 @@
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+# Never commit Firebase config or signing material.
+app/google-services.json
+app/src/*/google-services.json
+*.jks
+*.keystore
+signing.properties

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/pyre_flame"
+        android:pathData="M54,26C58,36 70,42 70,58C70,68 63,78 54,78C45,78 38,68 38,58C38,50 42,46 46,42C46,48 49,52 52,53C50,44 52,34 54,26Z" />
+    <path
+        android:fillColor="@color/pyre_flame_core"
+        android:pathData="M54,50C57,56 62,59 62,65C62,70 58,74 54,74C50,74 46,70 46,65C46,61 49,58 51,56C51,59 53,61 54,61C53,57 53,53 54,50Z" />
+</vector>

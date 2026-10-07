@@ -1,0 +1,48 @@
+# pyre-managed: rendered by scripts/install/install.sh from
+# packaging/systemd/pyre-hub.service.in (Pyre @VERSION@).
+# systemd user unit for the Pyre hub. No secrets: the TLS key and database
+# stay in the hub data directory (0700); the owner credential written by
+# `pyre-hub init` is never referenced here.
+#
+# The hub starts no child processes, so it is sandboxed and capped. In a user
+# unit the sandbox options need unprivileged user namespaces (systemd enables
+# PrivateUsers implicitly). If the unit fails with status 218/CAPABILITIES or
+# 226/NAMESPACE, reinstall with --no-harden. MemoryMax/CPUQuota take effect
+# only when the memory/cpu controllers are delegated to the user manager
+# (check: systemctl --user show pyre-hub.service -p MemoryMax -p CPUQuotaPerSecUSec).
+#
+# Keep the hub running across logout: loginctl enable-linger <user>
+
+[Unit]
+Description=Pyre hub (pyre-hub serve)
+Documentation=https://github.com/jhh3/pyre/blob/main/docs/operations.md
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=@EXEC_START@
+Environment="PATH=@PATH@"
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+LimitNOFILE=8192
+MemoryMax=@MEMORY_MAX@
+CPUQuota=@CPU_QUOTA@
+TasksMax=256
+# BEGIN harden
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@HUB_DATA_RW@
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+UMask=0077
+# END harden
+SyslogIdentifier=pyre-hub
+
+[Install]
+WantedBy=default.target

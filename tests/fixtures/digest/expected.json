@@ -1,0 +1,167 @@
+{
+  "since": "2026-10-05T09:00:00Z",
+  "since_cursor": 100,
+  "head_cursor": 149,
+  "generated_at": "2026-10-05T12:00:00Z",
+  "since_label": "last seen",
+  "agents": [
+    {
+      "session_id": "ses_synthA",
+      "title": "synth-api-refactor",
+      "harness": "claude",
+      "node": "synth-mac",
+      "run_id": "run_synthA",
+      "state": "waiting_approval",
+      "rank": "needs_you",
+      "summary": "Approve: go test -bench ./...",
+      "summary_source": "attention",
+      "link": "pyre://approval/apr_synthA",
+      "seq": 41,
+      "turns": 0,
+      "replies": 1,
+      "tools": 3,
+      "files": [
+        "handlers.go"
+      ],
+      "needs_you": [
+        {
+          "kind": "attention",
+          "id": "att_synthA",
+          "title": "Approve: go test -bench ./...",
+          "link": "pyre://approval/apr_synthA",
+          "at": "2026-10-05T11:55:00Z"
+        }
+      ],
+      "events": 2,
+      "last_activity": "2026-10-05T11:55:00Z"
+    },
+    {
+      "session_id": "ses_synthB",
+      "title": "synth-flaky-ci",
+      "harness": "codex",
+      "node": "synth-linux",
+      "run_id": "run_synthB",
+      "state": "failed",
+      "rank": "needs_you",
+      "summary": "Failed: no eligible Codex account",
+      "summary_source": "blocked",
+      "blocked": "failed: no eligible Codex account",
+      "link": "pyre://session/ses_synthB",
+      "turns": 0,
+      "replies": 0,
+      "tools": 0,
+      "events": 1,
+      "last_activity": "2026-10-05T10:30:00Z"
+    },
+    {
+      "session_id": "ses_synthH",
+      "title": "synth-codex-check",
+      "harness": "codex",
+      "node": "synth-mac",
+      "run_id": "run_synthH",
+      "state": "exited",
+      "rank": "done",
+      "summary": "Finished",
+      "summary_source": "state",
+      "link": "pyre://session/ses_synthH",
+      "turns": 0,
+      "replies": 0,
+      "tools": 0,
+      "events": 1,
+      "last_activity": "2026-10-05T11:00:00Z"
+    },
+    {
+      "session_id": "ses_synthC",
+      "title": "synth-docs-pass",
+      "harness": "claude",
+      "node": "synth-mac",
+      "run_id": "run_synthC",
+      "state": "waiting_input",
+      "rank": "done",
+      "summary": "Updated the digest docs and added tests for ranking, e.g. needs-you first.",
+      "summary_source": "assistant",
+      "link": "pyre://session/ses_synthC?run=run_synthC\u0026seq=812",
+      "seq": 812,
+      "turns": 2,
+      "replies": 1,
+      "tools": 5,
+      "files": [
+        "docs/digest.md",
+        "internal/digest/digest_test.go"
+      ],
+      "artifacts": [
+        {
+          "kind": "artifact_version",
+          "id": "ver_synthC2",
+          "title": "synth digest spec v2",
+          "link": "pyre://artifact_version/ver_synthC2",
+          "at": "2026-10-05T10:05:00Z"
+        }
+      ],
+      "docs": [
+        {
+          "kind": "document_revision",
+          "id": "rev_synthC",
+          "title": "synth brief: digest section",
+          "link": "pyre://document_revision/rev_synthC",
+          "at": "2026-10-05T10:06:00Z"
+        }
+      ],
+      "messages": [
+        {
+          "kind": "message",
+          "id": "msg_synthCD",
+          "title": "Synthetic: the docs are ready for review.",
+          "link": "pyre://message/msg_synthCD",
+          "at": "2026-10-05T10:10:00Z",
+          "direction": "sent"
+        }
+      ],
+      "events": 3,
+      "last_activity": "2026-10-05T10:10:00Z"
+    },
+    {
+      "session_id": "ses_synthD",
+      "title": "synth-search-index",
+      "harness": "claude",
+      "node": "synth-linux",
+      "run_id": "run_synthD",
+      "state": "running",
+      "rank": "working",
+      "summary": "Indexing the synthetic vault: 3 of 7 shards done.",
+      "summary_source": "assistant",
+      "link": "pyre://session/ses_synthD?run=run_synthD\u0026seq=2004",
+      "seq": 2004,
+      "turns": 2,
+      "replies": 1,
+      "tools": 2,
+      "partial": true,
+      "files": [
+        "index/manifest.json",
+        "index/shard-3.idx"
+      ],
+      "messages": [
+        {
+          "kind": "message",
+          "id": "msg_synthCD",
+          "title": "Synthetic: the docs are ready for review.",
+          "link": "pyre://message/msg_synthCD",
+          "at": "2026-10-05T10:10:00Z",
+          "direction": "received"
+        }
+      ],
+      "events": 2,
+      "last_activity": "2026-10-05T11:51:00Z"
+    }
+  ],
+  "quiet": 2,
+  "other": [
+    {
+      "kind": "attention",
+      "id": "att_synthNode",
+      "title": "synth-linux was offline for 12 minutes",
+      "link": "pyre://node/node_synthLinux",
+      "at": "2026-10-05T10:40:00Z"
+    }
+  ]
+}

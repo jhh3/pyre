@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · [M Machines] · A Accounts                                         anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  MACHINES · updated now                                                 │ synth-mac  ● online
+  STATUS     MACHINE        SEEN  HARNESSES                              │
+  ● online   synth-linux     30s  claude ✗codex shell  cpu 7% mem 40% d… │ Last seen  30s ago
+› ● online   synth-mac       30s  claude codex shell  cpu 18% mem 63%! … │ Connected  since 1h ago
+                                                                         │ Platform   darwin/arm64
+                                                                         │ Hostname   synth-mac.local
+                                                                         │ SSH        ssh synth-mac
+                                                                         │ Versions   protocol 1 · pyred 0.1.0-synth · tmux 3.5a
+                                                                         │ Resources  load 2.1/10 cpu · mem 6.0 GiB free of 16.0 GiB · runs 2/8
+                                                                         │ CPU        ████░░░░░░░░░░░░░░░░░░░░  18%  load 2.1 2.4 2.2 · 10 cores
+                                                                         │ Memory     ███████████████░░░░░░░░░  63%  10G of 16G · pressure warn
+                                                                         │ Swap       ████████████████████░░░░  85%  7.6G of 9.0G
+                                                                         │ Disk       ███████████████████████░  97%  15G free of 460G · home+data
+                                                                         │            ! disk home+data 15G free (3%) · memory pressure warn · swap 7.6G of 9.0G…
+                                                                         │            pyre overhead 38 MiB, 0.4% cpu · sampled 30s ago
+                                                                         │
+                                                                         │ Harnesses
+                                                                         │ ✓ claude  2.1.289  15 capabilities
+                                                                         │ ✓ codex   0.160.0  13 capabilities
+                                                                         │ ✓ shell   tmux 3.5a  4 capabilities
+                                                                         │
+                                                                         │ Sessions by memory
+                                                                         │  1.2G 35%  coordinator                  11 procs · top claude 702M
+                                                                         │   410M 0%  scratch (standalone)         4 procs · top claude 380M
+                                                                         │
+                                                                         │
+
+ ↑↓ select   r refresh                                                                                                                        esc back   ? help

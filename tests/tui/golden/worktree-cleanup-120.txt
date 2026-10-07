@@ -1,0 +1,34 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                         ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+                  ╭─ Remove this session's worktrees? ───────────────────────────────────────────────╮
+                  │                                                                                  │
+                  │ "share link fix" created 1 worktree:                                             │
+                  │                                                                                  │
+                  │   ~/code/notes-app/.worktrees/share-link  pyre/share-link                        │
+                  │                                                                                  │
+                  │ The main checkout and anything uncommitted always stay.                          │
+                  │                                                                                  │
+                  │ y remove the clean ones   n keep them (default)                                  │
+                  │                                                                                  │
+                  ╰──────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ y remove   n enter esc keep

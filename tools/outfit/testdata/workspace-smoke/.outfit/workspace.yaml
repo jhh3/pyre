@@ -1,0 +1,16 @@
+apiVersion: outfit.jhh3.dev/workspace/v1alpha2
+name: smoke-workspace
+skills: false
+links: true
+packages:
+  - key: smoke-github
+    path: ./connectors/smoke-github
+connectors:
+  - name: public-issues
+    package: smoke-github
+    mode: rest
+    credentialMethod: no-auth
+    operations: [api_root, get_issue]
+profiles:
+  default: [public-issues]
+profile: default

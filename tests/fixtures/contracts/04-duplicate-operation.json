@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "name": "duplicate-operation",
+  "description": "Same operation_id + same body returns the stored result; same operation_id + different body is a conflict. A repeated message_id never creates a second stored message.",
+  "synthetic": true,
+  "requirements": [
+    "R04",
+    "R14"
+  ],
+  "cases": [
+    "A05"
+  ],
+  "exchanges": [
+    {
+      "name": "first send",
+      "op": "messages.send",
+      "principal": {
+        "kind": "session",
+        "id": "ses_synth-a"
+      },
+      "request": {
+        "operation_id": "op_synth-dup-1",
+        "message_id": "msg_synth-dup",
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: run lint."
+        }
+      },
+      "response": {
+        "envelope": {
+          "schema_version": 1,
+          "message_id": "msg_synth-dup",
+          "operation_id": "op_synth-dup-1",
+          "sender": {
+            "kind": "session",
+            "id": "ses_synth-a"
+          },
+          "recipient": {
+            "kind": "session",
+            "id": "ses_synth-b"
+          },
+          "project_id": null,
+          "mode": "queue",
+          "body": {
+            "text": "Synthetic: run lint."
+          },
+          "created_at": "2026-10-04T11:50:00Z"
+        },
+        "status": {
+          "storage": "stored",
+          "stored_at": "2026-10-04T12:00:00Z",
+          "runtime": "queued",
+          "ack": "none",
+          "updated_at": "2026-10-04T12:00:00Z"
+        },
+        "cursor": 7
+      }
+    },
+    {
+      "name": "retry with identical body",
+      "op": "messages.send",
+      "principal": {
+        "kind": "session",
+        "id": "ses_synth-a"
+      },
+      "request": {
+        "operation_id": "op_synth-dup-1",
+        "message_id": "msg_synth-dup",
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: run lint."
+        }
+      },
+      "response": {
+        "envelope": {
+          "schema_version": 1,
+          "message_id": "msg_synth-dup",
+          "operation_id": "op_synth-dup-1",
+          "sender": {
+            "kind": "session",
+            "id": "ses_synth-a"
+          },
+          "recipient": {
+            "kind": "session",
+            "id": "ses_synth-b"
+          },
+          "project_id": null,
+          "mode": "queue",
+          "body": {
+            "text": "Synthetic: run lint."
+          },
+          "created_at": "2026-10-04T11:50:00Z"
+        },
+        "status": {
+          "storage": "stored",
+          "stored_at": "2026-10-04T12:00:00Z",
+          "runtime": "queued",
+          "ack": "none",
+          "updated_at": "2026-10-04T12:00:00Z"
+        },
+        "cursor": 7
+      },
+      "explanation": "Returns the original stored message; no new message or delivery."
+    },
+    {
+      "name": "same operation_id, different body",
+      "op": "messages.send",
+      "principal": {
+        "kind": "session",
+        "id": "ses_synth-a"
+      },
+      "request": {
+        "operation_id": "op_synth-dup-1",
+        "message_id": "msg_synth-dup",
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: run lint AND deploy."
+        }
+      },
+      "error": {
+        "code": "conflict",
+        "message": "operation_id reused with a different request body",
+        "retryable": false,
+        "ref": {
+          "kind": "operation",
+          "id": "op_synth-dup-1"
+        }
+      }
+    },
+    {
+      "name": "new operation_id, same message_id, same content",
+      "op": "messages.send",
+      "principal": {
+        "kind": "session",
+        "id": "ses_synth-a"
+      },
+      "request": {
+        "operation_id": "op_synth-dup-2",
+        "message_id": "msg_synth-dup",
+        "recipient": {
+          "kind": "session",
+          "id": "ses_synth-b"
+        },
+        "mode": "queue",
+        "body": {
+          "text": "Synthetic: run lint."
+        }
+      },
+      "response": {
+        "envelope": {
+          "schema_version": 1,
+          "message_id": "msg_synth-dup",
+          "operation_id": "op_synth-dup-1",
+          "sender": {
+            "kind": "session",
+            "id": "ses_synth-a"
+          },
+          "recipient": {
+            "kind": "session",
+            "id": "ses_synth-b"
+          },
+          "project_id": null,
+          "mode": "queue",
+          "body": {
+            "text": "Synthetic: run lint."
+          },
+          "created_at": "2026-10-04T11:50:00Z"
+        },
+        "status": {
+          "storage": "stored",
+          "stored_at": "2026-10-04T12:00:00Z",
+          "runtime": "queued",
+          "ack": "none",
+          "updated_at": "2026-10-04T12:00:00Z"
+        },
+        "cursor": 7
+      },
+      "explanation": "Message storage is deduplicated by message_id; identical content returns the existing message."
+    },
+    {
+      "name": "protocol mismatch",
+      "op": "system.hello",
+      "request": {
+        "protocol": 99,
+        "client": "pyre-cli/9.0.0"
+      },
+      "error": {
+        "code": "protocol_mismatch",
+        "message": "client protocol 99 not supported; hub supports 1..1",
+        "retryable": false,
+        "details": {
+          "min_protocol": 1,
+          "protocol": 1
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "outfit",
+  "version": "0.10.7",
+  "description": "Use local connectors, skills, and pasted-link context through outfit.",
+  "author": {
+    "name": "John Holliman",
+    "url": "https://github.com/jhh3"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Outfit",
+    "shortDescription": "Local connectors and linked context.",
+    "longDescription": "Use locally configured connectors through concise typed CLI commands generated from one Connector Kit contract, with a compact read-only MCP fallback for discovery and dispatch. Manage pinned provider CLIs and credentials, load only enabled connector skills and workflows, fetch supported pasted links, and restore portable encrypted configuration without a hosted control plane.",
+    "developerName": "John Holliman",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write", "Local"],
+    "defaultPrompt": [
+      "Show my enabled outfit connectors.",
+      "Find the right typed outfit CLI command for this task.",
+      "Explain the linked resources in my prompt."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

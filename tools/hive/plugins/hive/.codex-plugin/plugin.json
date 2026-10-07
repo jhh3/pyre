@@ -1,0 +1,9 @@
+{
+  "name": "hive",
+  "version": "0.2.5",
+  "description": "Unified session memory, workstreams, worktrees & lifecycle. Successor to jhh3-mem + ws + wt; one shared store across Claude Code and Codex.",
+  "author": { "name": "John Holliman" },
+  "keywords": ["memory", "workstreams", "worktrees", "sessions"],
+  "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json"
+}

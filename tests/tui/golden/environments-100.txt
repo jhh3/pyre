@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · [M Machines] · A Accounts › Environments & updates      ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  STATUS     MACHINE        PYRED       DRIFT      │ synth-linux  ● online
+› ● online   synth-linux    0.1.0-synth 2 drift    │
+  ● online   synth-mac      0.1.0-synth            │ Tool versions
+                                                   │ no managed tools reported
+                                                   │
+                                                   │ Configuration drift
+                                                   │ ! unmanaged_addition  ~/.claude/settings.json …
+                                                   │   user-added hook outside the Pyre-managed sec…
+                                                   │ ! modified  ~/.codex/config.toml [model]
+                                                   │   expected gpt-synth · actual gpt-synth-mini
+                                                   │
+                                                   │ Plan/apply/rollback: pyre env plan|apply --nod…
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+
+ ↑↓ select   r refresh                                                            esc back   ? help

@@ -1,0 +1,14 @@
+{
+  "name": "jhh3-outfit",
+  "description": "Local-first outfit connector runtime and coding-agent plugin",
+  "owner": {
+    "name": "John Holliman"
+  },
+  "plugins": [
+    {
+      "name": "outfit",
+      "source": "./plugins/outfit",
+      "description": "Local connectors, skills, and pasted-link context"
+    }
+  ]
+}

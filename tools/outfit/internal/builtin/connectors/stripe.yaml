@@ -1,0 +1,512 @@
+apiVersion: outfit.jhh3.dev/connector/v1alpha2
+key: stripe
+display: Stripe
+version: 2.0.1
+description: Payments, customers, subscriptions, logs, fixtures, and webhook development through a pinned Stripe CLI.
+category: customer-systems
+aliases: [stripe-cli, billing, payments]
+useCases: [inspect payments, manage customers, investigate billing, tail logs, test webhooks]
+limitations:
+  - Restricted keys can expose only the resources their Stripe permissions allow.
+  - Raw CLI commands that may mutate state require outfit exec --write.
+tools:
+  - id: stripe-cli
+    display: Stripe CLI
+    binary: stripe
+    version: 1.50.4
+    source:
+      kind: github-release
+      repository: stripe/stripe-cli
+      tag: v{{version}}
+      binaryPath: stripe
+      assets:
+        darwin-amd64: stripe_1.50.4_mac-os_x86_64.tar.gz
+        darwin-arm64: stripe_1.50.4_mac-os_arm64.tar.gz
+        linux-amd64: stripe_1.50.4_linux_x86_64.tar.gz
+        linux-arm64: stripe_1.50.4_linux_arm64.tar.gz
+        windows-amd64: stripe_1.50.4_windows_x86_64.zip
+      checksums:
+        darwin-amd64: 30f85c4988d1e5d42a65d97a87265e6e4865fbf01083e6b3d1d90d2994446622
+        darwin-arm64: 5dbf4bc580c3870d3f7cd0c56fde3c8a210340b59d45050a0c9c0ceb2110dc2f
+        linux-amd64: f6a04bbb318e678c20bb62f1ceb2bb6b03b47173189e08e043f7a6b4d9916bc2
+        linux-arm64: 35ff9ba4f861a10a94e1dff074b06b5fb36b0b3848caeeace995317de0f03f6e
+        windows-amd64: 69a7fbefa337e2a896d59540a7cf252ebca939eaf6f66abb011e8e929592e67a
+    verify: [version]
+credentialMethods:
+  - id: managed-restricted-key
+    label: outfit-managed restricted API key
+    description: Store a restricted Stripe key in the OS keychain and inject it only into the selected Stripe executor.
+    recommended: true
+    custody: outfit
+    fields:
+      - key: STRIPE_API_KEY
+        label: Restricted API key
+        description: 'Start in test mode at https://dashboard.stripe.com/test/apikeys. Under Restricted keys, create an rk_test_ key and grant only the resources this connection needs; use native Stripe login instead if you prefer Stripe to create and rotate its own 90-day restricted CLI key.'
+        secret: true
+        environment: [STRIPE_API_KEY]
+        pattern: '(rk|sk)_(test|live)_[A-Za-z0-9_]+'
+    bindings:
+      - target: process-env
+        name: STRIPE_API_KEY
+        value: '{{secret.STRIPE_API_KEY}}'
+  - id: native-login
+    label: Existing Stripe CLI login
+    description: Let Stripe CLI retain and select its own native profile; outfit stores no Stripe secret.
+    custody: executor
+    setup:
+      program: stripe
+      args: [login]
+      browserContinuation: {urlField: browser_url, verificationCodeField: verification_code, nextStepField: next_step, timeoutSeconds: 300}
+    verify: {program: stripe, args: [whoami, --format, json]}
+    logout: {program: stripe, args: [logout]}
+modes:
+  - id: cli
+    label: Stripe CLI
+    description: Pinned native Stripe CLI with structured output, request commands, logs, fixtures, and webhook streams.
+    recommendation:
+      rank: 1
+      reason: The official CLI has the broadest useful Stripe surface and supports both human and agent workflows.
+    executor:
+      kind: cli
+      tool: stripe-cli
+    credentialMethods: [managed-restricted-key, native-login]
+    defaultCredentialMethod: managed-restricted-key
+    capabilities: [customers, payments, subscriptions, refunds, balance, events, logs, webhooks]
+    operations:
+      - name: account_get
+        title: Get Stripe account
+        description: Return the Stripe account visible to the selected credential.
+        class: read
+        cli: {args: [get, /v1/account]}
+      - name: balance_get
+        title: Get Stripe balance
+        description: Inspect available and pending balances for the selected account.
+        class: read
+        cli: {args: [balance, retrieve]}
+      - name: balance_transactions_list
+        title: List balance transactions
+        description: List money movements in the selected account.
+        class: read
+        cli:
+          args: [balance_transactions, list]
+          optionalArgs: [{flag: --limit, argument: limit}, {flag: --type, argument: type}, {flag: --starting-after, argument: starting_after}]
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: customers_list
+        title: List customers
+        description: List customers visible to the selected Stripe account.
+        class: read
+        cli:
+          args: [customers, list]
+          optionalArgs:
+            - {flag: --limit, argument: limit}
+            - {flag: --starting-after, argument: starting_after}
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: customers_get
+        title: Retrieve customer
+        description: Retrieve one Stripe customer by ID.
+        class: read
+        input: {type: object, properties: {customer_id: {type: string}}, required: [customer_id], additionalProperties: false}
+        cli: {args: [customers, retrieve, '{{arg.customer_id}}']}
+      - name: customers_search
+        title: Search customers
+        description: Search customers with Stripe Search syntax.
+        class: read
+        input: {type: object, properties: {query: {type: string}, limit: {type: integer}}, required: [query], additionalProperties: false}
+        cli:
+          args: [customers, search, --query, '{{arg.query}}']
+          optionalArgs: [{flag: --limit, argument: limit}]
+      - name: customers_create
+        title: Create customer
+        description: Create a customer with explicit contact and description fields.
+        class: write
+        input: {type: object, properties: {email: {type: string}, name: {type: string}, description: {type: string}}, additionalProperties: false}
+        cli:
+          args: [customers, create]
+          optionalArgs: [{flag: --email, argument: email}, {flag: --name, argument: name}, {flag: --description, argument: description}]
+      - name: customers_update
+        title: Update customer
+        description: Update explicit fields on one customer.
+        class: write
+        input: {type: object, properties: {customer_id: {type: string}, email: {type: string}, name: {type: string}, description: {type: string}}, required: [customer_id], additionalProperties: false}
+        cli:
+          args: [customers, update, '{{arg.customer_id}}']
+          optionalArgs: [{flag: --email, argument: email}, {flag: --name, argument: name}, {flag: --description, argument: description}]
+      - name: customers_delete
+        title: Delete customer
+        description: Permanently delete one customer.
+        class: destructive
+        input: {type: object, properties: {customer_id: {type: string}}, required: [customer_id], additionalProperties: false}
+        cli: {args: [customers, delete, '{{arg.customer_id}}', --confirm]}
+      - name: payment_intents_list
+        title: List payment intents
+        description: List recent payment intents.
+        class: read
+        cli:
+          args: [payment_intents, list]
+          optionalArgs:
+            - {flag: --limit, argument: limit}
+            - {flag: --starting-after, argument: starting_after}
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: payment_intents_get
+        title: Retrieve payment intent
+        description: Retrieve one payment intent by ID.
+        class: read
+        input: {type: object, properties: {payment_intent_id: {type: string}}, required: [payment_intent_id], additionalProperties: false}
+        cli: {args: [payment_intents, retrieve, '{{arg.payment_intent_id}}']}
+      - name: subscriptions_list
+        title: List subscriptions
+        description: List subscriptions in the selected account.
+        class: read
+        cli:
+          args: [subscriptions, list]
+          optionalArgs:
+            - {flag: --limit, argument: limit}
+            - {flag: --starting-after, argument: starting_after}
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: subscriptions_get
+        title: Retrieve subscription
+        description: Retrieve one subscription by ID.
+        class: read
+        input: {type: object, properties: {subscription_id: {type: string}}, required: [subscription_id], additionalProperties: false}
+        cli: {args: [subscriptions, retrieve, '{{arg.subscription_id}}']}
+      - name: subscriptions_create
+        title: Create subscription
+        description: Create a subscription for a customer using explicit Stripe request data.
+        class: write
+        input: {type: object, properties: {customer: {type: string}, currency: {type: string}, description: {type: string}}, required: [customer, currency], additionalProperties: false}
+        cli:
+          args: [subscriptions, create, --customer, '{{arg.customer}}', --currency, '{{arg.currency}}']
+          optionalArgs: [{flag: --description, argument: description}]
+      - name: subscriptions_update
+        title: Update subscription
+        description: Update bounded subscription fields.
+        class: write
+        input: {type: object, properties: {subscription_id: {type: string}, description: {type: string}, cancel_at_period_end: {type: boolean}}, required: [subscription_id], additionalProperties: false}
+        cli:
+          args: [subscriptions, update, '{{arg.subscription_id}}']
+          optionalArgs: [{flag: --description, argument: description}, {flag: --cancel-at-period-end, argument: cancel_at_period_end}]
+      - name: subscriptions_cancel
+        title: Cancel subscription
+        description: Cancel one subscription immediately.
+        class: destructive
+        input: {type: object, properties: {subscription_id: {type: string}}, required: [subscription_id], additionalProperties: false}
+        cli: {args: [subscriptions, cancel, '{{arg.subscription_id}}', --confirm]}
+      - name: invoices_list
+        title: List invoices
+        description: List invoices in the selected account.
+        class: read
+        cli:
+          args: [invoices, list]
+          optionalArgs: [{flag: --limit, argument: limit}, {flag: --customer, argument: customer}, {flag: --status, argument: status}, {flag: --starting-after, argument: starting_after}]
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: invoices_get
+        title: Retrieve invoice
+        description: Retrieve one invoice by ID.
+        class: read
+        input: {type: object, properties: {invoice_id: {type: string}}, required: [invoice_id], additionalProperties: false}
+        cli: {args: [invoices, retrieve, '{{arg.invoice_id}}']}
+      - name: invoices_upcoming
+        title: Preview upcoming invoice
+        description: Preview the next invoice for a customer or subscription without creating it.
+        class: read
+        input: {type: object, properties: {customer: {type: string}, subscription: {type: string}}, additionalProperties: false}
+        cli:
+          args: [invoices, create_preview]
+          optionalArgs: [{flag: --customer, argument: customer}, {flag: --subscription, argument: subscription}]
+      - name: invoices_create
+        title: Create invoice
+        description: Create a draft invoice for a customer.
+        class: write
+        input: {type: object, properties: {customer: {type: string}, description: {type: string}}, required: [customer], additionalProperties: false}
+        cli:
+          args: [invoices, create, --customer, '{{arg.customer}}']
+          optionalArgs: [{flag: --description, argument: description}]
+      - name: invoices_finalize
+        title: Finalize invoice
+        description: Finalize a draft invoice.
+        class: write
+        input: {type: object, properties: {invoice_id: {type: string}}, required: [invoice_id], additionalProperties: false}
+        cli: {args: [invoices, finalize_invoice, '{{arg.invoice_id}}', --confirm]}
+      - name: invoices_void
+        title: Void invoice
+        description: Permanently void an invoice.
+        class: destructive
+        input: {type: object, properties: {invoice_id: {type: string}}, required: [invoice_id], additionalProperties: false}
+        cli: {args: [invoices, void_invoice, '{{arg.invoice_id}}', --confirm]}
+      - name: charges_list
+        title: List charges
+        description: List charges in the selected account.
+        class: read
+        cli:
+          args: [charges, list]
+          optionalArgs: [{flag: --limit, argument: limit}, {flag: --customer, argument: customer}, {flag: --payment-intent, argument: payment_intent}, {flag: --starting-after, argument: starting_after}]
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: charges_get
+        title: Retrieve charge
+        description: Retrieve one charge by ID.
+        class: read
+        input: {type: object, properties: {charge_id: {type: string}}, required: [charge_id], additionalProperties: false}
+        cli: {args: [charges, retrieve, '{{arg.charge_id}}']}
+      - name: refunds_list
+        title: List refunds
+        description: List refunds, optionally for one charge or payment intent.
+        class: read
+        cli:
+          args: [refunds, list]
+          optionalArgs: [{flag: --limit, argument: limit}, {flag: --charge, argument: charge}, {flag: --payment-intent, argument: payment_intent}, {flag: --starting-after, argument: starting_after}]
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: refunds_get
+        title: Retrieve refund
+        description: Retrieve one refund by ID.
+        class: read
+        input: {type: object, properties: {refund_id: {type: string}}, required: [refund_id], additionalProperties: false}
+        cli: {args: [refunds, retrieve, '{{arg.refund_id}}']}
+      - name: refunds_create
+        title: Create refund
+        description: Create a refund for a charge or payment intent.
+        class: write
+        input: {type: object, properties: {payment_intent_id: {type: string}, charge_id: {type: string}, amount: {type: integer}}, additionalProperties: false}
+        cli:
+          args: [refunds, create]
+          optionalArgs: [{flag: --payment-intent, argument: payment_intent_id}, {flag: --charge, argument: charge_id}, {flag: --amount, argument: amount}]
+      - name: events_list
+        title: List events
+        description: List recent Stripe events.
+        class: read
+        capabilities: [events]
+        cli:
+          args: [events, list]
+          optionalArgs: [{flag: --limit, argument: limit}, {flag: --type, argument: type}, {flag: --starting-after, argument: starting_after}]
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: events_get
+        title: Retrieve event
+        description: Retrieve one Stripe event by ID.
+        class: read
+        capabilities: [events]
+        input: {type: object, properties: {event_id: {type: string}}, required: [event_id], additionalProperties: false}
+        cli: {args: [events, retrieve, '{{arg.event_id}}']}
+      - name: events_resend
+        title: Resend event
+        description: Resend one event to an explicit webhook endpoint.
+        class: write
+        capabilities: [events, webhooks]
+        input: {type: object, properties: {event_id: {type: string}, webhook_endpoint_id: {type: string}}, required: [event_id, webhook_endpoint_id], additionalProperties: false}
+        cli: {args: [events, resend, '{{arg.event_id}}', --webhook-endpoint, '{{arg.webhook_endpoint_id}}', --confirm]}
+      - name: webhook_endpoints_list
+        title: List webhook endpoints
+        description: List registered webhook endpoints.
+        class: read
+        capabilities: [webhooks]
+        cli:
+          args: [webhook_endpoints, list]
+          optionalArgs: [{flag: --limit, argument: limit}, {flag: --starting-after, argument: starting_after}]
+        pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}
+      - name: webhook_endpoints_get
+        title: Retrieve webhook endpoint
+        description: Retrieve one webhook endpoint by ID.
+        class: read
+        capabilities: [webhooks]
+        input: {type: object, properties: {webhook_endpoint_id: {type: string}}, required: [webhook_endpoint_id], additionalProperties: false}
+        cli: {args: [webhook_endpoints, retrieve, '{{arg.webhook_endpoint_id}}']}
+      - name: event_trigger
+        title: Trigger test event
+        description: Create test fixtures and trigger one Stripe event type.
+        class: write
+        capabilities: [events]
+        input: {type: object, properties: {event_type: {type: string}}, required: [event_type], additionalProperties: false}
+        cli: {args: [trigger, '{{arg.event_type}}']}
+      - name: logs_tail
+        title: Tail request logs
+        description: Stream Stripe API request logs until cancelled.
+        class: read
+        interaction: stream
+        cli: {args: [logs, tail]}
+      - name: webhook_listen
+        title: Forward webhook events
+        description: Listen for Stripe webhook events and optionally forward them locally.
+        class: read
+        interaction: stream
+        capabilities: [webhooks]
+        cli:
+          args: [listen]
+          optionalArgs:
+            - {flag: --forward-to, argument: forward_to}
+    verify: account_get
+  - id: rest
+    label: Stripe REST API
+    description: Read-only fixed-origin Stripe API access using the same outfit-managed key without a provider CLI process.
+    recommendation:
+      rank: 2
+      reason: Choose REST for a minimal read-only surface; Stripe CLI remains the broader recommended experience.
+    executor: {kind: http, baseUrl: 'https://api.stripe.com/v1/'}
+    credentialMethods: [managed-restricted-key]
+    defaultCredentialMethod: managed-restricted-key
+    credentialBindings:
+      managed-restricted-key:
+        - {target: http-header, name: Authorization, value: 'Bearer {{secret.STRIPE_API_KEY}}'}
+    capabilities: [customers, payments, subscriptions, refunds, balance, events, webhooks]
+    operations:
+      - {name: account_get, title: Get Stripe account, description: Return the Stripe account visible to the selected credential., class: read, http: {method: GET, path: account}}
+      - {name: balance_get, title: Get Stripe balance, description: Inspect available and pending balances., class: read, http: {method: GET, path: balance}}
+      - {name: balance_transactions_list, title: List balance transactions, description: List money movements., class: read, http: {method: GET, path: balance_transactions, query: [limit, type, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: customers_list, title: List customers, description: List customers., class: read, http: {method: GET, path: customers, query: [limit, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: customers_get, title: Retrieve customer, description: Retrieve one customer., class: read, http: {method: GET, path: 'customers/{{arg.customer_id}}'}}
+      - {name: customers_search, title: Search customers, description: Search customers., class: read, http: {method: GET, path: customers/search, query: [query, limit]}}
+      - {name: subscriptions_list, title: List subscriptions, description: List subscriptions., class: read, http: {method: GET, path: subscriptions, query: [limit, customer, status, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: subscriptions_get, title: Retrieve subscription, description: Retrieve one subscription., class: read, http: {method: GET, path: 'subscriptions/{{arg.subscription_id}}'}}
+      - {name: invoices_list, title: List invoices, description: List invoices., class: read, http: {method: GET, path: invoices, query: [limit, customer, status, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: invoices_get, title: Retrieve invoice, description: Retrieve one invoice., class: read, http: {method: GET, path: 'invoices/{{arg.invoice_id}}'}}
+      - {name: payment_intents_list, title: List payment intents, description: List payment intents., class: read, http: {method: GET, path: payment_intents, query: [limit, customer, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: payment_intents_get, title: Retrieve payment intent, description: Retrieve one payment intent., class: read, http: {method: GET, path: 'payment_intents/{{arg.payment_intent_id}}'}}
+      - {name: charges_list, title: List charges, description: List charges., class: read, http: {method: GET, path: charges, query: [limit, customer, payment_intent, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: charges_get, title: Retrieve charge, description: Retrieve one charge., class: read, http: {method: GET, path: 'charges/{{arg.charge_id}}'}}
+      - {name: refunds_list, title: List refunds, description: List refunds., class: read, http: {method: GET, path: refunds, query: [limit, charge, payment_intent, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: refunds_get, title: Retrieve refund, description: Retrieve one refund., class: read, http: {method: GET, path: 'refunds/{{arg.refund_id}}'}}
+      - {name: events_list, title: List events, description: List events., class: read, capabilities: [events], http: {method: GET, path: events, query: [limit, type, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: events_get, title: Retrieve event, description: Retrieve one event., class: read, capabilities: [events], http: {method: GET, path: 'events/{{arg.event_id}}'}}
+      - {name: webhook_endpoints_list, title: List webhook endpoints, description: List webhook endpoints., class: read, capabilities: [webhooks], http: {method: GET, path: webhook_endpoints, query: [limit, starting_after]}, pagination: {cursorArgument: starting_after, itemsPath: $.data, hasMorePath: $.has_more, cursorFromLastItemPath: $.id, defaultMaxPages: 10, defaultMaxItems: 1000}}
+      - {name: webhook_endpoints_get, title: Retrieve webhook endpoint, description: Retrieve one webhook endpoint., class: read, capabilities: [webhooks], http: {method: GET, path: 'webhook_endpoints/{{arg.webhook_endpoint_id}}'}}
+    verify: account_get
+links:
+  - id: customer
+    resourceType: stripe.customer
+    patterns:
+      - hosts: [dashboard.stripe.com]
+        path: '/test/customers/:customer_id'
+        environments: [test]
+        segments: {customer_id: opaque-token}
+      - hosts: [dashboard.stripe.com]
+        path: '/customers/:customer_id'
+        environments: [live]
+        segments: {customer_id: opaque-token}
+    lookups:
+      - {mode: cli, operation: customers_get, arguments: {customer_id: customer_id}}
+      - {mode: rest, operation: customers_get, arguments: {customer_id: customer_id}}
+    presentation: {canonicalId: '$.id', title: '$.name', summary: '$.description', state: '$.delinquent', author: '$.email', updatedAt: '$.created'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 120}
+  - id: payment_intent
+    resourceType: stripe.payment_intent
+    patterns:
+      - hosts: [dashboard.stripe.com]
+        path: '/test/payments/:payment_intent_id'
+        environments: [test]
+        segments: {payment_intent_id: {kind: opaque-token, prefix: pi_}}
+      - hosts: [dashboard.stripe.com]
+        path: '/payments/:payment_intent_id'
+        environments: [live]
+        segments: {payment_intent_id: {kind: opaque-token, prefix: pi_}}
+    lookups:
+      - {mode: cli, operation: payment_intents_get, arguments: {payment_intent_id: payment_intent_id}}
+      - {mode: rest, operation: payment_intents_get, arguments: {payment_intent_id: payment_intent_id}}
+    presentation: {canonicalId: '$.id', title: '$.description', summary: '$.last_payment_error.message', state: '$.status', author: '$.customer', updatedAt: '$.created'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 60}
+  - id: subscription
+    resourceType: stripe.subscription
+    patterns:
+      - hosts: [dashboard.stripe.com]
+        path: '/test/subscriptions/:subscription_id'
+        environments: [test]
+        segments: {subscription_id: opaque-token}
+      - hosts: [dashboard.stripe.com]
+        path: '/subscriptions/:subscription_id'
+        environments: [live]
+        segments: {subscription_id: opaque-token}
+    lookups:
+      - {mode: cli, operation: subscriptions_get, arguments: {subscription_id: subscription_id}}
+      - {mode: rest, operation: subscriptions_get, arguments: {subscription_id: subscription_id}}
+    presentation: {canonicalId: '$.id', title: '$.description', summary: '$.items.data', state: '$.status', author: '$.customer', updatedAt: '$.current_period_end'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 120}
+  - id: invoice
+    resourceType: stripe.invoice
+    patterns:
+      - hosts: [dashboard.stripe.com]
+        path: '/test/invoices/:invoice_id'
+        environments: [test]
+        segments: {invoice_id: opaque-token}
+      - hosts: [dashboard.stripe.com]
+        path: '/invoices/:invoice_id'
+        environments: [live]
+        segments: {invoice_id: opaque-token}
+    lookups:
+      - {mode: cli, operation: invoices_get, arguments: {invoice_id: invoice_id}}
+      - {mode: rest, operation: invoices_get, arguments: {invoice_id: invoice_id}}
+    presentation: {canonicalId: '$.id', title: '$.number', summary: '$.description', state: '$.status', author: '$.customer_email', updatedAt: '$.created'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 120}
+  - id: charge
+    resourceType: stripe.charge
+    patterns:
+      - hosts: [dashboard.stripe.com]
+        path: '/test/payments/:charge_id'
+        environments: [test]
+        segments: {charge_id: {kind: opaque-token, prefix: ch_}}
+      - hosts: [dashboard.stripe.com]
+        path: '/payments/:charge_id'
+        environments: [live]
+        segments: {charge_id: {kind: opaque-token, prefix: ch_}}
+    lookups:
+      - {mode: cli, operation: charges_get, arguments: {charge_id: charge_id}}
+      - {mode: rest, operation: charges_get, arguments: {charge_id: charge_id}}
+    presentation: {canonicalId: '$.id', title: '$.description', summary: '$.failure_message', state: '$.status', author: '$.customer', updatedAt: '$.created'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 60}
+  - id: event
+    resourceType: stripe.event
+    patterns:
+      - hosts: [dashboard.stripe.com]
+        path: '/test/events/:event_id'
+        environments: [test]
+        segments: {event_id: opaque-token}
+      - hosts: [dashboard.stripe.com]
+        path: '/events/:event_id'
+        environments: [live]
+        segments: {event_id: opaque-token}
+    lookups:
+      - {mode: cli, operation: events_get, arguments: {event_id: event_id}}
+      - {mode: rest, operation: events_get, arguments: {event_id: event_id}}
+    presentation: {canonicalId: '$.id', title: '$.type', summary: '$.data.object', state: '$.pending_webhooks', updatedAt: '$.created'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 60}
+  - id: webhook_endpoint
+    resourceType: stripe.webhook_endpoint
+    patterns:
+      - hosts: [dashboard.stripe.com]
+        path: '/test/webhooks/:webhook_endpoint_id'
+        environments: [test]
+        segments: {webhook_endpoint_id: opaque-token}
+      - hosts: [dashboard.stripe.com]
+        path: '/webhooks/:webhook_endpoint_id'
+        environments: [live]
+        segments: {webhook_endpoint_id: opaque-token}
+      - hosts: [dashboard.stripe.com]
+        path: '/test/workbench/webhooks/:webhook_endpoint_id'
+        environments: [test]
+        segments: {webhook_endpoint_id: opaque-token}
+      - hosts: [dashboard.stripe.com]
+        path: '/workbench/webhooks/:webhook_endpoint_id'
+        environments: [live]
+        segments: {webhook_endpoint_id: opaque-token}
+    lookups:
+      - {mode: cli, operation: webhook_endpoints_get, arguments: {webhook_endpoint_id: webhook_endpoint_id}}
+      - {mode: rest, operation: webhook_endpoints_get, arguments: {webhook_endpoint_id: webhook_endpoint_id}}
+    presentation: {canonicalId: '$.id', title: '$.url', summary: '$.enabled_events', state: '$.status', updatedAt: '$.created'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 120}
+skill:
+  summary: Operate Stripe safely through the pinned outfit-managed Stripe CLI and selected account.
+  guidance:
+    - Start with account_get before consequential work so account and environment are explicit.
+    - Prefer restricted keys and test-mode resources for development.
+    - Use outfit run for curated reads, outfit write for curated mutations, and outfit exec only when the curated surface lacks a command.
+  workflows:
+    - title: Investigate a payment
+      steps: [retrieve the payment intent, inspect its status and latest charge, report exact IDs and timestamps]
+    - title: Investigate a subscription or invoice
+      steps: [find the customer, inspect subscriptions and invoices, distinguish Stripe state from application assumptions]
+    - title: Debug a webhook
+      steps: [read the event and endpoint, inspect logs, start a listener only for interactive debugging, resend only after explicit intent]
+    - title: Develop in test mode
+      steps: [confirm the connection is Test, trigger an explicit fixture event, explain every generated object, avoid live resources]
+    - title: Refund with confirmation
+      steps: [retrieve the payment intent, state the amount and environment, obtain explicit human intent, create the refund]
+skillSources:
+  - id: stripe-authored
+    kind: authored
+    paths:
+      - path: generated

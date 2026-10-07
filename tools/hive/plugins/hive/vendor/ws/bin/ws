@@ -1,0 +1,4331 @@
+#!/usr/bin/env python3
+"""ws — work-stream registry for humans and coding agents.
+
+Data lives in $WS_ROOT (default ~/streams):
+  streams/<slug>/{STREAM.md,VISION.md,LOG.md,tasks/tN-*.md}
+  inbox/<slug>/*.md          unread messages (read/ after delivery)
+  todos.md                   loose personal to-dos
+  index.html                 generated dashboard
+
+Run `ws help` for the full reference. Python stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import fcntl
+import html as html_mod
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# paths / constants
+# ---------------------------------------------------------------------------
+
+WS_ROOT = Path(os.environ.get("WS_ROOT", str(Path.home() / "streams"))).expanduser()
+STREAMS = WS_ROOT / "streams"
+INBOX = WS_ROOT / "inbox"
+CHANNELS = WS_ROOT / "channels"
+TODOS = WS_ROOT / "todos.md"
+INDEX_HTML = WS_ROOT / "index.html"
+
+# `hq` is the human/manager mailbox: always addressable, never a stream.
+HQ = "hq"
+
+# The plugin this CLI ships in (bin/ws -> plugin root is bin/..)
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES = PLUGIN_ROOT / "templates"
+
+STREAM_STATUSES = ("active", "blocked", "review", "parked", "done")
+TASK_STATUSES = ("open", "active", "blocked", "done")
+STATUS_ORDER = ("review", "blocked", "active", "parked", "done")
+
+MSG_KINDS = ("fyi", "question", "decision", "review", "reply")
+MSG_FM_KEYS = ["id", "from", "to", "kind", "sev", "reply_to",
+               "expect_reply", "created"]
+
+FM_KEYS = [
+    "title", "status", "kind", "worktree", "branch", "repo", "prs",
+    "harness", "session_id", "tmux_pane", "created", "updated", "next", "doc",
+    "channels", "chan_pos", "flagged",
+]
+TASK_FM_KEYS = ["id", "title", "status", "owner", "created", "updated"]
+
+STALE_SECONDS = 24 * 3600
+
+
+class UserError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# small utilities
+# ---------------------------------------------------------------------------
+
+def now_iso() -> str:
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def parse_iso(s: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def age_str(iso: str) -> str:
+    dt = parse_iso(iso)
+    if not dt:
+        return "?"
+    secs = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
+    if secs < 0:
+        secs = 0
+    if secs < 90:
+        return "now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    if secs < 48 * 3600:
+        return f"{int(secs // 3600)}h"
+    return f"{int(secs // 86400)}d"
+
+
+def is_stale(meta: dict) -> bool:
+    if meta.get("status") not in ("active", "blocked", "review"):
+        return False
+    dt = parse_iso(meta.get("updated", ""))
+    if not dt:
+        return False
+    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() > STALE_SECONDS
+
+
+def slugify(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return s[:48] or "item"
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ws-tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class stream_lock:
+    """flock on <stream>/.lock for read-modify-write cycles."""
+
+    def __init__(self, target_dir: Path):
+        self.path = target_dir / ".lock"
+        self.f = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(self.path, "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.f:
+            fcntl.flock(self.f, fcntl.LOCK_UN)
+            self.f.close()
+
+
+# ---------------------------------------------------------------------------
+# frontmatter (strict `key: value` subset; valid YAML for Obsidian)
+# ---------------------------------------------------------------------------
+
+_NEEDS_QUOTE = re.compile(r'(^[\s"\'#\-{\[@&*?|>%!`])|(: )|( #)|(\s$)|(^$)')
+
+
+def fm_quote(value: str) -> str:
+    value = str(value).replace("\n", " ").replace("\r", " ")
+    if _NEEDS_QUOTE.search(value):
+        return json.dumps(value)
+    return value
+
+
+def fm_unquote(value: str) -> str:
+    value = value.strip()
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+    return value
+
+
+def parse_doc(text: str) -> tuple[dict, str]:
+    """Return (frontmatter dict, body). Tolerates missing frontmatter."""
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---", 4)
+    if end == -1:
+        return {}, text
+    fm_block = text[4:end]
+    body = text[end + 4:]
+    if body.startswith("\n"):
+        body = body[1:]
+    meta: dict = {}
+    for line in fm_block.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        meta[key.strip()] = fm_unquote(val)
+    return meta, body
+
+
+def serialize_doc(meta: dict, body: str, key_order: list[str]) -> str:
+    lines = ["---"]
+    seen = set()
+    for k in key_order:
+        if k in meta:
+            lines.append(f"{k}: {fm_quote(meta.get(k) or '')}")
+            seen.add(k)
+    for k, v in meta.items():
+        if k not in seen:
+            lines.append(f"{k}: {fm_quote(v or '')}")
+    lines.append("---")
+    out = "\n".join(lines) + "\n"
+    if body:
+        out += "\n" + body.lstrip("\n")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# stream model
+# ---------------------------------------------------------------------------
+
+def stream_dir(slug: str) -> Path:
+    return STREAMS / slug
+
+
+def stream_file(slug: str) -> Path:
+    return stream_dir(slug) / "STREAM.md"
+
+
+def stream_exists(slug: str) -> bool:
+    return stream_file(slug).is_file()
+
+
+def all_slugs() -> list[str]:
+    if not STREAMS.is_dir():
+        return []
+    return sorted(d.name for d in STREAMS.iterdir() if (d / "STREAM.md").is_file())
+
+
+def load_meta(slug: str) -> dict:
+    meta, _ = parse_doc(stream_file(slug).read_text())
+    meta.setdefault("status", "active")
+    meta.setdefault("kind", "agent")
+    meta.setdefault("title", slug)
+    return meta
+
+
+def save_meta(slug: str, meta: dict, body: str | None = None) -> None:
+    path = stream_file(slug)
+    if body is None:
+        _, body = parse_doc(path.read_text()) if path.is_file() else ({}, "")
+    atomic_write(path, serialize_doc(meta, body, FM_KEYS))
+
+
+def update_meta(slug: str, updates: dict, touch: bool = True,
+                drop: tuple = ()) -> dict:
+    """Locked read-modify-write of STREAM.md frontmatter. touch=False leaves
+    the `updated` timestamp alone (for bookkeeping writes like pane caching)."""
+    with stream_lock(stream_dir(slug)):
+        meta, body = parse_doc(stream_file(slug).read_text())
+        meta.update({k: v for k, v in updates.items() if v is not None})
+        for k in drop:
+            meta.pop(k, None)
+        # Transparent legacy migration: fold a v<=0.2 single `pr:` value into
+        # the `prs:` list on any write (empty legacy keys just drop).
+        if "pr" in meta:
+            legacy = (meta.pop("pr") or "").strip()
+            if legacy:
+                folded = [p for p in (s.strip() for s in (meta.get("prs") or "").split(","))
+                          if p]
+                ref = normalize_pr_ref(legacy.split()[0])
+                if ref not in folded:
+                    folded.append(ref)
+                meta["prs"] = ", ".join(folded)
+        if touch:
+            meta["updated"] = now_iso()
+        atomic_write(stream_file(slug), serialize_doc(meta, body, FM_KEYS))
+        return meta
+
+
+def require_slug(slug: str) -> str:
+    if stream_exists(slug):
+        return slug
+    slugs = all_slugs()
+    hint = ""
+    close = difflib.get_close_matches(slug, slugs, n=1)
+    if close:
+        hint = f" Closest match: `{close[0]}`."
+    raise UserError(
+        f"Unknown stream `{slug}`.{hint} Run `ws status` to list streams, "
+        f"or `ws register {slug}` / `ws add {slug}` to create it."
+    )
+
+
+def find_by_cwd(cwd: str | None = None) -> str | None:
+    """Map cwd to a stream: the stream's own vault dir ($WS_ROOT/streams/<slug>,
+    the natural home of manual streams) wins, else the longest registered
+    worktree that is a prefix of cwd."""
+    cwd_path = Path(cwd or os.getcwd()).resolve()
+    try:
+        rel = cwd_path.relative_to(STREAMS.resolve())
+        if rel.parts and stream_exists(rel.parts[0]):
+            return rel.parts[0]
+    except (ValueError, OSError):
+        pass
+    best, best_len = None, -1
+    home = Path.home().resolve()
+    for slug in all_slugs():
+        wt = load_meta(slug).get("worktree", "")
+        if not wt:
+            continue
+        wt_path = Path(wt).expanduser()
+        try:
+            wt_res = wt_path.resolve()
+        except OSError:
+            continue
+        if wt_res == home:
+            # A stream rooted at $HOME would otherwise swallow every session on
+            # the machine. Exact-dir only — never as a prefix.
+            if cwd_path == home:
+                if 0 > best_len:
+                    best, best_len = slug, 0
+            continue
+        if cwd_path == wt_res or wt_res in cwd_path.parents:
+            n = len(str(wt_res))
+            if n > best_len:
+                best, best_len = slug, n
+    return best
+
+
+def infer_slug(explicit: str | None, cwd: str | None = None) -> str:
+    if explicit:
+        return require_slug(explicit)
+    found = find_by_cwd(cwd)
+    if found:
+        return found
+    raise UserError(
+        "No stream given and the current directory is not inside a registered "
+        "worktree. Pass a slug (see `ws status`) or run from a registered worktree."
+    )
+
+
+def one_liner(slug: str) -> str:
+    meta = load_meta(slug)
+    open_t, total_t = task_counts(slug)
+    parts = [f"{slug} — {meta.get('status')}"]
+    if total_t:
+        parts.append(f"tasks {total_t - open_t}/{total_t}")
+    unread = unread_messages(slug)
+    if unread:
+        parts.append(f"inbox {len(unread)} unread")
+    nxt = meta.get("next", "")
+    if nxt:
+        parts.append(f"next: {nxt}")
+    return " · ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# tasks
+# ---------------------------------------------------------------------------
+
+def tasks_dir(slug: str) -> Path:
+    return stream_dir(slug) / "tasks"
+
+
+def task_files(slug: str) -> list[Path]:
+    d = tasks_dir(slug)
+    if not d.is_dir():
+        return []
+    return sorted(
+        (p for p in d.glob("t*-*.md")),
+        key=lambda p: int(re.match(r"t(\d+)-", p.name).group(1)) if re.match(r"t(\d+)-", p.name) else 0,
+    )
+
+
+def load_tasks(slug: str) -> list[dict]:
+    out = []
+    for p in task_files(slug):
+        meta, body = parse_doc(p.read_text())
+        meta["_path"] = p
+        meta["_body"] = body
+        out.append(meta)
+    return out
+
+
+def task_counts(slug: str) -> tuple[int, int]:
+    tasks = load_tasks(slug)
+    open_t = sum(1 for t in tasks if t.get("status") != "done")
+    return open_t, len(tasks)
+
+
+def find_task(slug: str, task_id: str) -> Path:
+    for p in task_files(slug):
+        if p.name.startswith(task_id + "-"):
+            return p
+    ids = [p.name.split("-", 1)[0] for p in task_files(slug)]
+    hint = f" Existing ids: {', '.join(ids)}." if ids else " This stream has no tasks yet."
+    raise UserError(f"No task `{task_id}` in stream `{slug}`.{hint} Run `ws task list`.")
+
+
+# ---------------------------------------------------------------------------
+# inbox — per-recipient maildir-ish mailboxes. A mailbox exists for every
+# stream plus `hq` (the human/manager). Envelope lives in frontmatter:
+# id / from / to / kind / sev / reply_to / expect_reply / created.
+# Unread = top-level *.md; read/ after delivery; pending/ holds reply
+# obligations (messages this mailbox owes an answer to).
+# ---------------------------------------------------------------------------
+
+def inbox_dir(slug: str) -> Path:
+    return INBOX / slug
+
+
+def pending_dir(slug: str) -> Path:
+    return inbox_dir(slug) / "pending"
+
+
+def mailbox_exists(slug: str) -> bool:
+    return slug == HQ or stream_exists(slug)
+
+
+def require_mailbox(slug: str) -> str:
+    if mailbox_exists(slug):
+        return slug
+    return require_slug(slug)  # raises with the usual hints
+
+
+def new_msg_id() -> str:
+    return (datetime.now().strftime("%Y%m%d-%H%M%S")
+            + f"-{os.getpid()}-{os.urandom(2).hex()}")
+
+
+def write_message(to: str, text: str, sender: str, kind: str = "fyi",
+                  sev: str = "", reply_to: str = "",
+                  expect_reply: bool = False) -> str:
+    """Queue a message in `to`'s mailbox. Returns the message id."""
+    d = inbox_dir(to)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "read").mkdir(exist_ok=True)
+    mid = new_msg_id()
+    meta = {"id": mid, "from": sender, "to": to, "created": now_iso()}
+    if kind and kind != "fyi":
+        meta["kind"] = kind
+    if sev:
+        meta["sev"] = sev
+    if reply_to:
+        meta["reply_to"] = reply_to
+    if expect_reply:
+        meta["expect_reply"] = "true"
+    atomic_write(d / f"{mid}.md",
+                 serialize_doc(meta, text.strip() + "\n", MSG_FM_KEYS))
+    return mid
+
+
+def unread_messages(slug: str) -> list[Path]:
+    d = inbox_dir(slug)
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.glob("*.md") if p.is_file())
+
+
+def total_unread() -> int:
+    if not INBOX.is_dir():
+        return 0
+    return sum(len(unread_messages(d.name)) for d in INBOX.iterdir() if d.is_dir())
+
+
+def render_message(path: Path) -> str:
+    meta, body = parse_doc(path.read_text())
+    frm = meta.get("from", "user")
+    when = meta.get("created", "")
+    tags = ""
+    if meta.get("kind"):
+        tags += f" {meta['kind'].upper()}"
+    if meta.get("sev") == "high":
+        tags += " ❗HIGH"
+    line = f"[{when} from {frm}{tags}] {body.strip()}"
+    if meta.get("expect_reply") == "true":
+        line += (f"\n  ↳ reply expected: ws msg {meta.get('from', HQ)} "
+                 f"--reply-to {meta.get('id', '?')} \"...\"")
+    return line
+
+
+def deliver_unread(slug: str) -> list[str]:
+    """Return message texts and move files to read/ (exactly-once). Messages
+    expecting a reply leave an obligation in pending/ that the Stop hook
+    enforces until a reply is sent."""
+    d = inbox_dir(slug)
+    if not d.is_dir():
+        return []
+    delivered = []
+    with stream_lock(d):
+        read_dir = d / "read"
+        read_dir.mkdir(exist_ok=True)
+        for p in sorted(d.glob("*.md")):
+            if not p.is_file():
+                continue
+            delivered.append(render_message(p))
+            meta, _ = parse_doc(p.read_text())
+            if meta.get("expect_reply") == "true" and meta.get("id"):
+                pending_dir(slug).mkdir(exist_ok=True)
+                try:
+                    shutil.copy(p, pending_dir(slug) / p.name)
+                except OSError:
+                    pass
+            os.replace(p, read_dir / p.name)
+    delivered.extend(deliver_channels(slug))
+    return delivered
+
+
+def pending_replies(slug: str) -> list[Path]:
+    d = pending_dir(slug)
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.glob("*.md") if p.is_file())
+
+
+def clear_pending(slug: str, reply_to: str) -> bool:
+    p = pending_dir(slug) / f"{reply_to}.md"
+    if p.is_file():
+        try:
+            p.unlink()
+            return True
+        except OSError:
+            pass
+    return False
+
+
+def find_reply(slug: str, reply_to: str, deliver: bool = False) -> str | None:
+    """Find a message in `slug`'s mailbox whose reply_to matches. Checks
+    unread first, then read/ (a hook may have delivered it mid-wait).
+    deliver=True moves an unread match to read/."""
+    d = inbox_dir(slug)
+    if not d.is_dir():
+        return None
+    for p in sorted(d.glob("*.md")):
+        meta, _ = parse_doc(p.read_text())
+        if meta.get("reply_to") == reply_to:
+            text = render_message(p)
+            if deliver:
+                with stream_lock(d):
+                    if p.is_file():
+                        (d / "read").mkdir(exist_ok=True)
+                        os.replace(p, d / "read" / p.name)
+            return text
+    read_dir = d / "read"
+    if read_dir.is_dir():
+        for p in sorted(read_dir.glob("*.md")):
+            meta, _ = parse_doc(p.read_text())
+            if meta.get("reply_to") == reply_to:
+                return render_message(p)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# channels — named append-only logs (channels/<name>.md) with per-stream read
+# cursors. No fan-out copies: posting appends once and drops a hidden
+# .chan-pending marker in each subscriber's inbox so the pure-shell hook fast
+# path notices; delivery reads from the subscriber's cursor and advances it.
+# ---------------------------------------------------------------------------
+
+CHAN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+
+
+def channel_file(name: str) -> Path:
+    return CHANNELS / f"{name}.md"
+
+
+def all_channels() -> list[str]:
+    if not CHANNELS.is_dir():
+        return []
+    return sorted(p.stem for p in CHANNELS.glob("*.md"))
+
+
+def parse_channel_target(target: str) -> str | None:
+    """'#name' -> 'name' (validated), else None."""
+    if not target.startswith("#"):
+        return None
+    name = target[1:]
+    if not CHAN_RE.match(name):
+        raise UserError(f"Bad channel name `{name}` (lowercase slug, <=48 chars).")
+    return name
+
+
+def subscribed_channels(meta: dict) -> list[str]:
+    return [c.strip() for c in (meta.get("channels") or "").split(",") if c.strip()]
+
+
+def get_cursors(meta: dict) -> dict[str, int]:
+    out = {}
+    for part in (meta.get("chan_pos") or "").split(","):
+        if "=" in part:
+            name, _, off = part.partition("=")
+            try:
+                out[name.strip()] = int(off)
+            except ValueError:
+                pass
+    return out
+
+
+def set_cursors(slug: str, cursors: dict[str, int]) -> None:
+    val = ", ".join(f"{k}={v}" for k, v in sorted(cursors.items()))
+    update_meta(slug, {"chan_pos": val}, touch=False)
+
+
+def channel_subscribers(name: str) -> list[str]:
+    return [s for s in all_slugs() if name in subscribed_channels(load_meta(s))]
+
+
+def post_channel(name: str, text: str, sender: str) -> str:
+    CHANNELS.mkdir(parents=True, exist_ok=True)
+    mid = new_msg_id()
+    path = channel_file(name)
+    with stream_lock(CHANNELS):
+        existing = path.read_text() if path.is_file() else f"# #{name}\n"
+        if not existing.endswith("\n"):
+            existing += "\n"
+        existing += f"\n## {now_iso()} {sender} [{mid}]\n{text.strip()}\n"
+        atomic_write(path, existing)
+    for slug in channel_subscribers(name):
+        if slug == sender:
+            continue  # don't ring your own doorbell
+        try:
+            d = inbox_dir(slug)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / ".chan-pending").touch(exist_ok=True)
+        except OSError:
+            pass
+    return mid
+
+
+def channel_tail(name: str, frm: int) -> tuple[str, int]:
+    """Channel content from byte offset `frm`; returns (text, new_offset)."""
+    path = channel_file(name)
+    if not path.is_file():
+        return "", 0
+    data = path.read_text()
+    if frm > len(data):  # channel file rewritten/truncated — restart cleanly
+        frm = 0
+    return data[frm:].strip(), len(data)
+
+
+def deliver_channels(slug: str) -> list[str]:
+    """New entries in every channel `slug` subscribes to; advances cursors."""
+    if slug == HQ or not stream_exists(slug):
+        return []
+    meta = load_meta(slug)
+    subs = subscribed_channels(meta)
+    marker = inbox_dir(slug) / ".chan-pending"
+    if not subs:
+        marker.unlink(missing_ok=True)
+        return []
+    cursors = get_cursors(meta)
+    out = []
+    changed = False
+    for name in subs:
+        tail, new_off = channel_tail(name, cursors.get(name, 0))
+        if tail:
+            out.append(f"#{name}:\n{tail}")
+        if new_off != cursors.get(name, 0):
+            cursors[name] = new_off
+            changed = True
+    if changed:
+        set_cursors(slug, cursors)
+    marker.unlink(missing_ok=True)
+    return out
+
+
+def has_channel_pending(slug: str) -> bool:
+    return (inbox_dir(slug) / ".chan-pending").is_file()
+
+
+# ---------------------------------------------------------------------------
+# tmux helpers
+# ---------------------------------------------------------------------------
+
+def tmux(*args: str, timeout: float = 5) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            ["tmux", *args], capture_output=True, text=True, timeout=timeout
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def pane_alive(pane: str) -> bool:
+    if not pane:
+        return False
+    # tmux 3.6 exits 0 with empty output for an unknown -t pane, so the exit
+    # code alone can't be trusted — require the pane id echoed back.
+    r = tmux("display-message", "-p", "-t", pane, "#{pane_id}")
+    return bool(r and r.returncode == 0 and r.stdout.strip() == pane)
+
+
+def pane_session(pane: str) -> str | None:
+    r = tmux("display-message", "-p", "-t", pane, "#{session_name}")
+    if r and r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    return None
+
+
+def wake_pane(pane: str, text: str) -> bool:
+    r1 = tmux("send-keys", "-t", pane, "-l", text)
+    if not r1 or r1.returncode != 0:
+        return False
+    time.sleep(0.15)
+    r2 = tmux("send-keys", "-t", pane, "Enter")
+    return bool(r2 and r2.returncode == 0)
+
+
+# --- live pane discovery -----------------------------------------------------
+# `ws register` run from a harness Bash tool often gets a sanitized env with no
+# TMUX_PANE (and CLAUDE_SESSION_ID is hook-stdin-only), so streams registered
+# from pre-existing sessions end up with an empty/dead recorded pane. Recover by
+# scanning tmux for a pane whose cwd is (inside) the stream's worktree and whose
+# process tree contains a coding harness.
+
+HARNESS_COMMS = ("claude", "codex", "gemini")
+
+
+def parse_pane_list(text: str) -> list[dict]:
+    rows = []
+    for line in text.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) != 4:
+            continue
+        pane, session, pid, path = parts
+        rows.append({"pane": pane, "session": session, "pid": pid, "path": path})
+    return rows
+
+
+def _proc_harness_lookup():
+    """Return fn(pid_str) -> set of harness comms in that pid's descendant tree."""
+    children: dict[str, list[str]] = {}
+    comm: dict[str, str] = {}
+    try:
+        out = subprocess.run(["ps", "-eo", "pid=,ppid=,comm="],
+                             capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) != 3:
+                continue
+            pid, ppid, cm = parts
+            comm[pid] = cm
+            children.setdefault(ppid, []).append(pid)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    def lookup(pid: str) -> set:
+        found: set = set()
+        stack = [pid]
+        while stack:
+            p = stack.pop()
+            if comm.get(p, "") in HARNESS_COMMS:
+                found.add(comm[p])
+            stack.extend(children.get(p, []))
+        return found
+
+    return lookup
+
+
+def select_pane(rows: list[dict], worktree: str, prefer_harness: str,
+                harness_of) -> tuple[str | None, str]:
+    """Pick the pane for a worktree. Precedence: path in worktree (exact or
+    inside) -> must run a harness -> prefer the stream's harness -> prefer
+    exact-path over subdirectory -> else ambiguous (pick none, say so)."""
+    wt = str(Path(worktree).resolve())
+    # A stream rooted at $HOME must not claim every harness pane on the machine
+    # — for it, only a pane sitting exactly in $HOME counts.
+    exact_only = wt == str(Path.home().resolve())
+    cands = []
+    for row in rows:
+        try:
+            p = str(Path(row["path"]).resolve())
+        except OSError:
+            continue
+        if p == wt:
+            exact = True
+        elif not exact_only and p.startswith(wt + os.sep):
+            exact = False
+        else:
+            continue
+        harnesses = harness_of(row["pid"])
+        if not harnesses:
+            continue
+        cands.append({**row, "exact": exact, "harnesses": harnesses})
+    if not cands:
+        return None, "no live harness pane found in the worktree"
+    if len(cands) > 1 and prefer_harness:
+        pref = [c for c in cands if prefer_harness in c["harnesses"]]
+        if pref:
+            cands = pref
+    if len(cands) > 1:
+        exact = [c for c in cands if c["exact"]]
+        if exact:
+            cands = exact
+    if len(cands) == 1:
+        return cands[0]["pane"], ""
+    return None, ("ambiguous — multiple harness panes in the worktree: "
+                  + ", ".join(f"{c['pane']} (session {c['session']})" for c in cands))
+
+
+def discover_pane(worktree: str, prefer_harness: str = "") -> tuple[str | None, str]:
+    if not worktree or not Path(worktree).expanduser().is_dir():
+        return None, ""
+    r = tmux("list-panes", "-a", "-F",
+             "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}")
+    if not r or r.returncode != 0:
+        return None, ""
+    return select_pane(parse_pane_list(r.stdout), worktree, prefer_harness,
+                       _proc_harness_lookup())
+
+
+def ensure_pane(slug: str, meta: dict) -> tuple[str, str]:
+    """Recorded pane if alive; else discover in the worktree and persist the
+    find (without touching `updated`). Returns (pane or '', note)."""
+    pane = meta.get("tmux_pane", "")
+    if pane and pane_alive(pane):
+        return pane, ""
+    found, note = discover_pane(meta.get("worktree", ""), meta.get("harness", ""))
+    if found:
+        try:
+            update_meta(slug, {"tmux_pane": found}, touch=False)
+        except Exception:
+            pass
+        return found, "discovered"
+    return "", note
+
+
+# Busy/idle classification from pane content, verified empirically 2026-07-27
+# against live Claude Code panes on this machine: while the agent is mid-turn
+# the status bar shows "esc to interrupt" (spinner variants also carry it);
+# once idle that marker disappears while the composer prompt (❯) remains —
+# the prompt is present in BOTH states, so only the marker discriminates.
+# Codex (best-effort, no live pane available to verify): its working indicator
+# is also an "esc to interrupt" hint, and its composer prompt is › or ▌.
+PANE_BUSY_MARKERS = ("esc to interrupt",)  # case-insensitive substrings
+PANE_IDLE_PROMPTS = ("❯", "›", "▌", "▸")   # composer-prompt line starts
+PANE_CAPTURE_TAIL = 30
+
+
+def classify_capture(text: str) -> str:
+    """Classify captured pane content: 'busy' | 'idle' | 'alive' (unknown)."""
+    tail = [l for l in text.splitlines() if l.strip()][-PANE_CAPTURE_TAIL:]
+    joined = "\n".join(tail).lower()
+    if any(m in joined for m in PANE_BUSY_MARKERS):
+        return "busy"
+    if any(l.strip().startswith(p) for l in tail for p in PANE_IDLE_PROMPTS):
+        return "idle"
+    return "alive"
+
+
+def pane_state(pane: str) -> str:
+    """'dead' | 'busy' | 'idle' | 'alive' (alive = up but unclassifiable)."""
+    if not pane_alive(pane):
+        return "dead"
+    r = tmux("capture-pane", "-p", "-t", pane)
+    if not r or r.returncode != 0 or not r.stdout.strip():
+        return "alive"
+    return classify_capture(r.stdout)
+
+
+# ---------------------------------------------------------------------------
+# git / gh helpers
+# ---------------------------------------------------------------------------
+
+def git_info(cwd: str) -> dict:
+    info = {}
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:  # detached HEAD
+            r = subprocess.run(
+                ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+        if r.returncode == 0:
+            info["branch"] = r.stdout.strip()
+        r = subprocess.run(
+            ["git", "-C", cwd, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            url = r.stdout.strip()
+            m = re.search(r"[:/]([^/:]+/[^/]+?)(\.git)?$", url)
+            if m:
+                info["repo"] = m.group(1)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return info
+
+
+_GH_BROKEN = False
+
+
+# --- multi-PR tracking -------------------------------------------------------
+# Schema: `prs:` is one comma-joined string ('#8281, #8290') — our strict
+# key:value frontmatter handles it and it stays valid YAML. Legacy single
+# `pr:` values fold into it transparently (read via get_prs, write via
+# update_meta).
+
+def normalize_pr_ref(ref: str) -> str:
+    ref = ref.strip()
+    m = re.match(r"^#?(\d+)$", ref)
+    if m:
+        return f"#{m.group(1)}"
+    m = re.search(r"/pull/(\d+)\b", ref)
+    if m:
+        return f"#{m.group(1)}"
+    return ref  # opaque ref; kept verbatim (escaped wherever displayed)
+
+
+def get_prs(meta: dict) -> list[str]:
+    out: list[str] = []
+    for part in (meta.get("prs") or "").split(","):
+        p = part.strip()
+        if p:
+            p = normalize_pr_ref(p)
+            if p not in out:
+                out.append(p)
+    legacy = (meta.get("pr") or "").strip()
+    if legacy:  # e.g. '#8281 open' from the old gh enrichment — first token
+        ref = normalize_pr_ref(legacy.split()[0])
+        if ref not in out:
+            out.append(ref)
+    return out
+
+
+def set_prs(slug: str, prs: list[str]) -> None:
+    update_meta(slug, {"prs": ", ".join(prs)}, drop=("pr",))
+
+
+def gh_branch_pr(meta: dict) -> str | None:
+    """'#N' if the worktree's current branch has an OPEN PR, else None."""
+    global _GH_BROKEN
+    if _GH_BROKEN or os.environ.get("WS_NO_GH"):
+        return None
+    wt, branch = meta.get("worktree", ""), meta.get("branch", "")
+    if not wt or not branch or not Path(wt).is_dir():
+        return None
+    try:
+        r = subprocess.run(
+            ["gh", "pr", "view", branch, "--json", "number,state"],
+            capture_output=True, text=True, timeout=5, cwd=wt,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        _GH_BROKEN = True
+        return None
+    if r.returncode != 0:
+        if "auth" in (r.stderr or "").lower() or "gh: command" in (r.stderr or ""):
+            _GH_BROKEN = True
+        return None
+    try:
+        data = json.loads(r.stdout)
+        if str(data.get("state", "")).upper() == "OPEN":
+            return f"#{data['number']}"
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def autocapture_pr(slug: str) -> None:
+    """Auto-add the worktree branch's open PR to the stream's list."""
+    try:
+        meta = load_meta(slug)
+        ref = gh_branch_pr(meta)
+        if ref:
+            prs = get_prs(meta)
+            if ref not in prs:
+                set_prs(slug, prs + [ref])
+                print(f"(captured PR {ref} for branch {meta.get('branch')})")
+    except Exception:
+        pass
+
+
+_REPO_PR_CACHE: dict[str, dict[int, tuple[str, str, str]]] = {}
+PR_STATES_FILE = WS_ROOT / ".pr-states.json"
+
+
+def _load_pr_states_file() -> dict:
+    try:
+        return json.loads(PR_STATES_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _persist_pr_states() -> None:
+    """Write-through the in-run gh cache so unenriched paths (html render,
+    --no-gh) can show last-known state instead of blank."""
+    try:
+        disk = _load_pr_states_file()
+        for repo, d in _REPO_PR_CACHE.items():
+            slot = disk.setdefault(repo, {})
+            for n, (state, ci, title) in d.items():
+                if state:
+                    slot[str(n)] = [state, ci, title]
+        atomic_write(PR_STATES_FILE, json.dumps(disk))
+    except OSError:
+        pass
+
+
+def cached_pr_states(repo: str, nums: list[int]) -> dict[int, tuple[str, str, str]]:
+    """Last-known {num: (state, ci, title)} from disk — no network."""
+    if not repo or not nums:
+        return {}
+    disk = _load_pr_states_file().get(repo, {})
+    out = {}
+    for n in nums:
+        v = disk.get(str(n))
+        if isinstance(v, list) and len(v) >= 2:
+            out[n] = (v[0], v[1], v[2] if len(v) > 2 else "")
+    return out
+
+
+def repo_pr_states(repo: str, nums: list[int]) -> dict[int, tuple[str, str, str]]:
+    """{num: (state, ci, title)} via ONE aliased GraphQL call per repo per run,
+    fetching only the requested PRs with the aggregate statusCheckRollup state
+    (`gh pr list --json statusCheckRollup` 504s on big repos — measured)."""
+    global _GH_BROKEN
+    if (not repo or "/" not in repo or not nums
+            or _GH_BROKEN or os.environ.get("WS_NO_GH")):
+        return {}
+    cached = _REPO_PR_CACHE.setdefault(repo, {})
+    missing = [n for n in nums if n not in cached]
+    if missing:
+        owner, name = repo.split("/", 1)
+        fields = " ".join(
+            f"p{n}: pullRequest(number: {n}) {{ number state title "
+            "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }"
+            for n in missing)
+        query = f'query {{ r: repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}'
+        try:
+            r = subprocess.run(["gh", "api", "graphql", "-f", f"query={query}"],
+                               capture_output=True, text=True, timeout=5)
+            # gh exits 1 when any alias errors (e.g. deleted PR) but still
+            # returns partial data on stdout — parse it regardless.
+            try:
+                data = json.loads(r.stdout or "{}").get("data", {}).get("r") or {}
+            except json.JSONDecodeError:
+                data = {}
+            if r.returncode != 0 and "auth" in (r.stderr or "").lower():
+                _GH_BROKEN = True
+            for n in missing:
+                pr = data.get(f"p{n}")
+                if not pr:
+                    cached[n] = ("", "", "")
+                    continue
+                nodes = (pr.get("commits") or {}).get("nodes") or []
+                roll = ""
+                if nodes:
+                    roll = (((nodes[0] or {}).get("commit") or {})
+                            .get("statusCheckRollup") or {}).get("state", "")
+                ci = {"SUCCESS": "pass", "FAILURE": "fail", "ERROR": "fail"}.get(roll, "")
+                cached[n] = (str(pr.get("state", "")).lower(), ci,
+                             str(pr.get("title", "") or ""))
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            _GH_BROKEN = True
+        _persist_pr_states()
+    return cached
+
+
+def prs_structured(meta: dict, enrich: bool) -> list[dict]:
+    repo = meta.get("repo", "")
+    refs = get_prs(meta)
+    nums = [int(m.group(1)) for ref in refs if (m := re.match(r"^#(\d+)$", ref))]
+    live = repo_pr_states(repo, nums) if enrich else {}
+    # Disk cache fills whatever gh didn't answer (offline render, --no-gh,
+    # gh briefly broken) — live results always win.
+    states = {**cached_pr_states(repo, nums),
+              **{n: v for n, v in live.items() if v[0]}}
+    out = []
+    for ref in refs:
+        m = re.match(r"^#(\d+)$", ref)
+        num = int(m.group(1)) if m else None
+        state, ci, title = states.get(num, ("", "", "")) if num is not None else ("", "", "")
+        url = f"https://github.com/{repo}/pull/{num}" if (repo and num) else ""
+        out.append({"ref": ref, "num": num, "url": url, "state": state,
+                    "ci": ci, "title": title})
+    return out
+
+
+def pr_rollup(prs: list[dict]) -> str:
+    """Glance display: 1 PR -> '#N state ci'; >1 with exactly one open ->
+    'N PRs · #M open ci'; >1 with states -> 'N PRs · k open'; no data -> 'N PRs'."""
+    if not prs:
+        return ""
+    def mark(p):
+        return {"pass": " ✓", "fail": " ✗"}.get(p["ci"], "")
+    if len(prs) == 1:
+        p = prs[0]
+        return p["ref"] + (f" {p['state']}" if p["state"] else "") + mark(p)
+    opens = [p for p in prs if p["state"] == "open"]
+    if len(opens) == 1:
+        return f"{len(prs)} PRs · {opens[0]['ref']} open{mark(opens[0])}"
+    if any(p["state"] for p in prs):
+        return f"{len(prs)} PRs · {len(opens)} open"
+    return f"{len(prs)} PRs"
+
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+
+def cmd_register(args) -> int:
+    cwd = os.getcwd()
+    slug = args.slug or slugify(Path(cwd).name)
+    fresh = not stream_exists(slug)
+    harness = args.harness or ("claude" if os.environ.get("CLAUDECODE") else "claude")
+    session_id = args.session_id or os.environ.get("CLAUDE_SESSION_ID", "")
+    pane = args.pane or os.environ.get("TMUX_PANE", "")
+    discovered = False
+    if not pane:
+        # Harness Bash tools often sanitize TMUX_PANE out of the env; recover
+        # by scanning tmux for the harness pane sitting in this worktree.
+        found, _note = discover_pane(cwd, harness)
+        if found:
+            pane, discovered = found, True
+    git = git_info(cwd)
+
+    if fresh:
+        d = stream_dir(slug)
+        (d / "tasks").mkdir(parents=True, exist_ok=True)
+        inbox_dir(slug).mkdir(parents=True, exist_ok=True)
+        (inbox_dir(slug) / "read").mkdir(exist_ok=True)
+        meta = {
+            "title": args.title or slug,
+            "status": "active",
+            "kind": "agent",
+            "worktree": cwd,
+            "branch": git.get("branch", ""),
+            "repo": git.get("repo", ""),
+            "prs": "",
+            "harness": harness,
+            "session_id": session_id,
+            "tmux_pane": pane,
+            "created": now_iso(),
+            "updated": now_iso(),
+            "next": "",
+            "doc": args.doc or "",
+        }
+        body = "See VISION.md for the why and LOG.md for progress notes.\n"
+        atomic_write(stream_file(slug), serialize_doc(meta, body, FM_KEYS))
+        if not (d / "VISION.md").exists():
+            atomic_write(
+                d / "VISION.md",
+                f"# {meta['title']} — vision\n\n"
+                "<!-- Written once at registration: why this work exists, the north star,\n"
+                "constraints and decisions that every future agent on this stream must know. -->\n",
+            )
+        if not (d / "LOG.md").exists():
+            atomic_write(d / "LOG.md", f"# {meta['title']} — log\n")
+        print(f"Registered stream `{slug}`.")
+        print("Now write VISION.md (the why / north star) and set what's next:")
+        print(f'  ws update {slug} --next "<first step>"')
+    else:
+        updates = {"worktree": cwd}
+        for k, v in (("branch", git.get("branch")), ("repo", git.get("repo")),
+                     ("session_id", session_id or None), ("tmux_pane", pane or None),
+                     ("harness", args.harness), ("title", args.title), ("doc", args.doc)):
+            if v:
+                updates[k] = v
+        update_meta(slug, updates)
+        print(f"Stream `{slug}` already registered — refreshed worktree/session info.")
+    if discovered:
+        print(f"(pane {pane} discovered live in this worktree and recorded)")
+    autocapture_pr(slug)
+    print(one_liner(slug))
+    render_html_safe()
+    return 0
+
+
+def cmd_add(args) -> int:
+    slug = args.slug
+    if stream_exists(slug):
+        raise UserError(f"Stream `{slug}` already exists. Use `ws update {slug}` to change it.")
+    d = stream_dir(slug)
+    (d / "tasks").mkdir(parents=True, exist_ok=True)
+    inbox_dir(slug).mkdir(parents=True, exist_ok=True)
+    (inbox_dir(slug) / "read").mkdir(exist_ok=True)
+    meta = {
+        "title": args.title or slug,
+        "status": "active",
+        "kind": "manual",
+        "worktree": "", "branch": "", "repo": "", "prs": "",
+        "harness": "", "session_id": "", "tmux_pane": "",
+        "created": now_iso(), "updated": now_iso(),
+        "next": args.next or "",
+    }
+    atomic_write(stream_file(slug), serialize_doc(
+        meta, "Manual stream (not agent-driven). See LOG.md for notes.\n", FM_KEYS))
+    atomic_write(d / "VISION.md", f"# {meta['title']} — vision\n")
+    atomic_write(d / "LOG.md", f"# {meta['title']} — log\n")
+    print(f"Added manual stream `{slug}`.")
+    print(one_liner(slug))
+    render_html_safe()
+    return 0
+
+
+def cmd_todo(args) -> int:
+    text = args.text.strip()
+    if not text:
+        raise UserError("Empty to-do text.")
+    with stream_lock(WS_ROOT):
+        existing = TODOS.read_text() if TODOS.is_file() else "# To-dos\n\n"
+        if not existing.endswith("\n"):
+            existing += "\n"
+        existing += f"- [ ] {text} *(added {datetime.now().strftime('%Y-%m-%d')})*\n"
+        atomic_write(TODOS, existing)
+    print(f"Added to-do: {text}")
+    render_html_safe()
+    return 0
+
+
+def cmd_update(args) -> int:
+    slug = infer_slug(args.slug)
+    if args.status and args.status not in STREAM_STATUSES:
+        raise UserError(f"Invalid status `{args.status}`. One of: {', '.join(STREAM_STATUSES)}.")
+    updates = {}
+    if args.status:
+        updates["status"] = args.status
+    if args.next is not None:
+        updates["next"] = args.next
+    if args.title:
+        updates["title"] = args.title
+    if args.doc is not None:
+        updates["doc"] = args.doc
+    if getattr(args, "stream_kind", None):
+        updates["kind"] = args.stream_kind
+    if getattr(args, "worktree", None):
+        wt = Path(args.worktree).expanduser()
+        if not wt.is_dir():
+            raise UserError(f"No such directory: {wt}")
+        wt = wt.resolve()
+        if wt == Path.home().resolve():
+            raise UserError(
+                "Refusing to root a stream at $HOME — every session that starts "
+                "there would be mistaken for this stream. Use the stream's vault "
+                f"dir ({stream_dir(slug)}) or a worktree.")
+        updates["worktree"] = str(wt)
+    if getattr(args, "session_id", None) is not None:
+        updates["session_id"] = args.session_id
+    if getattr(args, "pane", None) is not None:
+        updates["tmux_pane"] = args.pane
+    if not updates and not args.note and args.pr is None:
+        raise UserError("Nothing to update. Pass --status / --next / --note / "
+                        "--title / --pr / --doc / --kind / --worktree / "
+                        "--session-id / --pane.")
+    if updates:
+        update_meta(slug, updates)
+    if args.pr is not None:  # alias for `ws pr add` (what agents already learned)
+        ref = normalize_pr_ref(args.pr)
+        prs = get_prs(load_meta(slug))
+        if ref not in prs:
+            set_prs(slug, prs + [ref])
+            print(f"Added PR {ref} to `{slug}`.")
+    if args.note:
+        append_log(slug, args.note)
+    autocapture_pr(slug)
+    print(one_liner(slug))
+    render_html_safe()
+    return 0
+
+
+def cmd_done(args) -> int:
+    slug = require_slug(args.slug)
+    update_meta(slug, {"status": "done", "next": ""})
+    print(f"Marked `{slug}` done.")
+    print(one_liner(slug))
+    render_html_safe()
+    return 0
+
+
+def append_log(slug: str, text: str) -> None:
+    d = stream_dir(slug)
+    with stream_lock(d):
+        path = d / "LOG.md"
+        existing = path.read_text() if path.is_file() else f"# {slug} — log\n"
+        if not existing.endswith("\n"):
+            existing += "\n"
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        existing += f"\n## {stamp}\n{text.strip()}\n"
+        atomic_write(path, existing)
+        # touch updated
+        meta, body = parse_doc(stream_file(slug).read_text())
+        meta["updated"] = now_iso()
+        atomic_write(stream_file(slug), serialize_doc(meta, body, FM_KEYS))
+
+
+def cmd_log(args) -> int:
+    slug = infer_slug(args.slug)
+    text = args.text
+    if text == "-" or text is None:
+        text = sys.stdin.read()
+    if not text.strip():
+        raise UserError("Empty log entry.")
+    append_log(slug, text)
+    print(f"Logged to `{slug}`.")
+    print(one_liner(slug))
+    render_html_safe()
+    return 0
+
+
+def cmd_task(args) -> int:
+    sub = args.task_cmd
+    if sub == "add":
+        slug = infer_slug(args.stream)
+        title = args.title.strip()
+        if not title:
+            raise UserError("Empty task title.")
+        d = tasks_dir(slug)
+        d.mkdir(parents=True, exist_ok=True)
+        with stream_lock(stream_dir(slug)):
+            nums = [int(m.group(1)) for p in task_files(slug)
+                    if (m := re.match(r"t(\d+)-", p.name))]
+            tid = f"t{max(nums, default=0) + 1}"
+            path = d / f"{tid}-{slugify(title)}.md"
+            meta = {"id": tid, "title": title, "status": "open",
+                    "owner": args.owner or "", "created": now_iso(), "updated": now_iso()}
+            atomic_write(path, serialize_doc(meta, "", TASK_FM_KEYS))
+        print(f"Added task {tid} to `{slug}`: {title}")
+        print(one_liner(slug))
+        render_html_safe()
+        return 0
+
+    if sub == "list":
+        slug = infer_slug(args.stream)
+        tasks = load_tasks(slug)
+        if not tasks:
+            print(f"No tasks in `{slug}`. Add one: ws task add \"<milestone>\"")
+            return 0
+        for t in tasks:
+            mark = "x" if t.get("status") == "done" else " "
+            owner = f" (@{t['owner']})" if t.get("owner") else ""
+            extra = f" [{t.get('status')}]" if t.get("status") not in ("done", "open") else ""
+            print(f"- [{mark}] {t.get('id')}: {t.get('title')}{extra}{owner}")
+        return 0
+
+    if sub in ("done", "update"):
+        slug = infer_slug(args.stream)
+        path = find_task(slug, args.id)
+        meta, body = parse_doc(path.read_text())
+        if sub == "done":
+            meta["status"] = "done"
+        else:
+            if args.status:
+                if args.status not in TASK_STATUSES:
+                    raise UserError(
+                        f"Invalid task status `{args.status}`. One of: {', '.join(TASK_STATUSES)}.")
+                meta["status"] = args.status
+            if args.owner is not None:
+                meta["owner"] = args.owner
+            if args.title_new:
+                meta["title"] = args.title_new
+            if args.note:
+                body = (body.rstrip() + f"\n\n{datetime.now().strftime('%Y-%m-%d %H:%M')}: {args.note}\n").lstrip("\n")
+        meta["updated"] = now_iso()
+        atomic_write(path, serialize_doc(meta, body, TASK_FM_KEYS))
+        update_meta(slug, {})  # touch stream updated under lock
+        print(f"Task {meta.get('id')} — {meta.get('status')}: {meta.get('title')}")
+        print(one_liner(slug))
+        render_html_safe()
+        return 0
+
+    raise UserError("Usage: ws task add|list|done|update … (see `ws help`)")
+
+
+def cmd_pr(args) -> int:
+    sub = args.pr_cmd
+    if sub == "list":
+        slug = infer_slug(args.slug)
+        meta = load_meta(slug)
+        prs = prs_structured(meta, enrich=not os.environ.get("WS_NO_GH"))
+        if not prs:
+            print(f"No PRs tracked on `{slug}`. Add one: ws pr add '#123'")
+            return 0
+        marks = {"pass": " CI ✓", "fail": " CI ✗"}
+        for p in prs:
+            line = f"- {p['ref']}"
+            if p["state"]:
+                line += f" {p['state']}"
+            line += marks.get(p["ci"], "")
+            if p["url"]:
+                line += f"  {p['url']}"
+            print(line)
+        return 0
+    if sub in ("add", "rm"):
+        slug = infer_slug(args.slug)
+        ref = normalize_pr_ref(args.ref)
+        prs = get_prs(load_meta(slug))
+        if sub == "add":
+            if ref in prs:
+                print(f"PR {ref} already tracked on `{slug}`.")
+            else:
+                prs.append(ref)
+                set_prs(slug, prs)
+                print(f"Added PR {ref} to `{slug}`.")
+        else:
+            if ref not in prs:
+                raise UserError(
+                    f"PR {ref} is not tracked on `{slug}`. "
+                    f"Tracked: {', '.join(prs) or 'none'}. Run `ws pr list`.")
+            prs.remove(ref)
+            set_prs(slug, prs)
+            print(f"Removed PR {ref} from `{slug}`.")
+        print("PRs: " + (", ".join(prs) or "none"))
+        render_html_safe()
+        return 0
+    raise UserError("Usage: ws pr add|rm|list … (see `ws help`)")
+
+
+def default_sender() -> str:
+    """Sender identity: the stream this cwd belongs to, `hq` from the vault,
+    else $USER."""
+    try:
+        if Path(os.getcwd()).resolve() == WS_ROOT.resolve():
+            return HQ
+    except OSError:
+        pass
+    return find_by_cwd() or os.environ.get("USER", "user")
+
+
+def nudge_stream(slug: str, note_text: str) -> str:
+    """Best-effort wake of a stream's pane. Returns a human-readable outcome:
+    'idle' | 'busy' | 'alive' | 'dead' | 'none' | 'ambiguous' | 'failed'."""
+    if not stream_exists(slug):
+        return "none"
+    meta = load_meta(slug)
+    pane, note = ensure_pane(slug, meta)
+    if not pane:
+        return "ambiguous" if note.startswith("ambiguous") else \
+            ("dead" if meta.get("tmux_pane") else "none")
+    state = pane_state(pane)
+    if state == "dead":
+        return "dead"
+    if not wake_pane(pane, note_text):
+        return "failed"
+    return state
+
+
+def cmd_msg(args) -> int:
+    text = args.text
+    if text == "-" or text is None:
+        text = sys.stdin.read()
+    if not text.strip():
+        raise UserError("Empty message.")
+    sender = args.sender or default_sender()
+    kind = args.kind or ("reply" if args.reply_to else "fyi")
+    if kind not in MSG_KINDS:
+        raise UserError(f"Invalid --kind `{kind}`. One of: {', '.join(MSG_KINDS)}.")
+
+    # Channel post: append once, ring every subscriber's doorbell.
+    chan = parse_channel_target(args.slug)
+    if chan is not None:
+        if args.reply_to or args.expect_reply or args.wait is not None:
+            raise UserError("Channels are broadcast-only: no --reply-to / "
+                            "--expect-reply / --wait. DM the stream instead.")
+        mid = post_channel(chan, text, sender)
+        subs = channel_subscribers(chan)
+        print(f"Posted to #{chan} [{mid}] — {len(subs)} subscriber(s).")
+        if not args.no_wake:
+            for s in subs:
+                if s == sender:
+                    continue
+                out = nudge_stream(
+                    s, f"New message in ws channel #{chan} — run: ws inbox read")
+                if out in ("idle", "busy", "alive"):
+                    print(f"  {s}: nudged ({out})")
+        render_html_safe()
+        return 0
+
+    slug = require_mailbox(args.slug)
+    if slug == sender:
+        if args.sender:
+            raise UserError(f"`{slug}` is you — pick another recipient.")
+        # Inferred self-send = the human typing inside the stream's worktree.
+        sender = os.environ.get("USER", "user")
+    mid = write_message(slug, text, sender, kind=kind,
+                        sev="high" if args.sev == "high" else "",
+                        reply_to=args.reply_to or "",
+                        expect_reply=bool(args.expect_reply))
+    # A reply settles the sender's own obligation, if one exists.
+    if args.reply_to and sender != HQ and stream_exists(sender):
+        if clear_pending(sender, args.reply_to):
+            print(f"(reply obligation {args.reply_to} cleared)")
+    print(f"Message [{mid}] queued for `{slug}` "
+          f"(inbox: {len(unread_messages(slug))} unread).")
+
+    if slug == HQ:
+        # No pane to wake: hq mail surfaces in brief/status/dashboard and is
+        # delivered by hooks into the HQ manager session.
+        print("hq mailbox — surfaces at the top of `ws brief`/`ws status` and "
+              "in the HQ session via hooks.")
+        render_html_safe()
+        return 0
+
+    out = "skipped" if args.no_wake else nudge_stream(
+        slug, "You have a new ws inbox message — run: ws inbox read")
+    meta = load_meta(slug)
+    if out == "skipped":
+        pass
+    elif out == "idle":
+        print(f"Pane idle — nudge submitted; the agent picks it up now.")
+    elif out == "busy":
+        print(f"Pane busy (agent mid-turn) — message will reach it via hooks "
+              f"mid-turn; nudge queued as its next prompt.")
+    elif out == "alive":
+        print(f"Pane alive — nudge sent.")
+    elif out == "failed":
+        print(f"Failed to nudge pane; message remains queued for hooks.")
+    elif out == "ambiguous":
+        print(f"No wake sent — multiple harness panes in the worktree. Message "
+              f"waits in the inbox; hooks deliver it at the session's next turn.")
+    else:  # dead / none
+        if args.revive:
+            sess, pane, note = materialize_session(slug, meta)
+            verb = "already running" if note == "exists" else "revived"
+            print(f"Stream {verb}: tmux session `{sess}` (pane {pane}) — the "
+                  f"session-start hook delivers the message on boot.")
+        elif out == "dead":
+            print(f"Pane dead — inbox only. Message waits there; "
+                  f"`ws resume {slug}` (or --revive) to restart the stream.")
+        else:
+            print("No tmux pane recorded or discoverable — no wake sent. "
+                  "It will be delivered by hooks at the session's next turn.")
+
+    if args.wait is not None:
+        deadline = time.time() + (args.wait or 600)
+        mailbox = sender if mailbox_exists(sender) else HQ
+        print(f"Waiting for a reply to [{mid}] in `{mailbox}`'s mailbox "
+              f"(timeout {int(deadline - time.time())}s, Ctrl-C to stop)…")
+        while time.time() < deadline:
+            reply = find_reply(mailbox, mid, deliver=True)
+            if reply:
+                print(f"Reply:\n  {reply}")
+                render_html_safe()
+                return 0
+            time.sleep(2)
+        print("No reply before timeout — it will arrive in the mailbox; "
+              f"check with `ws inbox --stream {mailbox}`.")
+        render_html_safe()
+        return 3
+    render_html_safe()
+    return 0
+
+
+def cmd_inbox(args) -> int:
+    slug = args.stream if args.stream == HQ else infer_slug(args.stream)
+    owed = pending_replies(slug)
+    if args.inbox_cmd == "read":
+        msgs = deliver_unread(slug)
+        if not msgs and not owed:
+            print(f"Inbox for `{slug}` is empty.")
+            return 0
+        if msgs:
+            print(f"{len(msgs)} message(s) for `{slug}` (now marked read):")
+            for m in msgs:
+                print(f"  - {m}")
+        for p in owed:
+            print(f"  ⏳ awaiting your reply: {render_message(p)}")
+        render_html_safe()
+        return 0
+    msgs = unread_messages(slug)
+    chan = " (+ new channel activity)" if has_channel_pending(slug) else ""
+    if not msgs and not chan and not owed:
+        print(f"Inbox for `{slug}` is empty.")
+        return 0
+    if msgs or chan:
+        print(f"{len(msgs)} unread for `{slug}`{chan} "
+              f"(use `ws inbox read` to mark read):")
+        for p in msgs:
+            print(f"  - {render_message(p)}")
+    for p in owed:
+        print(f"  ⏳ awaiting your reply: {render_message(p)}")
+    return 0
+
+
+def cmd_chan(args) -> int:
+    sub = args.chan_cmd
+    if sub == "list":
+        names = all_channels()
+        if not names:
+            print("No channels yet. Create one by posting: ws msg '#name' \"...\"")
+            return 0
+        for n in names:
+            subs = channel_subscribers(n)
+            print(f"#{n} — {len(subs)} subscriber(s): {', '.join(subs) or '-'}")
+        return 0
+    if sub in ("join", "leave"):
+        name = args.name.lstrip("#")
+        if not CHAN_RE.match(name):
+            raise UserError(f"Bad channel name `{name}`.")
+        slug = infer_slug(args.stream)
+        meta = load_meta(slug)
+        subs = subscribed_channels(meta)
+        if sub == "join":
+            if name in subs:
+                print(f"`{slug}` already subscribes to #{name}.")
+                return 0
+            subs.append(name)
+            # Start the cursor at the channel's current end: joining a channel
+            # subscribes you to NEW traffic, not its whole history.
+            cursors = get_cursors(meta)
+            _, end = channel_tail(name, 0)
+            cursors[name] = end
+            update_meta(slug, {"channels": ", ".join(subs)}, touch=False)
+            set_cursors(slug, cursors)
+            print(f"`{slug}` joined #{name} (history starts now; "
+                  f"`ws chan history {name}` for the past).")
+        else:
+            if name not in subs:
+                print(f"`{slug}` does not subscribe to #{name}.")
+                return 0
+            subs.remove(name)
+            update_meta(slug, {"channels": ", ".join(subs)}, touch=False)
+            print(f"`{slug}` left #{name}.")
+        render_html_safe()
+        return 0
+    if sub == "history":
+        name = args.name.lstrip("#")
+        text, _ = channel_tail(name, 0)
+        if not text:
+            print(f"#{name} is empty (or does not exist).")
+            return 0
+        lines = text.splitlines()
+        if args.tail and len(lines) > args.tail:
+            lines = lines[-args.tail:]
+        print("\n".join(lines))
+        return 0
+    raise UserError("Usage: ws chan list|join|leave|history … (see `ws help`)")
+
+
+def hq_unread_by_sender() -> dict[str, list[Path]]:
+    out: dict[str, list[Path]] = {}
+    for p in unread_messages(HQ):
+        meta, _ = parse_doc(p.read_text())
+        out.setdefault(meta.get("from", "?"), []).append(p)
+    return out
+
+
+def collect_status(refresh_pr: bool = True) -> list[dict]:
+    rows = []
+    asked = hq_unread_by_sender()
+    for slug in all_slugs():
+        meta = load_meta(slug)
+        open_t, total_t = task_counts(slug)
+        prs = prs_structured(meta, enrich=refresh_pr)
+        state = "-"
+        if meta.get("kind") == "agent":
+            p, _note = ensure_pane(slug, meta)
+            if p:
+                state = pane_state(p)
+            elif meta.get("tmux_pane"):
+                state = "dead"
+        needs_why = []
+        if meta.get("status") == "review":
+            needs_why.append("in review — awaiting your review/merge")
+        if meta.get("status") == "blocked":
+            needs_why.append("status blocked")
+        if slug in asked:
+            kinds = [k for p in asked[slug]
+                     if (k := (parse_doc(p.read_text())[0].get("kind") or "fyi"))]
+            needs_why.append(f"{len(asked[slug])} message(s) to you"
+                             + (f" ({', '.join(sorted(set(kinds)))})" if kinds else ""))
+        if is_stale(meta):
+            needs_why.append("stale")
+        rows.append({
+            "slug": slug,
+            "title": meta.get("title", slug),
+            "status": meta.get("status", "?"),
+            "kind": meta.get("kind", "agent"),
+            "tasks": f"{total_t - open_t}/{total_t}" if total_t else "-",
+            "pr": pr_rollup(prs) or "-",
+            "prs": prs,
+            "pane": state,
+            "doc": meta.get("doc", ""),
+            "updated": meta.get("updated", ""),
+            "age": age_str(meta.get("updated", "")),
+            "stale": is_stale(meta),
+            "unread": len(unread_messages(slug)),
+            "next": meta.get("next", ""),
+            "worktree": meta.get("worktree", ""),
+            "branch": meta.get("branch", ""),
+            "needs_you": bool(needs_why),
+            "needs_why": needs_why,
+            "channels": subscribed_channels(meta),
+        })
+    rows.sort(key=lambda r: (0 if r["needs_you"] and r["status"] != "done" else 1,
+                             STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER else 9,
+                             r["slug"]))
+    return rows
+
+
+def cmd_prs(args) -> int:
+    """Every PR across in-flight streams, merged/closed hidden by default."""
+    rows = collect_status(refresh_pr=not args.no_gh)
+    items, hidden = [], 0
+    for r in rows:
+        if r["status"] == "done" and not args.all:
+            continue
+        for p in r["prs"]:
+            if p["state"] in ("merged", "closed") and not args.all:
+                hidden += 1
+                continue
+            items.append({"stream": r["slug"], **p})
+    hidden_note = (f"({hidden} merged/closed PR(s) hidden — `ws prs --all`)"
+                   if hidden else "")
+    if args.json:
+        print(json.dumps(items, indent=2))
+        return 0
+    if not items:
+        print("No open PRs across in-flight streams. " + hidden_note)
+        return 0
+    if args.md:
+        for it in items:
+            t = f" — {it['title']}" if it["title"] else ""
+            u = f" ({it['url']})" if it["url"] else ""
+            print(f"- [ ] {it['ref']} [{it['stream']}]{t}{u}")
+    else:
+        marks = {"pass": "✓", "fail": "✗"}
+        headers = ["PR", "STATE", "CI", "STREAM", "TITLE"]
+        table = [[it["ref"], it["state"] or "?", marks.get(it["ci"], ""),
+                  it["stream"],
+                  (it["title"][:57] + "…") if len(it["title"]) > 57 else it["title"]]
+                 for it in items]
+        widths = [max(len(h), *(len(row[i]) for row in table))
+                  for i, h in enumerate(headers)]
+        print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+        for row in table:
+            print("  ".join(c.ljust(widths[i]) for i, c in enumerate(row)))
+    if hidden_note:
+        print(hidden_note)
+    return 0
+
+
+def cmd_status(args) -> int:
+    rows = collect_status(refresh_pr=not args.no_gh)
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return 0
+    if not rows:
+        print("No streams registered. `ws register` in a worktree, or `ws add <slug>` for manual work.")
+        return 0
+    hq_n = len(unread_messages(HQ))
+    if hq_n:
+        print(f"📥 hq inbox: {hq_n} unread for YOU — `ws inbox read --stream hq`")
+    shown = [r for r in rows if r["status"] != "done" or args.all]
+    headers = ["STREAM", "!", "STATUS", "KIND", "TASKS", "PR", "PANE", "UPD", "NEXT"]
+    table = []
+    for r in shown:
+        upd = r["age"] + (" ⚠" if r["stale"] else "")
+        status = r["status"] + (f" ✉{r['unread']}" if r["unread"] else "")
+        table.append([r["slug"], "✋" if r["needs_you"] else "", status, r["kind"],
+                      r["tasks"], r["pr"], r["pane"], upd,
+                      (r["next"][:60] + "…") if len(r["next"]) > 60 else r["next"]])
+    widths = [max(len(h), *(len(row[i]) for row in table)) if table else len(h)
+              for i, h in enumerate(headers)]
+    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    for row in table:
+        print("  ".join(c.ljust(widths[i]) for i, c in enumerate(row)))
+    hidden = len(rows) - len(shown)
+    if hidden:
+        print(f"({hidden} done stream(s) hidden — `ws status --all`)")
+    return 0
+
+
+def cmd_brief(args) -> int:
+    print(f"# ws brief — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print()
+    if TODOS.is_file():
+        todos = TODOS.read_text().strip()
+        if todos:
+            print("## Loose to-dos (todos.md)")
+            print(todos)
+            print()
+    rows = collect_status(refresh_pr=not args.no_gh)
+    live = [r for r in rows if r["status"] != "done"]
+    done = [r for r in rows if r["status"] == "done"]
+    needs = [r for r in live if r["needs_you"]]
+    hq_msgs = unread_messages(HQ)
+    if needs or hq_msgs:
+        print(f"## Needs you — {len(needs)} stream(s), {len(hq_msgs)} hq message(s)")
+        for p in hq_msgs:
+            print(f"- 📥 {render_message(p)}")
+        for r in needs:
+            print(f"- ✋ {r['slug']}: {'; '.join(r['needs_why'])}")
+        print()
+    print(f"## Streams — {len(live)} in flight, {len(done)} done")
+    for r in live:
+        print()
+        print(f"### {r['slug']} — {r['status']} ({r['kind']}) — {r['title']}")
+        if r["worktree"]:
+            print(f"- worktree: {r['worktree']} (branch {r['branch'] or '?'}, pane {r['pane']})")
+        if r["prs"]:
+            marks = {"pass": " ✓", "fail": " ✗"}
+            print("- prs: " + ", ".join(
+                p["ref"] + (f" {p['state']}" if p["state"] else "") + marks.get(p["ci"], "")
+                for p in r["prs"]))
+        print(f"- updated: {r['updated']} ({r['age']} ago){' ⚠ STALE' if r['stale'] else ''}")
+        if r["next"]:
+            print(f"- next: {r['next']}")
+        vision = stream_dir(r["slug"]) / "VISION.md"
+        if vision.is_file():
+            vt = re.sub(r"<!--.*?-->", "", vision.read_text(), flags=re.S).strip()
+            vt = "\n".join(l for l in vt.splitlines() if l.strip())
+            if vt and vt != f"# {r['title']} — vision":
+                print(f"- vision:\n{indent_block(vt[:2000])}")
+        tasks = [t for t in load_tasks(r["slug"]) if t.get("status") != "done"]
+        if tasks:
+            print("- open tasks:")
+            for t in tasks:
+                extra = f" [{t.get('status')}]" if t.get("status") != "open" else ""
+                print(f"    - {t.get('id')}: {t.get('title')}{extra}")
+        if r["unread"]:
+            print(f"- 📬 {r['unread']} unread inbox message(s)")
+        if r["channels"]:
+            print(f"- channels: {', '.join('#' + c for c in r['channels'])}")
+        owed = pending_replies(r["slug"])
+        if owed:
+            print(f"- ⏳ owes {len(owed)} reply(ies): "
+                  + "; ".join(parse_doc(p.read_text())[0].get("from", "?")
+                              + " [" + p.stem + "]" for p in owed))
+        log = stream_dir(r["slug"]) / "LOG.md"
+        if log.is_file():
+            tail = log_tail(log.read_text(), 3)
+            if tail:
+                print(f"- recent log:\n{indent_block(tail)}")
+    if done:
+        print()
+        print("Done: " + ", ".join(r["slug"] for r in done))
+    return 0
+
+
+def indent_block(text: str, pad: str = "    ") -> str:
+    return "\n".join(pad + l for l in text.splitlines())
+
+
+def log_tail(text: str, n_entries: int) -> str:
+    parts = re.split(r"(?m)^## ", text)
+    entries = ["## " + p.strip() for p in parts[1:]]
+    return "\n".join(entries[-n_entries:]) if entries else ""
+
+
+def resume_ladder(meta: dict, extra: list[str]) -> str:
+    """The shell command for a materialized session: the correct rung of the
+    resume ladder first, chained so a dead rung falls through to a fresh
+    harness instead of leaving a dead-on-arrival tmux session."""
+    harness = meta.get("harness") or "claude"
+    sid = meta.get("session_id", "")
+    sfx = (" " + shlex.join(extra)) if extra else ""
+    if harness == "codex":
+        rungs = ([f"codex resume {shlex.quote(sid)}{sfx}"] if sid else []) \
+            + [f"codex resume --last{sfx}", f"codex{sfx}"]
+    elif harness == "gemini":
+        rungs = [f"gemini{sfx}"]  # no reliable resume rung; fresh start
+    else:
+        rungs = ([f"claude --resume {shlex.quote(sid)}{sfx}"] if sid else []) \
+            + [f"claude --continue{sfx}", f"claude{sfx}"]
+    return " || ".join(rungs)
+
+
+def session_has_harness(sess: str) -> bool:
+    r = tmux("list-panes", "-t", sess, "-F", "#{pane_pid}")
+    if not r or r.returncode != 0:
+        return False
+    lookup = _proc_harness_lookup()
+    return any(lookup(pid.strip()) for pid in r.stdout.splitlines() if pid.strip())
+
+
+def cmd_resume(args) -> int:
+    slug = require_slug(args.slug)
+    # argparse.REMAINDER swallows flags written after the slug positional
+    # (`ws resume foo --print`) — reclaim our own flags from it.
+    passthrough = list(args.passthrough or [])
+    while passthrough and passthrough[0] in ("--print", "--exec", "--"):
+        flag = passthrough.pop(0)
+        if flag == "--print":
+            args.print_ = True
+        elif flag == "--exec":
+            args.exec_ = True
+        else:
+            break  # explicit `--`: everything after is harness args
+    args.passthrough = passthrough
+    meta = load_meta(slug)
+    pane, note = ensure_pane(slug, meta)
+    if pane:
+        sess = pane_session(pane) or ""
+        extra = " — discovered live in the worktree" if note == "discovered" else ""
+        print(f"Session is ALIVE in tmux (pane {pane}, session `{sess}`){extra}. Attach:")
+        print(f"  tmux attach -t '{sess}'")
+        if args.exec_:
+            os.execvp("tmux", ["tmux", "attach", "-t", sess])
+        return 0
+    if note.startswith("ambiguous"):
+        print(f"Note: {note} — not auto-attaching; pick one with tmux attach.")
+        return 0
+
+    wt, sid = meta.get("worktree", ""), meta.get("session_id", "")
+    harness = meta.get("harness") or "claude"
+    if args.print_:
+        # Look-don't-touch: print the ladder instructions, create nothing.
+        if wt and sid:
+            resume_cmd = f"claude --resume {sid}" if harness == "claude" \
+                else f"codex resume {sid}"
+            print(f"No live pane. Resume the recorded {harness} session:")
+            print(f"  cd {wt} && {resume_cmd}")
+            return 0
+        if wt:
+            resume_cmd = "claude --continue" if harness == "claude" else "codex resume --last"
+            print("No live pane or recorded session id. Resume the most recent "
+                  "conversation in the worktree:")
+            print(f"  cd {wt} && {resume_cmd}")
+            print(f"(If there is none, start fresh: cd {wt} && {harness} — the stream's "
+                  "context is re-injected on start.)")
+            return 0
+        print(f"`{slug}` is a manual stream (no worktree). Its home is "
+              f"{stream_dir(slug)}; plain `ws resume {slug}` starts a session there.")
+        return 0
+
+    # Materialize: create the tmux session that SHOULD exist for this stream.
+    passthrough = list(args.passthrough or [])
+    if passthrough and passthrough[0] == "--":
+        passthrough = passthrough[1:]
+    sess, new_pane, note = materialize_session(slug, meta, passthrough)
+    if note == "exists":
+        print(f"tmux session `{sess}` already exists with a running harness. Attach:")
+        print(f"  tmux attach -t {sess}")
+        if args.exec_ or sys.stdout.isatty():
+            os.execvp("tmux", ["tmux", "attach", "-t", sess])
+        return 0
+    print(f"Created tmux session `{sess}` (pane {new_pane}) in "
+          f"{wt or stream_dir(slug)}")
+    print(f"  running: {resume_ladder(meta, passthrough)}")
+    render_html_safe()
+    if args.exec_ or sys.stdout.isatty():
+        os.execvp("tmux", ["tmux", "attach", "-t", sess])
+    print(f"Attach: tmux attach -t {sess}")
+    return 0
+
+
+def materialize_session(slug: str, meta: dict,
+                        passthrough: list[str] | None = None) -> tuple[str, str, str]:
+    """Create (or find) the detached tmux session for a stream, running the
+    resume ladder in its home. Returns (session, pane, note) where note is
+    'created' or 'exists' (a harness is already running there)."""
+    wt = meta.get("worktree", "")
+    workdir = wt or str(stream_dir(slug))
+    if wt and not Path(wt).is_dir():
+        raise UserError(f"Recorded worktree {wt} no longer exists. "
+                        f"Fix it with `ws register {slug}` from the new location.")
+    sess = f"ws-{slug}"
+    shcmd = resume_ladder(meta, list(passthrough or []))
+    for attempt in (1, 2):
+        r = tmux("has-session", "-t", sess)
+        if r and r.returncode == 0:
+            if session_has_harness(sess):
+                pane_r = tmux("display-message", "-p", "-t", sess, "#{pane_id}")
+                pane = pane_r.stdout.strip() if pane_r and pane_r.returncode == 0 else ""
+                return sess, pane, "exists"
+            # Stale shell, no harness (e.g. a tmux-resurrect restore) — replace.
+            tmux("kill-session", "-t", sess)
+        r = tmux("new-session", "-d", "-s", sess, "-c", workdir, shcmd)
+        if r and r.returncode == 0:
+            break
+        # "duplicate session" = we lost a create race (tmux-continuum restoring
+        # the same name at boot). Loop once: the recheck above resolves it.
+        if attempt == 2 or not r or "duplicate session" not in (r.stderr or ""):
+            raise UserError("Failed to create tmux session: "
+                            f"{(r.stderr if r else 'tmux not available').strip()}")
+        time.sleep(1.0)
+    pane_r = tmux("display-message", "-p", "-t", sess, "#{pane_id}")
+    new_pane = pane_r.stdout.strip() if pane_r and pane_r.returncode == 0 else ""
+    if new_pane:
+        update_meta(slug, {"tmux_pane": new_pane,
+                           "harness": meta.get("harness") or "claude"}, touch=False)
+    return sess, new_pane, "created"
+
+
+def cmd_spawn(args) -> int:
+    slug = args.slug
+    harness = args.harness
+    d = args.dir or (load_meta(slug).get("worktree", "") if stream_exists(slug) else "")
+    if not d:
+        raise UserError(f"No --dir given and `{slug}` has no recorded worktree.")
+    d = str(Path(d).expanduser())
+    if not Path(d).is_dir():
+        raise UserError(f"Directory does not exist: {d}")
+    sess = f"ws-{slug}"
+    r = tmux("has-session", "-t", sess)
+    if r and r.returncode == 0:
+        raise UserError(f"tmux session `{sess}` already exists. Attach: tmux attach -t {sess}")
+    r = tmux("new-session", "-d", "-s", sess, "-c", d, harness)
+    if not r or r.returncode != 0:
+        raise UserError(f"Failed to create tmux session: {(r.stderr if r else 'tmux not available').strip()}")
+    pane_r = tmux("display-message", "-p", "-t", sess, "#{pane_id}")
+    pane = pane_r.stdout.strip() if pane_r and pane_r.returncode == 0 else ""
+    if stream_exists(slug) and pane:
+        update_meta(slug, {"tmux_pane": pane, "harness": harness})
+    print(f"Spawned `{harness}` for `{slug}` in tmux session `{sess}` (pane {pane}), dir {d}.")
+    print(f"Attach: tmux attach -t {sess}")
+    if not stream_exists(slug):
+        print(f"Tip: have the agent run `ws register {slug}` once it starts.")
+    render_html_safe()
+    return 0
+
+
+def cmd_init(args) -> int:
+    """Create (or repair) the data vault at WS_ROOT. Idempotent."""
+    created = []
+    for d in (STREAMS, INBOX):
+        if not d.is_dir():
+            d.mkdir(parents=True, exist_ok=True)
+            created.append(str(d))
+    (STREAMS / ".gitkeep").touch(exist_ok=True)
+    (INBOX / ".gitkeep").touch(exist_ok=True)
+
+    def from_template(name: str, dest: Path) -> None:
+        if dest.exists():
+            return
+        src = TEMPLATES / name
+        if src.is_file():
+            atomic_write(dest, src.read_text())
+        created.append(str(dest))
+
+    from_template("todos.md", TODOS)
+    from_template("HQ-CLAUDE.md", WS_ROOT / "CLAUDE.md")
+    from_template("README-vault.md", WS_ROOT / "README.md")
+    agents = WS_ROOT / "AGENTS.md"
+    if not agents.exists():
+        try:
+            agents.symlink_to("CLAUDE.md")
+        except OSError:
+            atomic_write(agents, (WS_ROOT / "CLAUDE.md").read_text())
+        created.append(str(agents))
+    if not (WS_ROOT / ".gitignore").exists():
+        atomic_write(WS_ROOT / ".gitignore", ".lock\n*/.lock\nstreams/*/.lock\n")
+    if not (WS_ROOT / ".git").is_dir():
+        try:
+            subprocess.run(["git", "init", "-b", "main"], cwd=WS_ROOT,
+                           capture_output=True, text=True, timeout=15)
+            subprocess.run(["git", "add", "-A"], cwd=WS_ROOT,
+                           capture_output=True, text=True, timeout=15)
+            subprocess.run(["git", "commit", "-m", "ws init"], cwd=WS_ROOT,
+                           capture_output=True, text=True, timeout=15)
+            created.append(str(WS_ROOT / ".git"))
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    render_html_safe()
+    if created:
+        print(f"Initialized vault at {WS_ROOT}:")
+        for c in created:
+            print(f"  + {c}")
+    else:
+        print(f"Vault at {WS_ROOT} already initialized — nothing to do.")
+    print(f"Dashboard: {INDEX_HTML}")
+    return 0
+
+
+WRAPPER_TEMPLATE = """#!/bin/sh
+# ws launcher — resolves the currently-installed ws plugin (survives autoUpdate).
+RESOLVED=$(python3 - 2>/dev/null <<'PYEOF'
+import glob, json, os
+home = os.path.expanduser("~")
+try:
+    d = json.load(open(os.path.join(home, ".claude/plugins/installed_plugins.json")))
+    for key, entries in d.get("plugins", {}).items():
+        if key.split("@")[0] == "ws" and entries:
+            p = os.path.join(entries[0]["installPath"], "bin", "ws")
+            if os.access(p, os.X_OK):
+                print(p)
+                raise SystemExit
+except SystemExit:
+    raise
+except Exception:
+    pass
+for p in sorted(glob.glob(os.path.join(home, ".claude/plugins/marketplaces/*/plugins/ws/bin/ws"))):
+    if os.access(p, os.X_OK):
+        print(p)
+        break
+PYEOF
+)
+[ -n "$RESOLVED" ] && [ -x "$RESOLVED" ] && exec "$RESOLVED" "$@"
+DEV="{dev_path}"
+[ -x "$DEV" ] && exec "$DEV" "$@"
+echo "ws: no installation found (plugin not installed and dev checkout missing)" >&2
+exit 127
+"""
+
+
+def cmd_setup(args) -> int:
+    """Wire this machine up: PATH launcher, Codex skill, vault. Idempotent."""
+    bin_dir = Path(args.bin_dir or (Path.home() / ".local" / "bin")).expanduser()
+    codex_skills = Path(args.codex_skills_dir or (Path.home() / ".codex" / "skills")).expanduser()
+
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    launcher = bin_dir / "ws"
+    atomic_write(launcher, WRAPPER_TEMPLATE.replace("{dev_path}", str(PLUGIN_ROOT / "bin" / "ws")))
+    launcher.chmod(0o755)
+    print(f"Installed launcher: {launcher}")
+
+    if codex_skills.is_dir() or args.codex_skills_dir:
+        codex_skills.mkdir(parents=True, exist_ok=True)
+        link = codex_skills / "ws"
+        target = PLUGIN_ROOT / "skills" / "ws"
+        # Prefer the auto-updating marketplace clone if this checkout isn't it.
+        for cand in sorted(Path.home().glob(".claude/plugins/marketplaces/*/plugins/ws/skills/ws")):
+            target = cand
+            break
+        if link.is_symlink() or link.exists():
+            if link.is_symlink() and link.resolve() == target.resolve():
+                print(f"Codex skill already linked: {link}")
+            else:
+                print(f"Codex skill path exists ({link}) — leaving it alone. "
+                      f"Link manually if desired: ln -sfn {target} {link}")
+        else:
+            link.symlink_to(target)
+            print(f"Linked Codex skill: {link} -> {target}")
+        print("Codex plugin (full hooks integration): codex plugin marketplace add jhh3/streams"
+              " && codex plugin add ws@streams")
+        # Plain Codex (no plugin): wire hooks.json directly at the user layer,
+        # pointing at this checkout's hook scripts with absolute paths.
+        codex_hooks = codex_skills.parent / "hooks.json"
+        if not codex_hooks.exists():
+            src = json.loads((PLUGIN_ROOT / "hooks" / "codex-hooks.json").read_text())
+            cfg = json.loads(json.dumps(src).replace(
+                "${CLAUDE_PLUGIN_ROOT}", str(PLUGIN_ROOT)))
+            atomic_write(codex_hooks, json.dumps(cfg, indent=2) + "\n")
+            print(f"Wrote Codex hooks: {codex_hooks} (SessionStart/UserPromptSubmit/"
+                  f"PostToolUse/Stop -> ws hook)")
+        else:
+            print(f"Codex hooks.json already exists: {codex_hooks} — left alone.")
+    else:
+        print("~/.codex not found — skipped Codex wiring.")
+
+    gemini_dir = Path.home() / ".gemini"
+    if gemini_dir.is_dir():
+        ext_dir = gemini_dir / "extensions"
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        link = ext_dir / "ws"
+        target = PLUGIN_ROOT / "gemini-extension"
+        if link.is_symlink() or link.exists():
+            print(f"Gemini extension path exists ({link}) — left alone.")
+        elif target.is_dir():
+            link.symlink_to(target)
+            print(f"Linked Gemini extension: {link} -> {target}")
+    else:
+        print("~/.gemini not found — skipped Gemini wiring.")
+
+    if not args.skip_init:
+        cmd_init(args)
+    print("\nIf the Claude Code plugin isn't installed yet:")
+    print("  /plugin marketplace add jhh3/streams   (then) /plugin install ws@streams")
+    return 0
+
+
+def cmd_admin(args) -> int:
+    """Launch (or print) the HQ manager session in the vault."""
+    if not STREAMS.is_dir() or not (WS_ROOT / "CLAUDE.md").is_file():
+        raise UserError(
+            f"Vault at {WS_ROOT} is not initialized (missing streams/ or CLAUDE.md). "
+            "Run `ws init` (or install.sh) first.")
+    # The user's own alias for this is `copus` = `claude --dangerously-skip-permissions`;
+    # aliases don't resolve for subprocesses, so spell it out.
+    cmd = ["claude", "--dangerously-skip-permissions"]
+    if args.model:
+        cmd += ["--model", args.model]
+    passthrough = list(args.passthrough or [])
+    if passthrough and passthrough[0] == "--":
+        passthrough = passthrough[1:]
+    cmd += passthrough
+    if args.prompt:
+        cmd.append(args.prompt)
+    if args.dry_run:
+        print(f"cd {shlex.quote(str(WS_ROOT))} && {shlex.join(cmd)}")
+        return 0
+    os.chdir(WS_ROOT)
+    os.execvp(cmd[0], cmd)
+
+
+def cmd_classify(args) -> int:
+    """Internal/test: classify pane-capture text from stdin -> busy|idle|alive."""
+    print(classify_capture(sys.stdin.read()))
+    return 0
+
+
+def cmd_match(args) -> int:
+    """Internal/test: run the pane-discovery matcher on fixture pane-list text
+    from stdin. --harness-map 'pid=claude,pid=codex' fakes the process check."""
+    hmap: dict[str, set] = {}
+    for part in (args.harness_map or "").split(","):
+        if "=" in part:
+            pid, h = part.split("=", 1)
+            hmap.setdefault(pid.strip(), set()).add(h.strip())
+    pane, note = select_pane(parse_pane_list(sys.stdin.read()), args.worktree,
+                             args.prefer or "", lambda pid: hmap.get(pid, set()))
+    print(pane if pane else f"none: {note}")
+    return 0
+
+
+def cmd_sync(args) -> int:
+    # Refresh PR states + dashboard first so the hourly commit ships a current
+    # index.html even when no interactive command ran in between.
+    try:
+        collect_status(refresh_pr=True)
+        render_html()
+    except Exception:
+        pass
+    def run(*cmd):
+        return subprocess.run(cmd, cwd=WS_ROOT, capture_output=True, text=True, timeout=60)
+    try:
+        run("git", "add", "-A")
+        r = run("git", "commit", "-m", f"ws sync {now_iso()}")
+        if r.returncode == 0:
+            print("Committed.")
+        else:
+            print("Nothing to commit." if "nothing to commit" in r.stdout + r.stderr
+                  else f"Commit failed: {(r.stderr or r.stdout).strip()}")
+        p = run("git", "push")
+        print("Pushed." if p.returncode == 0
+              else f"Push skipped/failed: {(p.stderr.strip().splitlines() or ['?'])[0]}")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"git unavailable: {e}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# stream docs (DOC.md et al) + minimal markdown renderer
+# ---------------------------------------------------------------------------
+
+DOC_FALLBACK_TEMPLATE = """# {title} — working doc
+
+Living deep-dive for this stream: richer than the task list, fresher than
+VISION. Keep it current at milestones — it is linked from the dashboard.
+
+## Current shape
+
+<!-- What exists right now and how it fits together. -->
+
+## In flight
+
+<!-- What is being built or changed at the moment, and by whom. -->
+
+## Decisions
+
+<!-- Dated, newest first: what was decided and why. -->
+
+## Links
+
+<!-- PRs, docs, dashboards, related streams. -->
+"""
+
+
+def _md_inline(s: str) -> str:
+    """Inline markdown on an already-HTML-escaped string."""
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"(?<![\w*])\*([^*\s](?:[^*]*[^*\s])?)\*(?![\w*])", r"<em>\1</em>", s)
+    s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)",
+               r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+    return s
+
+
+def md_to_html_body(text: str) -> str:
+    """Tiny stdlib markdown -> HTML: headings, paragraphs, bold/italic/code,
+    fenced code blocks, flat ul/ol lists, links. Everything HTML-escaped."""
+    e = html_mod.escape
+    out: list[str] = []
+    para: list[str] = []
+    list_tag: str | None = None
+
+    def flush_para():
+        if para:
+            out.append("<p>" + _md_inline(e(" ".join(para))) + "</p>")
+            para.clear()
+
+    def flush_list():
+        nonlocal list_tag
+        if list_tag:
+            out.append(f"</{list_tag}>")
+            list_tag = None
+
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            flush_para(); flush_list()
+            i += 1
+            code: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code.append(lines[i])
+                i += 1
+            out.append("<pre><code>" + e("\n".join(code)) + "</code></pre>")
+            i += 1
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if m:
+            flush_para(); flush_list()
+            n = len(m.group(1))
+            out.append(f"<h{n}>" + _md_inline(e(m.group(2))) + f"</h{n}>")
+            i += 1
+            continue
+        m = re.match(r"^\s*[-*]\s+(.*)$", line)
+        if m:
+            flush_para()
+            if list_tag != "ul":
+                flush_list(); out.append("<ul>"); list_tag = "ul"
+            out.append("<li>" + _md_inline(e(m.group(1))) + "</li>")
+            i += 1
+            continue
+        m = re.match(r"^\s*\d+[.)]\s+(.*)$", line)
+        if m:
+            flush_para()
+            if list_tag != "ol":
+                flush_list(); out.append("<ol>"); list_tag = "ol"
+            out.append("<li>" + _md_inline(e(m.group(1))) + "</li>")
+            i += 1
+            continue
+        if not stripped or stripped.startswith("<!--"):
+            flush_para(); flush_list()
+            i += 1
+            continue
+        para.append(stripped)
+        i += 1
+    flush_para(); flush_list()
+    return "\n".join(out)
+
+
+DOC_PAGE_CSS = """
+:root { color-scheme: light dark;
+  --bg:#fafafa; --fg:#1a1a1a; --card:#ffffff; --muted:#666; --border:#e0e0e0; --accent:#1565c0; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#141416; --fg:#e8e6e3; --card:#1e1e22; --muted:#9a9691; --border:#333; --accent:#64b5f6; } }
+* { box-sizing:border-box; }
+body { margin:0 auto; max-width:760px; padding:32px 20px 80px; font:16px/1.6 system-ui,sans-serif;
+  background:var(--bg); color:var(--fg); }
+h1,h2,h3 { line-height:1.25; } h1 { font-size:26px; }
+h2 { font-size:20px; margin-top:32px; border-bottom:1px solid var(--border); padding-bottom:4px; }
+code { font-family:ui-monospace,monospace; font-size:.9em; background:var(--card);
+  border:1px solid var(--border); border-radius:4px; padding:0 4px; }
+pre { background:var(--card); border:1px solid var(--border); border-radius:8px;
+  padding:12px 14px; overflow-x:auto; }
+pre code { border:none; background:none; padding:0; }
+a { color:var(--accent); }
+.docmeta { color:var(--muted); font-size:12px; margin-bottom:24px; }
+"""
+
+
+DOC_EXTRA_CSS = """
+table { border-collapse:collapse; width:100%; margin:16px 0; font-size:14px; display:block; overflow-x:auto; }
+th, td { border:1px solid var(--border); padding:7px 11px; text-align:left; vertical-align:top; }
+th { background:var(--card); font-weight:600; }
+hr { border:none; border-top:1px solid var(--border); margin:28px 0; }
+blockquote { margin:16px 0; padding:2px 16px; border-left:3px solid var(--border); color:var(--muted); }
+input[type=checkbox] { accent-color:#2e7d32; }
+img { max-width:100%; }
+"""
+
+
+def render_md_page(md_path: Path, title: str) -> Path:
+    """Render a markdown file to a sibling .html; returns the html path."""
+    out_path = md_path.with_suffix(".html")
+    body = md_to_html_body(md_path.read_text())
+    page = (
+        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        f"<title>{html_mod.escape(title)}</title>\n<style>{DOC_PAGE_CSS}</style></head><body>\n"
+        f"<div class='docmeta'>{html_mod.escape(md_path.name)} · rendered "
+        f"{html_mod.escape(datetime.now().strftime('%Y-%m-%d %H:%M'))} · "
+        "regenerated on every ws mutation</div>\n"
+        f"{body}\n</body></html>\n"
+    )
+    atomic_write(out_path, page)
+    return out_path
+
+
+def resolve_doc_path(slug: str, docval: str) -> Path | None:
+    if not docval:
+        return None
+    p = Path(docval).expanduser()
+    if not p.is_absolute():
+        p = stream_dir(slug) / p
+    return p if p.is_file() else None
+
+
+def href_from_root(target: Path) -> str:
+    try:
+        rel = os.path.relpath(target, WS_ROOT)
+    except ValueError:
+        return target.resolve().as_uri()
+    return target.resolve().as_uri() if rel.startswith("..") else rel
+
+
+def vision_nontrivial(slug: str, title: str) -> Path | None:
+    vision = stream_dir(slug) / "VISION.md"
+    if not vision.is_file():
+        return None
+    vt = re.sub(r"<!--.*?-->", "", vision.read_text(), flags=re.S).strip()
+    lines = [l for l in vt.splitlines() if l.strip()]
+    if len(lines) <= 1:  # just the scaffold heading
+        return None
+    return vision
+
+
+def stream_doc_links(slug: str, docval: str, title: str) -> list[tuple[str, str]]:
+    """(label, href-relative-to-vault) pairs; renders .md docs as a side effect."""
+    links: list[tuple[str, str]] = []
+    p = resolve_doc_path(slug, docval)
+    if p:
+        try:
+            if p.suffix.lower() in (".html", ".htm"):
+                links.append(("open doc ↗", href_from_root(p)))
+            else:
+                links.append(("open doc ↗", href_from_root(render_md_page(p, f"{title} — doc"))))
+        except Exception:
+            pass
+    vision = vision_nontrivial(slug, title)
+    if vision:
+        try:
+            links.append(("vision ↗", href_from_root(render_md_page(vision, f"{title} — vision"))))
+        except Exception:
+            pass
+    return links
+
+
+def cmd_doc(args) -> int:
+    slug = infer_slug(args.slug)
+    meta = load_meta(slug)
+    d = stream_dir(slug)
+    docval = meta.get("doc", "")
+    if not docval:
+        target = d / "DOC.md"
+        if not target.exists():
+            tpl = TEMPLATES / "DOC.md"
+            text = tpl.read_text() if tpl.is_file() else DOC_FALLBACK_TEMPLATE
+            atomic_write(target, text.replace("{title}", meta.get("title", slug)))
+            print(f"Scaffolded {target}")
+        update_meta(slug, {"doc": "DOC.md"})
+        docval = "DOC.md"
+        print(f"Stream doc set: {slug} -> DOC.md. Keep it current — it's the "
+              "human-readable deep-dive linked from the dashboard.")
+    path = resolve_doc_path(slug, docval)
+    if not path:
+        raise UserError(f"Doc `{docval}` for `{slug}` does not exist. "
+                        f"Create it, or reset with `ws update {slug} --doc <path>`.")
+    print(f"Doc for `{slug}`: {path}")
+    render_html_safe()
+    if args.open:
+        target = path if path.suffix.lower() in (".html", ".htm") \
+            else path.with_suffix(".html")
+        if not target.is_file():
+            target = render_md_page(path, f"{meta.get('title', slug)} — doc")
+        launch_browser(target.resolve().as_uri())
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# html dashboard
+# ---------------------------------------------------------------------------
+
+STATUS_COLORS = {
+    "active": "#2e7d32", "blocked": "#c62828", "review": "#6a1b9a",
+    "parked": "#616161", "done": "#455a64",
+}
+
+
+# Streams whose `next` starts with a block-on-user signal join the header
+# "needs you" callout alongside status=blocked.
+NEEDS_YOU_RE = re.compile(
+    r"(?i)^\s*(waiting|blocked|awaiting|needs?\b|ask\b|decide|decision|review needed)")
+
+_DOT_CLASS = {"busy": "busy", "idle": "idle", "alive": "up", "dead": "dead"}
+
+DASH_TMPL = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ws — work streams</title>
+<style>
+:root { color-scheme: light dark;
+  --bg:#fafafa; --fg:#1a1a1a; --card:#ffffff; --muted:#666; --border:#e0e0e0;
+  --accent:#1565c0; --amber:#b26a00; --green:#2e7d32; --orange:#ef6c00; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#141416; --fg:#e8e6e3; --card:#1e1e22; --muted:#9a9691; --border:#333;
+  --accent:#64b5f6; --amber:#e0a030; --green:#66bb6a; --orange:#ffa040; } }
+* { box-sizing:border-box; }
+body { margin:0 auto; max-width:860px; padding:20px 14px 60px;
+  font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+h1 { font-size:18px; margin:0; display:inline; }
+.gen { color:var(--muted); font-size:11px; margin-left:10px; }
+.counts { color:var(--muted); font-size:13px; margin:6px 0 2px; }
+.needsyou { background:var(--card); border:1px solid var(--amber); border-radius:8px;
+  padding:6px 12px; margin:8px 0; font-size:13px; }
+.needsyou b { color:var(--amber); }
+.openprs { background:var(--card); border:1px solid var(--border); border-radius:8px;
+  padding:6px 12px; margin:8px 0; font-size:13px; }
+.openprs a { text-decoration:none; }
+.openprs .prstream { color:var(--muted); }
+h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+  margin:18px 0 6px; }
+details.card { background:var(--card); border:1px solid var(--border); border-radius:8px;
+  margin-bottom:6px; }
+details.card[open] { border-color:var(--accent); }
+summary { display:block; padding:10px 14px 11px; cursor:pointer; list-style:none; }
+summary::-webkit-details-marker { display:none; }
+summary:focus-visible { outline:2px solid var(--accent); border-radius:8px; }
+.l1 { display:flex; gap:8px; align-items:center; }
+.sp { flex:1; }
+.l2 { margin-top:5px; font-size:14px; line-height:1.45; color:var(--fg); opacity:.92;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.l3 { display:flex; gap:14px; align-items:center; margin-top:6px; color:var(--muted);
+  font-size:12px; flex-wrap:wrap; }
+.l3 .br { font-family:ui-monospace,monospace; }
+details[open] summary .l2, details[open] summary .l3 { display:none; }
+.dot { width:9px; height:9px; border-radius:50%; flex:none; }
+.dot.busy { background:var(--orange); animation:pulse 1.2s ease-in-out infinite; }
+.dot.idle { background:var(--green); }
+.dot.up { background:var(--muted); }
+.dot.dead { background:transparent; border:1.5px solid var(--muted); }
+@keyframes pulse { 50% { opacity:.35; } }
+.ttl { font-weight:600; flex:none; max-width:60%; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; }
+.pill { font-size:10px; color:#fff; border-radius:999px; padding:0 8px; flex:none; }
+.tbar { width:44px; height:4px; background:var(--border); border-radius:2px; flex:none;
+  overflow:hidden; }
+.tfill { display:block; height:100%; background:var(--green); }
+.tnum { color:var(--muted); font-size:11px; flex:none; }
+.mail { color:var(--orange); font-weight:700; font-size:12px; flex:none; }
+.dim { color:var(--muted); opacity:.6; }
+.age { color:var(--muted); font-size:11px; flex:none; }
+.age.stale { color:var(--amber); font-weight:600; }
+.detail { border-top:1px solid var(--border); padding:10px 14px 12px; font-size:13px; }
+.row { margin:4px 0; display:flex; gap:8px; }
+.lbl { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+  flex:none; width:64px; padding-top:1px; }
+.rowv { min-width:0; overflow-wrap:anywhere; }
+.detail ul, .todos ul { list-style:none; margin:2px 0 0; padding:0; }
+.detail li, .todos li { padding:1px 0; }
+li.tdone { color:var(--muted); text-decoration:line-through; }
+.doclink { font-size:12px; font-weight:600; text-decoration:none; border:1px solid var(--accent);
+  border-radius:999px; padding:1px 10px; margin-right:6px; color:var(--accent); }
+.msgprev { color:var(--muted); font-size:12px; }
+code { font-family:ui-monospace,monospace; font-size:12px; }
+details.todos, details.donewrap { color:var(--muted); margin:10px 0; }
+details.todos summary, details.donewrap summary { padding:4px 0; display:list-item;
+  list-style:disclosure-closed; font-size:13px; }
+details.todos[open] summary, details.donewrap[open] summary { list-style:disclosure-open; }
+a { color:var(--accent); }
+</style></head><body>
+<header>
+<h1>Work streams</h1><span class="gen">__GEN__ · auto-refresh 30s</span>
+<div class="counts">__COUNTS__</div>
+__NEEDSYOU__
+__OPENPRS__
+</header>
+__TODOS__
+__SECTIONS__
+__DONE__
+<script>
+(function () {
+  var KEY = 'ws-dash-v1';
+  var state = {};
+  try { state = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+  var open = {};
+  (state.open || []).forEach(function (s) { open[s] = true; });
+  var cards = document.querySelectorAll('details[data-slug]');
+  cards.forEach(function (d) {
+    var slug = d.getAttribute('data-slug');
+    if (open[slug]) { d.open = true; }
+    d.addEventListener('toggle', function () {
+      if (d.open) { open[slug] = true; } else { delete open[slug]; }
+      save();
+    });
+  });
+  function save() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(
+        { open: Object.keys(open), scroll: window.scrollY }));
+    } catch (e) {}
+  }
+  if (typeof state.scroll === 'number') { window.scrollTo(0, state.scroll); }
+  var st;
+  addEventListener('scroll', function () {
+    clearTimeout(st); st = setTimeout(save, 150);
+  }, { passive: true });
+  setTimeout(function () { save(); location.reload(); }, 30000);
+})();
+</script>
+</body></html>
+"""
+
+
+def render_html() -> None:
+    e = html_mod.escape
+    rows = collect_status(refresh_pr=False)
+    live = [r for r in rows if r["status"] != "done"]
+    done_rows = [r for r in rows if r["status"] == "done"]
+
+    def attention(r: dict) -> bool:
+        return bool(r["unread"] or r["status"] in ("blocked", "review")
+                    or r["stale"])
+
+    needs = [r for r in live if attention(r)]
+    rest = [r for r in live if not attention(r)]
+    active = [r for r in rest if r["status"] == "active"]
+    quiet = [r for r in rest if r["status"] != "active"]
+
+    counts = (f"{len(live)} in flight — "
+              f"{sum(1 for r in live if r['status'] == 'active')} active · "
+              f"{sum(1 for r in live if r['status'] == 'blocked')} blocked · "
+              f"{sum(1 for r in live if r['status'] == 'review')} review · "
+              f"{sum(1 for r in live if r['unread'])} ✉ unread · "
+              f"{sum(1 for r in live if r['stale'])} stale")
+
+    needs_you = [(r["slug"], r["next"] or "blocked, no next set")
+                 for r in live
+                 if r["status"] in ("blocked", "review")
+                 or NEEDS_YOU_RE.match(r["next"] or "")]
+    needsyou_html = ""
+    if needs_you:
+        items = " · ".join(
+            f"<b>{e(s)}</b> <span title='{e(n)}'>({e(n[:60])}{'…' if len(n) > 60 else ''})</span>"
+            for s, n in needs_you)
+        needsyou_html = f"<div class='needsyou'>needs you: {items}</div>"
+
+    open_prs = [(r["slug"], p) for r in live for p in r["prs"]
+                if p["state"] not in ("merged", "closed")]
+    openprs_html = ""
+    if open_prs:
+        def pr_bit(slug: str, p: dict) -> str:
+            mark = {"pass": " ✓", "fail": " ✗"}.get(p["ci"], "")
+            label = f"{e(p['ref'])}{'' if p['state'] else ' ?'}{mark}"
+            tip = e(p["title"] or p["ref"])
+            body = (f"<a href='{e(p['url'])}' target='_blank' title='{tip}'>{label}</a>"
+                    if p["url"] else f"<span title='{tip}'>{label}</span>")
+            return f"{body} <span class='prstream'>{e(slug)}</span>"
+        openprs_html = (f"<div class='openprs'>open PRs ({len(open_prs)}): "
+                        + " · ".join(pr_bit(s, p) for s, p in open_prs) + "</div>")
+
+    todos_html = ""
+    if TODOS.is_file():
+        items = []
+        for line in TODOS.read_text().splitlines():
+            m = re.match(r"^- \[( |x)\] (.*)$", line)
+            if m:
+                done_t = m.group(1) == "x"
+                items.append(f"<li class='{'tdone' if done_t else ''}'>"
+                             f"{'☑' if done_t else '☐'} {e(m.group(2))}</li>")
+        if items:
+            todos_html = (f"<details class='todos' data-slug='__todos'>"
+                          f"<summary>to-dos ({len(items)})</summary>"
+                          f"<ul>{''.join(items)}</ul></details>")
+
+    def dot_html(state: str) -> str:
+        cls = _DOT_CLASS.get(state)
+        if not cls:
+            return ""
+        return f"<span class='dot {cls}' title='session {e(state)}'></span>"
+
+    def taskbar(r: dict) -> str:
+        if r["tasks"] == "-":
+            return ""
+        done_n, total = (int(x) for x in r["tasks"].split("/"))
+        pct = round(done_n / total * 100) if total else 0
+        return (f"<span class='tbar' title='tasks {e(r['tasks'])} done'>"
+                f"<span class='tfill' style='width:{pct}%'></span></span>"
+                f"<span class='tnum'>{e(r['tasks'])}</span>")
+
+    def card(r: dict) -> str:
+        slug = r["slug"]
+        color = STATUS_COLORS.get(r["status"], "#616161")
+        mail = f"<span class='mail' title='unread inbox'>✉{r['unread']}</span>" if r["unread"] else ""
+        age = (f"<span class='age{' stale' if r['stale'] else ''}' "
+               f"title='updated {e(r['updated'])}'>{e(r['age'])}{' ⚠' if r['stale'] else ''}</span>")
+        snext = e(r["next"]) if r["next"] else "<span class='dim'>no next set</span>"
+        l3_bits = [taskbar(r)]
+        if r["pr"] != "-":
+            l3_bits.append(f"<span class='prroll' title='pull requests'>{e(r['pr'])}</span>")
+        if r["branch"]:
+            l3_bits.append(f"<span class='br' title='branch'>{e(r['branch'])}</span>")
+        l3 = "".join(b for b in l3_bits if b)
+        summary = (
+            "<summary>"
+            f"<div class='l1'>{dot_html(r['pane'])}"
+            f"<span class='ttl' title='{e(slug)}'>{e(r['title'])}</span>"
+            f"<span class='pill' style='background:{color}'>{e(r['status'])}</span>"
+            f"{mail}<span class='sp'></span>{age}</div>"
+            f"<div class='l2'>{snext}</div>"
+            + (f"<div class='l3'>{l3}</div>" if l3 else "")
+            + "</summary>")
+
+        d: list[str] = []
+
+        def row(lbl: str, val_html: str) -> None:
+            d.append(f"<div class='row'><span class='lbl'>{lbl}</span>"
+                     f"<span class='rowv'>{val_html}</span></div>")
+
+        if r["next"]:
+            row("next", e(r["next"]))
+        tasks = load_tasks(slug)
+        if tasks:
+            lis = []
+            for t in tasks:
+                tdone = t.get("status") == "done"
+                extra = (f" <em>[{e(t.get('status', ''))}]</em>"
+                         if t.get("status") not in ("done", "open") else "")
+                lis.append(f"<li class='{'tdone' if tdone else ''}'>"
+                           f"{'☑' if tdone else '☐'} <b>{e(t.get('id', '?'))}</b> "
+                           f"{e(t.get('title', ''))}{extra}</li>")
+            row("tasks", f"<ul>{''.join(lis)}</ul>")
+        if r["prs"]:
+            marks = {"pass": " ✓", "fail": " ✗"}
+            parts = []
+            for p in r["prs"]:
+                label = e(p["ref"]) + (f" {e(p['state'])}" if p["state"] else "") \
+                    + marks.get(p["ci"], "")
+                if p["url"]:
+                    parts.append(f"<a target='_blank' rel='noopener' "
+                                 f"href='{e(p['url'])}'>{label}</a>")
+                else:
+                    parts.append(label)
+            row("prs", " · ".join(parts))
+        if r["worktree"]:
+            meta = load_meta(slug)
+            wt = f"<code>{e(r['worktree'])}</code>"
+            if r["branch"]:
+                wt += f" @ <code>{e(r['branch'])}</code>"
+            if meta.get("harness"):
+                wt += f" · {e(meta['harness'])}"
+            row("where", wt)
+        links = stream_doc_links(slug, r.get("doc", ""), r["title"])
+        if links:
+            row("docs", "".join(
+                f"<a class='doclink' target='_blank' rel='noopener' href='{e(h)}'>{e(l)}</a>"
+                for l, h in links))
+        previews = unread_messages(slug)[:3]
+        if previews:
+            row("inbox", "<br>".join(
+                f"<span class='msgprev'>{e(render_message(p)[:200])}</span>" for p in previews))
+        row("resume", f"<code>ws resume {e(slug)}</code>")
+        return (f"<details class='card' data-slug='{e(slug)}'>{summary}"
+                f"<div class='detail'>{''.join(d)}</div></details>")
+
+    sections = []
+    for label, group in (("needs attention", needs), ("active", active),
+                         ("parked", quiet)):
+        if group:
+            sections.append(f"<section><h2>{label} ({len(group)})</h2>"
+                            + "".join(card(r) for r in group) + "</section>")
+    if not sections:
+        sections.append("<p>No streams in flight. <code>ws register</code> in a "
+                        "worktree to start one.</p>")
+    done_html = ""
+    if done_rows:
+        done_html = (f"<details class='donewrap' data-slug='__done'>"
+                     f"<summary>done ({len(done_rows)})</summary>"
+                     + "".join(card(r) for r in done_rows) + "</details>")
+
+    page = (DASH_TMPL
+            .replace("__GEN__", e(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            .replace("__COUNTS__", counts)
+            .replace("__NEEDSYOU__", needsyou_html)
+            .replace("__OPENPRS__", openprs_html)
+            .replace("__TODOS__", todos_html)
+            .replace("__SECTIONS__", "".join(sections))
+            .replace("__DONE__", done_html))
+    atomic_write(INDEX_HTML, page)
+
+
+def render_html_safe() -> None:
+    try:
+        render_html()
+    except Exception:
+        pass  # dashboard is best-effort; never fail the command
+
+
+def cmd_html(args) -> int:
+    render_html()
+    print(f"Wrote {INDEX_HTML}")
+    return 0
+
+
+def launch_browser(url: str) -> bool:
+    opener = shutil.which("xdg-open") or shutil.which("open")
+    if not opener:
+        print(f"No opener found (xdg-open/open). Open manually: {url}")
+        return False
+    subprocess.Popen(
+        [opener, url],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    print(f"Opened {url}")
+    return True
+
+
+def cmd_open(args) -> int:
+    render_html()
+    return 0 if launch_browser(INDEX_HTML.resolve().as_uri()) else 1
+
+
+# ---------------------------------------------------------------------------
+# hooks
+# ---------------------------------------------------------------------------
+
+def hook_output_context(event: str, text: str) -> None:
+    print(json.dumps({
+        "hookSpecificOutput": {"hookEventName": event, "additionalContext": text}
+    }))
+
+
+def cmd_hook(args) -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    cwd = payload.get("cwd") or os.getcwd()
+    event = args.event
+
+    if event == "session-start":
+        try:
+            if Path(cwd).resolve() == WS_ROOT.resolve():
+                # HQ mode: inject the whole world.
+                import io
+                buf = io.StringIO()
+                old = sys.stdout
+                sys.stdout = buf
+                try:
+                    cmd_brief(argparse.Namespace(no_gh=True))
+                finally:
+                    sys.stdout = old
+                extra = ""
+                hq_msgs = deliver_unread(HQ)
+                if hq_msgs:
+                    extra = ("\n\nHQ inbox — messages for the human (now marked "
+                             "read; triage them):\n"
+                             + "\n".join(f"- {m}" for m in hq_msgs))
+                hook_output_context(
+                    "SessionStart",
+                    "You are running inside the ws work-streams registry (HQ mode). "
+                    "Current state of every stream and to-do follows. Re-run `ws brief` "
+                    "any time for a fresh view.\n\n" + buf.getvalue() + extra)
+                return 0
+        except OSError:
+            pass
+        slug = find_by_cwd(cwd)
+        if not slug:
+            hook_output_context(
+                "SessionStart",
+                "ws: no registered work stream for this directory. If this session's work "
+                "will outlive the session or span multiple PRs, register it with "
+                "`ws register <slug>` (see the `ws` skill / `ws help`). Skip for quick one-offs.")
+            return 0
+        # Backfill session/pane so `ws resume` and wake stay honest — but only
+        # when the session starts AT the stream's worktree. A stream rooted at
+        # an ancestor directory (e.g. $HOME) must not adopt the identity of
+        # every session that starts somewhere beneath it.
+        meta = load_meta(slug)
+        wt = meta.get("worktree", "")
+        # A stream rooted at $HOME is exempt entirely: plenty of unrelated
+        # sessions (cron skills, ad-hoc shells) start there, and each one would
+        # otherwise steal the stream's session_id/pane.
+        try:
+            wt_res = Path(wt).expanduser().resolve() if wt else None
+            at_root = bool(wt_res) and Path(cwd).resolve() == wt_res \
+                and wt_res != Path.home().resolve()
+        except OSError:
+            at_root = False
+        if at_root:
+            updates = {}
+            sid = payload.get("session_id", "")
+            pane = os.environ.get("TMUX_PANE", "")
+            if sid:
+                updates["session_id"] = sid
+            if pane:
+                updates["tmux_pane"] = pane
+            if updates:
+                try:
+                    update_meta(slug, updates)
+                except Exception:
+                    pass
+            meta = load_meta(slug)
+        lines = [
+            f"ws: this directory is registered to work stream `{slug}` "
+            f"({meta.get('title')}) — status {meta.get('status')}.",
+        ]
+        if meta.get("next"):
+            lines.append(f"Recorded next step: {meta['next']}")
+        vision = stream_dir(slug) / "VISION.md"
+        if vision.is_file():
+            vt = re.sub(r"<!--.*?-->", "", vision.read_text(), flags=re.S).strip()
+            if vt and len(vt.splitlines()) > 1:
+                lines.append("VISION.md (why this work exists):\n" + vt[:3000])
+        doc_path_ = resolve_doc_path(slug, meta.get("doc", ""))
+        if doc_path_ and doc_path_.suffix.lower() not in (".html", ".htm"):
+            try:
+                dt = doc_path_.read_text().strip()
+                if dt:
+                    lines.append(f"{doc_path_.name} (working doc — keep it current):\n"
+                                 + dt[:2000])
+            except OSError:
+                pass
+        open_tasks = [t for t in load_tasks(slug) if t.get("status") != "done"]
+        if open_tasks:
+            lines.append("Open tasks: " + "; ".join(
+                f"{t.get('id')}: {t.get('title')}" for t in open_tasks))
+        msgs = deliver_unread(slug)
+        if msgs:
+            lines.append("Unread inbox messages (now marked read — act on them):\n" +
+                         "\n".join(f"- {m}" for m in msgs))
+        lines.append(
+            "Keep the registry current as you work: `ws log \"...\"` at milestones, "
+            "`ws update --next \"...\"` when the plan changes, `ws task done <id>` "
+            "when a task completes. `ws help` has the full reference.")
+        hook_output_context("SessionStart", "\n\n".join(lines))
+        return 0
+
+    if event in ("user-prompt-submit", "post-tool-use"):
+        slug = hook_mailbox_for(cwd)
+        if not slug:
+            return 0
+        msgs = deliver_unread(slug) if slug != HQ else deliver_unread(HQ)
+        if not msgs:
+            return 0
+        name = "UserPromptSubmit" if event == "user-prompt-submit" else "PostToolUse"
+        whose = "HQ (the human's mailbox — triage them)" if slug == HQ \
+            else f"stream `{slug}`"
+        hook_output_context(
+            name,
+            f"ws inbox — new message(s) for {whose} (marked read; act on them):\n"
+            + "\n".join(f"- {m}" for m in msgs))
+        return 0
+
+    if event == "stop":
+        if payload.get("stop_hook_active"):
+            return 0
+        slug = find_by_cwd(cwd)
+        if not slug:
+            return 0
+        msgs = deliver_unread(slug)
+        owed = pending_replies(slug)
+        if not msgs and not owed:
+            return 0
+        parts = []
+        if msgs:
+            parts.append(
+                f"ws inbox — unread message(s) arrived for stream `{slug}` "
+                "(now marked read):\n" + "\n".join(f"- {m}" for m in msgs))
+        if owed:
+            parts.append(
+                "You owe replies before going idle (send them now — "
+                "the sender is blocked on you):\n"
+                + "\n".join(f"- {render_message(p)}" for p in owed))
+        parts.append("Act on the above, then bring the stream record current "
+                     "(`ws log` / `ws update --next`) before stopping.")
+        print(json.dumps({"decision": "block", "reason": "\n\n".join(parts)}))
+        return 0
+
+    raise UserError(f"Unknown hook event `{args.event}`.")
+
+
+def hook_mailbox_for(cwd: str) -> str | None:
+    """Which mailbox a session at `cwd` reads: its stream's, or `hq` for a
+    session inside the vault itself (the HQ manager)."""
+    try:
+        if Path(cwd).resolve() == WS_ROOT.resolve():
+            return HQ
+    except OSError:
+        pass
+    return find_by_cwd(cwd)
+
+
+# ---------------------------------------------------------------------------
+# mcp — stdio MCP server: the harness-agnostic verb surface. Tools only (no
+# resources/sampling — poll-hostile clients are the norm); every tool result
+# carries an unread-mail banner for the cwd's mailbox, so even hook-less MCP
+# clients learn about mail whenever they touch ws.
+# ---------------------------------------------------------------------------
+
+WS_VERSION = "0.6.2"
+
+MCP_TOOLS = [
+    {"name": "ws_status",
+     "description": "All work streams: status, tasks, PRs, pane liveness, "
+                    "unread mail, needs-you flags. Start here.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "ws_brief",
+     "description": "Full markdown dump of everything in flight (streams, "
+                    "visions, tasks, unread, log tails) for agent ingestion.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "ws_send",
+     "description": "Message a stream, `hq` (the human), or a `#channel`. "
+                    "kind: fyi|question|decision|review|reply. Use "
+                    "expect_reply for questions that block you; reply_to to "
+                    "answer one.",
+     "inputSchema": {"type": "object", "properties": {
+         "to": {"type": "string", "description": "stream slug, 'hq', or '#channel'"},
+         "text": {"type": "string"},
+         "kind": {"type": "string", "enum": list(MSG_KINDS)},
+         "sev": {"type": "string", "enum": ["", "high"]},
+         "reply_to": {"type": "string"},
+         "expect_reply": {"type": "boolean"},
+         "wait_seconds": {"type": "number",
+                          "description": "block up to N seconds for a reply"},
+     }, "required": ["to", "text"]}},
+    {"name": "ws_inbox",
+     "description": "Read this session's ws mailbox (marks read). "
+                    "Pass stream to read another mailbox, e.g. 'hq'.",
+     "inputSchema": {"type": "object", "properties": {
+         "stream": {"type": "string"},
+         "peek": {"type": "boolean", "description": "list without marking read"},
+     }}},
+    {"name": "ws_log",
+     "description": "Append a dated milestone/decision note to a stream's log.",
+     "inputSchema": {"type": "object", "properties": {
+         "text": {"type": "string"}, "stream": {"type": "string"},
+     }, "required": ["text"]}},
+    {"name": "ws_update",
+     "description": "Update stream state: status (active|blocked|review|"
+                    "parked|done), next step, and/or a log note.",
+     "inputSchema": {"type": "object", "properties": {
+         "stream": {"type": "string"}, "status": {"type": "string"},
+         "next": {"type": "string"}, "note": {"type": "string"},
+     }}},
+]
+
+
+def _capture_stdout(fn, ns) -> str:
+    import io
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        fn(ns)
+    finally:
+        sys.stdout = old
+    return buf.getvalue().strip()
+
+
+def mcp_banner(slug: str | None) -> str:
+    if not slug:
+        return ""
+    n = len(unread_messages(slug))
+    owed = len(pending_replies(slug))
+    chan = has_channel_pending(slug)
+    if not n and not owed and not chan:
+        return ""
+    bits = []
+    if n or chan:
+        bits.append(f"{n} unread" + (" + channel activity" if chan else ""))
+    if owed:
+        bits.append(f"{owed} reply(ies) owed")
+    return f"\n\n📬 ws: {', '.join(bits)} for `{slug}` — call ws_inbox now."
+
+
+def mcp_call(name: str, a: dict, mailbox: str | None) -> str:
+    if name == "ws_status":
+        rows = collect_status(refresh_pr=False)
+        keep = ("slug", "title", "status", "kind", "tasks", "pr", "pane",
+                "age", "stale", "unread", "next", "needs_you", "needs_why",
+                "channels")
+        return json.dumps([{k: r[k] for k in keep} for r in rows], indent=1)
+    if name == "ws_brief":
+        return _capture_stdout(cmd_brief, argparse.Namespace(no_gh=True))
+    if name == "ws_send":
+        wait = a.get("wait_seconds")
+        # The MCP mailbox identity is inferred (cwd), not explicit: a
+        # self-send falls back to $USER just like the CLI's inferred sender.
+        ns = argparse.Namespace(
+            slug=a["to"], text=a["text"],
+            sender=mailbox if a["to"] != mailbox else None,
+            kind=a.get("kind") or None, sev=a.get("sev") or None,
+            reply_to=a.get("reply_to") or None,
+            expect_reply=bool(a.get("expect_reply")),
+            wait=min(int(wait), 240) if wait else None,
+            no_wake=False, revive=False)
+        return _capture_stdout(cmd_msg, ns)
+    if name == "ws_inbox":
+        ns = argparse.Namespace(stream=a.get("stream") or mailbox,
+                                inbox_cmd=None if a.get("peek") else "read")
+        return _capture_stdout(cmd_inbox, ns)
+    if name == "ws_log":
+        return _capture_stdout(cmd_log, argparse.Namespace(
+            slug=a.get("stream"), text=a["text"]))
+    if name == "ws_update":
+        return _capture_stdout(cmd_update, argparse.Namespace(
+            slug=a.get("stream"), status=a.get("status"),
+            next=a.get("next"), note=a.get("note"),
+            title=None, doc=None, pr=None))
+    raise UserError(f"Unknown tool `{name}`.")
+
+
+def cmd_mcp(args) -> int:
+    """Newline-delimited JSON-RPC over stdio. The mailbox identity is fixed
+    at startup from the server's cwd (harnesses spawn MCP servers in the
+    project directory)."""
+    try:
+        mailbox = hook_mailbox_for(os.getcwd())
+    except Exception:
+        mailbox = None
+
+    def respond(rid, result=None, error=None):
+        msg: dict = {"jsonrpc": "2.0", "id": rid}
+        if error is not None:
+            msg["error"] = error
+        else:
+            msg["result"] = result
+        sys.stdout.write(json.dumps(msg) + "\n")
+        sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method, rid = req.get("method", ""), req.get("id")
+        if method.startswith("notifications/"):
+            continue
+        if method == "initialize":
+            ver = (req.get("params") or {}).get("protocolVersion") or "2025-06-18"
+            respond(rid, {"protocolVersion": ver,
+                          "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "ws", "version": WS_VERSION}})
+        elif method == "ping":
+            respond(rid, {})
+        elif method == "tools/list":
+            respond(rid, {"tools": MCP_TOOLS})
+        elif method == "tools/call":
+            params = req.get("params") or {}
+            name = params.get("name", "")
+            try:
+                out = mcp_call(name, params.get("arguments") or {}, mailbox)
+                if name != "ws_inbox":  # inbox output IS the mail
+                    out += mcp_banner(mailbox)
+                respond(rid, {"content": [{"type": "text", "text": out or "ok"}],
+                              "isError": False})
+            except UserError as e:
+                respond(rid, {"content": [{"type": "text", "text": f"ws: {e}"}],
+                              "isError": True})
+            except Exception as e:
+                respond(rid, {"content": [{"type": "text",
+                                           "text": f"ws internal error: {type(e).__name__}: {e}"}],
+                              "isError": True})
+        elif rid is not None:
+            respond(rid, error={"code": -32601, "message": f"method not found: {method}"})
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# watchdog + doctor — one cron-able caretaker, no daemons. The failure mode of
+# every mailbox system is silent wake-channel rot; these two commands notice.
+# ---------------------------------------------------------------------------
+
+def flag_once(slug: str) -> bool:
+    """True at most once per 24h per stream — rate-limits watchdog noise."""
+    meta = load_meta(slug)
+    last = parse_iso(meta.get("flagged", ""))
+    if last and (datetime.now(timezone.utc) - last.astimezone(timezone.utc)
+                 ).total_seconds() < 24 * 3600:
+        return False
+    update_meta(slug, {"flagged": now_iso()}, touch=False)
+    return True
+
+
+def escalate_once(slug: str, text: str) -> bool:
+    """Send hq a watchdog escalation for `slug` at most once per 24h."""
+    if not flag_once(slug):
+        return False
+    write_message(HQ, text, sender="watchdog", kind="question", sev="high")
+    return True
+
+
+def cmd_watchdog(args) -> int:
+    if args.install:
+        me = shutil.which("ws") or str(Path(__file__).resolve())
+        print("Add to crontab (crontab -e) — every 15 minutes:")
+        print(f"  */15 * * * * WS_ROOT={WS_ROOT} {me} watchdog "
+              f"{'--revive ' if args.revive else ''}--quiet")
+        return 0
+    acted, checked = [], 0
+    for slug in all_slugs():
+        meta = load_meta(slug)
+        if meta.get("kind") != "agent" or \
+                meta.get("status") not in ("active", "blocked", "review"):
+            continue
+        checked += 1
+        mail = bool(unread_messages(slug)) or has_channel_pending(slug)
+        owed = bool(pending_replies(slug))
+        pane, _ = ensure_pane(slug, meta)
+        state = pane_state(pane) if pane else "dead"
+        if (mail or owed) and state == "idle":
+            if wake_pane(pane, "ws watchdog: you have unread mail / owed "
+                               "replies — run: ws inbox read"):
+                acted.append(f"{slug}: nudged idle pane")
+        elif (mail or owed) and state == "dead":
+            if args.revive:
+                try:
+                    sess, _p, note = materialize_session(slug, meta)
+                    acted.append(f"{slug}: {'found' if note == 'exists' else 'revived'} "
+                                 f"session {sess} (mail waiting)")
+                except UserError as e:
+                    if escalate_once(slug, f"watchdog: `{slug}` has waiting mail, "
+                                           f"its session is dead, and revive failed: {e}"):
+                        acted.append(f"{slug}: revive failed — escalated to hq")
+            else:
+                if escalate_once(slug, f"watchdog: `{slug}` has waiting mail but its "
+                                       f"session is dead. `ws resume {slug}` or reply "
+                                       f"on its behalf."):
+                    acted.append(f"{slug}: escalated to hq (dead + mail)")
+        elif is_stale(meta) and state in ("dead", "idle"):
+            # Staleness already shows on every dashboard (⚠ STALE + ✋ on the
+            # stream itself) — mailing hq about it just piles up duplicate mail.
+            if flag_once(slug):
+                acted.append(f"{slug}: stale (pane {state}) — flagged, no mail")
+    if acted:
+        for a in acted:
+            print(f"- {a}")
+        render_html_safe()
+    if not args.quiet or acted:
+        print(f"watchdog: {checked} stream(s) checked, {len(acted)} action(s).")
+    return 0
+
+
+def cmd_up(args) -> int:
+    """Boot recovery: bring every in-flight agent stream's session back up."""
+    if args.install:
+        me = shutil.which("ws") or str(Path(__file__).resolve())
+        print("Add to crontab (crontab -e) — restart in-flight streams at boot:")
+        print(f"  @reboot sleep 45 && WS_ROOT={WS_ROOT} {me} up --quiet")
+        return 0
+    slugs = args.slugs or all_slugs()
+    started, running, skipped, failed = [], [], [], []
+    for slug in slugs:
+        try:
+            meta = load_meta(slug)
+        except FileNotFoundError:
+            failed.append((slug, "no such stream"))
+            continue
+        if meta.get("kind") != "agent" or \
+                meta.get("status") not in ("active", "blocked", "review"):
+            skipped.append(slug)
+            continue
+        pane, _ = ensure_pane(slug, meta)
+        if pane and pane_state(pane) != "dead":
+            running.append(slug)
+            continue
+        if args.dry_run:
+            started.append((slug, f"ws-{slug} (dry-run)"))
+            continue
+        try:
+            sess, _p, note = materialize_session(slug, meta)
+            if note == "exists":
+                running.append(slug)
+            else:
+                started.append((slug, sess))
+        except UserError as e:
+            failed.append((slug, str(e)))
+    for slug, sess in started:
+        print(f"- {slug}: {'would start' if args.dry_run else 'started'} {sess}")
+    for slug, why in failed:
+        print(f"- {slug}: FAILED — {why}")
+    if not args.quiet or started or failed:
+        print(f"up: {len(started)} started, {len(running)} already running, "
+              f"{len(skipped)} skipped (manual/parked/done), {len(failed)} failed.")
+    if started and not args.dry_run:
+        render_html_safe()
+    return 1 if failed else 0
+
+
+SERVE_DEFAULT_LISTEN = "127.0.0.1:8791"
+
+
+def serve_token_path() -> Path:
+    d = Path.home() / ".local/state/ws"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "serve-token"
+
+
+def load_serve_token() -> str:
+    import secrets
+    p = serve_token_path()
+    if p.is_file() and p.read_text().strip():
+        return p.read_text().strip()
+    t = secrets.token_hex(16)
+    p.write_text(t + "\n")
+    p.chmod(0o600)
+    return t
+
+
+def vault_digest() -> str:
+    """Cheap change signal for SSE: newest mtime + count of vault files."""
+    latest, n = 0.0, 0
+    for root, dirs, files in os.walk(WS_ROOT):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for f in files:
+            if f.endswith(".md") or f == ".chan-pending" or f == "todos.md":
+                try:
+                    latest = max(latest, os.stat(os.path.join(root, f)).st_mtime)
+                    n += 1
+                except OSError:
+                    pass
+    return f"{n}:{latest:.2f}"
+
+
+def msg_struct(p: Path) -> dict:
+    meta, body = parse_doc(p.read_text())
+    return {"id": meta.get("id", p.stem), "from": meta.get("from", "?"),
+            "kind": meta.get("kind", "fyi"), "sev": meta.get("sev", ""),
+            "created": meta.get("created", ""),
+            "expect_reply": meta.get("expect_reply") == "true",
+            "body": body.strip()}
+
+
+def mark_read(slug: str, mid: str) -> bool:
+    d = inbox_dir(slug)
+    p = d / f"{mid}.md"
+    if not p.is_file():
+        return False
+    (d / "read").mkdir(exist_ok=True)
+    p.rename(d / "read" / p.name)
+    return True
+
+
+def serve_state(refresh_pr: bool = False) -> dict:
+    rows = collect_status(refresh_pr=refresh_pr)
+    doc_order = {"VISION.md": 0, "DOC.md": 1, "LOG.md": 2}
+    for r in rows:
+        slug = r["slug"]
+        r["tasks_list"] = load_tasks(slug)
+        r["unread_msgs"] = [msg_struct(p) for p in unread_messages(slug)[:8]]
+        r["owed"] = len(pending_replies(slug))
+        r["docs"] = sorted(
+            (p.name for p in stream_dir(slug).glob("*.md") if p.name != "STREAM.md"),
+            key=lambda n: (doc_order.get(n, 9), n))
+    return {"generated": now_iso(),
+            "hq": [msg_struct(p) for p in unread_messages(HQ)],
+            "todos": TODOS.read_text() if TODOS.is_file() else "",
+            "channels": [{"name": n, "subs": channel_subscribers(n)}
+                         for n in all_channels()],
+            "streams": rows}
+
+
+def serve_action(a: dict) -> dict:
+    """Web actions go through the same functions the CLI uses — the CLI stays
+    the only writer of structured state; this is just another caller."""
+    act = a.get("action", "")
+
+    def s(k):
+        return str(a.get(k, "") or "").strip()
+
+    if act == "msg":
+        to, text = s("to"), s("text")
+        if not text:
+            raise UserError("Empty message.")
+        chan = parse_channel_target(to)
+        if chan is not None:
+            mid = post_channel(chan, text, HQ)
+            woke = [sub for sub in channel_subscribers(chan) if sub != HQ and
+                    nudge_stream(sub, f"New message in ws channel #{chan} — "
+                                      f"run: ws inbox read") in ("idle", "busy", "alive")]
+            return {"ok": True, "note": f"posted to #{chan} [{mid}], nudged {len(woke)}"}
+        to = require_mailbox(to)
+        if to == HQ:
+            raise UserError("That's your own mailbox.")
+        kind = s("kind") or ("reply" if s("reply_to") else "fyi")
+        if kind not in MSG_KINDS:
+            raise UserError(f"Invalid kind `{kind}`.")
+        mid = write_message(to, text, HQ, kind=kind,
+                            sev="high" if s("sev") == "high" else "",
+                            reply_to=s("reply_to"),
+                            expect_reply=bool(a.get("expect_reply")))
+        if s("reply_to"):
+            mark_read(HQ, s("reply_to"))
+        out = nudge_stream(to, "You have a new ws inbox message — run: ws inbox read")
+        if out in ("dead", "none") and a.get("revive"):
+            try:
+                sess, _p, note = materialize_session(to, load_meta(to))
+                out = "already running" if note == "exists" else f"revived {sess}"
+            except UserError as e:
+                out = f"dead (revive failed: {e})"
+        return {"ok": True, "note": f"[{mid}] queued for {to}; wake: {out}"}
+
+    if act == "keys":
+        # Interactive attach: type into the stream's real pane. Literal text
+        # via -l; named keys only from a whitelist.
+        slug = require_mailbox(s("slug"))
+        meta = load_meta(slug)
+        pane, _n = ensure_pane(slug, meta)
+        if not pane or pane_state(pane) == "dead":
+            raise UserError(f"`{slug}` has no live pane — revive it first.")
+        keymap = {"Enter": "Enter", "Escape": "Escape", "Tab": "Tab",
+                  "BSpace": "BSpace", "Up": "Up", "Down": "Down",
+                  "Left": "Left", "Right": "Right", "PageUp": "PageUp",
+                  "PageDown": "PageDown", "C-c": "C-c", "C-d": "C-d"}
+        if s("key"):
+            if s("key") not in keymap:
+                raise UserError(f"Key `{s('key')}` not allowed.")
+            r = tmux("send-keys", "-t", pane, keymap[s("key")])
+        elif a.get("text"):
+            r = tmux("send-keys", "-t", pane, "-l", str(a["text"]))
+            if a.get("enter"):
+                tmux("send-keys", "-t", pane, "Enter")
+        else:
+            raise UserError("Nothing to send.")
+        if not r or r.returncode != 0:
+            raise UserError("send-keys failed — pane may have just died.")
+        return {"ok": True, "note": "sent"}
+
+    if act == "mark_read":
+        if not mark_read(HQ, s("id")):
+            raise UserError(f"No unread hq message {s('id')}.")
+        return {"ok": True, "note": "marked read"}
+
+    if act == "nudge":
+        slug = require_mailbox(s("slug"))
+        return {"ok": True, "note": f"wake: {nudge_stream(slug, 'HQ pinged you — run: ws inbox, ws status, and carry on')}"}
+
+    if act == "revive":
+        slug = require_mailbox(s("slug"))
+        sess, _p, note = materialize_session(slug, load_meta(slug))
+        return {"ok": True,
+                "note": f"session {sess} {'already running' if note == 'exists' else 'started'}"}
+
+    if act == "task_done":
+        slug = require_mailbox(s("slug"))
+        path = find_task(slug, s("id"))
+        meta, body = parse_doc(path.read_text())
+        meta["status"], meta["updated"] = "done", now_iso()
+        atomic_write(path, serialize_doc(meta, body, TASK_FM_KEYS))
+        update_meta(slug, {})
+        return {"ok": True, "note": f"{s('id')} done"}
+
+    if act == "log":
+        slug = require_mailbox(s("slug"))
+        if not s("text"):
+            raise UserError("Empty log entry.")
+        append_log(slug, s("text"))
+        return {"ok": True, "note": f"logged to {slug}"}
+
+    if act == "update":
+        slug = require_mailbox(s("slug"))
+        updates = {}
+        if s("status"):
+            if s("status") not in STREAM_STATUSES:
+                raise UserError(f"Invalid status `{s('status')}`.")
+            updates["status"] = s("status")
+        if s("next"):
+            updates["next"] = s("next")
+        if not updates:
+            raise UserError("Nothing to update.")
+        update_meta(slug, updates)
+        return {"ok": True, "note": f"{slug} updated"}
+
+    if act == "todo_toggle":
+        raw = str(a.get("line", ""))
+        if not raw.strip() or not TODOS.is_file():
+            raise UserError("No such to-do.")
+        lines = TODOS.read_text().split("\n")
+        for i, line in enumerate(lines):
+            if line == raw:
+                if "[ ]" in line:
+                    lines[i] = line.replace("[ ]", "[x]", 1)
+                elif "[x]" in line.lower():
+                    lines[i] = line.replace("[x]", "[ ]", 1).replace("[X]", "[ ]", 1)
+                else:
+                    raise UserError("That line is not a checkbox to-do.")
+                atomic_write(TODOS, "\n".join(lines))
+                return {"ok": True, "note": "to-do toggled"}
+        raise UserError("To-do not found — it changed on disk; refresh.")
+
+    if act == "sync":
+        def run(*cmd):
+            return subprocess.run(cmd, cwd=WS_ROOT, capture_output=True,
+                                  text=True, timeout=60)
+        run("git", "add", "-A")
+        c = run("git", "commit", "-m", f"ws sync {now_iso()}")
+        p = run("git", "push")
+        committed = "committed" if c.returncode == 0 else "nothing to commit"
+        pushed = "pushed" if p.returncode == 0 else "push failed"
+        return {"ok": True, "note": f"{committed}, {pushed}"}
+
+    raise UserError(f"Unknown action `{act}`.")
+
+
+def ws_read_frame(rfile):
+    """One RFC6455 frame → (opcode, payload) or None on EOF/close."""
+    hdr = rfile.read(2)
+    if len(hdr) < 2:
+        return None
+    opcode, b2 = hdr[0] & 0x0F, hdr[1]
+    ln = b2 & 0x7F
+    if ln == 126:
+        ln = int.from_bytes(rfile.read(2), "big")
+    elif ln == 127:
+        ln = int.from_bytes(rfile.read(8), "big")
+    mask = rfile.read(4) if b2 & 0x80 else b""
+    data = rfile.read(ln) if ln else b""
+    if mask and data:
+        data = bytes(c ^ mask[i % 4] for i, c in enumerate(data))
+    return opcode, data
+
+
+def ws_write_frame(wfile, lock, payload: bytes, opcode: int = 2) -> None:
+    ln = len(payload)
+    if ln < 126:
+        hdr = bytes([0x80 | opcode, ln])
+    elif ln < 65536:
+        hdr = bytes([0x80 | opcode, 126]) + ln.to_bytes(2, "big")
+    else:
+        hdr = bytes([0x80 | opcode, 127]) + ln.to_bytes(8, "big")
+    with lock:
+        wfile.write(hdr + payload)
+        wfile.flush()
+
+
+def serve_term_bridge(handler, slug: str) -> None:
+    """WebSocket ⇄ PTY running `tmux attach` — a real tmux client in the
+    browser. Auth already checked by the caller."""
+    import base64
+    import hashlib
+    import pty as pty_mod
+    import signal
+    import socket as socket_mod
+    import struct
+    import termios
+    import threading
+
+    def refuse(code: int, msg: str) -> None:
+        handler.send_response(code)
+        handler.send_header("Content-Type", "text/plain")
+        handler.send_header("Content-Length", str(len(msg)))
+        handler.end_headers()
+        handler.wfile.write(msg.encode())
+
+    if not stream_exists(slug):
+        return refuse(404, "no such stream")
+    pane, _n = ensure_pane(slug, load_meta(slug))
+    if not pane or pane_state(pane) == "dead":
+        return refuse(409, "no live pane — revive the stream first")
+    r = tmux("display-message", "-p", "-t", pane, "#{session_name}")
+    sess = r.stdout.strip() if r and r.returncode == 0 else ""
+    if not sess:
+        return refuse(409, "cannot resolve tmux session")
+    key = handler.headers.get("Sec-WebSocket-Key", "")
+    if not key or handler.headers.get("Upgrade", "").lower() != "websocket":
+        return refuse(400, "websocket upgrade required")
+
+    accept = base64.b64encode(hashlib.sha1(
+        (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+    handler.send_response(101)
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    handler.connection.settimeout(None)
+
+    pid, fd = pty_mod.fork()
+    if pid == 0:  # child: become a real tmux client
+        os.environ["TERM"] = "xterm-256color"
+        try:
+            os.execvp("tmux", ["tmux", "attach-session", "-t", sess])
+        finally:
+            os._exit(1)
+
+    wlock = threading.Lock()
+    stop = threading.Event()
+
+    def pump():  # pty → browser
+        try:
+            while not stop.is_set():
+                data = os.read(fd, 65536)
+                if not data:
+                    break
+                ws_write_frame(handler.wfile, wlock, data, opcode=2)
+        except OSError:
+            pass
+        finally:
+            stop.set()
+            try:
+                handler.connection.shutdown(socket_mod.SHUT_RDWR)
+            except OSError:
+                pass
+
+    threading.Thread(target=pump, daemon=True).start()
+    try:
+        while not stop.is_set():
+            fr = ws_read_frame(handler.rfile)
+            if fr is None:
+                break
+            op, data = fr
+            if op == 8:  # close
+                break
+            if op == 9:  # ping → pong
+                ws_write_frame(handler.wfile, wlock, data, opcode=10)
+                continue
+            if op in (1, 2) and data:
+                try:
+                    m = json.loads(data)
+                except ValueError:
+                    continue
+                if m.get("t") == "i":
+                    os.write(fd, str(m.get("d", "")).encode())
+                elif m.get("t") == "r":
+                    rows = max(4, min(500, int(m.get("rows", 24))))
+                    cols = max(10, min(1000, int(m.get("cols", 80))))
+                    fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                                struct.pack("HHHH", rows, cols, 0, 0))
+                    os.kill(pid, signal.SIGWINCH)
+    except (OSError, ValueError):
+        pass
+    finally:
+        stop.set()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.kill(pid, signal.SIGHUP)
+            os.waitpid(pid, 0)
+        except (OSError, ChildProcessError):
+            pass
+        handler.close_connection = True
+
+
+def cmd_serve(args) -> int:
+    import hmac as hmac_mod
+    import http.server
+    import urllib.parse
+
+    listen = args.listen or SERVE_DEFAULT_LISTEN
+    host, _, port_s = listen.partition(":")
+    port = int(port_s or "8791")
+    token = args.token or load_serve_token()
+
+    if args.install:
+        me = shutil.which("ws") or str(Path(__file__).resolve())
+        unit = Path.home() / ".config/systemd/user/ws-serve.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(f"""[Unit]
+Description=ws work-streams live web UI (loopback + token)
+
+[Service]
+Environment=WS_ROOT={WS_ROOT}
+ExecStart={me} serve --listen {listen}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+""")
+        print(f"Wrote {unit}")
+        print("Enable:  systemctl --user daemon-reload && "
+              "systemctl --user enable --now ws-serve")
+        print(f"URL:     http://{listen}/?token={token}")
+        print(f"Phone:   tailscale serve --bg http://127.0.0.1:{port}  "
+              "(HTTPS on your tailnet)")
+        return 0
+
+    tmpl_path = TEMPLATES / "serve.html"
+    if not tmpl_path.is_file():
+        raise UserError(f"Missing template {tmpl_path}.")
+    tmpl = tmpl_path.read_text()
+
+    vendor_dir = TEMPLATES / "vendor"
+    vendor_cache: dict[str, bytes] = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        server_version = f"ws/{WS_VERSION}"
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_a):
+            pass
+
+        def _authed(self) -> bool:
+            u = urllib.parse.urlparse(self.path)
+            cand = ""
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                cand = auth[7:].strip()
+            if not cand:
+                qs = urllib.parse.parse_qs(u.query)
+                cand = (qs.get("token") or [""])[0]
+            if not cand:
+                m = re.search(r"(?:^|;\s*)ws_token=([^;\s]+)",
+                              self.headers.get("Cookie", ""))
+                cand = m.group(1) if m else ""
+            return bool(cand) and hmac_mod.compare_digest(cand, token)
+
+        def _send(self, code: int, body, ctype="application/json", extra=None):
+            data = body if isinstance(body, bytes) else body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            if u.path.startswith("/vendor/"):
+                # Static vendored libs (xterm, marked): no vault data, no auth —
+                # subresource loads can't rely on the cookie being set yet.
+                name = u.path[len("/vendor/"):]
+                if "/" in name or name.startswith(".") or (
+                        name not in vendor_cache
+                        and not (vendor_dir / name).is_file()):
+                    self._send(404, '{"error": "not found"}')
+                    return
+                if name not in vendor_cache:
+                    vendor_cache[name] = (vendor_dir / name).read_bytes()
+                ctype = ("text/css" if name.endswith(".css")
+                         else "application/javascript")
+                self._send(200, vendor_cache[name], ctype,
+                           {"Cache-Control": "max-age=86400"})
+                return
+            if not self._authed():
+                self._send(401, "ws serve: missing/bad token — open the URL "
+                                "printed by `ws serve` (it carries ?token=…).",
+                           "text/plain; charset=utf-8")
+                return
+            if u.path == "/":
+                self._send(200, tmpl, "text/html; charset=utf-8",
+                           {"Set-Cookie": f"ws_token={token}; Path=/; "
+                                          f"HttpOnly; SameSite=Strict"})
+            elif u.path.startswith("/ws/term/"):
+                serve_term_bridge(self, urllib.parse.unquote(
+                    u.path[len("/ws/term/"):]))
+            elif u.path.startswith("/doc/"):
+                parts = u.path[len("/doc/"):].split("/")
+                slug = urllib.parse.unquote(parts[0]) if parts else ""
+                name = urllib.parse.unquote(parts[1]) if len(parts) == 2 else ""
+                if (not stream_exists(slug) or "/" in name or ".." in name
+                        or not name.endswith(".md")
+                        or not (stream_dir(slug) / name).is_file()):
+                    self._send(404, '{"error": "not found"}')
+                    return
+                raw = (stream_dir(slug) / name).read_text()
+                if (vendor_dir / "marked.js").is_file():
+                    md_json = json.dumps(raw).replace("</", "<\\/")
+                    body = (f"<div id='md'></div>"
+                            f"<script src='/vendor/marked.js'></script>"
+                            f"<script>document.getElementById('md').innerHTML="
+                            f"marked.parse({md_json},{{gfm:true}});</script>")
+                else:  # fallback: stdlib mini-renderer
+                    body = md_to_html_body(raw)
+                page = (
+                    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+                    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+                    f"<title>{html_mod.escape(slug)} — {html_mod.escape(name)}</title>"
+                    f"<style>{DOC_PAGE_CSS}{DOC_EXTRA_CSS}</style></head><body>"
+                    f"<div class='docmeta'>{html_mod.escape(slug)} / "
+                    f"{html_mod.escape(name)} · rendered live</div>"
+                    f"{body}</body></html>")
+                self._send(200, page, "text/html; charset=utf-8",
+                           {"Set-Cookie": f"ws_token={token}; Path=/; "
+                                          f"HttpOnly; SameSite=Strict"})
+            elif u.path == "/api/state":
+                self._send(200, json.dumps(
+                    serve_state(refresh_pr="gh=1" in (u.query or "")), default=str))
+            elif u.path.startswith("/api/pane/"):
+                slug = urllib.parse.unquote(u.path[len("/api/pane/"):])
+                if not stream_exists(slug):
+                    self._send(404, '{"error": "no such stream"}')
+                    return
+                pane, _n = ensure_pane(slug, load_meta(slug))
+                state = pane_state(pane) if pane else "dead"
+                text = ""
+                if pane and state != "dead":
+                    r = tmux("capture-pane", "-p", "-t", pane, "-S", "-120")
+                    if r and r.returncode == 0:
+                        text = r.stdout.rstrip()
+                self._send(200, json.dumps({"state": state, "text": text}))
+            elif u.path == "/api/events":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                last = ""
+                try:
+                    while True:
+                        d = vault_digest()
+                        payload = (f"data: {d}\n\n" if d != last else ": ping\n\n")
+                        last = d
+                        self.wfile.write(payload.encode())
+                        self.wfile.flush()
+                        time.sleep(2)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+            else:
+                self._send(404, '{"error": "not found"}')
+
+        def do_POST(self):
+            if not self._authed():
+                self._send(401, '{"error": "unauthorized"}')
+                return
+            if urllib.parse.urlparse(self.path).path != "/api/action":
+                self._send(404, '{"error": "not found"}')
+                return
+            try:
+                n = int(self.headers.get("Content-Length", "0") or 0)
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                res = serve_action(payload)
+                render_html_safe()
+                self._send(200, json.dumps(res))
+            except UserError as e:
+                self._send(400, json.dumps({"ok": False, "error": str(e)}))
+            except Exception as e:  # pragma: no cover — surface, don't die
+                self._send(500, json.dumps(
+                    {"ok": False, "error": f"{type(e).__name__}: {e}"}))
+
+    class Server(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+
+    srv = Server((host, port), Handler)
+    print(f"ws serve — http://{host}:{port}/?token={token}")
+    print(f"token file: {serve_token_path()} · systemd: ws serve --install")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    issues = []
+    # Zombie sessions: a pane whose cwd was deleted from under it (removed
+    # worktree). Shells there fail with getcwd errors on attach/resume.
+    r = tmux("list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}")
+    if r and r.returncode == 0:
+        flagged = set()
+        for line in r.stdout.splitlines():
+            sess, _, path = line.partition("\t")
+            path = path.replace(" (deleted)", "").strip()
+            if path and sess not in flagged and not Path(path).is_dir():
+                flagged.add(sess)
+                issues.append(f"tmux session `{sess}`: its directory {path} no "
+                              f"longer exists (deleted worktree?) — "
+                              f"`tmux kill-session -t {sess}` unless you need it")
+    slugs = all_slugs()
+    for slug in slugs:
+        meta = load_meta(slug)
+        live = meta.get("status") in ("active", "blocked", "review")
+        if live and meta.get("kind") == "agent":
+            wt = meta.get("worktree", "")
+            if wt and not Path(wt).is_dir():
+                issues.append(f"{slug}: recorded worktree {wt} no longer exists "
+                              f"— re-register from the new location, or "
+                              f"`ws done/update --status parked` if finished")
+        pane = meta.get("tmux_pane", "")
+        if live and meta.get("kind") == "agent" and pane and not pane_alive(pane):
+            found, _ = discover_pane(meta.get("worktree", ""), meta.get("harness", ""))
+            if not found:
+                issues.append(f"{slug}: recorded pane {pane} is dead, no live "
+                              f"replacement — `ws resume {slug}` (wake-channel rot)")
+        n = len(unread_messages(slug))
+        if n and (not pane or not pane_alive(pane)):
+            oldest = min(unread_messages(slug))
+            issues.append(f"{slug}: {n} unread message(s) with no live session "
+                          f"(oldest {oldest.stem}) — delivery is starved")
+        for p in pending_replies(slug):
+            m, _ = parse_doc(p.read_text())
+            dt = parse_iso(m.get("created", ""))
+            if dt and (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+                       ).total_seconds() > 24 * 3600:
+                issues.append(f"{slug}: owes `{m.get('from')}` a reply for >24h "
+                              f"[{p.stem}]")
+        cursors = get_cursors(meta)
+        for name in subscribed_channels(meta):
+            if not channel_file(name).is_file():
+                issues.append(f"{slug}: subscribes to missing channel #{name} — "
+                              f"`ws chan leave {name} --stream {slug}`")
+            elif cursors.get(name, 0) > len(channel_file(name).read_text()):
+                issues.append(f"{slug}: #{name} cursor is past end-of-file "
+                              f"(channel rewritten?) — will self-heal to 0 on "
+                              f"next delivery")
+    if INBOX.is_dir():
+        for d in INBOX.iterdir():
+            if d.is_dir() and d.name != HQ and d.name not in slugs:
+                issues.append(f"inbox/{d.name}: mailbox for unknown stream "
+                              f"({len(list(d.glob('*.md')))} unread) — stale dir?")
+    r = tmux("list-sessions", "-F", "#{session_name}")
+    if r and r.returncode == 0:
+        for sess in r.stdout.splitlines():
+            if sess.startswith("ws-") and not session_has_harness(sess):
+                issues.append(f"tmux `{sess}`: ws session with no harness running "
+                              f"— orphaned; `tmux kill-session -t {sess}`")
+    if issues:
+        print(f"ws doctor — {len(issues)} issue(s):")
+        for i in issues:
+            print(f"  ✗ {i}")
+        return 1
+    print("ws doctor — all clear: panes honest, mail flowing, no orphans.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# help
+# ---------------------------------------------------------------------------
+
+HELP = """ws — work-stream registry for humans and coding agents
+
+Data root: $WS_ROOT (default ~/streams). Streams live in streams/<slug>/
+(STREAM.md state + VISION.md why + LOG.md history + tasks/), messages in
+inbox/<slug>/, loose to-dos in todos.md, dashboard in index.html.
+
+WHEN TO REGISTER  Register a stream when the work will outlive this session
+or span multiple PRs. Skip registration for quick one-offs.
+
+EVERYDAY COMMANDS (slug inferred from cwd inside a registered worktree)
+  ws register [slug]            Register/refresh the current directory as a
+                                stream (captures worktree, branch, session,
+                                tmux pane). Idempotent. Then write VISION.md.
+  ws log "text"                 Append a dated progress/decision note (use -
+                                to read stdin for multi-line).
+  ws update --status S --next "..." --note "..."
+                                Update state. Statuses: active blocked review
+                                parked done. --note also logs.
+  ws task add "title"           Add a milestone task (ids t1, t2, ...).
+  ws task list                  List tasks.
+  ws task done t2               Complete a task.
+  ws task update t3 --status blocked --owner name --note "..."
+  ws inbox [read]               List unread messages / read + mark read.
+  ws doc [--open]               Scaffold/set the stream's working doc (DOC.md)
+                                — the living deep-dive linked from the
+                                dashboard; --open renders + opens it.
+  ws pr add <#num|url> [slug]   Track a PR on the stream (dedupes; run it when
+                                you open a PR). `ws update --pr` is an alias.
+  ws pr rm <#num> / ws pr list  Untrack / list with live state+CI via gh.
+                                Open PRs on the worktree branch are also
+                                auto-captured at register/update time.
+  ws prs [--all|--md|--json]    Every PR across in-flight streams with live
+                                state+CI+title (merged/closed hidden unless
+                                --all; --md prints a pasteable checklist).
+
+COORDINATION
+  ws msg <to> "text"            Message a stream, `hq` (the human's mailbox),
+                                or a `#channel`. Queues in the inbox and nudges
+                                the tmux pane if alive; --revive restarts a
+                                dead session so the message lands on boot.
+                                Envelope: --kind fyi|question|decision|review|
+                                reply, --sev high, --reply-to <id>. Ask-and-
+                                wait: --expect-reply (recipient can't idle
+                                until it answers) and --wait [secs] (block for
+                                the reply). --no-wake / --from as before.
+  ws inbox [read] [--stream S]  List/read a mailbox (read marks read and shows
+                                channel activity + replies you owe). Agents:
+                                reply with ws msg <sender> --reply-to <id>.
+  ws chan list|join|leave|history <name>
+                                Channels: append-only logs any stream can
+                                subscribe to (frontmatter `channels:`); posts
+                                fan in via the same hook delivery. Joining
+                                subscribes to NEW traffic only.
+  ws status [--json|--all|--no-gh]   Table of every stream: status, tasks,
+                                PR (live via gh), pane state (dead/idle/busy —
+                                idle means a wake nudge reaches it immediately),
+                                staleness.
+  ws admin [--model M] [--prompt "..."] [--dry-run] [-- extra-claude-args]
+                                Launch the HQ manager session (claude with
+                                permissions skipped) inside the vault.
+  ws brief                      Full dump of everything in flight (todos,
+                                streams, visions, tasks, unread, log tails)
+                                — feed this to a manager agent.
+  ws resume <slug> [--exec|--print] [-- extra-args]
+                                Get back into a stream. Live pane -> attach.
+                                Otherwise CREATES a detached tmux session
+                                (ws-<slug>) in the stream's home (worktree, or
+                                the stream dir for manual streams) running the
+                                right resume rung (claude --resume/--continue,
+                                codex resume --last, fresh), records the pane,
+                                and attaches when on a TTY. --print = only
+                                show instructions; -- passes extra harness args.
+  ws spawn <slug> [--harness claude|codex] [--dir D]
+                                Start a harness for a stream in a new tmux
+                                session (ws-<slug>).
+
+HOUSEKEEPING
+  ws add <slug> --title "..."   Track manual (non-agent) work as a stream.
+  ws todo "text"                Append a loose personal to-do.
+  ws done <slug>                Mark a stream done.
+  ws open                       Open the dashboard (index.html) in a browser.
+  ws html                       Regenerate index.html (also runs after every
+                                mutation).
+  ws init                       Create the data vault at $WS_ROOT (idempotent).
+  ws setup                      Wire up this machine: ~/.local/bin/ws launcher,
+                                Codex skill link, vault init (idempotent).
+  ws sync                       git add/commit/push the registry (best-effort).
+  ws mcp                        Run the stdio MCP server: ws_status/ws_brief/
+                                ws_send/ws_inbox/ws_log/ws_update tools for
+                                any MCP-capable harness; every result carries
+                                an unread-mail banner.
+  ws watchdog [--revive]        Cron-able caretaker: nudges idle panes with
+                                mail, optionally revives dead sessions that
+                                have mail waiting, escalates the rest to hq
+                                (at most once/24h per stream). --install
+                                prints the crontab line.
+  ws up [slug…]                 Boot recovery: restart every in-flight agent
+                                stream's tmux session (skips manual/parked/
+                                done). --dry-run previews; --install prints
+                                the @reboot crontab line.
+  ws serve                      Live web UI (loopback+token): dashboard with
+                                SSE push, read-only terminal tails, and
+                                actions (message/nudge/revive/tasks/log/sync)
+                                through the same code paths as the CLI.
+                                --install writes the systemd user unit.
+  ws doctor                     Diagnose wake-channel rot: dead recorded
+                                panes, starved mailboxes, overdue replies,
+                                orphaned ws-* tmux sessions.
+  ws hook <event>               Internal: called by the harness hooks.
+
+MAIL  Every ws command first prints a banner if your stream has unread inbox
+mail — on harnesses without hooks (plain Codex), that banner IS delivery:
+when you see it, run `ws inbox read` and act on the messages.
+
+CONVENTIONS
+  VISION.md = why the stream exists, north star, constraints. Write once at
+  registration, update only on direction changes.  DOC.md (via `ws doc`) =
+  the living deep-dive of what's in flight and how it fits together — keep it
+  current on substantial streams; it renders to HTML on the dashboard.
+  LOG.md = dated milestones and decisions, via `ws log` (not turn-by-turn
+  narration).  Tasks are stream-level milestones, not an agent's internal
+  micro-checklist.  Keep `next` honest: one sentence a fresh agent could act
+  on.
+"""
+
+
+def cmd_help(args) -> int:
+    print(HELP)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# argparse wiring
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="ws", add_help=True,
+                                description="Work-stream registry. `ws help` for the full reference.")
+    sub = p.add_subparsers(dest="cmd")
+
+    sp = sub.add_parser("register", help="register/refresh cwd as a stream")
+    sp.add_argument("slug", nargs="?")
+    sp.add_argument("--title")
+    sp.add_argument("--session-id", dest="session_id")
+    sp.add_argument("--harness", choices=["claude", "codex", "gemini"])
+    sp.add_argument("--pane", help=argparse.SUPPRESS)
+    sp.add_argument("--doc", help="stream doc path (relative to the stream dir, or absolute)")
+    sp.set_defaults(fn=cmd_register)
+
+    sp = sub.add_parser("add", help="add a manual (non-agent) stream")
+    sp.add_argument("slug")
+    sp.add_argument("--title")
+    sp.add_argument("--next")
+    sp.set_defaults(fn=cmd_add)
+
+    sp = sub.add_parser("todo", help="append a loose to-do")
+    sp.add_argument("text")
+    sp.set_defaults(fn=cmd_todo)
+
+    sp = sub.add_parser("update", help="update stream state")
+    sp.add_argument("slug", nargs="?")
+    sp.add_argument("--status")  # validated in cmd_update for a teaching error
+    sp.add_argument("--next")
+    sp.add_argument("--note")
+    sp.add_argument("--title")
+    sp.add_argument("--pr")
+    sp.add_argument("--doc", help="stream doc path (relative to the stream dir, or absolute)")
+    sp.add_argument("--kind", choices=["agent", "manual"], dest="stream_kind",
+                    help="flip between agent-driven and manual")
+    sp.add_argument("--worktree", help="re-home the stream (repair a wrong/stale path)")
+    sp.add_argument("--session-id", dest="session_id",
+                    help="relink the harness session (empty string clears it)")
+    sp.add_argument("--pane", help="relink the tmux pane id (empty string clears it)")
+    sp.set_defaults(fn=cmd_update)
+
+    sp = sub.add_parser("log", help="append a dated log entry")
+    sp.add_argument("slug_or_text", nargs="?")
+    sp.add_argument("maybe_text", nargs="?")
+    sp.set_defaults(fn=None)  # resolved in main (slug optional + positional text)
+
+    sp = sub.add_parser("task", help="manage stream tasks")
+    tsub = sp.add_subparsers(dest="task_cmd")
+    t = tsub.add_parser("add")
+    t.add_argument("title")
+    t.add_argument("--stream")
+    t.add_argument("--owner")
+    t = tsub.add_parser("list")
+    t.add_argument("--stream")
+    t = tsub.add_parser("done")
+    t.add_argument("id")
+    t.add_argument("--stream")
+    t = tsub.add_parser("update")
+    t.add_argument("id")
+    t.add_argument("--stream")
+    t.add_argument("--status")
+    t.add_argument("--owner")
+    t.add_argument("--note")
+    t.add_argument("--title", dest="title_new")
+    sp.set_defaults(fn=cmd_task)
+
+    sp = sub.add_parser("pr", help="track the stream's PRs")
+    prsub = sp.add_subparsers(dest="pr_cmd")
+    t = prsub.add_parser("add")
+    t.add_argument("ref")
+    t.add_argument("slug", nargs="?")
+    t = prsub.add_parser("rm")
+    t.add_argument("ref")
+    t.add_argument("slug", nargs="?")
+    t = prsub.add_parser("list")
+    t.add_argument("slug", nargs="?")
+    sp.set_defaults(fn=cmd_pr)
+
+    sp = sub.add_parser("msg", help="message a stream, hq, or a #channel (+ tmux wake)")
+    sp.add_argument("slug", help="stream slug, `hq`, or `#channel`")
+    sp.add_argument("text", nargs="?")
+    sp.add_argument("--from", dest="sender")
+    sp.add_argument("--no-wake", action="store_true")
+    sp.add_argument("--kind", choices=list(MSG_KINDS))
+    sp.add_argument("--sev", choices=["high"])
+    sp.add_argument("--reply-to", dest="reply_to", metavar="MSG_ID")
+    sp.add_argument("--expect-reply", dest="expect_reply", action="store_true",
+                    help="recipient's Stop hook blocks idling until it replies")
+    sp.add_argument("--wait", nargs="?", const=600, type=int, metavar="SECS",
+                    help="block until the reply arrives (default 600s)")
+    sp.add_argument("--revive", action="store_true",
+                    help="if the stream's session is dead, restart it so the "
+                         "message is delivered on boot")
+    sp.set_defaults(fn=cmd_msg)
+
+    sp = sub.add_parser("inbox", help="list/read this stream's inbox")
+    sp.add_argument("inbox_cmd", nargs="?", choices=["read"])
+    sp.add_argument("--stream")
+    sp.set_defaults(fn=cmd_inbox)
+
+    sp = sub.add_parser("chan", help="channels: list/join/leave/history")
+    csub = sp.add_subparsers(dest="chan_cmd")
+    t = csub.add_parser("list")
+    for name in ("join", "leave"):
+        t = csub.add_parser(name)
+        t.add_argument("name")
+        t.add_argument("--stream")
+    t = csub.add_parser("history")
+    t.add_argument("name")
+    t.add_argument("--tail", type=int, default=0, help="last N lines only")
+    sp.set_defaults(fn=cmd_chan)
+
+    sp = sub.add_parser("status", help="table of all streams")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--all", action="store_true")
+    sp.add_argument("--no-gh", action="store_true")
+    sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("prs", help="all PRs across in-flight streams (open by default)")
+    sp.add_argument("--all", action="store_true",
+                    help="include merged/closed PRs and done streams")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--md", action="store_true", help="markdown checklist for pasting")
+    sp.add_argument("--no-gh", action="store_true",
+                    help="skip gh; show last-known states")
+    sp.set_defaults(fn=cmd_prs)
+
+    sp = sub.add_parser("brief", help="full dump for agent ingestion")
+    sp.add_argument("--no-gh", action="store_true")
+    sp.set_defaults(fn=cmd_brief)
+
+    sp = sub.add_parser("resume", help="get back into a stream (creates the session if needed)")
+    sp.add_argument("slug")
+    sp.add_argument("--exec", dest="exec_", action="store_true")
+    sp.add_argument("--print", dest="print_", action="store_true",
+                    help="only print how to resume; create/attach nothing")
+    sp.add_argument("passthrough", nargs=argparse.REMAINDER,
+                    help="extra args appended to the harness command (prefix with --)")
+    sp.set_defaults(fn=cmd_resume)
+
+    sp = sub.add_parser("spawn", help="start a harness for a stream in tmux")
+    sp.add_argument("slug")
+    sp.add_argument("--harness", choices=["claude", "codex", "gemini"], default="claude")
+    sp.add_argument("--dir")
+    sp.set_defaults(fn=cmd_spawn)
+
+    sp = sub.add_parser("done", help="mark a stream done")
+    sp.add_argument("slug")
+    sp.set_defaults(fn=cmd_done)
+
+    sp = sub.add_parser("open", help="open the dashboard in a browser")
+    sp.set_defaults(fn=cmd_open)
+
+    sp = sub.add_parser("doc", help="scaffold/set/open the stream's working doc")
+    sp.add_argument("slug", nargs="?")
+    sp.add_argument("--open", action="store_true")
+    sp.set_defaults(fn=cmd_doc)
+
+    sp = sub.add_parser("admin", help="launch the HQ manager session in the vault")
+    sp.add_argument("--model")
+    sp.add_argument("--prompt")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true")
+    sp.add_argument("passthrough", nargs=argparse.REMAINDER,
+                    help="extra args passed to claude verbatim (prefix with --)")
+    sp.set_defaults(fn=cmd_admin)
+
+    sp = sub.add_parser("_classify")  # internal/test: stdin capture -> state
+    sp.set_defaults(fn=cmd_classify)
+
+    sp = sub.add_parser("_match")  # internal/test: stdin pane list -> pane
+    sp.add_argument("worktree")
+    sp.add_argument("--prefer", default="")
+    sp.add_argument("--harness-map", dest="harness_map", default="")
+    sp.set_defaults(fn=cmd_match)
+
+    sp = sub.add_parser("html", help="regenerate index.html")
+    sp.set_defaults(fn=cmd_html)
+
+    sp = sub.add_parser("init", help="create the data vault at $WS_ROOT")
+    sp.set_defaults(fn=cmd_init)
+
+    sp = sub.add_parser("setup", help="wire up this machine (launcher, Codex, vault)")
+    sp.add_argument("--bin-dir")
+    sp.add_argument("--codex-skills-dir")
+    sp.add_argument("--skip-init", action="store_true")
+    sp.set_defaults(fn=cmd_setup)
+
+    sp = sub.add_parser("sync", help="git add/commit/push the registry")
+    sp.set_defaults(fn=cmd_sync)
+
+    sp = sub.add_parser("mcp", help="run the stdio MCP server (harness-agnostic)")
+    sp.set_defaults(fn=cmd_mcp)
+
+    sp = sub.add_parser("watchdog", help="cron-able caretaker: nudge/revive/escalate")
+    sp.add_argument("--revive", action="store_true",
+                    help="restart dead sessions that have waiting mail")
+    sp.add_argument("--quiet", action="store_true")
+    sp.add_argument("--install", action="store_true",
+                    help="print the crontab line to run this every 15 minutes")
+    sp.set_defaults(fn=cmd_watchdog)
+
+    sp = sub.add_parser("up", help="boot recovery: restart every in-flight agent stream's session")
+    sp.add_argument("slugs", nargs="*", help="specific streams (default: all in flight)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="show what would start without starting it")
+    sp.add_argument("--quiet", action="store_true")
+    sp.add_argument("--install", action="store_true",
+                    help="print the @reboot crontab line")
+    sp.set_defaults(fn=cmd_up)
+
+    sp = sub.add_parser("serve", help="live web UI: dashboard + terminals + actions (loopback+token)")
+    sp.add_argument("--listen", default=None, metavar="HOST:PORT",
+                    help=f"bind address (default {SERVE_DEFAULT_LISTEN})")
+    sp.add_argument("--token", default=None,
+                    help="auth token (default: persisted in ~/.local/state/ws/serve-token)")
+    sp.add_argument("--install", action="store_true",
+                    help="write the systemd user unit and print enable instructions")
+    sp.set_defaults(fn=cmd_serve)
+
+    sp = sub.add_parser("doctor", help="diagnose wake-channel rot and mailbox issues")
+    sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("hook", help="internal: harness hook handler")
+    sp.add_argument("event", choices=["session-start", "user-prompt-submit",
+                                      "post-tool-use", "stop"])
+    sp.set_defaults(fn=cmd_hook)
+
+    sp = sub.add_parser("help", help="full reference")
+    sp.set_defaults(fn=cmd_help)
+    return p
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.cmd:
+        parser.print_help()
+        return 1
+    if args.cmd == "log":
+        # `ws log "text"` (slug from cwd) or `ws log <slug> "text"` or `ws log -`
+        a, b = args.slug_or_text, args.maybe_text
+        if b is not None:
+            args.slug, args.text = a, b
+        else:
+            args.slug, args.text = None, a
+        args.fn = cmd_log
+    if args.cmd == "task":
+        if not getattr(args, "task_cmd", None):
+            print("Usage: ws task add|list|done|update … (see `ws help`)", file=sys.stderr)
+            return 1
+        args.stream = getattr(args, "stream", None)
+    # Universal mail banner: any harness that runs ANY ws command learns about
+    # unread inbox mail for its stream — the delivery channel for hook-less
+    # harnesses. Hooks/inbox/help are exempt (hooks deliver themselves; inbox
+    # is the reader; help/init/setup have no stream context).
+    if args.cmd not in ("hook", "inbox", "help", "init", "setup", "msg", "admin",
+                        "_classify", "_match", "mcp", "serve"):
+        try:
+            slug = hook_mailbox_for(os.getcwd())
+            if slug:
+                n = len(unread_messages(slug))
+                chan = has_channel_pending(slug) if slug != HQ else False
+                owed = len(pending_replies(slug)) if slug != HQ else 0
+                bits = []
+                if n:
+                    bits.append(f"{n} unread message(s)")
+                if chan:
+                    bits.append("new channel activity")
+                if owed:
+                    bits.append(f"{owed} owed reply(ies)")
+                if bits:
+                    print(f"📬 ws: {', '.join(bits)} for `{slug}` — "
+                          f"run `ws inbox read` and act on them.")
+        except Exception:
+            pass
+    try:
+        return args.fn(args)
+    except UserError as e:
+        print(f"ws: {e}", file=sys.stderr)
+        return 1
+    except BrokenPipeError:
+        return 0
+    except Exception as e:  # internal error
+        print(f"ws: internal error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# hive launcher — resolves the plugin lib and dispatches to the python CLI.
+set -euo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+PLUGIN_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+export PYTHONPATH="$PLUGIN_DIR/lib${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m hive.cli "$@"

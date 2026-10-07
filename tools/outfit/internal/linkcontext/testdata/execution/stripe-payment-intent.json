@@ -1,0 +1,16 @@
+{
+  "id": "pi_123",
+  "object": "payment_intent",
+  "amount": 4200,
+  "currency": "usd",
+  "customer": "cus_enterprise",
+  "description": "Enterprise renewal",
+  "status": "requires_payment_method",
+  "last_payment_error": {
+    "code": "card_declined",
+    "decline_code": "insufficient_funds",
+    "message": "The card was declined because the account has insufficient funds."
+  },
+  "created": 1787620000,
+  "livemode": false
+}

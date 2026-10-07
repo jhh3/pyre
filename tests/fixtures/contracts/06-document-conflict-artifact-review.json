@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "name": "document-conflict-artifact-review",
+  "description": "Two sessions edit the brief from revision 1; one commits revision 2, the other gets a conflict with its proposal preserved. An artifact has two immutable versions; a comment stays on version 1.",
+  "synthetic": true,
+  "requirements": [
+    "R05",
+    "R06"
+  ],
+  "cases": [
+    "A08",
+    "A09"
+  ],
+  "projects": [
+    {
+      "project_id": "prj_synth-outfit",
+      "name": "Synthetic Outfit",
+      "brief_document_id": "doc_synth-brief",
+      "repos": [],
+      "checkouts": [],
+      "archived": false,
+      "version": 1,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T03:40:00Z",
+      "updated_at": "2026-10-04T03:40:00Z"
+    }
+  ],
+  "documents": [
+    {
+      "document_id": "doc_synth-brief",
+      "project_id": "prj_synth-outfit",
+      "title": "Brief",
+      "slug": "brief",
+      "media_type": "text/markdown",
+      "head_revision_id": "rev_synth-brief-2",
+      "head_seq": 2,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T03:40:00Z",
+      "updated_at": "2026-10-04T11:58:00Z"
+    }
+  ],
+  "revisions": [
+    {
+      "revision_id": "rev_synth-brief-1",
+      "document_id": "doc_synth-brief",
+      "seq": 1,
+      "digest": "sha256:f1cf94508b5111e216810fbf65afc15a73ef4949af1cbd895ef21b632543e4bf",
+      "size": 18,
+      "author": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T03:40:00Z",
+      "content": "# Brief\n\nGoal: X.\n"
+    },
+    {
+      "revision_id": "rev_synth-brief-2",
+      "document_id": "doc_synth-brief",
+      "seq": 2,
+      "parent_revision_id": "rev_synth-brief-1",
+      "digest": "sha256:47dce5bc902e7d7fd55822367d7fa700c741d84d551999e28fecd2e95f391849",
+      "size": 47,
+      "author": {
+        "kind": "session",
+        "id": "ses_synth-a"
+      },
+      "created_at": "2026-10-04T11:58:00Z",
+      "summary": "add constraint",
+      "content": "# Brief\n\nGoal: X.\nConstraint: keep API stable.\n"
+    }
+  ],
+  "proposals": [
+    {
+      "proposal_id": "prp_synth-bob-1",
+      "document_id": "doc_synth-brief",
+      "base_revision_id": "rev_synth-brief-1",
+      "content": "# Brief\n\nGoal: X and Y.\n",
+      "author": {
+        "kind": "session",
+        "id": "ses_synth-b"
+      },
+      "created_at": "2026-10-04T11:59:00Z",
+      "state": "conflicted",
+      "head_at_conflict": "rev_synth-brief-2"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "art_synth-report",
+      "project_id": "prj_synth-outfit",
+      "session_id": "ses_synth-b",
+      "title": "Synthetic test report",
+      "latest_version_id": "ver_synth-report-2",
+      "version_count": 2,
+      "created_by": {
+        "kind": "session",
+        "id": "ses_synth-b"
+      },
+      "created_at": "2026-10-04T11:40:00Z",
+      "updated_at": "2026-10-04T11:55:00Z"
+    }
+  ],
+  "versions": [
+    {
+      "version_id": "ver_synth-report-1",
+      "artifact_id": "art_synth-report",
+      "seq": 1,
+      "digest": "sha256:7e6d3d270d85a569bd48ab1fbfc0358d841b2936c4b8da7010842513b262dcdd",
+      "size": 36,
+      "media_type": "text/markdown",
+      "filename": "report.md",
+      "author": {
+        "kind": "session",
+        "id": "ses_synth-b"
+      },
+      "provenance": {
+        "session_id": "ses_synth-b",
+        "run_id": "run_synth-b-1",
+        "node_id": "node_synth-linux",
+        "project_id": "prj_synth-outfit"
+      },
+      "created_at": "2026-10-04T11:40:00Z",
+      "content_url": "/v1/content/ver_synth-report-1"
+    },
+    {
+      "version_id": "ver_synth-report-2",
+      "artifact_id": "art_synth-report",
+      "seq": 2,
+      "previous_version_id": "ver_synth-report-1",
+      "digest": "sha256:11299da1890730113990a8180c4b0518004a32ec93e693b2708754f36082387d",
+      "size": 45,
+      "media_type": "text/html",
+      "filename": "report.html",
+      "author": {
+        "kind": "session",
+        "id": "ses_synth-b"
+      },
+      "provenance": {
+        "session_id": "ses_synth-b",
+        "run_id": "run_synth-b-1",
+        "node_id": "node_synth-linux",
+        "project_id": "prj_synth-outfit"
+      },
+      "created_at": "2026-10-04T11:55:00Z",
+      "content_url": "/v1/content/ver_synth-report-2",
+      "preview_url": "/preview/ver_synth-report-2/{token}"
+    }
+  ],
+  "comments": [
+    {
+      "comment_id": "cmt_synth-1",
+      "target": {
+        "kind": "artifact_version",
+        "id": "ver_synth-report-1"
+      },
+      "anchor": {
+        "kind": "line",
+        "value": "3"
+      },
+      "author": {
+        "kind": "owner",
+        "id": "cli_synth-android",
+        "name": "owner phone (synthetic)"
+      },
+      "body": "Synthetic: include the failure count.",
+      "mentions": [
+        "ses_synth-b"
+      ],
+      "resolved": false,
+      "created_at": "2026-10-04T11:45:00Z",
+      "updated_at": "2026-10-04T11:45:00Z",
+      "project_id": "prj_synth-outfit"
+    }
+  ],
+  "attention": [
+    {
+      "attention_id": "att_synth-review",
+      "kind": "review_ready",
+      "severity": "normal",
+      "group_key": "review:art_synth-report",
+      "object": {
+        "kind": "artifact_version",
+        "id": "ver_synth-report-2"
+      },
+      "project_id": "prj_synth-outfit",
+      "title": "Synthetic test report v2 ready for review",
+      "state": "open",
+      "count": 2,
+      "created_at": "2026-10-04T11:40:00Z",
+      "updated_at": "2026-10-04T11:55:00Z",
+      "deep_link": "pyre://artifact_version/ver_synth-report-2"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "stale propose",
+      "op": "documents.propose",
+      "principal": {
+        "kind": "session",
+        "id": "ses_synth-b"
+      },
+      "request": {
+        "operation_id": "op_synth-prop-bob",
+        "document_id": "doc_synth-brief",
+        "base_revision_id": "rev_synth-brief-1",
+        "content": "# Brief\n\nGoal: X and Y.\n"
+      },
+      "error": {
+        "code": "conflict",
+        "message": "document head moved",
+        "retryable": false,
+        "ref": {
+          "kind": "document",
+          "id": "doc_synth-brief"
+        },
+        "details": {
+          "current_head": "rev_synth-brief-2",
+          "proposal_id": "prp_synth-bob-1"
+        }
+      }
+    },
+    {
+      "name": "finalize with wrong digest",
+      "op": "artifacts.finalize",
+      "principal": {
+        "kind": "session",
+        "id": "ses_synth-b"
+      },
+      "request": {
+        "operation_id": "op_synth-fin-bad",
+        "upload_id": "upl_synth-bad"
+      },
+      "error": {
+        "code": "conflict",
+        "message": "uploaded bytes do not match declared sha256; nothing was published",
+        "retryable": false,
+        "ref": {
+          "kind": "upload",
+          "id": "upl_synth-bad"
+        }
+      }
+    }
+  ],
+  "contents": {
+    "ver_synth-report-1": "# Report\n\nAll synthetic tests pass.\n",
+    "ver_synth-report-2": "\u003ch1\u003eReport\u003c/h1\u003e\u003cscript\u003e/*sandboxed*/\u003c/script\u003e"
+  }
+}

@@ -1,0 +1,148 @@
+package supervisor
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// Alive reports whether a process with pid exists (it may belong to another
+// user, in which case signalling is not permitted but it is alive).
+func Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// Proc is one row of the process table.
+type Proc struct {
+	PID    int
+	PPID   int
+	RSSKB  int64
+	CPUPct float64
+}
+
+// ProcessTable returns a snapshot of all processes (one bounded `ps`
+// invocation; works on macOS and Linux).
+func ProcessTable(ctx context.Context) (map[int]Proc, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,rss=,pcpu=")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return parsePS(out.Bytes()), nil
+}
+
+func parsePS(b []byte) map[int]Proc {
+	m := map[int]Proc{}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) < 4 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(f[0])
+		ppid, err2 := strconv.Atoi(f[1])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		rss, _ := strconv.ParseInt(f[2], 10, 64)
+		cpu, _ := strconv.ParseFloat(strings.Replace(f[3], ",", ".", 1), 64)
+		m[pid] = Proc{PID: pid, PPID: ppid, RSSKB: rss, CPUPct: cpu}
+	}
+	return m
+}
+
+// TreeUsage sums RSS and CPU over roots and all their descendants. Each
+// process is counted once even if roots overlap.
+func TreeUsage(table map[int]Proc, roots []int) (rssKB int64, cpuPct float64, count int) {
+	children := map[int][]int{}
+	for _, p := range table {
+		children[p.PPID] = append(children[p.PPID], p.PID)
+	}
+	seen := map[int]bool{}
+	stack := append([]int(nil), roots...)
+	for len(stack) > 0 {
+		pid := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		if p, ok := table[pid]; ok {
+			rssKB += p.RSSKB
+			cpuPct += p.CPUPct
+			count++
+		}
+		stack = append(stack, children[pid]...)
+	}
+	return rssKB, cpuPct, count
+}
+
+// SelfSampler measures the daemon's own CPU (getrusage deltas over wall
+// time) and RSS. It is cheap and safe to call every heartbeat.
+type SelfSampler struct {
+	mu      sync.Mutex
+	lastAt  time.Time
+	lastCPU time.Duration
+}
+
+func cpuTime() time.Duration {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return 0
+	}
+	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
+}
+
+// Sample returns RSS in MB and CPU percent (of one core) since the previous
+// call (0 on the first call).
+func (s *SelfSampler) Sample(ctx context.Context) (rssMB float64, cpuPct float64) {
+	s.mu.Lock()
+	now := time.Now()
+	cpu := cpuTime()
+	if !s.lastAt.IsZero() {
+		wall := now.Sub(s.lastAt)
+		if wall > 0 {
+			cpuPct = float64(cpu-s.lastCPU) / float64(wall) * 100
+		}
+	}
+	s.lastAt, s.lastCPU = now, cpu
+	s.mu.Unlock()
+	return SelfRSSMB(ctx), cpuPct
+}
+
+// SelfRSSMB returns the current resident set size of this process in MB.
+func SelfRSSMB(ctx context.Context) float64 {
+	if runtime.GOOS == "linux" {
+		if b, err := os.ReadFile("/proc/self/statm"); err == nil {
+			f := strings.Fields(string(b))
+			if len(f) >= 2 {
+				pages, _ := strconv.ParseInt(f[1], 10, 64)
+				return float64(pages*int64(os.Getpagesize())) / (1 << 20)
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		return 0
+	}
+	kb, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	return float64(kb) / 1024
+}

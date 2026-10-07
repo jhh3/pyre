@@ -1,0 +1,57 @@
+{
+  "description": "hive hooks (Codex): memory digest + stream context at session start, ledger heartbeat + inbox delivery mid-turn. No Stop entry — the user-level ~/.codex/hooks.json Stop (ws stop gate + agent-notify-codex) stays authoritative to keep its trusted hash and notify wiring intact. No SessionEnd/PreCompact — Codex has no such events; the hive tick sweep owns capture.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/vendored-mem-session-start.sh",
+            "timeout": 10,
+            "statusMessage": "hive: recalling recent work"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/vendored-ws-session-start.sh",
+            "timeout": 15,
+            "statusMessage": "hive: loading stream context"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/hook-harness.sh SessionStart",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/vendored-ws-user-prompt-submit.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/hook-harness.sh UserPromptSubmit",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/vendored-ws-post-tool-use.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

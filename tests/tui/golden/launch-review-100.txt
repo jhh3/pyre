@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · M Machines · A Accounts › Launch                        ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Launch session  │  ✓ Machine synth-mac  ›  ✓ Harness claude  ›  ✓ Where /Users/synth  ›  ● Review
+
+Review & start
+
+Machine      synth-mac
+Harness      claude
+Where        /Users/synth
+Project      none (standalone)
+Account      claude-personal-a — only eligible account (5h 22% used, weekly 41%) · observed now
+             policy: eligible anthropic subscription; never crosses providers
+Environment  global default profile
+Title        (automatic) — t to set
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ enter start   t title                                                            esc back   ? help

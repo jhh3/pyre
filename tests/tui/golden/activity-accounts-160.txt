@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · M Machines · A Accounts › Activity                                anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ACTIVITY · updated now
+  all  [accounts 4]  sessions   fleet   f cycles
+  04:59 synth-mac   ↻ 'scratch (standalone)' hit a limit on claude-personal-a (weekly 41%); no … │ switched 'api work (limited)' from codex-personal-a to
+› 04:58 synth-linux ↻ switched 'api work (limited)' from codex-personal-a to acct_synth-codex-b… │ acct_synth-codex-b — cross-account native resume unproven for
+  04:57 synth-mac   ↻ switched 'migration work' from claude-work-c (5h 100%) to claude-personal… │ codex; created linked successor with h…
+  04:30 synth-mac   ↻ chose claude-personal-a (weekly 41%) for 'scratch (standalone)' — most he… │
+                                                                                                 │ When     Sun Oct 4 2026 04:58:00 · 2m ago
+                                                                                                 │ Where    synth-linux  node_synth-linux
+                                                                                                 │ Who      Pyre · automatic (nobody asked)
+                                                                                                 │ What     account.switched · account
+                                                                                                 │ Why      cross-account native resume unproven for codex;
+                                                                                                 │          created linked successor with handoff
+                                                                                                 │ Session  'api work (limited)'  ses_synth-fbx
+                                                                                                 │ Run      run_synth-fbx-1
+                                                                                                 │ From     codex-personal-a  acct_synth-codex-a
+                                                                                                 │ To       acct_synth-codex-b
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+                                                                                                 │
+
+ ↑↓ select   f filter   r refresh                                                                                                             esc back   ? help

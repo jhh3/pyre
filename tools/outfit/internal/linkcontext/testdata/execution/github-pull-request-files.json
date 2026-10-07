@@ -1,0 +1,9 @@
+[
+  {
+    "filename": "internal/state/store.go",
+    "status": "modified",
+    "additions": 91,
+    "deletions": 18,
+    "patch": "Use BEGIN IMMEDIATE and commit every schema revision atomically."
+  }
+]

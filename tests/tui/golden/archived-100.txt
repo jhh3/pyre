@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+               ╭─ Archived sessions ────────────────────────────────────────────────╮
+               │                                                                    │
+               │ synth-linux                                                        │
+               │ › – exited     api work (limited)                      codex   30s │
+               │                                                                    │
+               │ 1 archived session · u unarchive                                   │
+               │                                                                    │
+               ╰────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+ archived api work (limited) — :archived lists it (u restores)
+ u unarchive   ↑↓ move   esc close

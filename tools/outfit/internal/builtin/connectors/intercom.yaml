@@ -1,0 +1,52 @@
+apiVersion: outfit.jhh3.dev/connector/v1alpha2
+key: intercom
+display: Intercom
+version: 1.0.0
+description: Customer conversations, contacts, companies, and support context.
+category: Support
+credentialMethods:
+  - id: managed-token
+    label: outfit-managed access token
+    description: Store a private-app token for your own Intercom workspace in Outfit; the token never leaves this machine except in requests to api.intercom.io.
+    recommended: true
+    custody: outfit
+    fields:
+      - key: TOKEN
+        label: Access token
+        description: 'Open https://app.intercom.com/a/developer-signup, create an app for the target workspace, enable read access for admins, contacts/companies, and conversations, then copy Configure → Authentication → Access Token. This private-app route is for a workspace you own.'
+        secret: true
+        environment: [INTERCOM_ACCESS_TOKEN, INTERCOM_TOKEN]
+    bindings: [{target: http-header, name: Authorization, value: 'Bearer {{secret.TOKEN}}'}]
+modes:
+  - id: rest
+    label: Intercom REST API
+    description: Recommended local mode using an access token; explicit and complete for support workflows.
+    recommendation: {rank: 1, reason: The fixed-origin REST API is the clearest complete support workflow.}
+    executor: {kind: http, baseUrl: 'https://api.intercom.io/'}
+    credentialMethods: [managed-token]
+    defaultCredentialMethod: managed-token
+    verify: admins
+    operations:
+      - {name: admins, description: List admins and verify the workspace., class: read, http: {method: GET, path: /admins}}
+      - {name: conversation, description: Read a conversation., class: read, http: {method: GET, path: '/conversations/:id'}}
+      - {name: contact, description: Read a contact., class: read, http: {method: GET, path: '/contacts/:id'}}
+      - {name: search_conversations, description: Search conversations., class: read, http: {method: POST, path: /conversations/search, body: [query]}}
+links:
+  - id: conversation
+    resourceType: intercom.conversation
+    patterns:
+      - hosts: [app.intercom.com]
+        path: '/a/inbox/:workspace/inbox/:inbox/conversation/:id'
+        segments: {workspace: opaque-token, inbox: opaque-token, id: opaque-token}
+    lookups:
+      - {mode: rest, operation: conversation, arguments: {id: id}}
+    presentation: {canonicalId: '$.id', title: '$.title', summary: '$.source.body', state: '$.state', updatedAt: '$.updated_at'}
+    limits: {timeoutMs: 12000, maxResultBytes: 262144, cacheTtlSeconds: 60}
+skill:
+  summary: Use Intercom for customer, company, and conversation context.
+  guidance: [Read the whole conversation before responding, Distinguish internal notes from customer messages, Never send without explicit user intent]
+  workflows:
+    - title: Understand a support conversation
+      steps: [resolve the exact conversation or customer, read the full conversation and participant timeline, inspect linked company context when relevant, summarize customer intent and unresolved questions]
+    - title: Prepare a response
+      steps: [separate customer-visible messages from internal notes, gather exact account and conversation evidence, draft without sending, use outfit write only when the human explicitly asks to publish]

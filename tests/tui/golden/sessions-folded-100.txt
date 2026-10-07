@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  STATUS       SESSION                 MACHINE      AGE  │ Synthetic Outfit
+› ▸ Synthetic Outfit 1 · 1 working                       │
+                                                         │ 1 session folded
+  No project 8 · ! 3 need you · 3 working · 1 idle       │ ● outfit API client  working
+  ◔ starting   api work (handoff succ… synth-linux  30s  │
+  ◌ stale      long refactor           synth-linux   7m  │ enter or a click expands · gb changes th…
+  ! needs you  worker                  synth-linux  30s  │
+  ● working    coordinator             synth-mac    30s  │
+  ! approval   deploy prep             synth-mac    30s  │
+  ● working    migration work          synth-mac    30s  │
+  ○ idle       pairing session         synth-mac    30s  │
+  ! needs you  scratch (standalone)    synth-mac    30s  │
+                                                         │
+  machines  synth-linux ● 4 · synth-mac ● 5              │
+  1 ended — . show                                       │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+
+ Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)
+ Tips  n new session · enter type in · 1-4 switch tabs · ␣␣ find anything · ? help · m…  esc hide ✕
+
+ n new session   enter expand   gb group by   / filter   ␣␣ find                             ? help

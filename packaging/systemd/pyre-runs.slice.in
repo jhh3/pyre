@@ -1,0 +1,17 @@
+# pyre-managed: rendered by scripts/install/install.sh from
+# packaging/systemd/pyre-runs.slice.in (Pyre @VERSION@).
+# Slice for the transient scopes holding Pyre's tmux servers and therefore all
+# agent runs (Claude, Codex, shells). pyred.service creates the scopes with
+# systemd-run --user --scope --slice=pyre-runs.slice. MemoryHigh throttles
+# (reclaims) runs before the host runs out of memory instead of killing them;
+# there is deliberately no MemoryMax. CPUWeight below the default 100 keeps the
+# desktop and pyred responsive when runs saturate the CPU.
+# Inspect: systemctl --user status pyre-runs.slice; systemd-cgls --user-unit pyre-runs.slice
+
+[Unit]
+Description=Pyre agent runs (tmux server scopes started by pyred)
+Documentation=https://github.com/jhh3/pyre/blob/main/docs/operations.md
+
+[Slice]
+MemoryHigh=@RUNS_MEMORY_HIGH@
+CPUWeight=@RUNS_CPU_WEIGHT@

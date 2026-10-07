@@ -1,0 +1,369 @@
+{
+  "schema_version": 1,
+  "name": "node-disconnected-live-run",
+  "description": "The Linux node lost its control connection 7 minutes ago. Its run is reported with stale freshness and state unknown — not failed, not idle.",
+  "synthetic": true,
+  "requirements": [
+    "R01",
+    "R14"
+  ],
+  "cases": [
+    "A01",
+    "A19"
+  ],
+  "nodes": [
+    {
+      "node_id": "node_synth-mac",
+      "name": "synth-mac",
+      "hostname": "synth-mac.local",
+      "ssh_alias": "synth-mac",
+      "platform": "darwin",
+      "arch": "arm64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "subagents.observe",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "hooks.events",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "0.160.0",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.steer",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.5a",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "stop",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-synth",
+        "tmux": "3.5a"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-04T11:00:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 10,
+        "load1": 2.1,
+        "mem_total_mb": 16384,
+        "mem_avail_mb": 6100,
+        "active_runs": 2,
+        "max_runs": 8,
+        "pyre_rss_mb": 38,
+        "pyre_cpu_pct": 0.4,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 18.5,
+        "load5": 2.4,
+        "load15": 2.2,
+        "swap_total_mb": 9216,
+        "swap_used_mb": 7816,
+        "mem_pressure": "warn",
+        "disks": [
+          {
+            "path": "/Users/synth",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 471482,
+            "free_mb": 15510
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_synth-a-1",
+            "session_id": "ses_synth-a",
+            "procs": 11,
+            "rss_mb": 1229.4,
+            "cpu_pct": 35.2,
+            "top": {
+              "pid": 4321,
+              "name": "claude",
+              "rss_mb": 702.1
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_synth-standalone-1",
+            "session_id": "ses_synth-standalone",
+            "procs": 4,
+            "rss_mb": 410,
+            "cpu_pct": 0.3,
+            "top": {
+              "pid": 4400,
+              "name": "claude",
+              "rss_mb": 380.5
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-27T13:20:00Z"
+    },
+    {
+      "node_id": "node_synth-linux",
+      "name": "synth-linux",
+      "hostname": "synth-linux",
+      "ssh_alias": "synth-linux",
+      "platform": "linux",
+      "arch": "amd64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "subagents.observe",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "hooks.events",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "",
+          "available": false,
+          "reason": "codex executable not found on node PATH",
+          "capabilities": [],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.4",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "stop",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-synth",
+        "tmux": "3.4"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "disconnected",
+        "last_seen_at": "2026-10-04T11:53:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 32,
+        "load1": 5.5,
+        "mem_total_mb": 123904,
+        "mem_avail_mb": 74000,
+        "active_runs": 1,
+        "max_runs": 16,
+        "pyre_rss_mb": 41,
+        "pyre_cpu_pct": 0.3,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 7.2,
+        "load5": 4.9,
+        "load15": 4.1,
+        "swap_total_mb": 8192,
+        "swap_used_mb": 310,
+        "mem_pressure": "normal",
+        "mem_pressure_some10": 0.4,
+        "disks": [
+          {
+            "path": "/home/synth",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 953869,
+            "free_mb": 612400
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_synth-project-1",
+            "session_id": "ses_synth-project",
+            "procs": 23,
+            "rss_mb": 2310.7,
+            "cpu_pct": 112.5,
+            "top": {
+              "pid": 9001,
+              "name": "go",
+              "rss_mb": 980.2
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_synth-b-1",
+            "session_id": "ses_synth-b",
+            "procs": 6,
+            "rss_mb": 655,
+            "cpu_pct": 1.1,
+            "top": {
+              "pid": 9100,
+              "name": "claude",
+              "rss_mb": 512.3
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-28T06:00:00Z"
+    }
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_synth-offline",
+        "harness": "claude",
+        "title": "long refactor",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-offline-1",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-offline-1",
+        "session_id": "ses_synth-offline",
+        "node_id": "node_synth-linux",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/home/synth/work/ses_synth-offline",
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "state": "unknown",
+        "state_reason": "node disconnected; last observed running",
+        "freshness": {
+          "observed_at": "2026-10-04T11:53:00Z",
+          "source": "node:node_synth-linux",
+          "stale": true,
+          "reason": "node disconnected"
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ]
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T11:53:00Z",
+        "source": "hub-cache",
+        "stale": true,
+        "reason": "node disconnected"
+      }
+    }
+  ],
+  "events": [
+    {
+      "event_id": "evt_synth-conn-1",
+      "cursor": 101,
+      "origin": "hub",
+      "kind": "node.connection",
+      "object": {
+        "kind": "node",
+        "id": "node_synth-linux"
+      },
+      "project_id": null,
+      "payload_version": 1,
+      "payload": {
+        "state": "disconnected",
+        "last_seen_at": "2026-10-04T11:53:00Z",
+        "protocol": 1
+      },
+      "occurred_at": "2026-10-04T11:53:00Z",
+      "ingested_at": "2026-10-04T11:53:00Z"
+    }
+  ]
+}

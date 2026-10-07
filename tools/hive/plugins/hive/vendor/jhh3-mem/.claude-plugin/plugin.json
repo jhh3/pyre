@@ -1,0 +1,13 @@
+{
+  "name": "jhh3-mem",
+  "version": "0.4.5",
+  "description": "Local-only episodic session memory for Claude Code: bounded SessionStart digest, deterministic SessionEnd capture, FTS5 recall. No daemon, no network, no tool interception.",
+  "author": {
+    "name": "John Holliman"
+  },
+  "keywords": [
+    "memory",
+    "personal",
+    "sqlite"
+  ]
+}

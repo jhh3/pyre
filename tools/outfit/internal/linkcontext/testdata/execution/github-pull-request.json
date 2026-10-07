@@ -1,0 +1,10 @@
+{
+  "html_url": "https://github.com/acme/widget/pull/42",
+  "number": 42,
+  "title": "Serialize first-run state migrations",
+  "body": "Moves schema initialization behind one SQLite transaction.",
+  "state": "open",
+  "user": {"login": "ada"},
+  "head": {"sha": "abc123def456"},
+  "updated_at": "2026-08-24T20:10:00Z"
+}

@@ -1,0 +1,32 @@
+#!/bin/sh
+# Fake macOS `security` for synthetic Claude homes. Placed first on PATH so the harness
+# never touches the real login keychain. Logs the verb, service (-s) and account presence
+# only; never logs -w/-X payloads (they would be synthetic anyway). Always reports
+# "item not found" for reads and fails writes, which forces Claude's plaintext fallback
+# ($CLAUDE_CONFIG_DIR/.credentials.json) and keeps credentials inside the scratch home.
+log="${PYRE_SECURITY_SHIM_LOG:-/dev/null}"
+verb="$1"
+svc=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-s" ] && svc="$a"
+  prev="$a"
+done
+if [ "$verb" = "-i" ]; then
+  # interactive mode: command arrives on stdin; extract only verb and -s value
+  line=$(head -c 4096)
+  verb="-i:$(printf '%s' "$line" | awk '{print $1}')"
+  svc=$(printf '%s' "$line" | sed -n 's/.*-s "\([^"]*\)".*/\1/p')
+fi
+printf '{"ts":%s,"shim":"security","verb":"%s","service":"%s","ppid":%s}\n' "$(date +%s)" "$verb" "$svc" "$PPID" >> "$log"
+case "$verb" in
+  find-generic-password|find-internet-password)
+    echo "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." >&2
+    exit 44 ;;
+  delete-generic-password)
+    echo "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." >&2
+    exit 44 ;;
+  *)
+    echo "security: pyre shim refuses keychain writes" >&2
+    exit 1 ;;
+esac

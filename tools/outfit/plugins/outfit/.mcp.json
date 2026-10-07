@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "outfit": {
+      "command": "outfit-core",
+      "args": ["mcp"]
+    }
+  }
+}

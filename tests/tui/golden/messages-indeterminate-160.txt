@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · [M Machines] · A Accounts                               /worker   anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  MACHINES · updated now                                                 │ synth-linux  ● online
+  STATUS     MACHINE        SEEN  HARNESSES                              │
+› ● online   synth-linux     30s  claude ✗codex shell  cpu 7% mem 40% d… │ Last seen  30s ago
+  ● online   synth-mac       30s  claude codex shell  cpu 18% mem 63%! … │ Connected  since 5h ago
+                                                                         │ Platform   linux/amd64
+                                                                         │ Hostname   synth-linux
+                                                                         │ SSH        ssh synth-linux
+                                                                         │ Versions   protocol 1 · pyred 0.1.0-synth · tmux 3.4
+                                                                         │ Resources  load 5.5/32 cpu · mem 72.3 GiB free of 121.0 GiB · runs 1/16
+                                                                         │ CPU        ██░░░░░░░░░░░░░░░░░░░░░░   7%  load 5.5 4.9 4.1 · 32 cores
+                                                                         │ Memory     ██████████░░░░░░░░░░░░░░  40%  49G of 121G · pressure normal (psi 0.4%)
+                                                                         │ Swap       █░░░░░░░░░░░░░░░░░░░░░░░   4%  310M of 8.0G
+                                                                         │ Disk       █████████░░░░░░░░░░░░░░░  36%  598G free of 932G · home+data
+                                                                         │            pyre overhead 41 MiB, 0.3% cpu · sampled 30s ago
+                                                                         │
+                                                                         │ Harnesses
+                                                                         │ ✓ claude  2.1.289  15 capabilities
+                                                                         │ ✗ codex   unavailable: codex executable not found on node PATH
+                                                                         │ ✓ shell   tmux 3.4  4 capabilities
+                                                                         │
+                                                                         │ Sessions by memory
+                                                                         │ 2.3G 112%  outfit API client            23 procs · top go 980M
+                                                                         │   655M 1%  worker                       6 procs · top claude 512M
+                                                                         │
+                                                                         │
+                                                                         │
+
+ ↑↓ select   r refresh                                                                                                                        esc back   ? help

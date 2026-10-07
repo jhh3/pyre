@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+                  ╭─ Rename session ─────────────────────────────────────────────╮
+                  │                                                              │
+                  │ > worker                                                     │
+                  │                                                              │
+                  │ Your name stays: automatic naming stops for this session.    │
+                  │                                                              │
+                  │ enter save   esc cancel                                      │
+                  │                                                              │
+                  ╰──────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+ enter save   esc cancel

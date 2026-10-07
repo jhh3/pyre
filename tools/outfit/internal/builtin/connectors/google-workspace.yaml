@@ -1,0 +1,486 @@
+apiVersion: outfit.jhh3.dev/connector/v1alpha2
+key: google-workspace
+display: Google Workspace
+version: 2.0.0
+description: Gmail, Drive, Calendar, Sheets, Docs, Chat, Admin, Meet, and other Workspace APIs through the pinned gws CLI.
+category: productivity
+aliases: [gws, gmail, google-drive, google-calendar, google-sheets]
+useCases: [email, files, calendar, spreadsheets, documents, chat, workspace administration]
+limitations:
+  - Google consent and service-account delegation determine the real service boundary.
+  - Only skills matching the selected services are installed into agent sessions.
+tools:
+  - id: gws
+    display: Google Workspace CLI
+    binary: gws
+    version: 0.22.5
+    source:
+      kind: github-release
+      repository: googleworkspace/cli
+      tag: v{{version}}
+      binaryPath: gws
+      assets:
+        darwin-amd64: google-workspace-cli-x86_64-apple-darwin.tar.gz
+        darwin-arm64: google-workspace-cli-aarch64-apple-darwin.tar.gz
+        linux-amd64: google-workspace-cli-x86_64-unknown-linux-gnu.tar.gz
+        linux-arm64: google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz
+        windows-amd64: google-workspace-cli-x86_64-pc-windows-msvc.zip
+      checksums:
+        darwin-amd64: 51f9bd731404d4bba26c36e2e30dd68c56dccd1f834c01252cb0b14d6a6544b2
+        darwin-arm64: 1d2a9ffd5bc9b2c2c4b48630daf082fad13d9e57d741988a2c248eed562f7dac
+        linux-amd64: de78ecdbd2f1a84cca0063a7ecbc440240fc14b6ebccbb17f4646b792a8c5c1f
+        linux-arm64: 94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
+        windows-amd64: 407705d695dc83d48b1c5f50d71b5aa64095bf6f17d5b439b2e9a373bbe67ec2
+    verify: [--version]
+credentialMethods:
+  - id: outfit-oauth
+    label: Sign in with Google (outfit-managed)
+    description: Open Google authorization in the browser, keep the refreshable grant in the OS keychain, and mint an access token only for each gws process.
+    custody: oauth
+    capabilityField: GWS_SERVICES
+    fields:
+      - key: OAUTH_CLIENT_ID
+        label: Google OAuth desktop client ID
+        description: In https://console.cloud.google.com/, enable the selected Workspace APIs, configure the OAuth consent screen, add your account as a test user when the app is in testing, then create an OAuth client of type Desktop app and paste its client ID.
+      - key: OAUTH_CLIENT_SECRET
+        label: Google OAuth desktop client secret
+        description: Client secret from the same downloaded Desktop OAuth client JSON; Outfit stores it in the OS keychain.
+        secret: true
+      - key: GWS_SERVICES
+        label: Enabled services
+        description: Select only the Workspace services this connection should authorize and expose.
+        multiple: true
+        default: gmail,drive,calendar
+        choices:
+          - {value: gmail, label: Gmail}
+          - {value: drive, label: Drive}
+          - {value: calendar, label: Calendar}
+          - {value: sheets, label: Sheets}
+          - {value: docs, label: Docs}
+          - {value: slides, label: Slides}
+          - {value: tasks, label: Tasks}
+          - {value: people, label: People}
+          - {value: chat, label: Chat}
+          - {value: classroom, label: Classroom}
+          - {value: forms, label: Forms}
+          - {value: keep, label: Keep}
+          - {value: meet, label: Meet}
+          - {value: events, label: Workspace Events}
+          - {value: admin, label: Admin Reports}
+          - {value: script, label: Apps Script}
+      - {key: OAUTH_ACCESS_TOKEN, label: OAuth access token, secret: true, generated: true}
+      - {key: OAUTH_REFRESH_TOKEN, label: OAuth refresh token, secret: true, generated: true}
+      - {key: OAUTH_TOKEN_EXPIRY, label: OAuth token expiry, generated: true}
+      - {key: OAUTH_GRANTED_SCOPES, label: Granted OAuth scopes, generated: true}
+    oauth:
+      authorizationUrl: https://accounts.google.com/o/oauth2/v2/auth
+      tokenUrl: https://oauth2.googleapis.com/token
+      userInfoUrl: https://openidconnect.googleapis.com/v1/userinfo
+      scopes: [openid, email]
+      capabilityScopes:
+        gmail: [https://www.googleapis.com/auth/gmail.modify]
+        drive: [https://www.googleapis.com/auth/drive]
+        calendar: [https://www.googleapis.com/auth/calendar]
+        sheets: [https://www.googleapis.com/auth/spreadsheets]
+        docs: [https://www.googleapis.com/auth/documents]
+        slides: [https://www.googleapis.com/auth/presentations]
+        tasks: [https://www.googleapis.com/auth/tasks]
+        people: [https://www.googleapis.com/auth/contacts]
+        chat: [https://www.googleapis.com/auth/chat.messages, https://www.googleapis.com/auth/chat.spaces]
+        classroom: [https://www.googleapis.com/auth/classroom.courses]
+        forms: [https://www.googleapis.com/auth/forms.body]
+        keep: [https://www.googleapis.com/auth/keep]
+        meet: [https://www.googleapis.com/auth/meetings.space.created]
+        events: [https://www.googleapis.com/auth/workspace.events]
+        admin: [https://www.googleapis.com/auth/admin.reports.audit.readonly]
+        script: [https://www.googleapis.com/auth/script.projects]
+    bindings:
+      - {target: temporary-directory, name: GOOGLE_WORKSPACE_CLI_CONFIG_DIR}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE}
+      - {target: unset-env, name: GOOGLE_APPLICATION_CREDENTIALS}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_ID}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_SECRET}
+      - {target: process-env, name: GOOGLE_WORKSPACE_CLI_TOKEN, value: '{{secret.OAUTH_ACCESS_TOKEN}}'}
+  - id: managed-credentials-file
+    label: outfit-managed Workspace credentials
+    description: Store exported OAuth or service-account JSON in the OS keychain and materialize a 0600 file only for the gws child process.
+    custody: outfit
+    capabilityField: GWS_SERVICES
+    fields:
+      - key: GWS_CREDENTIALS_JSON
+        label: Credentials JSON
+        description: Run $(outfit tool path gws) auth setup --login first, then paste the complete output of $(outfit tool path gws) auth export --unmasked. Service-account JSON should use the dedicated service-account method below.
+        secret: true
+      - key: GWS_SERVICES
+        label: Enabled services
+        description: Select only the Workspace services this connection should expose.
+        multiple: true
+        default: gmail,drive,calendar
+        choices:
+          - {value: gmail, label: Gmail}
+          - {value: drive, label: Drive}
+          - {value: calendar, label: Calendar}
+          - {value: sheets, label: Sheets}
+          - {value: docs, label: Docs}
+          - {value: slides, label: Slides}
+          - {value: tasks, label: Tasks}
+          - {value: people, label: People}
+          - {value: chat, label: Chat}
+          - {value: classroom, label: Classroom}
+          - {value: forms, label: Forms}
+          - {value: keep, label: Keep}
+          - {value: meet, label: Meet}
+          - {value: events, label: Workspace Events}
+          - {value: admin, label: Admin Reports}
+          - {value: script, label: Apps Script}
+    bindings:
+      - {target: temporary-directory, name: GOOGLE_WORKSPACE_CLI_CONFIG_DIR}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_TOKEN}
+      - {target: unset-env, name: GOOGLE_APPLICATION_CREDENTIALS}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_ID}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_SECRET}
+      - target: temporary-file
+        name: GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE
+        path: credentials.json
+        mode: 384
+        value: '{{secret.GWS_CREDENTIALS_JSON}}'
+  - id: managed-access-token
+    label: outfit-managed short-lived access token
+    description: Store a pre-obtained Google access token and inject it only into gws.
+    custody: outfit
+    capabilityField: GWS_SERVICES
+    fields:
+      - {key: GOOGLE_WORKSPACE_CLI_TOKEN, label: Access token, description: 'A short-lived Google OAuth access token with every selected service scope. It cannot refresh; use only for temporary sessions and reconnect when it expires.', secret: true, environment: [GOOGLE_WORKSPACE_CLI_TOKEN]}
+      - key: GWS_SERVICES
+        label: Enabled services
+        description: Select only the Workspace services covered by this temporary token.
+        multiple: true
+        default: gmail,drive,calendar
+    bindings:
+      - {target: temporary-directory, name: GOOGLE_WORKSPACE_CLI_CONFIG_DIR}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE}
+      - {target: unset-env, name: GOOGLE_APPLICATION_CREDENTIALS}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_ID}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_SECRET}
+      - {target: process-env, name: GOOGLE_WORKSPACE_CLI_TOKEN, value: '{{secret.GOOGLE_WORKSPACE_CLI_TOKEN}}'}
+  - id: managed-service-account
+    label: outfit-managed service account
+    description: Store a Google service-account JSON document and materialize it only for the selected gws child process.
+    custody: outfit
+    capabilityField: GWS_SERVICES
+    fields:
+      - key: GWS_SERVICE_ACCOUNT_JSON
+        label: Service-account JSON
+        description: Download a JSON key for a Google Cloud service account. Share target Drive/Docs/Sheets resources with its service-account email; user-owned Gmail and Calendar data normally require an administrator-managed delegated setup instead.
+        secret: true
+      - key: GOOGLE_WORKSPACE_PROJECT_ID
+        label: Quota project
+        description: Optional Google Cloud project used for quota and billing.
+        optional: true
+      - key: GWS_SERVICES
+        label: Enabled services
+        multiple: true
+        default: drive,sheets
+        choices:
+          - {value: gmail, label: Gmail}
+          - {value: drive, label: Drive}
+          - {value: calendar, label: Calendar}
+          - {value: sheets, label: Sheets}
+          - {value: docs, label: Docs}
+          - {value: slides, label: Slides}
+          - {value: tasks, label: Tasks}
+          - {value: people, label: People}
+          - {value: chat, label: Chat}
+          - {value: classroom, label: Classroom}
+          - {value: forms, label: Forms}
+          - {value: keep, label: Keep}
+          - {value: meet, label: Meet}
+          - {value: events, label: Workspace Events}
+          - {value: admin, label: Admin Reports}
+          - {value: script, label: Apps Script}
+    bindings:
+      - {target: temporary-directory, name: GOOGLE_WORKSPACE_CLI_CONFIG_DIR}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_TOKEN}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_ID}
+      - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_SECRET}
+      - target: temporary-file
+        name: GOOGLE_APPLICATION_CREDENTIALS
+        path: service-account.json
+        mode: 384
+        value: '{{secret.GWS_SERVICE_ACCOUNT_JSON}}'
+      - {target: process-env, name: GOOGLE_WORKSPACE_PROJECT_ID, value: '{{setting.GOOGLE_WORKSPACE_PROJECT_ID}}'}
+  - id: native-login
+    label: Existing gws native login
+    description: Best for one human account. Install and authenticate gcloud first; on a fresh machine Outfit runs gws auth setup --login to enable APIs, create or select a Google Cloud Desktop OAuth client, and store the encrypted gws login.
+    recommended: true
+    custody: executor
+    setup: {program: gws, args: [auth, setup, --login]}
+    verify: {program: gws, args: [auth, status]}
+    logout: {program: gws, args: [auth, logout]}
+    capabilityField: GWS_SERVICES
+    fields:
+      - key: GWS_SERVICES
+        label: Enabled services
+        description: Select only the Workspace services this native login should expose through Outfit.
+        multiple: true
+        default: gmail,drive,calendar
+modes:
+  - id: cli
+    label: Google Workspace CLI
+    description: Pinned gws binary with structured JSON, dynamic API coverage, and selectively installed upstream skills.
+    recommendation:
+      rank: 1
+      reason: gws covers the Workspace APIs in one structured CLI and ships the strongest maintained skill corpus.
+    executor:
+      kind: cli
+      tool: gws
+    credentialMethods: [outfit-oauth, managed-credentials-file, managed-access-token, managed-service-account, native-login]
+    defaultCredentialMethod: native-login
+    credentialBindings:
+      native-login:
+        - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_TOKEN}
+        - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE}
+        - {target: unset-env, name: GOOGLE_APPLICATION_CREDENTIALS}
+        - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_ID}
+        - {target: unset-env, name: GOOGLE_WORKSPACE_CLI_CLIENT_SECRET}
+    capabilities: [gmail, drive, calendar, sheets, docs, slides, tasks, people, chat, classroom, forms, keep, meet, events, admin, script]
+    operations:
+      - name: auth_status
+        title: Authentication status
+        description: Show the gws authentication source and status.
+        class: read
+        cli: {args: [auth, status]}
+      - name: gmail_messages_list
+        title: List Gmail messages
+        description: List Gmail messages using the supplied Gmail API params JSON.
+        class: read
+        capabilities: [gmail]
+        input:
+          type: object
+          properties:
+            params: {type: object, description: 'Gmail users.messages.list parameters such as userId, maxResults, q, and pageToken.', examples: [{userId: me, maxResults: 10, q: 'is:unread'}]}
+          required: [params]
+          additionalProperties: false
+        cli: {args: [gmail, users, messages, list, --params, '{{arg.params}}'], schema: gmail.users.messages.list}
+      - name: drive_files_list
+        title: List Drive files
+        description: List Drive files using the supplied Drive API params JSON.
+        class: read
+        capabilities: [drive]
+        input:
+          type: object
+          properties:
+            params: {type: object, description: 'Drive files.list parameters such as pageSize, q, orderBy, fields, and pageToken.', examples: [{pageSize: 10, q: 'trashed = false', fields: 'files(id,name,mimeType,modifiedTime),nextPageToken'}]}
+          required: [params]
+          additionalProperties: false
+        cli: {args: [drive, files, list, --params, '{{arg.params}}'], schema: drive.files.list}
+      - name: drive_file_get
+        title: Read Drive file metadata
+        description: Read bounded metadata for one Google Drive file.
+        class: read
+        capabilities: [drive]
+        cli: {args: [drive, files, get, --params, '{"fileId":"{{arg.file_id}}","fields":"id,name,mimeType,modifiedTime,owners,webViewLink,description,size"}'], schema: drive.files.get}
+      - name: docs_document_get
+        title: Read Google Doc
+        description: Read one Google Docs document and its bounded structural content.
+        class: read
+        capabilities: [docs]
+        cli: {args: [docs, documents, get, --params, '{"documentId":"{{arg.document_id}}"}'], schema: docs.documents.get}
+      - name: sheets_spreadsheet_get
+        title: Read Google Sheet metadata
+        description: Read one spreadsheet's metadata and sheet structure without grid data.
+        class: read
+        capabilities: [sheets]
+        cli: {args: [sheets, spreadsheets, get, --params, '{"spreadsheetId":"{{arg.spreadsheet_id}}","includeGridData":false}'], schema: sheets.spreadsheets.get}
+      - name: sheets_values_preview
+        title: Read linked Sheet values
+        description: Read a bounded A1:Z200 value window so link enrichment includes cells as well as sheet metadata.
+        class: read
+        capabilities: [sheets]
+        cli: {args: [sheets, spreadsheets, values, get, --params, '{"spreadsheetId":"{{arg.spreadsheet_id}}","range":"A1:Z200"}'], schema: sheets.spreadsheets.values.get}
+      - name: slides_presentation_get
+        title: Read Google Slides presentation
+        description: Read one presentation and its bounded slide structure.
+        class: read
+        capabilities: [slides]
+        cli: {args: [slides, presentations, get, --params, '{"presentationId":"{{arg.presentation_id}}"}'], schema: slides.presentations.get}
+      - name: calendar_event_get
+        title: Read Calendar event
+        description: Read one event from the calendar identity encoded in a Google Calendar link.
+        class: read
+        capabilities: [calendar]
+        input:
+          type: object
+          properties:
+            params: {type: object, description: 'Calendar events.get parameters. calendarId and eventId are required by Google.', examples: [{calendarId: primary, eventId: event_123}]}
+          required: [params]
+          additionalProperties: false
+        cli: {args: [calendar, events, get, --params, '{{arg.params}}'], schema: calendar.events.get}
+      - name: calendar_events_list
+        title: List Calendar events
+        description: List events from a calendar using the supplied API params JSON.
+        class: read
+        capabilities: [calendar]
+        input:
+          type: object
+          properties:
+            params: {type: object, description: 'Calendar events.list parameters. For upcoming events use calendarId primary, maxResults, timeMin in RFC3339, singleEvents true, and orderBy startTime.', examples: [{calendarId: primary, maxResults: 10, timeMin: '2026-08-24T00:00:00Z', singleEvents: true, orderBy: startTime}]}
+          required: [params]
+          additionalProperties: false
+        cli: {args: [calendar, events, list, --params, '{{arg.params}}'], schema: calendar.events.list}
+      - name: sheets_values_get
+        title: Read Sheets values
+        description: Read a spreadsheet range using the supplied API params JSON.
+        class: read
+        capabilities: [sheets]
+        input:
+          type: object
+          properties:
+            params: {type: object, description: 'Sheets values.get parameters. spreadsheetId and range are required by Google.', examples: [{spreadsheetId: spreadsheet_123, range: 'Sheet1!A1:Z200'}]}
+          required: [params]
+          additionalProperties: false
+        cli: {args: [sheets, spreadsheets, values, get, --params, '{{arg.params}}'], schema: sheets.spreadsheets.values.get}
+      - name: gmail_messages_send
+        title: Send Gmail message
+        description: Send a Gmail message using explicit params and JSON body.
+        class: write
+        capabilities: [gmail]
+        input:
+          type: object
+          properties:
+            params: {type: object, description: 'Gmail users.messages.send parameters.', examples: [{userId: me}]}
+            body: {type: object, description: 'Gmail Message body. raw is a base64url-encoded RFC 2822 message.', examples: [{raw: base64url_rfc2822_message}]}
+          required: [params, body]
+          additionalProperties: false
+        cli: {args: [gmail, users, messages, send, --params, '{{arg.params}}', --json, '{{arg.body}}'], schema: gmail.users.messages.send}
+      - name: calendar_events_insert
+        title: Create Calendar event
+        description: Create a calendar event using explicit params and JSON body.
+        class: write
+        capabilities: [calendar]
+        input:
+          type: object
+          properties:
+            params: {type: object, description: 'Calendar events.insert parameters.', examples: [{calendarId: primary}]}
+            body: {type: object, description: 'Google Calendar Event body including summary plus start and end dateTime/timeZone objects.', examples: [{summary: 'Planning review', start: {dateTime: '2026-08-25T10:00:00-07:00'}, end: {dateTime: '2026-08-25T10:30:00-07:00'}}]}
+          required: [params, body]
+          additionalProperties: false
+        cli: {args: [calendar, events, insert, --params, '{{arg.params}}', --json, '{{arg.body}}'], schema: calendar.events.insert}
+    verify: auth_status
+links:
+  - id: drive_file
+    resourceType: google.drive.file
+    patterns:
+      - hosts: [drive.google.com]
+        path: '/file/d/:file_id/view'
+        segments: {file_id: opaque-token}
+      - hosts: [drive.google.com]
+        path: '/file/d/:file_id/edit'
+        segments: {file_id: opaque-token}
+    lookup: {mode: cli, operation: drive_file_get, arguments: {file_id: file_id}}
+    presentation: {canonicalId: '$.id', title: '$.name', summary: '$.description', author: '$.owners[0].displayName', updatedAt: '$.modifiedTime'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 300}
+  - id: docs_document
+    resourceType: google.docs.document
+    patterns:
+      - hosts: [docs.google.com]
+        path: '/document/d/:document_id/edit'
+        segments: {document_id: opaque-token}
+      - hosts: [docs.google.com]
+        path: '/document/d/:document_id/view'
+        segments: {document_id: opaque-token}
+    lookup: {mode: cli, operation: docs_document_get, arguments: {document_id: document_id}}
+    presentation: {canonicalId: '$.documentId', title: '$.title', summary: '$.body.content'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 300}
+  - id: sheets_spreadsheet
+    resourceType: google.sheets.spreadsheet
+    patterns:
+      - hosts: [docs.google.com]
+        path: '/spreadsheets/d/:spreadsheet_id/edit'
+        segments: {spreadsheet_id: opaque-token}
+      - hosts: [docs.google.com]
+        path: '/spreadsheets/d/:spreadsheet_id/view'
+        segments: {spreadsheet_id: opaque-token}
+    lookup: {mode: cli, operation: sheets_spreadsheet_get, arguments: {spreadsheet_id: spreadsheet_id}, heavyReads: [{operation: sheets_values_preview, arguments: {spreadsheet_id: spreadsheet_id}}]}
+    presentation: {canonicalId: '$.spreadsheetId', title: '$.properties.title', summary: '$.sheets'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 300}
+  - id: slides_presentation
+    resourceType: google.slides.presentation
+    patterns:
+      - hosts: [docs.google.com]
+        path: '/presentation/d/:presentation_id/edit'
+        segments: {presentation_id: opaque-token}
+      - hosts: [docs.google.com]
+        path: '/presentation/d/:presentation_id/view'
+        segments: {presentation_id: opaque-token}
+    lookup: {mode: cli, operation: slides_presentation_get, arguments: {presentation_id: presentation_id}}
+    presentation: {canonicalId: '$.presentationId', title: '$.title', summary: '$.slides'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 300}
+  - id: calendar_event
+    resourceType: google.calendar.event
+    patterns:
+      - hosts: [calendar.google.com]
+        path: /calendar/event
+        query: {eid: google-calendar-eid}
+    lookup: {mode: cli, operation: calendar_event_get, arguments: {params: eid}}
+    presentation: {canonicalId: '$.htmlLink', title: '$.summary', summary: '$.description', state: '$.status', author: '$.creator.email', updatedAt: '$.updated'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 120}
+skill:
+  summary: Use only the granted Google Workspace services through the pinned gws CLI and selected account.
+  guidance:
+    - Start with auth_status and make the account and service boundary explicit.
+    - Use the selectively installed upstream service skill for exact commands and fields.
+    - Prefer a listed typed outfit operation; use outfit exec only for an upstream gws capability without a typed operation.
+  workflows:
+    - title: Read Workspace evidence
+      steps: [confirm the selected account and granted service, load the matching installed GWS service skill, inspect the exact outfit operation or gws schema, return stable message file event or document identifiers]
+    - title: Change Workspace data
+      steps: [read the current resource first, confirm recipients owners or calendar before mutation, follow the matching GWS service skill, prefer outfit write when a typed operation exists and use outfit exec --write only for an unlisted capability after explicit human intent]
+skillSources:
+  - id: gws-upstream
+    kind: github-directory
+    repository: googleworkspace/cli
+    ref: 705fb0ecac6f4249679958f6325b809b63fdde17
+    digest: 38a27bae67755c101da1278154ca4b9bf9f7fdccd7a5a1db916c2ff880bfa9fd
+    attribution: Google Workspace CLI project
+    paths:
+      - {path: skills/gws-shared}
+      - {path: skills/gws-gmail, capabilities: [gmail]}
+      - {path: skills/gws-gmail-read, capabilities: [gmail]}
+      - {path: skills/gws-gmail-triage, capabilities: [gmail]}
+      - {path: skills/gws-gmail-send, capabilities: [gmail]}
+      - {path: skills/gws-gmail-reply, capabilities: [gmail]}
+      - {path: skills/gws-gmail-reply-all, capabilities: [gmail]}
+      - {path: skills/gws-gmail-forward, capabilities: [gmail]}
+      - {path: skills/gws-gmail-watch, capabilities: [gmail, events]}
+      - {path: skills/gws-drive, capabilities: [drive]}
+      - {path: skills/gws-drive-upload, capabilities: [drive]}
+      - {path: skills/gws-calendar, capabilities: [calendar]}
+      - {path: skills/gws-calendar-agenda, capabilities: [calendar]}
+      - {path: skills/gws-calendar-insert, capabilities: [calendar]}
+      - {path: skills/gws-sheets, capabilities: [sheets]}
+      - {path: skills/gws-sheets-read, capabilities: [sheets]}
+      - {path: skills/gws-sheets-append, capabilities: [sheets]}
+      - {path: skills/gws-docs, capabilities: [docs]}
+      - {path: skills/gws-docs-write, capabilities: [docs]}
+      - {path: skills/gws-slides, capabilities: [slides]}
+      - {path: skills/gws-tasks, capabilities: [tasks]}
+      - {path: skills/gws-people, capabilities: [people]}
+      - {path: skills/gws-chat, capabilities: [chat]}
+      - {path: skills/gws-chat-send, capabilities: [chat]}
+      - {path: skills/gws-classroom, capabilities: [classroom]}
+      - {path: skills/gws-forms, capabilities: [forms]}
+      - {path: skills/gws-keep, capabilities: [keep]}
+      - {path: skills/gws-meet, capabilities: [meet]}
+      - {path: skills/gws-events, capabilities: [events]}
+      - {path: skills/gws-events-subscribe, capabilities: [events]}
+      - {path: skills/gws-events-renew, capabilities: [events]}
+      - {path: skills/gws-admin-reports, capabilities: [admin]}
+      - {path: skills/gws-script, capabilities: [script]}
+      - {path: skills/gws-script-push, capabilities: [script]}
+      - {path: skills/gws-workflow, capabilities: [gmail, calendar, drive, tasks]}
+      - {path: skills/gws-workflow-meeting-prep, capabilities: [calendar, drive]}
+      - {path: skills/gws-workflow-email-to-task, capabilities: [gmail, tasks]}
+      - {path: skills/gws-workflow-weekly-digest, capabilities: [gmail, calendar]}
+      - {path: skills/gws-workflow-file-announce, capabilities: [drive, chat]}

@@ -1,0 +1,26 @@
+# Local tools and operating-system files
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+
+# Build and local development state
+dist/
+build/
+/bin/
+.worktrees/
+.local/
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets and signing material must never be committed
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks
+google-services.json
+accounts.export.json

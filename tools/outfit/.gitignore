@@ -1,0 +1,8 @@
+/bin/
+/dist/
+/coverage/
+*.prof
+*.test
+.DS_Store
+.outfit-eval/
+__pycache__/

@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · M Machines · [A Accounts]                                                                                 anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ACCOUNTS · updated now
+
+  Anthropic · 1 ready · 1 at limit · 1 unknown   ██████▒▒▒▒▒░░░░░
+              account                        kind      machines        5-hour                                                  weekly                                                  in use
+› ● ready     claude-personal-a              login     synth-mac       █████▎░░░░░░░░░░░░░░░░░░  22%  in 2h 19m  2:20 PM       █████████▉░░░░░░░░░░░░░░  41%  in 3d 11h  Wed 11:20 PM  1 session
+              machines  synth-mac     ● ready     5h 22% · week 41% · observed 1m ago via rota:usage-endpoint
+              in use    scratch (standalone) on synth-mac · since 30m ago
+
+  ○ unknown   claude-personal-b              login     synth-mac       ██████████████▍░░░░░░░░░  60%                           not reported
+  ✕ at limit  claude-work-c                  login     synth-mac       ████████████████████████ 100%  in 1h 19m  1:20 PM       not reported
+
+  ○ your own login on synth-linux (not managed) · usage unknown; Pyre does not observe it
+
+  OpenAI · 0 ready · 1 unknown · nothing available   ░░░░░░░░░░░░░░░░
+              account                        kind      machines        5-hour                                                  weekly                                                  in use
+  ○ unknown   codex-personal-a               login     synth-mac       no observation since node restart
+
+  Recent switches · a all activity
+    ↻ 04:59 synth-mac · 'scratch (standalone)' hit a limit on claude-personal-a (weekly 41%); no other account is eligible (waiting for a reset) — no eligible anthropic subscription (c exhausted unti…
+    ↻ 04:58 synth-linux · switched 'api work (limited)' from codex-personal-a to acct_synth-codex-b — cross-account native resume unproven for codex; created linked successor with h…
+    ↻ 04:57 synth-mac · switched 'migration work' from claude-work-c (5h 100%) to claude-personal-a (weekly 41%) — limit reached
+
+  Pyre keeps each machine on its own account below 80%, else the most 5-hour, then weekly headroom. Credentials never leave their machine.
+
+
+
+
+ ↑↓ select   r refresh   a activity                                                                                                                                                   esc back   ? help

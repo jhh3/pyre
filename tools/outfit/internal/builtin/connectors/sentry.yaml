@@ -1,0 +1,74 @@
+apiVersion: outfit.jhh3.dev/connector/v1alpha2
+key: sentry
+display: Sentry
+version: 1.0.0
+description: Errors, events, projects, and releases.
+category: Engineering
+credentialMethods:
+  - id: managed-token
+    label: outfit-managed auth token
+    description: Store a user authentication token in Outfit for direct issue and event investigation.
+    recommended: true
+    custody: outfit
+    fields:
+      - key: TOKEN
+        label: Sentry user auth token
+        description: 'Open https://sentry.io/settings/account/api/auth-tokens/, create a user token with org:read, project:read, and event:read, and copy it once. A user token is required for the organization-list verification used by this local workflow; do not paste a DSN or legacy API key.'
+        secret: true
+        environment: [SENTRY_AUTH_TOKEN, SENTRY_ACCESS_TOKEN]
+    bindings: [{target: http-header, name: Authorization, value: 'Bearer {{secret.TOKEN}}'}]
+  - id: adopted-host-oauth
+    label: OAuth imported from Claude or Codex
+    description: Transfer an existing hosted-MCP OAuth grant into outfit, then disable the duplicate host registration.
+    custody: oauth
+    fields:
+      - {key: OAUTH_CLIENT_ID, label: OAuth client ID, generated: true}
+      - {key: OAUTH_ACCESS_TOKEN, label: OAuth access token, secret: true, generated: true}
+      - {key: OAUTH_REFRESH_TOKEN, label: OAuth refresh token, secret: true, generated: true}
+      - {key: OAUTH_TOKEN_EXPIRY, label: OAuth token expiry, generated: true}
+      - {key: OAUTH_GRANTED_SCOPES, label: Granted OAuth scopes, generated: true, optional: true}
+    oauth:
+      authorizationUrl: https://mcp.sentry.dev/oauth/authorize
+      tokenUrl: https://mcp.sentry.dev/oauth/token
+      scopes: [org:read, project:write, team:write, event:write]
+    bindings: [{target: mcp-header, name: Authorization, value: 'Bearer {{secret.OAUTH_ACCESS_TOKEN}}'}]
+modes:
+  - id: rest
+    label: Sentry REST API
+    description: Recommended local mode using a scoped Sentry user authentication token.
+    recommendation: {rank: 1, reason: The fixed-origin REST API is the reliable investigation surface.}
+    executor: {kind: http, baseUrl: 'https://sentry.io/api/0/'}
+    credentialMethods: [managed-token]
+    defaultCredentialMethod: managed-token
+    verify: organizations
+    operations:
+      - {name: organizations, description: List accessible organizations., class: read, http: {method: GET, path: /organizations/}}
+      - {name: issue, description: Read an issue., class: read, http: {method: GET, path: '/issues/:issue/'}}
+      - {name: issue_events, description: Read recent events for an issue., class: read, http: {method: GET, path: '/issues/:issue/events/'}}
+  - id: hosted_mcp
+    label: Sentry hosted MCP
+    description: Sentry's hosted MCP tool surface, using an OAuth grant transferred from Claude or Codex.
+    recommendation: {rank: 2, reason: Adopt this when a working hosted-MCP OAuth grant already exists in a coding host.}
+    executor: {kind: mcp, endpoint: 'https://mcp.sentry.dev/mcp'}
+    credentialMethods: [adopted-host-oauth]
+    defaultCredentialMethod: adopted-host-oauth
+links:
+  - id: issue
+    resourceType: sentry.issue
+    patterns:
+      - hosts: [sentry.io, www.sentry.io, '*.sentry.io']
+        path: '/organizations/:org/issues/:issue'
+        segments: {org: slug, issue: integer}
+    lookups:
+      - {mode: rest, operation: issue, arguments: {issue: issue}, heavyReads: [{operation: issue_events, arguments: {issue: issue}}]}
+      - {mode: hosted_mcp, operation: get_sentry_resource, arguments: {url: $url}}
+    presentation: {canonicalId: '$.id', title: '$.title', summary: '$.culprit', state: '$.status', updatedAt: '$.lastSeen'}
+    limits: {timeoutMs: 12000, maxResultBytes: 262144, cacheTtlSeconds: 60}
+skill:
+  summary: Use Sentry for exact issue and event evidence before diagnosing production failures.
+  guidance: [Inspect recent events and tags, Separate symptoms from root cause, Do not mutate issue state while investigating]
+  workflows:
+    - title: Diagnose an issue
+      steps: [resolve the exact organization project and issue, inspect recent representative events and tags, correlate releases traces or suspect commits when available, distinguish observed evidence from inference]
+    - title: Change issue state
+      steps: [read the latest issue state and recurrence evidence, explain the proposed mutation, use outfit write only after explicit human intent, report the resulting issue state]

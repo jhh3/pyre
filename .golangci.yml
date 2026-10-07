@@ -1,0 +1,45 @@
+# golangci-lint v2 configuration (run with `make lint`; pinned in the Makefile).
+#
+# Conservative scope: bug-finding analyzers only. This is a gate: `make
+# check` and CI (.github/workflows/ci.yml, job "lint") fail on any finding.
+# The adoption baseline (22 findings, then 29 with gofmt drift) was fixed in
+# code on 2026-10-05 (W-hardening); there are no nolint suppressions. Fix new
+# findings rather than suppressing them; a justified `//nolint:<linter> //
+# <reason>` must name the linter and say why.
+#
+# errcheck is off: ~1160 findings, overwhelmingly fmt.Fprint* to stdout/stderr,
+# deferred Close, and best-effort cleanup (os.Remove) in tests. Enabling it
+# needs a dedicated cleanup pass, not a blanket exclusion list.
+version: "2"
+
+run:
+  timeout: 10m
+  tests: true
+
+issues:
+  # Report every finding (defaults cap identical messages at 3 and each
+  # linter at 50, which hid most gofmt drift).
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    staticcheck:
+      # Correctness checks only; S1*/QF* simplifications and ST* style
+      # suggestions are left to `go fix` and review.
+      checks:
+        - "SA*"
+  exclusions:
+    generated: strict
+    presets:
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt

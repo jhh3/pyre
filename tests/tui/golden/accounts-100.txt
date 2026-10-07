@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · M Machines · [A Accounts]                               ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ACCOUNTS · updated now
+
+  Anthropic · 1 ready · 1 at limit · 1 unknown   ██████▒▒▒▒▒░░░░░
+› ● ready     claude-personal-a      login     1 session
+              5h   ███▌░░░░░░░░░░░░  22%  in 2h 19m    week ██████▌░░░░░░░░░  41%  in 3d 11h
+              machines  synth-mac     ● ready     5h 22% · week 41% · observed 1m ago via rota:usag…
+              in use    scratch (standalone) on synth-mac · since 30m ago
+
+  ○ unknown   claude-personal-b      login
+              5h   █████████▋░░░░░░  60%               week not reported
+  ✕ at limit  claude-work-c          login
+              5h   ████████████████ 100%  in 1h 19m    week not reported
+
+  ○ your own login on synth-linux (not managed) · usage unknown; Pyre does not observe it
+
+  OpenAI · 0 ready · 1 unknown · nothing available   ░░░░░░░░░░░░░░░░
+  ○ unknown   codex-personal-a       login
+              no observation since node restart
+
+  Recent switches · a all activity
+    ↻ 04:59 synth-mac · 'scratch (standalone)' hit a limit on claude-personal-a (weekly 41%); no ot…
+    ↻ 04:58 synth-linux · switched 'api work (limited)' from codex-personal-a to acct_synth-codex-b…
+    ↻ 04:57 synth-mac · switched 'migration work' from claude-work-c (5h 100%) to claude-personal-a…
+
+  Pyre keeps each machine on its own account below 80%, else the most 5-hour, then weekly headroom.…
+
+
+ ↑↓ select   r refresh   a activity                                               esc back   ? help

@@ -1,0 +1,931 @@
+#!/usr/bin/env bash
+# jhh3-mem — bin/jhh3-mem
+# The explicit, on-demand front end. SPEC §10.
+#
+# THIS IS THE OPPOSITE OF THE HOOKS, ON PURPOSE.
+#   The hooks fail OPEN: exit 0, say nothing, log the reason. A memory bug must
+#   never block a coding session.
+#   This fails LOUD: honest exit codes, a real message on stderr, no swallowed
+#   errors. A diagnosis tool that hides failures is worse than no tool.
+#
+#   rc 0 success · 1 expected failure (no results, refused) · 2 misuse
+#      · 3 a required dependency is unavailable · 75 another process holds the
+#      DDL lock.
+#
+# It is a DISPATCHER and nothing more: every verb calls the same library
+# function the hooks call, so `explain-inject` cannot drift from what
+# SessionStart actually emits, and `search` cannot drift from `recall`.
+#
+# `set -uo pipefail`, NOT `-e`. Same resolution as lib/inject.sh and
+# lib/recall.sh: the libraries this sources are written to be sourced without
+# `-e` (`[ x ] && y` as a statement is idiomatic throughout them and returns 1
+# when the test is false), and `set -e` here would turn every such line into an
+# abort. Exit codes are therefore explicit, taken through `|| rc=$?` at every
+# call site — which is what "fails loud with honest exit codes" actually
+# requires. `-u` and `pipefail` are on.
+set -uo pipefail
+
+_jm_bin="${BASH_SOURCE[0]:-$0}"
+case "$_jm_bin" in
+  */*) _jm_bin_dir="${_jm_bin%/*}" ;;
+  *) _jm_bin_dir="." ;;
+esac
+JM_ROOT="$(cd -- "$_jm_bin_dir/.." && pwd -P)"
+unset _jm_bin _jm_bin_dir
+
+# shellcheck source=../lib/common.sh
+. "$JM_ROOT/lib/common.sh"
+# shellcheck source=../lib/db.sh
+. "$JM_ROOT/lib/db.sh"
+
+_jm_load() {
+  local f
+  for f in "$@"; do
+    # shellcheck source=/dev/null
+    . "$JM_ROOT/lib/$f"
+  done
+}
+
+usage() {
+  cat <<'USAGE'
+jhh3-mem — local cross-session episodic memory (SQLite + FTS5, no daemon).
+
+  read
+    search <terms>       search titles, prompts, outcomes and notes
+    files <path>...      what past work touched these paths (this repo only)
+    recent               reverse-chronological, this repo
+    show <id|uid>        everything kept for one entry
+    export               NDJSON of every entry, to stdout
+
+  write
+    note <text>          record one hand-authored memory
+    forget <selector>    remove memories (dry run without --yes)
+    capture              capture a transcript by hand
+
+  operate
+    status               rows, repos, schema version, store size
+    doctor               self-check; --deep adds integrity checks
+    paths                every path this plugin ever creates
+    log                  the ops log
+    explain-inject       print exactly what SessionStart would inject
+    migrate --from DB    import the legacy claude-mem archive
+    setup                one idempotent command: store, legacy import, nightly job, verify
+    schedule [--remove]  install or remove the nightly job
+    embed [--install]    optional semantic search (sqlite-vec + embeddings API)
+    nightly              enrich + dream + embed, in order (nightly job)
+    catchup              enrich + embed only (hourly job; no-op when idle)
+    dream                consolidate the store (both hosts); never deletes
+    enrich [--all]       fill learned/decided/next_steps out of band (never from a hook)
+    upgrade              apply pending schema migrations
+    uninstall            dry run; --purge --yes actually removes the store
+    version
+
+  read flags
+    --limit N            default 20
+    --since 30d|90d|YYYY-MM-DD
+    --kind KIND          decision|bugfix|gotcha|security|refactor|change|
+                         feature|discovery|note|session|prompt|other
+    --repo KEY           scope to a repo other than the current one
+    --all-repos          search every repo (other repos are down-weighted)
+    --dups               show every member of a deduplicated group
+    --json               NDJSON, one object per line
+
+  `jhh3-mem <verb> --help` for the write and operate verbs.
+USAGE
+}
+
+die() { printf 'jhh3-mem: %s\n' "$*" >&2; exit 2; }
+
+# _jm_since SPEC — epoch, or empty for "no bound". Accepts 30d/12w/6m/1y and
+# YYYY-MM-DD; anything else is a usage error rather than a silent 0.
+_jm_since() {
+  local s="${1:-}" n unit now
+  [ -n "$s" ] || { printf '0\n'; return 0; }
+  now="$(jm_now_epoch)"
+  case "$s" in
+    [0-9]*d | [0-9]*w | [0-9]*m | [0-9]*y)
+      n="${s%[dwmy]}"; unit="${s##*[0-9]}"
+      case "$n" in '' | *[!0-9]*) return 1 ;; esac
+      case "$unit" in
+        d) printf '%s\n' "$((now - n * 86400))" ;;
+        w) printf '%s\n' "$((now - n * 604800))" ;;
+        m) printf '%s\n' "$((now - n * 2592000))" ;;
+        y) printf '%s\n' "$((now - n * 31536000))" ;;
+      esac
+      ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+      n="$(date -d "$s" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M:%S' "$s 00:00:00" +%s 2>/dev/null)" || return 1
+      case "$n" in '' | *[!0-9]*) return 1 ;; esac
+      printf '%s\n' "$n"
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# _jm_repo_here — the repo_key for $PWD, exactly as capture and inject compute it.
+_jm_repo_here() {
+  local ident
+  ident="$(jm_repo_ident "$PWD")"
+  printf '%s' "${ident%%$'\t'*}"
+}
+
+# ── read verbs ──────────────────────────────────────────────────────────────
+
+cmd_search() {
+  _jm_load query.sh render.sh recall.sh
+  local terms='' limit=20 since='' kind='' repo='' all=0 fmt=text dups=0 explicit_repo=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --limit) limit="${2:-20}"; shift 2 ;;
+      --limit=*) limit="${1#--limit=}"; shift ;;
+      --since) since="${2:-}"; shift 2 ;;
+      --since=*) since="${1#--since=}"; shift ;;
+      --kind) kind="${2:-}"; shift 2 ;;
+      --kind=*) kind="${1#--kind=}"; shift ;;
+      --repo) repo="${2:-}"; explicit_repo=1; shift 2 ;;
+      --repo=*) repo="${1#--repo=}"; explicit_repo=1; shift ;;
+      --all-repos) all=1; shift ;;
+      --dups) dups=1; shift ;;
+      --json) fmt=json; shift ;;
+      -h | --help) usage; return 0 ;;
+      --) shift; terms="${terms}${terms:+ }$*"; break ;;
+      -*) die "search: unknown flag: $1" ;;
+      *) terms="${terms}${terms:+ }$1"; shift ;;
+    esac
+  done
+  [ -n "$terms" ] || die 'search: give me something to search for'
+  case "$limit" in '' | *[!0-9]*) die "search: --limit wants a number, not $limit" ;; esac
+
+  local since_epoch=0
+  since_epoch="$(_jm_since "$since")" || die "search: --since wants 30d / 12w / 6m / 1y / YYYY-MM-DD, not $since"
+
+  # --all-repos wins over an implicit current-repo scope; an EXPLICIT --repo
+  # wins over --all-repos, because the user named one.
+  if [ "$all" = '1' ] && [ "$explicit_repo" = '0' ]; then
+    repo=''
+  elif [ -z "$repo" ]; then
+    repo="$(_jm_repo_here)"
+  fi
+
+  local rc=0
+  jm_recall_search "$terms" "$repo" "$limit" "$since_epoch" "$kind" "$fmt" "$dups" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) printf 'no results\n' >&2; return 1 ;;
+    3) printf 'jhh3-mem: sqlite3 is not installed\n' >&2; return 3 ;;
+    *) return "$rc" ;;
+  esac
+}
+
+cmd_files() {
+  _jm_load query.sh render.sh recall.sh
+  local -a paths=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --limit) JM_RECALL_LIMIT="${2:-20}"; shift 2 ;;
+      --limit=*) JM_RECALL_LIMIT="${1#--limit=}"; shift ;;
+      --json) JM_RECALL_FORMAT=json; shift ;;
+      -h | --help) usage; return 0 ;;
+      --) shift; paths+=("$@"); break ;;
+      -*) die "files: unknown flag: $1" ;;
+      *) paths+=("$1"); shift ;;
+    esac
+  done
+  [ "${#paths[@]}" -gt 0 ] || die 'files: give me at least one path'
+  export JM_RECALL_LIMIT="${JM_RECALL_LIMIT:-20}" JM_RECALL_FORMAT="${JM_RECALL_FORMAT:-text}"
+  local rc=0
+  jm_recall_files "${paths[@]}" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) printf 'no results\n' >&2; return 1 ;;
+    *) return "$rc" ;;
+  esac
+}
+
+cmd_recent() {
+  _jm_load query.sh render.sh recall.sh
+  local limit=20 repo='' all=0 fmt=text explicit_repo=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --limit) limit="${2:-20}"; shift 2 ;;
+      --limit=*) limit="${1#--limit=}"; shift ;;
+      --repo) repo="${2:-}"; explicit_repo=1; shift 2 ;;
+      --repo=*) repo="${1#--repo=}"; explicit_repo=1; shift ;;
+      --all-repos) all=1; shift ;;
+      --json) fmt=json; shift ;;
+      -h | --help) usage; return 0 ;;
+      *) die "recent: unknown argument: $1" ;;
+    esac
+  done
+  case "$limit" in '' | *[!0-9]*) die "recent: --limit wants a number, not $limit" ;; esac
+  if [ "$all" = '1' ] && [ "$explicit_repo" = '0' ]; then
+    repo=''
+  elif [ -z "$repo" ]; then
+    repo="$(_jm_repo_here)"
+  fi
+  local rc=0
+  jm_recall_recent "$repo" "$limit" "$fmt" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) printf 'no results\n' >&2; return 1 ;;
+    *) return "$rc" ;;
+  esac
+}
+
+cmd_show() {
+  _jm_load query.sh render.sh recall.sh
+  local sel='' fmt=text
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) fmt=json; shift ;;
+      -h | --help) usage; return 0 ;;
+      -*) die "show: unknown flag: $1" ;;
+      *) sel="$1"; shift ;;
+    esac
+  done
+  [ -n "$sel" ] || die 'show: give me an id or a uid'
+  local rc=0
+  jm_recall_show "$sel" "$fmt" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) printf 'jhh3-mem: no entry %s\n' "$sel" >&2; return 1 ;;
+    *) return "$rc" ;;
+  esac
+}
+
+cmd_export() {
+  _jm_load uninstall.sh
+  local out=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) shift ;;                       # NDJSON is the only format; accept it
+      --out) out="${2:-}"; shift 2 ;;
+      --out=*) out="${1#--out=}"; shift ;;
+      -h | --help) usage; return 0 ;;
+      *) die "export: unknown argument: $1" ;;
+    esac
+  done
+  jm_require_sqlite || { printf 'jhh3-mem: sqlite3 is not installed\n' >&2; return 3; }
+  jm_db_present || { printf 'jhh3-mem: no memory store at %s\n' "$JM_DB" >&2; return 1; }
+  if [ -n "$out" ]; then
+    jm_uninstall_export "$out" || { printf 'jhh3-mem: export to %s failed\n' "$out" >&2; return 1; }
+    printf '%s\n' "$out"
+    return 0
+  fi
+  # stdout form: what AGENTS.md points the Skill Gardener at, so it never needs
+  # a live database path.
+  jm_db_read "SELECT json_object(
+      'id', id, 'uid', uid, 'origin', origin, 'producer', producer,
+      'repo_key', repo_key, 'worktree', worktree, 'branch', branch,
+      'repo_path', repo_path, 'kind', kind, 'ts', ts, 'started_at', started_at,
+      'title', title, 'request', request, 'outcome', outcome,
+      'learned', learned, 'decided', decided, 'next_steps', next_steps,
+      'facts', facts, 'concepts', concepts, 'files_touched', files_touched,
+      'commands', commands, 'capture_mode', capture_mode, 'end_reason', end_reason,
+      'turns', turns, 'redactions', redactions, 'durability', durability,
+      'dedup_key', dedup_key, 'n_mod', n_mod, 'n_read', n_read,
+      'ephemeral', ephemeral, 'injectable', injectable, 'superseded', superseded)
+    FROM entries ORDER BY id;"
+}
+
+# ── write verbs ─────────────────────────────────────────────────────────────
+
+cmd_note() {
+  _jm_load note.sh
+  local text='' kind='note'
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kind) kind="${2:-note}"; shift 2 ;;
+      --kind=*) kind="${1#--kind=}"; shift ;;
+      -h | --help) usage; return 0 ;;
+      --) shift; text="${text}${text:+ }$*"; break ;;
+      -*) die "note: unknown flag: $1" ;;
+      *) text="${text}${text:+ }$1"; shift ;;
+    esac
+  done
+  jm_note_run "$text" "$kind" "$PWD"
+}
+
+cmd_forget() {
+  _jm_load note.sh
+  local session='' repo='' before='' matching='' yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session) session="${2:-}"; shift 2 ;;
+      --session=*) session="${1#--session=}"; shift ;;
+      --repo) repo="${2:-}"; shift 2 ;;
+      --repo=*) repo="${1#--repo=}"; shift ;;
+      --this-repo) repo="$(_jm_repo_here)"; shift ;;
+      --before) before="${2:-}"; shift 2 ;;
+      --before=*) before="${1#--before=}"; shift ;;
+      --matching) matching="${2:-}"; shift 2 ;;
+      --matching=*) matching="${1#--matching=}"; shift ;;
+      --yes | -y) yes=1; shift ;;
+      -h | --help) usage; return 0 ;;
+      *) die "forget: unknown argument: $1" ;;
+    esac
+  done
+  jm_forget_run "$session" "$repo" "$before" "$matching" "$yes"
+}
+
+cmd_capture() {
+  _jm_load capture.sh
+  jm_capture_main "$@"
+}
+
+# ── operate verbs ───────────────────────────────────────────────────────────
+
+cmd_paths() {
+  local annotated=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --annotated | -l) annotated=1; shift ;;
+      -h | --help) usage; return 0 ;;
+      *) die "paths: unknown argument: $1" ;;
+    esac
+  done
+  if [ "$annotated" = '1' ]; then
+    printf '%-56s %-6s %-5s %s\n' PATH KIND MODE NOTE
+    local p kind mode note
+    while IFS=$'\t' read -r p kind mode note; do
+      printf '%-56s %-6s %-5s %s\n' "$p" "$kind" "$mode" "$note"
+    done < <(jm_paths_manifest_annotated)
+  else
+    jm_paths_manifest
+  fi
+}
+
+cmd_status() {
+  jm_require_sqlite || { printf 'jhh3-mem: sqlite3 is not installed\n' >&2; return 3; }
+  printf 'jhh3-mem %s\n' "$JM_VERSION"
+  printf '  store        %s\n' "$JM_HOME"
+  if ! jm_db_present; then
+    printf '  database     (none yet — the first SessionEnd creates it)\n'
+    return 0
+  fi
+  local bytes total repos live noted legacy newest schema
+  bytes=0
+  local p
+  while IFS= read -r p; do
+    [ -f "$p" ] || continue
+    bytes=$((bytes + $(_jm_file_size "$p")))
+  done < <(jm_paths_manifest)
+  schema="$(jm_db_schema_version)"
+  total="$(jm_db_read 'SELECT count(*) FROM entries;' 2>/dev/null)" || total='?'
+  repos="$(jm_db_read 'SELECT count(DISTINCT repo_key) FROM entries;' 2>/dev/null)" || repos='?'
+  live="$(jm_db_read "SELECT count(*) FROM entries WHERE origin='live';" 2>/dev/null)" || live='?'
+  noted="$(jm_db_read "SELECT count(*) FROM entries WHERE origin='noted';" 2>/dev/null)" || noted='?'
+  legacy="$(jm_db_read "SELECT count(*) FROM entries WHERE origin LIKE 'legacy-%';" 2>/dev/null)" || legacy='?'
+  newest="$(jm_db_read "SELECT coalesce(max(ts),0) FROM entries;" 2>/dev/null)" || newest=0
+  printf '  size         %s\n' "$(jm_human_bytes "$bytes")"
+  printf '  schema       %s (code wants %s)\n' "${schema:-0}" "$JM_SCHEMA_VERSION"
+  printf '  entries      %s across %s repos\n' "${total:-0}" "${repos:-0}"
+  printf '               live %s · noted %s · migrated %s\n' "${live:-0}" "${noted:-0}" "${legacy:-0}"
+  case "${newest:-0}" in
+    '' | 0) printf '  newest       (none)\n' ;;
+    *) printf '  newest       %s\n' "$(jm_iso_local "$newest")" ;;
+  esac
+  printf '  this repo    %s\n' "$(_jm_repo_here)"
+  local recent
+  recent="$(jm_db_read "SELECT '  ' || event || ' ' || outcome || ' ' || reason || '  ' || ms || 'ms'
+                          FROM ops_log ORDER BY id DESC LIMIT 3;" 2>/dev/null)" || recent=''
+  if [ -n "$recent" ]; then
+    printf '  last hooks\n'
+    printf '%s\n' "$recent"
+  fi
+  return 0
+}
+
+cmd_doctor() {
+  local deep=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deep) deep=1; shift ;;
+      -h | --help) usage; return 0 ;;
+      *) die "doctor: unknown argument: $1" ;;
+    esac
+  done
+
+  local problems=0
+  printf 'jhh3-mem doctor  (%s)\n' "$JM_VERSION"
+
+  # dependencies
+  if jm_have sqlite3; then
+    printf '  %-28s ok    %s\n' 'sqlite3' "$(sqlite3 --version 2>/dev/null | cut -d' ' -f1)"
+  else
+    printf '  %-28s FAIL  not installed — nothing can work without it\n' 'sqlite3'
+    problems=$((problems + 1))
+  fi
+  if jm_have sqlite3 && sqlite3 -bail -batch ':memory:' \
+      'CREATE VIRTUAL TABLE t USING fts5(a); DROP TABLE t;' >/dev/null 2>&1; then
+    printf '  %-28s ok\n' 'sqlite3 FTS5'
+  else
+    printf '  %-28s FAIL  this sqlite3 has no FTS5; search cannot work\n' 'sqlite3 FTS5'
+    problems=$((problems + 1))
+  fi
+  printf '  %-28s %s\n' 'redaction ruleset' \
+    "$([ -r "$JM_REDACT_SED" ] && printf 'ok    %s rules' "$(grep -c '^s#\|^/' "$JM_REDACT_SED" 2>/dev/null)" || printf 'FAIL  missing')"
+  [ -r "$JM_REDACT_SED" ] || problems=$((problems + 1))
+
+  # store
+  if [ -d "$JM_HOME" ]; then
+    printf '  %-28s ok    %s (%s)\n' 'store directory' "$JM_HOME" \
+      "$(stat -c%a -- "$JM_HOME" 2>/dev/null || stat -f%Lp -- "$JM_HOME" 2>/dev/null || printf '?')"
+  else
+    printf '  %-28s ---   %s does not exist yet\n' 'store directory' "$JM_HOME"
+  fi
+  if jm_db_present; then
+    local grc=0
+    jm_db_gate || grc=$?
+    case "$grc" in
+      0) printf '  %-28s ok    schema %s, mode %s\n' 'database' "$JM_SCHEMA_VERSION" "$(_jm_db_mode_owner)" ;;
+      2) printf '  %-28s WARN  schema is behind the code — run `jhh3-mem upgrade`\n' 'database'
+         problems=$((problems + 1)) ;;
+      3) printf '  %-28s WARN  schema is AHEAD of this plugin; upgrade the plugin\n' 'database'
+         problems=$((problems + 1)) ;;
+      *)
+        if _jm_db_perm_suspect || _jm_db_err_is_perm "${JM_DB_LAST_ERR:-}"; then
+          # Not corruption. The data is intact and the fix is one chmod.
+          printf '  %-28s FAIL  permission denied — mode/owner %s, you are uid %s\n' \
+            'database' "$(_jm_db_mode_owner)" "$(id -u)"
+          printf '  %-28s       your data is fine: chmod 0600 %s\n' '' "$JM_DB"
+        else
+          printf '  %-28s FAIL  unreadable: %s\n' 'database' "${JM_DB_LAST_ERR:-unknown}"
+        fi
+        problems=$((problems + 1))
+        ;;
+    esac
+  else
+    printf '  %-28s ---   no database yet\n' 'database'
+  fi
+
+  # the two claims this plugin exists to be able to make. jm_probe_processes is
+  # the SAME function `uninstall` proves removal with — one implementation, so
+  # the two cannot disagree about whether a daemon exists.
+  local nproc=0 line
+  if jm_have pgrep; then
+    # NAMED, not merely counted, and deliberately NOT a failure: the plugin
+    # directory is called jhh3-mem, so any process whose argv mentions that path
+    # (an editor, `claude --plugin-dir`, a grep) matches. Asserting zero here
+    # would be a check that fails for the wrong reason. What the reader needs is
+    # the list, so they can see for themselves that none of it is a daemon —
+    # the same thing `uninstall` prints, from the same probe.
+    local plines=''
+    plines="$(jm_probe_processes)"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      nproc=$((nproc + 1))
+    done <<EOF
+$plines
+EOF
+    if [ "$nproc" -eq 0 ]; then
+      printf '  %-28s %s\n' 'processes' '0     [expected: no daemon, nothing survives a session]'
+    else
+      printf '  %-28s %s\n' 'processes' \
+        "$nproc     no daemon; processes merely naming the plugin path:"
+      printf '%s\n' "$plines" | head -5 | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf '  %-28s   %s\n' '' "$(printf '%.72s' "$line")"
+      done
+    fi
+  else
+    printf '  %-28s ?     pgrep is not installed; run `pgrep -fa jhh3-mem` yourself\n' 'processes'
+  fi
+  if jm_have ss; then
+    local nsock
+    nsock="$(ss -ltnp 2>/dev/null | grep -c 'jhh3-mem' || true)"
+    printf '  %-28s %s\n' 'listening sockets' "$nsock   [expected 0: this plugin opens no port]"
+    [ "$nsock" = '0' ] || problems=$((problems + 1))
+  else
+    printf '  %-28s ?     ss is not installed; run `ss -ltnp | grep jhh3-mem` yourself\n' 'listening sockets'
+  fi
+
+  if [ "$deep" = '1' ] && jm_db_present; then
+    printf '  %-28s ...\n' 'integrity (deep)'
+    local ic fc
+    ic="$(jm_db_read 'PRAGMA integrity_check;' 2>/dev/null)" || ic='unreadable'
+    printf '  %-28s %s\n' '  integrity_check' "$ic"
+    [ "$ic" = 'ok' ] || problems=$((problems + 1))
+    fc="$(jm_db_read "INSERT INTO entries_fts(entries_fts) VALUES('integrity-check');" 2>&1)" || fc='(read-only connection; run it against a writable handle)'
+    [ -n "$fc" ] || fc='ok'
+    printf '  %-28s %s\n' '  entries_fts' "$fc"
+    local orphans
+    orphans="$(jm_db_read 'SELECT count(*) FROM path WHERE id NOT IN (SELECT path_id FROM entry_file);' 2>/dev/null)" || orphans='?'
+    printf '  %-28s %s   [reclaim with `jhh3-mem forget`]\n' '  orphan path rows' "${orphans:-0}"
+  fi
+
+  printf '\n'
+  if [ "$problems" -eq 0 ]; then
+    printf 'healthy\n'
+    return 0
+  fi
+  printf '%s problem(s) found\n' "$problems"
+  return 1
+}
+
+cmd_log() {
+  local n=20 file=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) n="${2:-20}"; shift 2 ;;
+      -n*) n="${1#-n}"; shift ;;
+      --file) file=1; shift ;;
+      -h | --help) usage; return 0 ;;
+      *) die "log: unknown argument: $1" ;;
+    esac
+  done
+  case "$n" in '' | *[!0-9]*) die "log: -n wants a number, not $n" ;; esac
+  if [ "$file" = '1' ] || ! jm_db_present; then
+    [ -r "$JM_LOG" ] || { printf 'jhh3-mem: no log at %s\n' "$JM_LOG" >&2; return 1; }
+    LC_ALL=C tail -n "$n" -- "$JM_LOG"
+    return 0
+  fi
+  jm_db_read "SELECT strftime('%Y-%m-%d %H:%M:%S', ts, 'unixepoch') || '  ' ||
+                     printf('%-13s', event) || printf('%-9s', outcome) ||
+                     printf('%-28s', reason) || printf('%6s', ms) || 'ms  ' || repo_key
+                FROM (SELECT * FROM ops_log ORDER BY id DESC LIMIT $n) ORDER BY id;"
+}
+
+cmd_explain_inject() {
+  _jm_load query.sh render.sh inject.sh
+  local cwd="$PWD" source=startup
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cwd) cwd="${2:-$PWD}"; shift 2 ;;
+      --source) source="${2:-startup}"; shift 2 ;;
+      -h | --help) usage; return 0 ;;
+      *) die "explain-inject: unknown argument: $1" ;;
+    esac
+  done
+  # The SAME function SessionStart calls, with the same arguments. That is the
+  # point: this cannot drift from what the hook emits (INJ-16).
+  local rc=0
+  jm_inject_run "$cwd" "$source" '' || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'jhh3-mem: SessionStart would inject nothing here (see `jhh3-mem log`)\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+cmd_migrate() {
+  _jm_load migrate.sh
+  jm_migrate_main "$@"
+}
+
+# _jm_report_shim — install the launcher and say plainly whether the shell can find it.
+_jm_report_shim() {
+  if ! jm_shim_install; then
+    printf '  %-22s could not write %s\n' 'launcher' "$JM_SHIM"
+    return 0
+  fi
+  if jm_shim_on_path; then
+    printf '  %-22s %s\n' 'launcher' "$JM_SHIM"
+  else
+    printf '  %-22s %s\n' 'launcher' "$JM_SHIM"
+    printf '  %-22s ^ NOT on your PATH — the command will not resolve in your shell.\n' ''
+    printf '  %-22s   add this to your shell rc:  export PATH="%s:$PATH"\n' '' "$(dirname -- "$JM_SHIM")"
+  fi
+  return 0
+}
+
+cmd_setup() {
+  local do_sched=1 with_enrich=1 from='' dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-schedule) do_sched=0 ;;
+      --with-enrich) with_enrich=1 ;;   # kept: was the old opt-in spelling
+      --no-enrich)   with_enrich=0 ;;
+      --env-file)    shift; JHH3_MEM_SCHED_ENV_FILE="${1:-}" ;;
+      --from)        shift; from="${1:-}" ;;
+      --dry-run)     dry=1 ;;
+      -h|--help)
+        printf 'usage: jhh3-mem setup [--from DB] [--no-schedule] [--no-enrich]\n'
+        printf '                      [--env-file PATH] [--dry-run]\n'
+        printf '\nOne idempotent command that brings this machine up to date: bootstrap or\n'
+        printf 'upgrade the store, import a legacy archive if one is found and none has been\n'
+        printf 'imported, install the nightly job, and verify. Safe to re-run -- running it\n'
+        printf 'again after a plugin update IS the update path.\n'
+        return 0 ;;
+      *) printf 'setup: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+
+  jm_require_sqlite || { printf 'jhh3-mem: sqlite3 is not installed; nothing can work without it\n' >&2; return 3; }
+  sqlite3 -bail -batch ':memory:' 'CREATE VIRTUAL TABLE t USING fts5(x);' >/dev/null 2>&1 \
+    || { printf 'jhh3-mem: this sqlite3 has no FTS5; search cannot work\n' >&2; return 3; }
+
+  printf 'jhh3-mem setup%s\n\n' "$([ "$dry" = '1' ] && printf ' (dry run)')"
+
+  # 1. store — bootstrap on a fresh machine, migrate schema on an updated one.
+  local have want
+  want="$JM_SCHEMA_VERSION"
+  have="$(jm_db_schema_version 2>/dev/null || printf '0')"
+  if [ "$dry" = '1' ]; then
+    printf '  %-22s schema %s -> %s\n' 'store' "${have:-0}" "$want"
+  elif [ "${have:-0}" = "$want" ]; then
+    printf '  %-22s already at schema %s\n' 'store' "$want"
+  else
+    jm_db_bootstrap >/dev/null 2>&1 || { printf 'jhh3-mem: could not bootstrap the store\n' >&2; return 1; }
+    printf '  %-22s schema %s -> %s\n' 'store' "${have:-0}" "$want"
+  fi
+
+  # 2. legacy import — only when one is findable AND nothing has been imported yet,
+  #    so re-running setup never re-imports and never duplicates.
+  local already legacy=''
+  already="$(jm_db_read "SELECT count(*) FROM entries WHERE origin LIKE 'legacy-%';" 2>/dev/null || printf '0')"
+  if [ -n "$from" ]; then legacy="$from"
+  else
+    for legacy in "$HOME/mem-archive/claude-mem.db" "$HOME/.claude-mem/claude-mem.db" ''; do
+      [ -n "$legacy" ] && [ -r "$legacy" ] && break
+    done
+  fi
+  if [ "${already:-0}" -gt 0 ]; then
+    printf '  %-22s %s row(s) already imported; skipping\n' 'legacy archive' "$already"
+  elif [ -z "$legacy" ]; then
+    printf '  %-22s none found (looked in ~/mem-archive, ~/.claude-mem)\n' 'legacy archive'
+  elif [ "$dry" = '1' ]; then
+    printf '  %-22s would import from %s\n' 'legacy archive' "$legacy"
+  else
+    printf '  %-22s importing from %s ...\n' 'legacy archive' "$legacy"
+    _jm_load migrate.sh
+    jm_migrate_run "$legacy" 0 0 0 >/dev/null 2>&1 \
+      && printf '  %-22s %s row(s) imported\n' '' "$(jm_db_read "SELECT count(*) FROM entries WHERE origin LIKE 'legacy-%';" 2>/dev/null)" \
+      || printf '  %-22s import failed — run `jhh3-mem migrate --from %s` for the error\n' '' "$legacy"
+  fi
+
+  # 3. nightly job
+  if [ "$do_sched" = '1' ]; then
+    _jm_load schedule.sh
+    local st; st="$(jm_schedule_status)"
+    if [ "$st" != 'none' ] && [ "$dry" != '1' ]; then
+      printf '  %-22s already scheduled (%s); rewriting to match this version\n' 'nightly job' "$st"
+    fi
+    printf '  %-22s ' 'nightly job'
+    jm_schedule_install "$dry" "$with_enrich" || printf 'not scheduled (see above)\n'
+    [ "$dry" = '1' ] || _jm_report_shim
+  else
+    # The shim is the PATH fix, not part of the job: install it either way so the
+    # command exists in the user's own shell, where the plugin's bin/ never lands.
+    _jm_load schedule.sh
+    _jm_report_shim
+    printf '  %-22s skipped (--no-schedule)\n' 'nightly job'
+  fi
+
+  # 4. semantic search — REPORTED, never enabled. It is the one part of this
+  #    plugin that costs money and leaves the machine, so "setup made it work"
+  #    would be the wrong kind of convenient. State where the machine stands and
+  #    name the single command that changes it. This block is also why re-running
+  #    setup after an update is worth doing: it is where a user learns that new
+  #    rows have been captured since the last embed.
+  if [ "$dry" != '1' ]; then
+    _jm_load embed.sh 2>/dev/null || true
+    if command -v jm_embed_status >/dev/null 2>&1; then
+      printf '  %-22s %s\n' 'semantic search' "$(jm_embed_status 2>/dev/null || printf 'off')"
+    fi
+  fi
+
+  # 5. verify, and say what to look at next
+  printf '\n'
+  if [ "$dry" != '1' ]; then
+    _jm_load doctor.sh 2>/dev/null || true
+    cmd_doctor 2>/dev/null | sed 's/^/  /' | head -14
+  fi
+  printf '\n  next: jhh3-mem explain-inject   # exactly what SessionStart will emit here\n'
+  printf '        jhh3-mem recent            # what it has captured so far\n'
+  return 0
+}
+
+cmd_catchup() {
+  case "${1:-}" in
+    -h|--help)
+      printf 'usage: jhh3-mem catchup\n'
+      printf '\nThe two incremental stages -- enrich, then embed -- and nothing else.\n'
+      printf 'Cheap and a no-op when nothing is pending, so it is safe hourly. `dream`\n'
+      printf 'is deliberately absent: FTS compaction is nightly work.\n'
+      return 0 ;;
+  esac
+  local rc=0
+  # Runs HOURLY, so a session is distilled and searchable within the hour rather
+  # than the next morning. Both stages exit immediately with nothing pending, which
+  # is the normal case -- the cost of running this often is one sqlite count.
+  #
+  # Limits are high, not "safe": the old default of 40 quietly meant a busy day
+  # could never catch up, and a backlog that never clears is the same as a feature
+  # that is off. Order matters here for the same reason as in `nightly` -- embed
+  # after enrich, so a row is vectorised WITH its distilled text, not before it.
+  cmd_enrich --limit 500 >/dev/null 2>&1 || rc=1
+  cmd_embed --limit 5000 >/dev/null 2>&1 || rc=1
+  jm_log catchup ok "rc=$rc"
+  return "$rc"
+}
+
+cmd_nightly() {
+  local rc=0 t0
+  case "${1:-}" in
+    -h|--help)
+      printf 'usage: jhh3-mem nightly [--no-enrich]\n'
+      printf '\nEverything that keeps the store improving, in one command and in the only\n'
+      printf 'order that is correct: enrich distils new rows, dream consolidates them, embed\n'
+      printf 'vectorises the result. This is what the scheduler runs.\n'
+      return 0 ;;
+  esac
+  local do_enrich=1
+  [ "${1:-}" = '--no-enrich' ] && do_enrich=0
+
+  # Order is load-bearing, which is exactly why this is ONE command rather than
+  # three cron lines an hour apart guessing at each other's runtime:
+  #   enrich writes learned/decided/next_steps -> dream reconciles and compacts
+  #   -> embed vectorises, and only now does it see the enriched text.
+  # Run the other way round and every enriched row waits a full day for its vector.
+  #
+  # Each stage is independent: a stage that fails is reported and the next still
+  # runs, because a missing model or an expired key must not stop consolidation.
+  t0="$(date +%s)"
+  printf 'jhh3-mem nightly\n'
+
+  if [ "$do_enrich" = '1' ]; then
+    printf '  enrich  '; cmd_enrich --limit 2000 2>&1 | tail -1 || rc=1
+  else
+    printf '  enrich  skipped (--no-enrich)\n'
+  fi
+  printf '  dream   '; cmd_dream 2>&1 | tail -1 || rc=1
+  printf '  embed   '
+  if cmd_embed --limit 20000 2>&1 | tail -1; then :; else rc=1; fi
+
+  jm_log nightly ok "secs=$(( $(date +%s) - t0 )) rc=$rc"
+  return "$rc"
+}
+
+cmd_schedule() {
+  local dry=0 with_enrich=1 remove=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --remove) remove=1 ;;
+      --with-enrich) with_enrich=1 ;;
+      --no-enrich)   with_enrich=0 ;;
+      --env-file)    shift; JHH3_MEM_SCHED_ENV_FILE="${1:-}" ;;
+      --dry-run) dry=1 ;;
+      --status) _jm_load schedule.sh; jm_schedule_status; return 0 ;;
+      -h|--help)
+        printf 'usage: jhh3-mem schedule [--no-enrich] [--env-file PATH] [--remove]\n'
+        printf '                         [--status] [--dry-run]\n'
+        printf '\nInstalls the recurring jobs (catchup hourly, full pass nightly). When\n'
+        printf '--env-file (default HOME/.env.private) names a file providing OPENAI_API_KEY,\n'
+        printf 'the cron lines source it at run time so the embed stage has a key under cron;\n'
+        printf 'the key itself is never written into the crontab. Registered in `paths` and\n'
+        printf 'removed by `uninstall --purge`, so it cannot outlive the plugin.\n'
+        return 0 ;;
+      *) printf 'schedule: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  _jm_load schedule.sh
+  if [ "$remove" = '1' ]; then jm_schedule_remove; printf 'removed\n'; return 0; fi
+  jm_schedule_install "$dry" "$with_enrich"
+}
+
+cmd_embed() {
+  local limit=500 dry=0 install=0 status=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --install)  install=1 ;;
+      --limit)    shift; limit="${1:-500}" ;;
+      --dry-run)  dry=1 ;;
+      --status)   status=1 ;;
+      -h|--help)
+        printf 'usage: jhh3-mem embed [--install] [--limit N] [--dry-run] [--status]\n'
+        printf '\nOptional semantic search. --install fetches the sqlite-vec extension into\n'
+        printf 'the store (verified against a pinned checksum). Embedding needs OPENAI_API_KEY.\n'
+        printf 'With neither, search behaves exactly as it does today.\n'
+        return 0 ;;
+      *) printf 'embed: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  _jm_load embed.sh
+  if [ "$status" = '1' ]; then jm_embed_status; return 0; fi
+  if [ "$install" = '1' ]; then
+    jm_embed_fetch_extension || return 1
+    printf 'sqlite-vec v%s installed at %s.so\n' "$JM_VEC_VERSION" "$JM_VEC_SO"
+    jm_embed_ensure_table && printf 'vector table ready (dim %s)\n' "$JM_EMBED_DIM"
+    return 0
+  fi
+  jm_embed_rows "$limit" "$dry"
+}
+
+cmd_dream() {
+  local dry=0 verbose=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      -v|--verbose) verbose=1 ;;
+      -h|--help)
+        printf 'usage: jhh3-mem dream [--dry-run] [-v]\n'
+        printf '\nBetween-session consolidation over the whole store, both hosts at once:\n'
+        printf 'reconcile superseded rows, re-rank enriched ones, compact the index,\n'
+        printf 'and report. Never deletes; never runs from a hook.\n'
+        return 0 ;;
+      *) printf 'dream: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  _jm_load dream.sh
+  jm_dream_run "$dry" "$verbose"
+}
+
+cmd_enrich() {
+  local selector='pending' limit=20 dry=0 model=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all)      selector='all' ;;
+      --repo)     shift; selector="${1:-}" ;;
+      --limit)    shift; limit="${1:-20}" ;;
+      --model)    shift; model="${1:-}" ;;
+      --dry-run)  dry=1 ;;
+      -h|--help)
+        printf 'usage: jhh3-mem enrich [--all|--repo KEY] [--limit N] [--model M] [--dry-run]\n'
+        printf '\nFills learned/decided/next_steps on deterministic rows using whichever\n'
+        printf 'agent CLI is installed. Never runs from a hook; safe to re-run.\n'
+        return 0 ;;
+      *) printf 'enrich: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  _jm_load enrich.sh
+  jm_enrich_run "$selector" "$limit" "$dry" "$model"
+}
+
+cmd_upgrade() {
+  jm_require_sqlite || { printf 'jhh3-mem: sqlite3 is not installed\n' >&2; return 3; }
+  local have
+  have="$(jm_db_schema_version)"
+  if [ "$have" = "$JM_SCHEMA_VERSION" ]; then
+    printf 'already at schema %s; nothing to do\n' "$JM_SCHEMA_VERSION"
+    return 0
+  fi
+  if [ "$have" -gt "$JM_SCHEMA_VERSION" ] 2>/dev/null; then
+    printf 'jhh3-mem: the database is at schema %s, this plugin only knows %s.\n' \
+      "$have" "$JM_SCHEMA_VERSION" >&2
+    printf '          Update the plugin; do not downgrade the store.\n' >&2
+    return 1
+  fi
+  local lrc=0
+  jm_db_lock_ddl 30 || lrc=$?
+  [ "$lrc" -eq 75 ] && { printf 'jhh3-mem: another migration holds the lock\n' >&2; return 75; }
+  [ "$lrc" -eq 0 ] || { printf 'jhh3-mem: could not acquire the DDL lock\n' >&2; return 1; }
+  local rc=0
+  jm_db_bootstrap || rc=$?
+  jm_db_unlock_ddl
+  if [ "$rc" -ne 0 ]; then
+    printf 'jhh3-mem: upgrade failed (rc %s: %s)\n' "$rc" "$JM_DB_LAST_ERR" >&2
+    return 1
+  fi
+  jm_log upgrade ok "from=$have to=$JM_SCHEMA_VERSION"
+  printf 'upgraded schema %s -> %s\n' "$have" "$JM_SCHEMA_VERSION"
+  return 0
+}
+
+cmd_uninstall() {
+  _jm_load uninstall.sh
+  jm_uninstall_main "$@"
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+
+main() {
+  [ $# -gt 0 ] || { usage; return 2; }
+  local verb="$1"; shift
+  case "$verb" in
+    search) cmd_search "$@" ;;
+    files) cmd_files "$@" ;;
+    recent) cmd_recent "$@" ;;
+    show) cmd_show "$@" ;;
+    export) cmd_export "$@" ;;
+    note) cmd_note "$@" ;;
+    forget) cmd_forget "$@" ;;
+    capture) cmd_capture "$@" ;;
+    paths) cmd_paths "$@" ;;
+    status) cmd_status "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    log) cmd_log "$@" ;;
+    explain-inject) cmd_explain_inject "$@" ;;
+    setup) cmd_setup "$@" ;;
+    nightly) cmd_nightly "$@" ;;
+    catchup) cmd_catchup "$@" ;;
+    schedule) cmd_schedule "$@" ;;
+    embed) cmd_embed "$@" ;;
+    dream) cmd_dream "$@" ;;
+    enrich) cmd_enrich "$@" ;;
+    migrate) cmd_migrate "$@" ;;
+    upgrade) cmd_upgrade "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    version | --version | -V) printf 'jhh3-mem %s (schema %s)\n' "$JM_VERSION" "$JM_SCHEMA_VERSION" ;;
+    help | --help | -h) usage ;;
+    *) printf 'jhh3-mem: unknown command: %s\n\n' "$verb" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"

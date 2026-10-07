@@ -1,0 +1,1966 @@
+#!/usr/bin/env python3
+"""rota — manage Claude accounts and show Claude + Codex subscription usage.
+
+Commands:
+  rota                     Usage bars for all Claude and Codex subscriptions
+  rota usage [name]        Usage for one Claude account, or all subscriptions
+  rota switch [email]      Switch accounts (prefix ok: `rota switch dev`);
+                           with no email, switch to the best account
+  rota add [email]         Enroll a new account via an in-process browser login
+                           (never touches the live login; does not switch)
+  rota reauth <email>      Re-authenticate a saved account whose refresh token
+                           expired, in place — no switching, no logout.
+                           `--all` walks every dead account; add --manual when
+                           a browser can't reach localhost.
+  rota list                List accounts with token health (active one marked)
+  rota whoami              Show the active account
+  rota export [email...]   Print account snapshots as JSON (contains secrets!)
+  rota import <file|->     Import snapshots exported on another machine
+  rota remove <email>      Delete an account snapshot
+  rota save                Repair: re-snapshot the live login (rarely needed)
+
+Codex commands (independent of the Claude account — switching one never
+touches the other):
+  rota codex               Usage for all Codex subscriptions
+  rota codex switch [name] Switch the active Codex account; with no name,
+                           switch to the account with the most headroom
+  rota codex add           Enroll a new Codex account via `codex login`
+                           (does not switch)
+  rota codex list          List saved Codex accounts
+  rota codex save [name]   Snapshot the live Codex login
+  rota codex remove <name> Delete a Codex account snapshot
+  rota codex whoami        Show the active Codex account
+
+Notes:
+  - Snapshots live in ~/.claude/accounts/<name>.json (chmod 600).
+  - Switching swaps only the claudeAiOauth key in .credentials.json, so MCP
+    server OAuth (Sentry/Notion/Linear/...) is untouched.
+  - Codex snapshots live in $CODEX_HOME/accounts/<name>/auth.json; switching
+    swaps only $CODEX_HOME/auth.json, so Codex config/history stay shared and
+    the Claude login is never touched.
+  - Refresh tokens are single-use (rotated on refresh) and their lifetime is
+    fixed at login (~60 days) — refreshing does not extend it. rota refreshes
+    when an access token is expired or a request 401s, and writes rotated
+    tokens back to both the snapshot and the live file. Once a refresh token
+    is rejected the account is marked dead and left alone (no more requests,
+    so no 429 lockouts) until `rota reauth <email>`.
+  - Usage results are cached in ~/.claude/accounts/.usage-cache.json; when a
+    fetch fails (rate limit, network) the last good numbers are shown, marked
+    with their age.
+  - Avoid switching while another Claude Code session is mid-conversation;
+    running sessions keep their old identity.
+"""
+
+import base64
+import getpass
+import hashlib
+import json
+import os
+import random
+import re
+import secrets
+import select
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+CREDS_FILE = CLAUDE_DIR / ".credentials.json"
+CLAUDE_JSON = (
+    (CLAUDE_DIR / ".claude.json")
+    if os.environ.get("CLAUDE_CONFIG_DIR")
+    else Path.home() / ".claude.json"
+)
+STORE_DIR = CLAUDE_DIR / "accounts"
+CACHE_FILE = STORE_DIR / ".usage-cache.json"
+
+# OAuth endpoints and parameters, mirrored from what `claude /login` uses.
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+ROLES_URL = "https://api.anthropic.com/api/oauth/claude_cli/roles"
+AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"  # claude.ai subscription login
+MANUAL_REDIRECT_URL = "https://platform.claude.com/oauth/code/callback"
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code public OAuth client
+LOGIN_SCOPES = [
+    "org:create_api_key", "user:profile", "user:inference",
+    "user:sessions:claude_code", "user:mcp_servers", "user:file_upload", "user:plugins",
+]
+SUBSCRIPTION_TYPES = {
+    "claude_max": "max", "claude_pro": "pro",
+    "claude_enterprise": "enterprise", "claude_team": "team",
+}
+LOGIN_TIMEOUT = 600          # seconds to wait for the browser round-trip
+RETRY_AFTER_BUDGET = 5       # sleep-and-retry a 429 only if Retry-After is this short
+REFRESH_WARN_DAYS = 7        # warn when a refresh token expires within this many days
+
+CODEX_BIN = os.environ.get("ROTA_CODEX_BIN", "codex")
+CODEX_TIMEOUT = 15
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+CYAN = "\033[36m"
+
+
+# ---------- file helpers ----------
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def write_json_atomic(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+# ---------- live credentials (file on Linux, Keychain on macOS) ----------
+
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+_DEFAULT_CREDS_FILE = CREDS_FILE
+
+
+def _keychain_read():
+    """Return the raw credentials JSON text from the macOS login Keychain, or None."""
+    if sys.platform != "darwin" or os.environ.get("ROTA_NO_KEYCHAIN"):
+        return None
+    if CREDS_FILE != _DEFAULT_CREDS_FILE:
+        # credentials path was redirected (tests, custom setups): never touch the Keychain
+        return None
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def _keychain_write(text):
+    r = subprocess.run(
+        ["security", "add-generic-password", "-U", "-a", getpass.getuser(),
+         "-s", KEYCHAIN_SERVICE, "-w", text],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        die(f"failed to write Keychain entry {KEYCHAIN_SERVICE!r}: {r.stderr.strip()}")
+
+
+def use_keychain():
+    """Claude Code on macOS stores credentials in the login Keychain rather than
+    .credentials.json. Prefer the Keychain whenever an entry exists there."""
+    return _keychain_read() is not None
+
+
+def read_live_creds():
+    text = _keychain_read()
+    if text is not None:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+    return read_json(CREDS_FILE) or {}
+
+
+def write_live_creds(creds):
+    if use_keychain():
+        _keychain_write(json.dumps(creds))
+    else:
+        write_json_atomic(CREDS_FILE, creds)
+
+
+def die(msg):
+    print(f"{RED}error:{RESET} {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------- account store ----------
+
+def store_accounts():
+    """name -> snapshot dict"""
+    out = {}
+    if STORE_DIR.is_dir():
+        for p in sorted(STORE_DIR.glob("*.json")):
+            data = read_json(p)
+            if data and "claudeAiOauth" in data:
+                out[p.stem] = data
+    return out
+
+
+def validate_name(name):
+    if not re.fullmatch(r"[A-Za-z0-9._@-]+", name) or set(name) <= {"."}:
+        die(f"invalid account name {name!r} (use letters, digits, . _ @ -)")
+
+
+def store_path(name):
+    validate_name(name)
+    return STORE_DIR / f"{name}.json"
+
+
+def live_oauth():
+    return read_live_creds().get("claudeAiOauth")
+
+
+def live_account_info():
+    cfg = read_json(CLAUDE_JSON) or {}
+    return cfg.get("oauthAccount") or {}
+
+
+def active_name():
+    """Which saved account is currently live, matched by accountUuid."""
+    uuid = live_account_info().get("accountUuid")
+    if not uuid:
+        return None
+    for name, snap in store_accounts().items():
+        if snap.get("oauthAccount", {}).get("accountUuid") == uuid:
+            return name
+    return None
+
+
+def resolve_name(accounts, query, what, list_cmd):
+    """Resolve an account by exact name or unique prefix/substring."""
+    if query in accounts:
+        return query
+    matches = [n for n in accounts if n.startswith(query)] or \
+              [n for n in accounts if query in n]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        die(f"no {what} matching {query!r} — see: {list_cmd}")
+    die(f"{query!r} is ambiguous: {', '.join(matches)}")
+
+
+def resolve(query):
+    return resolve_name(store_accounts(), query, "account", "rota list")
+
+
+def snapshot_live(name=None):
+    oauth = live_oauth()
+    if not oauth:
+        die("no logged-in account found (.credentials.json or macOS Keychain) — run `claude` and /login first")
+    if name is None:
+        name = live_account_info().get("emailAddress") or die("live login has no email address")
+    snap = {
+        "name": name,
+        "claudeAiOauth": oauth,
+        "oauthAccount": live_account_info(),
+        "savedAt": int(time.time() * 1000),
+    }
+    write_json_atomic(store_path(name), snap)
+    return snap
+
+
+def persist_tokens(name, tokens, also_live):
+    """Write rotated/updated tokens back to the snapshot (and live creds if active)."""
+    path = store_path(name)
+    snap = read_json(path)
+    if snap is not None:
+        snap["claudeAiOauth"] = tokens
+        write_json_atomic(path, snap)
+    if also_live:
+        creds = read_live_creds()
+        creds["claudeAiOauth"] = tokens
+        write_live_creds(creds)
+
+
+# ---------- HTTP ----------
+
+_UA = None
+
+def user_agent():
+    global _UA
+    if _UA is None:
+        ver = "2.0.0"
+        try:
+            out = subprocess.run(
+                ["claude", "--version"], capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+            m = re.match(r"[\d.]+", out)
+            if m:
+                ver = m.group(0)
+        except Exception:
+            pass
+        _UA = f"claude-cli/{ver} (external, cli)"
+    return _UA
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def span_text(ms):
+    """'6d 2h', '3h 12m' or '4m' for a millisecond span."""
+    secs = abs(int(ms)) // 1000
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def age_text(ms):
+    """'6d 2h ago' / 'in 3d 4h' relative to now."""
+    delta = ms - now_ms()
+    return f"in {span_text(delta)}" if delta > 0 else f"{span_text(delta)} ago"
+
+
+class HttpError(Exception):
+    def __init__(self, code, body, headers):
+        super().__init__(f"HTTP {code}")
+        self.code, self.body, self.headers = code, body, headers
+
+    def detail(self):
+        try:
+            err = json.loads(self.body)
+            msg = err.get("error_description") or err.get("error")
+            if isinstance(msg, dict):
+                msg = msg.get("message") or msg.get("type")
+            if msg:
+                return str(msg)
+        except Exception:
+            pass
+        return self.body.decode(errors="replace").strip()[:200] if self.body else ""
+
+
+def http_json(url, data=None, headers=None, timeout=30):
+    """One JSON request; HTTP errors surface as HttpError with the body kept."""
+    hdrs = {"Content-Type": "application/json", "User-Agent": user_agent()}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(
+        url, data=json.dumps(data).encode() if data is not None else None, headers=hdrs
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read()[:2000]
+        except Exception:
+            body = b""
+        raise HttpError(e.code, body, e.headers) from None
+
+
+def oauth_headers(access_token):
+    return {"Authorization": f"Bearer {access_token}", "anthropic-beta": "oauth-2025-04-20"}
+
+
+class Unauthorized(Exception):
+    pass
+
+
+class RateLimited(Exception):
+    def __init__(self, retry_after):
+        super().__init__(f"rate limited (retry {age_text(now_ms() + retry_after * 1000)})")
+        self.retry_after = retry_after
+
+
+class RefreshDead(Exception):
+    """The refresh token was rejected outright; only a new login will help."""
+
+
+def retry_after_seconds(headers, default=60):
+    try:
+        return max(1, int(float(headers.get("Retry-After", default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def fetch_usage(access_token):
+    """One usage fetch. Sleeps through a short Retry-After and retries one 5xx."""
+    for attempt in (1, 2):
+        try:
+            return http_json(USAGE_URL, headers=oauth_headers(access_token))
+        except HttpError as e:
+            if e.code in (401, 403):
+                raise Unauthorized() from e
+            if e.code == 429:
+                wait = retry_after_seconds(e.headers)
+                if attempt == 1 and wait <= RETRY_AFTER_BUDGET:
+                    time.sleep(wait)
+                    continue
+                raise RateLimited(wait) from e
+            if e.code >= 500 and attempt == 1:
+                time.sleep(1)
+                continue
+            raise
+
+
+def tokens_from_response(d, base=None):
+    """Merge a token-endpoint response into a claudeAiOauth block."""
+    new = dict(base or {})
+    now = now_ms()
+    new["accessToken"] = d["access_token"]
+    if d.get("refresh_token"):
+        new["refreshToken"] = d["refresh_token"]
+    new["expiresAt"] = now + int(d.get("expires_in", 3600)) * 1000
+    if d.get("refresh_token_expires_in") is not None:
+        new["refreshTokenExpiresAt"] = now + int(d["refresh_token_expires_in"]) * 1000
+    else:
+        new.pop("refreshTokenExpiresAt", None)  # unknown; don't keep a stale value
+    if d.get("scope"):
+        new["scopes"] = d["scope"].split()
+    return new
+
+
+def refresh_tokens(tokens):
+    body = {
+        "grant_type": "refresh_token",
+        "refresh_token": tokens["refreshToken"],
+        "client_id": CLIENT_ID,
+    }
+    try:
+        d = http_json(TOKEN_URL, data=body)
+    except HttpError as e:
+        if e.code in (400, 401) and b"invalid_grant" in e.body:
+            raise RefreshDead(e.detail() or "refresh token rejected") from e
+        if e.code == 429:
+            raise RateLimited(retry_after_seconds(e.headers)) from e
+        raise RuntimeError(f"token refresh failed (HTTP {e.code}) {e.detail()}") from e
+    return tokens_from_response(d, tokens)
+
+
+def token_expired(tokens, margin_ms=60_000):
+    exp = tokens.get("expiresAt")
+    return exp is not None and exp <= now_ms() + margin_ms
+
+
+def refresh_token_expires_at(snap):
+    return (snap.get("claudeAiOauth") or {}).get("refreshTokenExpiresAt")
+
+
+def mark_dead(name, reason):
+    """Persist that this account's refresh token was rejected, so later runs
+    skip it entirely instead of hammering the API (which earns a 429 lockout)."""
+    path = store_path(name)
+    snap = read_json(path)
+    if snap is not None:
+        snap["authDead"] = {"at": now_ms(), "reason": reason}
+        write_json_atomic(path, snap)
+
+
+def dead_message(name, snap):
+    dead = snap.get("authDead") or {}
+    since = f" (since {age_text(dead['at'])})" if dead.get("at") else ""
+    reason = dead.get("reason") or "refresh token rejected"
+    return f"{reason}{since} — re-auth with: rota reauth {name}"
+
+
+def usage_for(name, snap, is_active):
+    """Return (usage_data, error_string).
+
+    Refreshes up front when the access token is already expired (a request with a
+    dead token is wasted and, repeated, gets the token rate-limited), refreshes on
+    401, and marks the account dead when the refresh token itself is rejected."""
+    if snap.get("authDead"):
+        return None, dead_message(name, snap)
+    tokens = (live_oauth() if is_active else None) or snap["claudeAiOauth"]
+
+    def refresh():
+        nonlocal tokens
+        try:
+            if not tokens.get("refreshToken"):
+                raise RefreshDead("no refresh token saved (logged out elsewhere?)")
+            tokens = refresh_tokens(tokens)
+        except RefreshDead as e:
+            if name in store_accounts():
+                mark_dead(name, str(e))
+            raise
+        persist_tokens(name, tokens, also_live=is_active)
+
+    try:
+        if token_expired(tokens):
+            refresh()
+        try:
+            return fetch_usage(tokens["accessToken"]), None
+        except Unauthorized:
+            refresh()
+            return fetch_usage(tokens["accessToken"]), None
+    except RefreshDead as e:
+        return None, f"{e} — re-auth with: rota reauth {name}"
+    except RateLimited as e:
+        return None, str(e)
+    except HttpError as e:
+        return None, f"HTTP {e.code} {e.detail()}".strip()
+    except Exception as e:
+        return None, str(e)
+
+
+# ---------- usage cache ----------
+
+_cache_lock = threading.Lock()
+
+
+def cache_load():
+    return read_json(CACHE_FILE) or {}
+
+
+def cache_store(results):
+    """Remember the latest good usage per account (used as a fallback on errors)."""
+    if not results:
+        return
+    with _cache_lock:
+        cache = cache_load()
+        for name, data in results.items():
+            cache[name] = {"fetchedAt": now_ms(), "data": data}
+        try:
+            write_json_atomic(CACHE_FILE, cache)
+        except OSError:
+            pass
+
+
+# ---------- OAuth login (in-process, mirrors `claude /login`) ----------
+
+def pkce_pair():
+    verifier = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return verifier, base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def authorize_url(challenge, state, redirect_uri, login_hint=None):
+    params = {
+        "code": "true",
+        "client_id": CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": " ".join(LOGIN_SCOPES),
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    if login_hint:
+        params["login_hint"] = login_hint
+    return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
+
+
+def parse_auth_input(text, expected_state):
+    """Accept a pasted callback URL, the manual page's 'code#state', or a bare
+    code. Returns (code, state)."""
+    text = text.strip()
+    if "://" in text:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(text).query)
+        return (q.get("code") or [None])[0], (q.get("state") or [expected_state])[0]
+    if "#" in text:
+        code, state = text.split("#", 1)
+        return code.strip(), state.strip()
+    return text, expected_state
+
+
+def exchange_code(code, state, verifier, redirect_uri):
+    body = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": CLIENT_ID,
+        "code_verifier": verifier,
+        "state": state,
+    }
+    try:
+        return http_json(TOKEN_URL, data=body)
+    except HttpError as e:
+        if e.code == 401:
+            die("authentication failed: invalid or already-used authorization code")
+        die(f"token exchange failed (HTTP {e.code}) {e.detail()}")
+
+
+def account_from_login(token_response):
+    """Build (claudeAiOauth, oauthAccount) the way Claude Code populates them
+    after a login: token response + /api/oauth/profile + /claude_cli/roles."""
+    tokens = tokens_from_response(token_response)
+    profile = http_json(PROFILE_URL, headers=oauth_headers(tokens["accessToken"]))
+    try:
+        roles = http_json(ROLES_URL, headers=oauth_headers(tokens["accessToken"]))
+    except Exception:
+        roles = {}
+    acct = profile.get("account") or {}
+    org = profile.get("organization") or {}
+    tok_acct = token_response.get("account") or {}
+    tok_org = token_response.get("organization") or {}
+    tokens["subscriptionType"] = SUBSCRIPTION_TYPES.get(org.get("organization_type"))
+    tokens["rateLimitTier"] = org.get("rate_limit_tier")
+    account = {
+        "accountUuid": acct.get("uuid") or tok_acct.get("uuid"),
+        "emailAddress": acct.get("email") or tok_acct.get("email_address"),
+        "organizationUuid": org.get("uuid") or tok_org.get("uuid"),
+        "hasExtraUsageEnabled": org.get("has_extra_usage_enabled", False),
+        "billingType": org.get("billing_type"),
+        "accountCreatedAt": acct.get("created_at"),
+        "subscriptionCreatedAt": org.get("subscription_created_at"),
+        "ccOnboardingFlags": org.get("cc_onboarding_flags") or {},
+        "claudeCodeTrialEndsAt": org.get("claude_code_trial_ends_at"),
+        "claudeCodeTrialDurationDays": org.get("claude_code_trial_duration_days"),
+        "seatTier": org.get("seat_tier"),
+        "displayName": acct.get("display_name"),
+        "fullName": acct.get("full_name"),
+        "profileFetchedAt": now_ms(),
+        "organizationRole": roles.get("organization_role"),
+        "workspaceRole": roles.get("workspace_role"),
+        "organizationName": roles.get("organization_name") or org.get("name") or tok_org.get("name"),
+        "organizationType": org.get("organization_type"),
+        "organizationRateLimitTier": org.get("rate_limit_tier"),
+        "userRateLimitTier": None,
+    }
+    if not account["accountUuid"] or not account["emailAddress"]:
+        die("login succeeded but the profile has no account uuid/email")
+    return tokens, account
+
+
+def open_callback_listeners():
+    """Bind 127.0.0.1 (and ::1 when available) on one random port, so the
+    browser's http://localhost:<port>/callback redirect lands here."""
+    for _ in range(25):
+        port = random.randint(20000, 60000)
+        socks = []
+        try:
+            for fam, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+                s = socket.socket(fam, socket.SOCK_STREAM)
+                try:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind((host, port))
+                    s.listen(5)
+                    socks.append(s)
+                except OSError:
+                    s.close()
+                    if fam == socket.AF_INET:
+                        raise
+            return port, socks
+        except OSError:
+            for s in socks:
+                s.close()
+    die("couldn't bind a local port for the OAuth callback")
+
+
+_CALLBACK_PAGE = """<!doctype html><meta charset=utf-8><title>rota</title>
+<body style="font-family:system-ui;margin:3em"><h2>{title}</h2><p>{body}</p></body>"""
+
+
+def handle_callback(conn, expected_state):
+    """Serve one HTTP request on the listener. Returns (code, state) when the
+    request is a valid callback, else None (after answering the browser)."""
+    conn.settimeout(5)
+    try:
+        raw = b""
+        try:
+            while b"\r\n\r\n" not in raw and len(raw) < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                raw += chunk
+        except OSError:
+            # Browsers open speculative "preconnect" sockets that never send a
+            # request; a read timeout or reset here is noise, keep listening.
+            return None
+        if not raw.strip():
+            return None
+        line = raw.split(b"\r\n", 1)[0].decode(errors="replace")
+        parts = line.split(" ")
+        path = parts[1] if len(parts) >= 2 else "/"
+        url = urllib.parse.urlparse(path)
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+
+        def respond(status, title, body):
+            page = _CALLBACK_PAGE.format(title=title, body=body).encode()
+            conn.sendall(
+                f"HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
+                f"Content-Length: {len(page)}\r\nConnection: close\r\n\r\n".encode() + page
+            )
+
+        if url.path != "/callback":
+            respond("404 Not Found", "Not found", "rota only handles /callback.")
+            return None
+        if q.get("error"):
+            respond("400 Bad Request", "Sign-in failed",
+                    f"{q.get('error')}: {q.get('error_description', '')}. You can close this tab.")
+            raise RuntimeError(f"sign-in failed: {q.get('error')} {q.get('error_description', '')}".strip())
+        if q.get("state") != expected_state:
+            respond("400 Bad Request", "Stale sign-in",
+                    "This callback belongs to a different login attempt. Close the tab and retry.")
+            return None
+        if not q.get("code"):
+            respond("400 Bad Request", "No code", "No authorization code was received.")
+            return None
+        respond("200 OK", "Signed in", "You can close this tab and return to the terminal.")
+        return q["code"], q["state"]
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def wait_for_auth_code(socks, expected_state, allow_paste=True, timeout=LOGIN_TIMEOUT):
+    """Block until the browser hits a listener or the user pastes the code/URL."""
+    stdin_ok = allow_paste and sys.stdin and sys.stdin.isatty()
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            die("timed out waiting for the login to complete")
+        watch = list(socks) + ([sys.stdin] if stdin_ok else [])
+        ready, _, _ = select.select(watch, [], [], remaining)
+        for r in ready:
+            if r is sys.stdin:
+                line = sys.stdin.readline()
+                if not line:
+                    stdin_ok = False
+                    continue
+                if line.strip():
+                    code, state = parse_auth_input(line, expected_state)
+                    if not code:
+                        print(f"{YELLOW}no code found in that input — try again{RESET}")
+                        continue
+                    if state != expected_state:
+                        print(f"{YELLOW}state mismatch — that code is from another attempt{RESET}")
+                        continue
+                    return code, state
+            else:
+                conn, _ = r.accept()
+                got = handle_callback(conn, expected_state)
+                if got:
+                    return got
+
+
+def try_open_browser(url):
+    if not (sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    try:
+        return bool(webbrowser.open(url, new=2))
+    except Exception:
+        return False
+
+
+def oauth_login(login_hint=None, manual=False):
+    """Run the full browser login and return (claudeAiOauth, oauthAccount).
+    Nothing on disk is touched until the caller decides what to do with it."""
+    verifier, challenge = pkce_pair()
+    state = secrets.token_urlsafe(32)
+    socks = []
+    if manual:
+        redirect_uri = MANUAL_REDIRECT_URL
+    else:
+        port, socks = open_callback_listeners()
+        redirect_uri = f"http://localhost:{port}/callback"
+    url = authorize_url(challenge, state, redirect_uri, login_hint)
+    try:
+        hint = f" as {BOLD}{login_hint}{RESET}" if login_hint else ""
+        print(f"sign in{hint} in your browser. If the browser is logged into another "
+              f"claude.ai account, use a private window.\n")
+        opened = try_open_browser(url) if not manual else False
+        if opened:
+            print(f"{DIM}browser opened; if it didn't, open this URL:{RESET}")
+        else:
+            print("open this URL:")
+        print(f"\n{url}\n")
+        if manual:
+            print("then paste the code shown on the page (code#state) here: ", end="")
+        else:
+            print(f"{DIM}waiting for the redirect… (or paste the code / callback URL here){RESET}")
+        sys.stdout.flush()
+        code, state = wait_for_auth_code(socks, state, allow_paste=True)
+    finally:
+        for s in socks:
+            s.close()
+    print(f"{DIM}exchanging code…{RESET}")
+    return account_from_login(exchange_code(code, state, verifier, redirect_uri))
+
+
+def save_login(tokens, account, replace_live=False):
+    """Write a fresh snapshot for the account that just logged in, and update the
+    live login too if that account is the active one."""
+    name = account["emailAddress"]
+    snap = {
+        "name": name,
+        "claudeAiOauth": tokens,
+        "oauthAccount": account,
+        "savedAt": now_ms(),
+    }
+    write_json_atomic(store_path(name), snap)
+    if replace_live:
+        creds = read_live_creds()
+        creds["claudeAiOauth"] = tokens
+        write_live_creds(creds)
+        cfg = read_json(CLAUDE_JSON) or {}
+        cfg["oauthAccount"] = account
+        write_json_atomic(CLAUDE_JSON, cfg)
+    return name
+
+
+# ---------- Codex account store ----------
+
+def codex_dir():
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+
+
+def codex_auth_file():
+    return codex_dir() / "auth.json"
+
+
+def codex_store_dir():
+    return codex_dir() / "accounts"
+
+
+def codex_store_home(name):
+    """Each saved Codex account is a directory usable as a CODEX_HOME, so
+    usage fetches run against it directly and rotated tokens persist there."""
+    validate_name(name)
+    return codex_store_dir() / name
+
+
+def codex_store_accounts():
+    """name -> auth.json dict for saved Codex accounts."""
+    out = {}
+    if codex_store_dir().is_dir():
+        for p in sorted(codex_store_dir().iterdir()):
+            auth = read_json(p / "auth.json")
+            if auth is not None:
+                out[p.name] = auth
+    return out
+
+
+def jwt_claims(token):
+    """Decode a JWT payload without verification (identity display only)."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return {}
+
+
+def codex_identity(auth):
+    """(kind, stable id, email) for an auth.json payload."""
+    tokens = (auth or {}).get("tokens") or {}
+    if tokens.get("account_id") or tokens.get("id_token"):
+        claims = jwt_claims(tokens.get("id_token") or "")
+        return "chatgpt", tokens.get("account_id") or claims.get("sub"), claims.get("email")
+    key = (auth or {}).get("OPENAI_API_KEY")
+    if key:
+        return "apiKey", key, None
+    return None, None, None
+
+
+def codex_plan(auth):
+    claims = jwt_claims(((auth or {}).get("tokens") or {}).get("id_token") or "")
+    return (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
+
+
+def codex_active_name():
+    """Which saved Codex account is currently live, matched by account id."""
+    live = codex_identity(read_json(codex_auth_file()))[:2]
+    if not live[1]:
+        return None
+    for name, auth in codex_store_accounts().items():
+        if codex_identity(auth)[:2] == live:
+            return name
+    return None
+
+
+def codex_resolve(query):
+    return resolve_name(codex_store_accounts(), query, "codex account", "rota codex list")
+
+
+def codex_snapshot_live(name=None):
+    auth = read_json(codex_auth_file())
+    if not auth or not any(codex_identity(auth)[:2]):
+        die("no Codex login found — run `codex login` first")
+    if name is None:
+        name = codex_identity(auth)[2] or die(
+            "Codex login has no email — use: rota codex save <name>"
+        )
+    write_json_atomic(codex_store_home(name) / "auth.json", auth)
+    return name
+
+
+# ---------- Codex usage ----------
+
+def codex_switch_profiles():
+    """One profile per saved Codex account; the active one reads the live home."""
+    active = codex_active_name()
+    return [
+        {
+            "name": name,
+            "home": codex_dir() if name == active else codex_store_home(name),
+            "active": name == active,
+            "switchable": True,
+        }
+        for name in codex_store_accounts()
+    ]
+
+
+def codex_profiles():
+    """Codex homes to inspect: the live login, saved accounts, and any extra
+    homes supplied through the path-separated ROTA_CODEX_HOMES."""
+    profiles = codex_switch_profiles()
+    profiles.sort(key=lambda p: not p["active"])
+    if not any(p["active"] for p in profiles):
+        profiles.insert(0, {
+            "name": "default", "home": codex_dir(), "active": True, "switchable": False,
+        })
+    seen = {str(p["home"].absolute()) for p in profiles}
+    for value in os.environ.get("ROTA_CODEX_HOMES", "").split(os.pathsep):
+        if not value:
+            continue
+        home = Path(value).expanduser()
+        key = str(home.absolute())
+        if key in seen:
+            continue
+        seen.add(key)
+        profiles.append({"name": home.name, "home": home, "active": False, "switchable": False})
+    return profiles
+
+
+def _codex_send(proc, message):
+    proc.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
+    proc.stdin.flush()
+
+
+def _codex_responses(proc, wanted, buffer, deadline):
+    """Read JSONL until all response IDs arrive, ignoring notifications."""
+    found = {}
+    while not wanted.issubset(found):
+        while b"\n" in buffer:
+            raw, buffer = buffer.split(b"\n", 1)
+            if not raw.strip():
+                continue
+            try:
+                message = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise RuntimeError(f"invalid response from Codex app server: {e}") from e
+            response_id = message.get("id")
+            if response_id not in wanted:
+                continue
+            if message.get("error"):
+                error = message["error"]
+                detail = error.get("message") if isinstance(error, dict) else str(error)
+                raise RuntimeError(detail or "Codex app server request failed")
+            found[response_id] = message.get("result") or {}
+        if wanted.issubset(found):
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Codex app server timed out")
+        ready, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not ready:
+            raise TimeoutError("Codex app server timed out")
+        chunk = os.read(proc.stdout.fileno(), 65536)
+        if not chunk:
+            detail = proc.stderr.read().decode(errors="replace").strip()
+            raise RuntimeError(detail or "Codex app server exited unexpectedly")
+        buffer += chunk
+    return found, buffer
+
+
+def _stop_codex(proc):
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream:
+            stream.close()
+
+
+def codex_usage_for(profile, codex_bin=CODEX_BIN, timeout=CODEX_TIMEOUT):
+    """Return (account/rate-limit data, error) for one CODEX_HOME."""
+    home = profile["home"]
+    if not home.is_dir():
+        return None, f"Codex home does not exist: {home}"
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(home)
+    try:
+        proc = subprocess.Popen(
+            [codex_bin, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    except FileNotFoundError:
+        return None, "`codex` not found on PATH"
+    except Exception as e:
+        return None, f"could not start Codex app server: {e}"
+
+    buffer = b""
+    deadline = time.monotonic() + timeout
+    try:
+        _codex_send(proc, {
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "rota", "version": "1"}},
+        })
+        _, buffer = _codex_responses(proc, {1}, buffer, deadline)
+        _codex_send(proc, {"method": "initialized", "params": {}})
+        _codex_send(proc, {
+            "id": 2,
+            "method": "account/read",
+            "params": {"refreshToken": False},
+        })
+        account_responses, buffer = _codex_responses(proc, {2}, buffer, deadline)
+        account = account_responses[2]
+        account_data = account.get("account")
+        result = {
+            "account": account_data,
+            "requiresOpenaiAuth": account.get("requiresOpenaiAuth"),
+            "rateLimits": None,
+        }
+        if not account_data or account_data.get("type") != "chatgpt":
+            return result, None
+        _codex_send(proc, {
+            "id": 3,
+            "method": "account/rateLimits/read",
+            "params": {},
+        })
+        responses, _ = _codex_responses(proc, {3}, buffer, deadline)
+        result["rateLimits"] = responses[3]
+        return result, None
+    except Exception as e:
+        return None, str(e)
+    finally:
+        _stop_codex(proc)
+
+
+def collect_codex_usage(profiles=None):
+    profiles = profiles or codex_profiles()
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(profiles)))) as pool:
+        fetched = list(pool.map(codex_usage_for, profiles))
+    return [
+        {"profile": profile, "data": data, "error": error}
+        for profile, (data, error) in zip(profiles, fetched)
+    ]
+
+
+# ---------- rendering ----------
+
+def humanize_until(iso):
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return iso
+    delta = dt - datetime.now(dt.tzinfo)
+    secs = int(delta.total_seconds())
+    if secs <= 0:
+        return "resetting now"
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    local = dt.astimezone()
+    when = local.strftime("%a %-I:%M%p").lower()
+    if days:
+        return f"resets {when} (in {days}d {hours}h)"
+    if hours:
+        return f"resets {when} (in {hours}h {mins}m)"
+    return f"resets {when} (in {mins}m)"
+
+
+def bar(pct, width=20):
+    pct = max(0.0, min(100.0, float(pct)))
+    filled = round(pct / 100 * width)
+    color = GREEN if pct < 60 else YELLOW if pct < 85 else RED
+    return f"{color}{'█' * filled}{DIM}{'░' * (width - filled)}{RESET}"
+
+
+LIMIT_LABELS = {"session": "session (5h)", "weekly_all": "weekly (all)"}
+
+
+def limit_label(lim):
+    kind = lim.get("kind", "?")
+    if kind in LIMIT_LABELS:
+        return LIMIT_LABELS[kind]
+    scope = lim.get("scope") or {}
+    model = (scope.get("model") or {}).get("display_name")
+    if kind == "weekly_scoped" and model:
+        return f"weekly ({model})"
+    return kind
+
+
+def render_usage(name, snap, data, is_active, note=None):
+    acct = snap.get("oauthAccount", {})
+    email = acct.get("emailAddress", "?")
+    tier = acct.get("organizationRateLimitTier", "") or snap["claudeAiOauth"].get(
+        "subscriptionType", ""
+    ) or ""
+    tier = tier.replace("default_claude_", "").replace("_", " ")
+    marker = f"{GREEN}●{RESET}" if is_active else f"{DIM}○{RESET}"
+    active_tag = f"  {CYAN}← active{RESET}" if is_active else ""
+    ident = name if name == email else f"{name}  {email}"
+    health, color = token_health(snap)
+    warn_tag = f"  {color}{health}{RESET}" if color in (RED, YELLOW) and health else ""
+    note_tag = f"  {YELLOW}({note}){RESET}" if note else ""
+    print(f"{marker} {BOLD}{ident}{RESET}  {DIM}({tier}){RESET}{active_tag}{warn_tag}{note_tag}")
+    limits = data.get("limits") or []
+    if limits:
+        width = max(len(limit_label(l)) for l in limits)
+        for lim in limits:
+            pct = lim.get("percent", 0)
+            label = limit_label(lim).ljust(width)
+            reset = humanize_until(lim.get("resets_at"))
+            print(f"    {label}  {bar(pct)} {pct:>3.0f}%  {DIM}{reset}{RESET}")
+    else:
+        for key in ("five_hour", "seven_day"):
+            block = data.get(key)
+            if block:
+                pct = block.get("utilization") or 0
+                label = {"five_hour": "session (5h)", "seven_day": "weekly"}[key]
+                print(
+                    f"    {label:<14}{bar(pct)} {pct:>3.0f}%  "
+                    f"{DIM}{humanize_until(block.get('resets_at'))}{RESET}"
+                )
+    extra = data.get("extra_usage") or {}
+    if extra.get("is_enabled"):
+        used = extra.get("used_credits") or 0
+        places = extra.get("decimal_places", 2)
+        amount = used / (10 ** places)
+        note = " (spend limit reached)" if extra.get("spend_limit_reached") else ""
+        print(f"    {DIM}extra usage: ${amount:,.2f} used{note}{RESET}")
+
+
+def codex_window_label(minutes, fallback):
+    if minutes == 300:
+        return "session (5h)"
+    if minutes == 10080:
+        return "weekly"
+    if isinstance(minutes, (int, float)) and minutes > 0:
+        if minutes % 1440 == 0:
+            days = int(minutes // 1440)
+            return f"{days} day" + ("s" if days != 1 else "")
+        if minutes % 60 == 0:
+            hours = int(minutes // 60)
+            return f"{hours} hour" + ("s" if hours != 1 else "")
+        return f"{int(minutes)} min"
+    return fallback
+
+
+def codex_reset_text(timestamp):
+    if timestamp is None:
+        return ""
+    try:
+        iso = datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return str(timestamp)
+    return humanize_until(iso)
+
+
+def codex_snapshots(rate_data):
+    by_id = (rate_data or {}).get("rateLimitsByLimitId")
+    if isinstance(by_id, dict) and by_id:
+        return sorted(
+            by_id.items(),
+            key=lambda item: (
+                item[0] != "codex",
+                item[1].get("limitName") or item[0],
+            ),
+        )
+    snapshot = (rate_data or {}).get("rateLimits")
+    return [(snapshot.get("limitId") or "codex", snapshot)] if snapshot else []
+
+
+def codex_limit_rows(rate_data):
+    snapshots = codex_snapshots(rate_data)
+    rows = []
+    for limit_id, snapshot in snapshots:
+        scope = snapshot.get("limitName")
+        if not scope and len(snapshots) > 1 and limit_id != "codex":
+            scope = str(limit_id).removeprefix("codex_").replace("_", " ")
+        for window_name in ("primary", "secondary"):
+            window = snapshot.get(window_name)
+            if not window:
+                continue
+            label = codex_window_label(
+                window.get("windowDurationMins"), window_name
+            )
+            if scope:
+                label = f"{label} ({scope})"
+            rows.append({
+                "label": label,
+                "percent": window.get("usedPercent"),
+                "resets_at": window.get("resetsAt"),
+            })
+    return rows
+
+
+def format_decimal(value):
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value)
+    rendered = f"{amount:,.2f}"
+    return rendered.rstrip("0").rstrip(".")
+
+
+def render_codex_entry(entry):
+    profile = entry["profile"]
+    marker = f"{GREEN}●{RESET}" if profile["active"] else f"{DIM}○{RESET}"
+    active_tag = f"  {CYAN}← active{RESET}" if profile["active"] else ""
+    if entry["error"]:
+        print(f"{marker} {BOLD}{profile['name']}{RESET}  {RED}{entry['error']}{RESET}{active_tag}")
+        return
+
+    data = entry["data"]
+    account = data.get("account")
+    if not account:
+        print(f"{marker} {BOLD}{profile['name']}{RESET}  {DIM}(not logged in){RESET}{active_tag}")
+        return
+    email = account.get("email") or profile["name"]
+    ident = email if profile["name"] in ("default", email) else f"{profile['name']}  {email}"
+    account_type = account.get("type", "unknown")
+    plan = account.get("planType")
+    detail = f"{plan} subscription" if plan else account_type
+    print(f"{marker} {BOLD}{ident}{RESET}  {DIM}({detail}){RESET}{active_tag}")
+    if account_type != "chatgpt":
+        print(f"    {DIM}subscription limits unavailable for {account_type} authentication{RESET}")
+        return
+
+    rate_data = data.get("rateLimits") or {}
+    rows = codex_limit_rows(rate_data)
+    if rows:
+        width = max(len(row["label"]) for row in rows)
+        for row in rows:
+            pct = row["percent"]
+            reset = codex_reset_text(row["resets_at"])
+            if pct is None:
+                print(f"    {row['label'].ljust(width)}  {DIM}usage unknown  {reset}{RESET}")
+            else:
+                print(
+                    f"    {row['label'].ljust(width)}  {bar(pct)} {pct:>3.0f}%  "
+                    f"{DIM}{reset}{RESET}"
+                )
+    else:
+        print(f"    {DIM}subscription limits unavailable{RESET}")
+
+    snapshots = codex_snapshots(rate_data)
+    credits = next((snap.get("credits") for _, snap in snapshots if snap.get("credits")), None)
+    if credits:
+        if credits.get("unlimited"):
+            print(f"    {DIM}credits: unlimited{RESET}")
+        elif credits.get("hasCredits") and credits.get("balance") is not None:
+            print(f"    {DIM}credits: {format_decimal(credits['balance'])} remaining{RESET}")
+    spend = next((snap.get("individualLimit") for _, snap in snapshots if snap.get("individualLimit")), None)
+    if spend:
+        print(
+            f"    {DIM}spend: {format_decimal(spend.get('used'))} of "
+            f"{format_decimal(spend.get('limit'))} used  "
+            f"{codex_reset_text(spend.get('resetsAt'))}{RESET}"
+        )
+    reached = next((snap.get("rateLimitReachedType") for _, snap in snapshots if snap.get("rateLimitReachedType")), None)
+    if reached:
+        print(f"    {RED}{reached.replace('_', ' ')}{RESET}")
+    reset_credits = rate_data.get("rateLimitResetCredits") or {}
+    if reset_credits.get("availableCount"):
+        print(f"    {DIM}rate-limit resets available: {reset_credits['availableCount']}{RESET}")
+
+
+def codex_score(entry):
+    """Worst-window used percent, for ranking accounts; None when unusable."""
+    data = entry.get("data") or {}
+    if entry.get("error") or (data.get("account") or {}).get("type") != "chatgpt":
+        return None
+    pcts = [
+        row["percent"]
+        for row in codex_limit_rows(data.get("rateLimits") or {})
+        if row["percent"] is not None
+    ]
+    return max(pcts) if pcts else None
+
+
+def render_codex_usage(entries):
+    print(f"{BOLD}Codex{RESET}")
+    for index, entry in enumerate(entries):
+        if index:
+            print()
+        render_codex_entry(entry)
+    scored = {
+        entry["profile"]["name"]: codex_score(entry)
+        for entry in entries
+        if entry["profile"].get("switchable") and codex_score(entry) is not None
+    }
+    if len(scored) > 1:
+        active = next((e["profile"]["name"] for e in entries if e["profile"]["active"]), None)
+        eligible = {n: p for n, p in scored.items() if p < 100}
+        pool = eligible or scored
+        best = min(pool, key=pool.get)
+        note = "" if eligible else f"  {YELLOW}(all have a limit at 100%){RESET}"
+        print(f"\n{BOLD}best:{RESET} {best} ({scored[best]:.0f}% max window used){note}", end="")
+        if best != active:
+            print(f"  {DIM}-> rota codex switch {best}{RESET}")
+        else:
+            print(f"  {DIM}(already active){RESET}")
+
+
+def session_pct(data):
+    for lim in data.get("limits") or []:
+        if lim.get("kind") == "session":
+            return lim.get("percent", 0)
+    return (data.get("five_hour") or {}).get("utilization") or 0
+
+
+def weekly_pct(data):
+    for lim in data.get("limits") or []:
+        if lim.get("kind") == "weekly_all":
+            return lim.get("percent", 0)
+    return (data.get("seven_day") or {}).get("utilization") or 0
+
+
+def accounts_incl_live():
+    """All saved accounts, plus the live-but-unsaved login as '(current)'. Returns (accounts, active)."""
+    accounts = store_accounts()
+    active = active_name()
+    if live_oauth() and not active:
+        accounts["(current)"] = {
+            "claudeAiOauth": live_oauth(),
+            "oauthAccount": live_account_info(),
+        }
+        active = "(current)"
+    return accounts, active
+
+
+def collect_usage(accounts, active):
+    """Fetch usage for every account in parallel. Never touches the live login
+    except to persist a rotated token for the account that already owns it."""
+    user_agent()  # prime the cached UA before threading
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(accounts)))) as pool:
+        fetched = list(pool.map(
+            lambda item: usage_for(item[0], item[1], item[0] == active),
+            accounts.items(),
+        ))
+    results, errors = {}, {}
+    for name, (data, err) in zip(accounts, fetched):
+        if err:
+            errors[name] = err
+        else:
+            results[name] = data
+    cache_store({n: d for n, d in results.items() if n != "(current)"})
+    return results, errors
+
+
+def token_health(snap):
+    """(text, color) describing whether this account can still refresh itself."""
+    if snap.get("authDead"):
+        return "needs re-auth", RED
+    exp = refresh_token_expires_at(snap)
+    if not exp:
+        return "", DIM
+    left = exp - now_ms()
+    if left <= 0:
+        return "refresh token expired", RED
+    if left < REFRESH_WARN_DAYS * 86400_000:
+        return f"refresh token expires {age_text(exp)}", YELLOW
+    return f"login good for {span_text(left)}", DIM
+
+
+def render_error(name, snap, err, is_active, cached=None):
+    """Account header + error line; if a cached result exists, show its bars too."""
+    if cached:
+        render_usage(name, snap, cached["data"], is_active,
+                     note=f"cached {age_text(cached['fetchedAt'])}")
+    else:
+        acct = snap.get("oauthAccount", {})
+        tier = (acct.get("organizationRateLimitTier", "")
+                or snap["claudeAiOauth"].get("subscriptionType", "") or "")
+        tier = tier.replace("default_claude_", "").replace("_", " ")
+        marker = f"{GREEN}●{RESET}" if is_active else f"{DIM}○{RESET}"
+        active_tag = f"  {CYAN}← active{RESET}" if is_active else ""
+        tier_tag = f"  {DIM}({tier}){RESET}" if tier else ""
+        print(f"{marker} {BOLD}{name}{RESET}{tier_tag}{active_tag}")
+    print(f"    {RED}✗ {err}{RESET}")
+
+
+def pct_colored(pct, width=4):
+    color = GREEN if pct < 60 else YELLOW if pct < 85 else RED
+    return f"{color}{pct:>{width}.0f}%{RESET}"
+
+
+def limit_cols(data):
+    """Ordered {column label: percent} for one account's usage."""
+    cols = {}
+    for lim in data.get("limits") or []:
+        kind = lim.get("kind")
+        if kind == "session":
+            label = "session"
+        elif kind == "weekly_all":
+            label = "weekly"
+        elif kind == "weekly_scoped":
+            label = ((lim.get("scope") or {}).get("model") or {}).get("display_name") or "scoped"
+        else:
+            label = kind
+        cols[label] = lim.get("percent", 0)
+    if not cols:
+        cols = {"session": session_pct(data), "weekly": weekly_pct(data)}
+    return cols
+
+
+def scoped_pct(data):
+    """Model-scoped weekly limit (Fable) percent, or None if the account has none."""
+    for lim in data.get("limits") or []:
+        if lim.get("kind") == "weekly_scoped":
+            return lim.get("percent", 0)
+    return None
+
+
+def fable_pct(data):
+    p = scoped_pct(data)
+    return p if p is not None else weekly_pct(data)
+
+
+def best_account(results):
+    """Best = usable now without credits: session, weekly (all), and Fable all < 100%.
+    Among eligible: most Fable headroom, then session, then overall weekly.
+    Returns (name, eligible_bool)."""
+    eligible = [
+        n for n in results
+        if session_pct(results[n]) < 100
+        and weekly_pct(results[n]) < 100
+        and fable_pct(results[n]) < 100
+    ]
+    pool = eligible or list(results)
+    pick = min(
+        pool,
+        key=lambda n: (fable_pct(results[n]), session_pct(results[n]), weekly_pct(results[n])),
+    )
+    return pick, bool(eligible)
+
+
+def describe(results, name):
+    d = results[name]
+    return (f"Fable {fable_pct(d):.0f}% · weekly {weekly_pct(d):.0f}% · "
+            f"session {session_pct(d):.0f}% used")
+
+
+# ---------- commands ----------
+
+def cmd_list():
+    accounts = store_accounts()
+    active = active_name()
+    if not accounts:
+        print("no saved accounts yet — run: rota save (or rota add)")
+    for name, snap in accounts.items():
+        marker = f"{GREEN}●{RESET}" if name == active else f"{DIM}○{RESET}"
+        saved = datetime.fromtimestamp(snap.get("savedAt", 0) / 1000).strftime("%Y-%m-%d %H:%M")
+        tag = f"  {CYAN}← active{RESET}" if name == active else ""
+        health, color = token_health(snap)
+        health_tag = f"  {color}{health}{RESET}" if health else ""
+        print(
+            f"{marker} {BOLD}{name:<28}{RESET} "
+            f"{DIM}{snap['claudeAiOauth'].get('subscriptionType') or '?':<5} saved {saved}{RESET}"
+            f"{health_tag}{tag}"
+        )
+    dead = [n for n, s in accounts.items() if s.get("authDead")]
+    if dead:
+        print(f"\n{YELLOW}re-auth needed:{RESET} " + "  ".join(f"rota reauth {n}" for n in dead))
+    live = live_account_info()
+    if live and not active:
+        print(
+            f"\n{YELLOW}note:{RESET} current login ({live.get('emailAddress', '?')}) "
+            f"is not saved — run: rota save"
+        )
+
+
+def cmd_save(args):
+    snap = snapshot_live()
+    print(f"saved {BOLD}{snap['name']}{RESET} -> {store_path(snap['name'])}")
+
+
+def cmd_switch(args):
+    if not args or args[0] in ("--best", "--smart"):
+        return smart_switch()
+    do_switch(resolve(args[0]))
+
+
+def smart_switch():
+    accounts = store_accounts()
+    active = active_name()
+    if not accounts:
+        die("no saved accounts — run: rota add")
+    if len(accounts) == 1:
+        name = next(iter(accounts))
+        if name == active:
+            print(f"only one account ({name}); already active")
+            return
+        return do_switch(name)
+    results, errors = collect_usage(accounts, active)
+    for name, err in errors.items():
+        print(f"{YELLOW}skipping {name}:{RESET} {err}")
+    if not results:
+        die("couldn't fetch usage for any account")
+    best, eligible = best_account(results)
+    if not eligible:
+        print(f"{YELLOW}warning:{RESET} no account has session + weekly + Fable headroom — picking least-bad")
+    if best == active:
+        print(f"already on the best account: {BOLD}{best}{RESET} ({describe(results, best)})")
+        return
+    vs = f"  {DIM}(current: {describe(results, active)}){RESET}" if active in results else ""
+    print(f"best: {BOLD}{best}{RESET} ({describe(results, best)}){vs}")
+    do_switch(best)
+
+
+def do_switch(name):
+    target = read_json(store_path(name))
+    if not target:
+        die(f"no saved account {name!r} — see: rota list")
+    current = active_name()
+    if current == name:
+        print(f"{name} is already active")
+        return
+    if target.get("authDead"):
+        die(f"{name} can't be used: {dead_message(name, target)}")
+    # Sync live (possibly refreshed) tokens back into the outgoing account's snapshot
+    if current:
+        oauth = live_oauth()
+        if oauth:
+            persist_tokens(current, oauth, also_live=False)
+    elif live_oauth():
+        print(
+            f"{YELLOW}warning:{RESET} current login is not saved as an account; "
+            f"its tokens will be overwritten. Ctrl-C now and `rota save` to keep it."
+        )
+        time.sleep(3)
+    # Swap claudeAiOauth in credentials (keep mcpOAuth etc. intact)
+    creds = read_live_creds()
+    creds["claudeAiOauth"] = target["claudeAiOauth"]
+    write_live_creds(creds)
+    # Swap oauthAccount identity in .claude.json
+    cfg = read_json(CLAUDE_JSON) or {}
+    if target.get("oauthAccount"):
+        cfg["oauthAccount"] = target["oauthAccount"]
+        write_json_atomic(CLAUDE_JSON, cfg)
+    print(f"switched to {BOLD}{name}{RESET}")
+    print(f"{DIM}new `claude` sessions will use this account; already-running sessions won't.{RESET}")
+
+
+def login_and_save(expected=None, manual=False):
+    """Shared by `add` and `reauth`: browser login -> snapshot, live login only
+    updated when the account that signed in is the active one."""
+    tokens, account = oauth_login(login_hint=expected, manual=manual)
+    got = account["emailAddress"]
+    if expected and got != expected:
+        print(f"{YELLOW}note:{RESET} you signed in as {BOLD}{got}{RESET}, not {expected} "
+              f"— saving {got}; {expected} is untouched")
+    existed = got in store_accounts()
+    is_active = active_name() == got or (
+        not active_name() and live_account_info().get("accountUuid") == account["accountUuid"]
+    )
+    save_login(tokens, account, replace_live=is_active)
+    verb = "re-authenticated" if existed else "saved new account"
+    print(f"\n{verb} {BOLD}{got}{RESET} -> {store_path(got)}")
+    if is_active:
+        print(f"{DIM}{got} is the active account, so the live login was updated too; "
+              f"already-running claude sessions keep their old tokens.{RESET}")
+    else:
+        print(f"{DIM}active account unchanged; use `rota switch {got}` when you want it{RESET}")
+    return got
+
+
+def parse_login_args(args):
+    manual = "--manual" in args
+    rest = [a for a in args if a != "--manual"]
+    return rest, manual
+
+
+def cmd_add(args):
+    rest, manual = parse_login_args(args)
+    hint = rest[0] if rest else None
+    if hint and hint in store_accounts():
+        print(f"{DIM}{hint} is already saved; re-authenticating it{RESET}")
+    login_and_save(hint, manual=manual)
+
+
+def cmd_reauth(args):
+    rest, manual = parse_login_args(args)
+    everything = "--all" in rest or rest == ["all"]
+    rest = [a for a in rest if a not in ("--all", "all")]
+    if everything or not rest:
+        dead = [n for n, s in store_accounts().items() if s.get("authDead")]
+        if not dead:
+            die("usage: rota reauth <email> [--manual]  (no accounts are marked dead)")
+        if len(dead) > 1 and not everything:
+            die("several accounts need re-auth: " + ", ".join(dead)
+                + " — pick one, or: rota reauth --all")
+        targets = dead
+    else:
+        targets = [resolve(rest[0])]
+    for i, name in enumerate(targets):
+        if i:
+            print()
+        if len(targets) > 1:
+            print(f"{BOLD}[{i + 1}/{len(targets)}]{RESET} {name}")
+        snap = read_json(store_path(name))
+        email = (snap.get("oauthAccount") or {}).get("emailAddress") or name
+        login_and_save(email, manual=manual)
+
+
+def cmd_usage(args):
+    accounts, active = accounts_incl_live()
+    if args:
+        wanted = args[0] if args[0] in accounts else resolve(args[0])
+        accounts = {wanted: accounts[wanted]}
+    if not accounts and args:
+        die("no Claude accounts — run: rota save")
+
+    codex_entries = None
+    if args:
+        results, errors = collect_usage(accounts, active)
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            codex_future = pool.submit(collect_codex_usage)
+            claude_future = pool.submit(collect_usage, accounts, active) if accounts else None
+            results, errors = claude_future.result() if claude_future else ({}, {})
+            codex_entries = codex_future.result()
+
+    cache = cache_load() if errors else {}
+    first = True
+    for name, snap in accounts.items():
+        if not first:
+            print()
+        first = False
+        if name in errors:
+            cached = cache.get(name) if not snap.get("authDead") else None
+            render_error(name, snap, errors[name], name == active, cached)
+            continue
+        render_usage(name, snap, results[name], name == active)
+
+    if len(results) > 1:
+        avg_s = sum(session_pct(d) for d in results.values()) / len(results)
+        avg_w = sum(weekly_pct(d) for d in results.values()) / len(results)
+        avg_f = sum(fable_pct(d) for d in results.values()) / len(results)
+        print(f"\n{DIM}fleet avg: session {avg_s:.0f}% · weekly {avg_w:.0f}% · Fable {avg_f:.0f}%{RESET}")
+        best, eligible = best_account(results)
+        note = "" if eligible else f"  {YELLOW}(none have session + weekly + Fable room){RESET}"
+        print(f"{BOLD}best:{RESET} {best} ({describe(results, best)}){note}", end="")
+        if best != active:
+            print(f"  {DIM}-> rota switch {best}{RESET}")
+        else:
+            print(f"  {DIM}(already active){RESET}")
+
+    if codex_entries is not None:
+        if accounts:
+            print()
+        render_codex_usage(codex_entries)
+
+
+def cmd_codex(args):
+    if not args or args[0] == "usage":
+        if len(args) > 1:
+            die("usage: rota codex [usage|switch|add|list|save|remove|whoami]")
+        return render_codex_usage(collect_codex_usage())
+    sub, rest = args[0], args[1:]
+    if sub in ("switch", "use"):
+        cmd_codex_switch(rest)
+    elif sub == "add":
+        cmd_codex_add(rest)
+    elif sub in ("list", "ls"):
+        cmd_codex_list()
+    elif sub == "save":
+        cmd_codex_save(rest)
+    elif sub in ("remove", "rm"):
+        cmd_codex_remove(rest)
+    elif sub == "whoami":
+        cmd_codex_whoami()
+    else:
+        die(f"unknown codex command {sub!r} — try: rota help")
+
+
+def cmd_codex_list():
+    accounts = codex_store_accounts()
+    active = codex_active_name()
+    if not accounts:
+        print("no saved codex accounts yet — run: rota codex save (or rota codex add)")
+    for name, auth in accounts.items():
+        marker = f"{GREEN}●{RESET}" if name == active else f"{DIM}○{RESET}"
+        tag = f"  {CYAN}← active{RESET}" if name == active else ""
+        kind, _, email = codex_identity(auth)
+        detail = codex_plan(auth) or kind or "?"
+        if email and email != name:
+            detail = f"{email}  {detail}"
+        print(f"{marker} {BOLD}{name:<28}{RESET} {DIM}{detail}{RESET}{tag}")
+    live = read_json(codex_auth_file())
+    if live and any(codex_identity(live)[:2]) and not active:
+        email = codex_identity(live)[2]
+        print(
+            f"\n{YELLOW}note:{RESET} current codex login ({email or '?'}) "
+            f"is not saved — run: rota codex save"
+        )
+
+
+def cmd_codex_save(args):
+    name = codex_snapshot_live(args[0] if args else None)
+    print(f"saved codex account {BOLD}{name}{RESET} -> {codex_store_home(name) / 'auth.json'}")
+
+
+def cmd_codex_switch(args):
+    if not args or args[0] in ("--best", "--smart"):
+        return codex_smart_switch()
+    codex_do_switch(codex_resolve(args[0]))
+
+
+def codex_smart_switch():
+    accounts = codex_store_accounts()
+    active = codex_active_name()
+    if not accounts:
+        die("no saved codex accounts — run: rota codex add")
+    if len(accounts) == 1:
+        name = next(iter(accounts))
+        if name == active:
+            print(f"only one codex account ({name}); already active")
+            return
+        return codex_do_switch(name)
+    entries = collect_codex_usage(codex_switch_profiles())
+    scored = {}
+    for entry in entries:
+        name = entry["profile"]["name"]
+        if entry["error"]:
+            print(f"{YELLOW}skipping {name}:{RESET} {entry['error']}")
+            continue
+        score = codex_score(entry)
+        if score is not None:
+            scored[name] = score
+    if not scored:
+        die("couldn't fetch usage for any codex account")
+    eligible = {n: p for n, p in scored.items() if p < 100}
+    if not eligible:
+        print(f"{YELLOW}warning:{RESET} every codex account has a limit at 100% — picking least-bad")
+    pool = eligible or scored
+    best = min(pool, key=pool.get)
+    if best == active:
+        print(f"already on the best codex account: {BOLD}{best}{RESET} "
+              f"({scored[best]:.0f}% max window used)")
+        return
+    vs = f"  {DIM}(current: {scored[active]:.0f}% max window used){RESET}" if active in scored else ""
+    print(f"best: {BOLD}{best}{RESET} ({scored[best]:.0f}% max window used){vs}")
+    codex_do_switch(best)
+
+
+def codex_do_switch(name):
+    target = read_json(codex_store_home(name) / "auth.json")
+    if not target:
+        die(f"no saved codex account {name!r} — see: rota codex list")
+    current = codex_active_name()
+    if current == name:
+        print(f"{name} is already the active codex account")
+        return
+    # Sync live (possibly refreshed) tokens back into the outgoing account's snapshot
+    live = read_json(codex_auth_file())
+    if live:
+        if current:
+            write_json_atomic(codex_store_home(current) / "auth.json", live)
+        elif any(codex_identity(live)[:2]):
+            print(
+                f"{YELLOW}warning:{RESET} current codex login is not saved as an account; "
+                f"its tokens will be overwritten. Ctrl-C now and `rota codex save` to keep it."
+            )
+            time.sleep(3)
+    # Swap only auth.json — Codex config/history and the Claude login are untouched
+    write_json_atomic(codex_auth_file(), target)
+    print(f"switched codex to {BOLD}{name}{RESET}")
+    print(f"{DIM}new `codex` sessions will use this account; already-running sessions won't. "
+          f"Claude account untouched.{RESET}")
+
+
+def cmd_codex_add(args):
+    prev = codex_active_name()
+    live = read_json(codex_auth_file())
+    if live and any(codex_identity(live)[:2]):
+        if prev:
+            write_json_atomic(codex_store_home(prev) / "auth.json", live)
+            print(f"saved current codex tokens for {BOLD}{prev}{RESET}")
+        else:
+            prev = codex_snapshot_live()
+            print(f"current codex login auto-saved as {BOLD}{prev}{RESET}")
+    # Log out: drop auth.json so `codex login` starts fresh
+    codex_auth_file().unlink(missing_ok=True)
+    print(f"\nlaunching {BOLD}codex login{RESET} — sign in to the new account in the browser\n")
+    try:
+        subprocess.run([CODEX_BIN, "login"])
+    except FileNotFoundError:
+        die("`codex` not found on PATH")
+    except KeyboardInterrupt:
+        pass
+
+    def restore_prev(reason):
+        if not prev:
+            return
+        restored = read_json(codex_store_home(prev) / "auth.json")
+        if restored:
+            write_json_atomic(codex_auth_file(), restored)
+            print(f"{reason} {BOLD}{prev}{RESET}")
+
+    new = read_json(codex_auth_file())
+    if new and any(codex_identity(new)[:2]):
+        name = codex_snapshot_live()
+        if name == prev:
+            print(f"\n{YELLOW}note:{RESET} you logged into the same codex account ({name}) "
+                  f"— nothing new added")
+            return
+        print(f"\nsaved new codex account {BOLD}{name}{RESET}")
+        restore_prev("active codex account restored to")
+        print(f"{DIM}use `rota codex switch {name}` when you want it{RESET}")
+    else:
+        print(f"\n{YELLOW}codex login didn't complete{RESET} — restoring previous account")
+        restore_prev("restored")
+
+
+def cmd_codex_remove(args):
+    if not args:
+        die("usage: rota codex remove <name>")
+    name = codex_resolve(args[0])
+    if name == codex_active_name():
+        print(f"{YELLOW}note:{RESET} {name} is the active codex account; "
+              f"removing only the snapshot (login stays).")
+    shutil.rmtree(codex_store_home(name))
+    print(f"removed codex account {name}")
+
+
+def cmd_codex_whoami():
+    auth = read_json(codex_auth_file())
+    kind, _, email = codex_identity(auth)
+    if not kind:
+        print("not logged in to codex")
+        return
+    name = codex_active_name()
+    ident = email or "?"
+    if name and name != email:
+        ident = f"{name}  {ident}"
+    saved = "" if name else f"  {DIM}(unsaved){RESET}"
+    print(f"{BOLD}{ident}{RESET}  {DIM}{codex_plan(auth) or kind}{RESET}{saved}")
+
+
+def cmd_whoami():
+    acct = live_account_info()
+    if not acct:
+        print("not logged in")
+        return
+    name = active_name() or f"{DIM}(unsaved){RESET}"
+    oauth = live_oauth() or {}
+    email = acct.get("emailAddress", "?")
+    ident = email if name == email else f"{name}  {email}"
+    print(f"{BOLD}{ident}{RESET}  "
+          f"{DIM}{oauth.get('subscriptionType', '?')} / {acct.get('organizationRateLimitTier', '?')}{RESET}")
+
+
+def cmd_export(args):
+    accounts = store_accounts()
+    # Sync the active account's snapshot with live tokens first, so exports are fresh
+    current = active_name()
+    if current and live_oauth():
+        persist_tokens(current, live_oauth(), also_live=False)
+        accounts = store_accounts()
+    names = [resolve(a) for a in args] or list(accounts)
+    payload = {"rota_export": 1, "exportedAt": int(time.time() * 1000),
+               "accounts": [accounts[n] | {"name": n} for n in names]}
+    print(json.dumps(payload, indent=2))
+    print(f"{YELLOW}warning:{RESET} export contains OAuth secrets — "
+          f"treat the output like a password (chmod 600, don't commit).", file=sys.stderr)
+
+
+def cmd_import(args):
+    force = "--force" in args
+    args = [a for a in args if a != "--force"]
+    if not args:
+        die("usage: rota import <file|-> [--force]")
+    raw = sys.stdin.read() if args[0] == "-" else Path(args[0]).read_text()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        die(f"not valid JSON: {e}")
+    entries = payload.get("accounts") if isinstance(payload, dict) else None
+    if entries is None:
+        die("not a rota export (missing 'accounts' key)")
+    imported = skipped = 0
+    for snap in entries:
+        name = snap.get("name")
+        if not name or "claudeAiOauth" not in snap:
+            print(f"{YELLOW}skipping malformed entry{RESET}")
+            continue
+        if store_path(name).exists() and not force:
+            print(f"{DIM}skipping {name} (exists — use --force to overwrite){RESET}")
+            skipped += 1
+            continue
+        write_json_atomic(store_path(name), snap)
+        print(f"imported {BOLD}{name}{RESET} ({snap.get('oauthAccount', {}).get('emailAddress', '?')})")
+        imported += 1
+    print(f"{imported} imported, {skipped} skipped")
+    if imported:
+        print(f"{DIM}note: refresh tokens are single-use — if the source machine keeps using "
+              f"these accounts, tokens may invalidate each other. Prefer one machine per account, "
+              f"or re-auth here with `rota add`.{RESET}")
+
+
+def cmd_remove(args):
+    if not args:
+        die("usage: rota remove <name>")
+    name = resolve(args[0])
+    path = store_path(name)
+    if name == active_name():
+        print(f"{YELLOW}note:{RESET} {name} is the active account; removing only the snapshot (login stays).")
+    path.unlink()
+    print(f"removed {name}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        return cmd_usage([])
+    cmd = args[0]
+    rest = args[1:]
+    if cmd in ("list", "ls"):
+        cmd_list()
+    elif cmd == "save":
+        cmd_save(rest)
+    elif cmd == "add":
+        cmd_add(rest)
+    elif cmd in ("reauth", "login", "relogin"):
+        cmd_reauth(rest)
+    elif cmd in ("switch", "use"):
+        cmd_switch(rest)
+    elif cmd == "usage":
+        cmd_usage(rest)
+    elif cmd == "codex":
+        cmd_codex(rest)
+    elif cmd == "whoami":
+        cmd_whoami()
+    elif cmd == "export":
+        cmd_export(rest)
+    elif cmd == "import":
+        cmd_import(rest)
+    elif cmd in ("remove", "rm"):
+        cmd_remove(rest)
+    elif cmd in ("-h", "--help", "help"):
+        print(__doc__.strip())
+    else:
+        die(f"unknown command {cmd!r} — try: rota help")
+
+
+if __name__ == "__main__":
+    main()

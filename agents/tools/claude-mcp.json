@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pyre": {
+      "type": "stdio",
+      "command": "pyre",
+      "args": ["mcp"]
+    }
+  }
+}

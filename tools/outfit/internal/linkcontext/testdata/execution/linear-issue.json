@@ -1,0 +1,31 @@
+{
+  "data": {
+    "issue": {
+      "id": "issue-123",
+      "identifier": "ENG-123",
+      "title": "Make connector evals resumable",
+      "description": "Checkpoint each completed host decision and retry operational failures.",
+      "url": "https://linear.app/acme/issue/ENG-123/make-connector-evals-resumable",
+      "state": {"name": "In Progress"},
+      "assignee": {"name": "Ada Lovelace"},
+      "project": {"id": "project-1", "name": "Outfit reliability"},
+      "cycle": {"id": "cycle-8", "name": "August hardening"},
+      "labels": {"nodes": [{"id": "label-1", "name": "reliability"}]},
+      "relations": {
+        "nodes": [
+          {
+            "id": "relation-1",
+            "type": "blocks",
+            "relatedIssue": {"id": "issue-122", "identifier": "ENG-122", "title": "Provider fixtures", "state": {"name": "Done"}}
+          }
+        ]
+      },
+      "comments": {
+        "nodes": [
+          {"id": "comment-1", "body": "Preserve completed trials after interruption.", "createdAt": "2026-08-24T20:00:00Z", "updatedAt": "2026-08-24T20:00:00Z", "user": {"id": "user-1", "name": "Grace Hopper"}}
+        ]
+      },
+      "updatedAt": "2026-08-24T20:15:00Z"
+    }
+  }
+}

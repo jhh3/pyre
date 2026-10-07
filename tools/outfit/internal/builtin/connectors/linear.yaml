@@ -1,0 +1,89 @@
+apiVersion: outfit.jhh3.dev/connector/v1alpha2
+key: linear
+display: Linear
+version: 1.0.0
+description: Issues, projects, cycles, and teams.
+category: Engineering
+credentialMethods:
+  - id: managed-key
+    label: outfit-managed personal API key
+    description: Store a Linear personal API key in Outfit for direct GraphQL reads.
+    recommended: true
+    custody: outfit
+    fields:
+      - key: TOKEN
+        label: Personal API key
+        description: 'Open https://linear.app/settings/account/security, create a Personal API key, and copy it once. Read permission is sufficient for Outfit’s current GraphQL operations; optionally restrict the key to the teams this connection should see.'
+        secret: true
+        environment: [LINEAR_API_KEY, LINEAR_TOKEN]
+    bindings: [{target: http-header, name: Authorization, value: '{{secret.TOKEN}}'}]
+  - id: adopted-host-oauth
+    label: OAuth imported from Claude or Codex
+    description: Transfer an existing hosted-MCP OAuth grant into outfit, then disable the duplicate host registration.
+    custody: oauth
+    fields:
+      - {key: OAUTH_CLIENT_ID, label: OAuth client ID, generated: true}
+      - {key: OAUTH_ACCESS_TOKEN, label: OAuth access token, secret: true, generated: true}
+      - {key: OAUTH_REFRESH_TOKEN, label: OAuth refresh token, secret: true, generated: true}
+      - {key: OAUTH_TOKEN_EXPIRY, label: OAuth token expiry, generated: true}
+      - {key: OAUTH_GRANTED_SCOPES, label: Granted OAuth scopes, generated: true, optional: true}
+    oauth:
+      authorizationUrl: https://mcp.linear.app/authorize
+      tokenUrl: https://mcp.linear.app/token
+      scopes: [read, write]
+    bindings: [{target: mcp-header, name: Authorization, value: 'Bearer {{secret.OAUTH_ACCESS_TOKEN}}'}]
+modes:
+  - id: graphql
+    label: Linear GraphQL API
+    description: Recommended local mode using a personal API key.
+    recommendation: {rank: 1, reason: GraphQL provides precise issue and project lookups with structured output.}
+    executor: {kind: http, baseUrl: 'https://api.linear.app/'}
+    credentialMethods: [managed-key]
+    defaultCredentialMethod: managed-key
+    verify: viewer
+    operations:
+      - name: viewer
+        description: Verify the current Linear identity.
+        class: read
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues: {query: '{ viewer { id name email } }'}
+      - name: issue
+        description: Read a Linear issue by identifier.
+        class: read
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues:
+            query: 'query Issue($id: String!) { issue(id: $id) { id identifier title description url state { name } assignee { name } project { id name } cycle { id name } labels { nodes { id name } } relations { nodes { id type relatedIssue { id identifier title state { name } } } } comments { nodes { id body createdAt updatedAt user { id name } } } updatedAt } }'
+            variables: {id: '{{arg.id}}'}
+  - id: hosted_mcp
+    label: Linear hosted MCP
+    description: Linear's hosted MCP tool surface, using an OAuth grant transferred from Claude or Codex.
+    recommendation: {rank: 2, reason: Adopt this when a working hosted-MCP OAuth grant already exists in a coding host.}
+    executor: {kind: mcp, endpoint: 'https://mcp.linear.app/mcp'}
+    credentialMethods: [adopted-host-oauth]
+    defaultCredentialMethod: adopted-host-oauth
+links:
+  - id: issue
+    resourceType: linear.issue
+    patterns:
+      - hosts: [linear.app]
+        path: '/:workspace/issue/:id/:slug'
+        segments: {workspace: slug, id: linear-identifier, slug: path}
+    lookups:
+      - {mode: graphql, operation: issue, arguments: {id: id}}
+      - {mode: hosted_mcp, operation: get_issue, arguments: {id: id}, heavyReads: [{operation: list_comments, arguments: {issueId: id}}]}
+    presentation: {canonicalId: '$.data.issue.url', title: '$.data.issue.title', summary: '$.data.issue.description', state: '$.data.issue.state.name', author: '$.data.issue.assignee.name', updatedAt: '$.data.issue.updatedAt'}
+    limits: {timeoutMs: 10000, maxResultBytes: 131072, cacheTtlSeconds: 120}
+skill:
+  summary: Use Linear for issue, project, cycle, and team context.
+  guidance: [Prefer issue identifiers, Read relations and project context before changing status]
+  workflows:
+    - title: Investigate an issue
+      steps: [resolve the exact issue identifier, read description status relations and recent discussion, inspect project or cycle context when it changes the answer, cite the issue identifier]
+    - title: Plan or update work
+      steps: [read the target team project and workflow states first, identify the smallest intended change, use outfit write only after explicit human intent, report changed identifiers and state]

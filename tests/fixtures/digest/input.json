@@ -1,0 +1,2386 @@
+{
+  "since": "2026-10-05T09:00:00Z",
+  "since_cursor": 100,
+  "head_cursor": 149,
+  "now": "2026-10-05T12:00:00Z",
+  "since_label": "last seen",
+  "events": [
+    {
+      "event_id": "evt_synth90",
+      "cursor": 90,
+      "origin": "",
+      "kind": "artifact.published",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthF",
+      "payload_version": 0,
+      "payload": {
+        "artifact": {
+          "artifact_id": "art_synthOld",
+          "project_id": null,
+          "session_id": "ses_synthF",
+          "title": "synth old report",
+          "version_count": 0,
+          "created_by": {
+            "kind": "",
+            "id": ""
+          },
+          "created_at": "0001-01-01T00:00:00Z",
+          "updated_at": "0001-01-01T00:00:00Z"
+        },
+        "version": {
+          "version_id": "ver_synthOld",
+          "artifact_id": "",
+          "seq": 1,
+          "digest": "",
+          "size": 0,
+          "media_type": "",
+          "filename": "",
+          "author": {
+            "kind": "",
+            "id": ""
+          },
+          "provenance": {},
+          "created_at": "0001-01-01T00:00:00Z",
+          "content_url": ""
+        }
+      },
+      "occurred_at": "2026-10-05T08:30:00Z",
+      "ingested_at": "2026-10-05T08:30:00Z"
+    },
+    {
+      "event_id": "evt_synth101",
+      "cursor": 101,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthA",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthA",
+        "session_id": "ses_synthA",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "waiting_approval",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T11:54:00Z",
+      "ingested_at": "2026-10-05T11:54:00Z"
+    },
+    {
+      "event_id": "evt_synth102",
+      "cursor": 102,
+      "origin": "hub",
+      "kind": "approval.requested",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthA",
+      "payload_version": 1,
+      "payload": {
+        "approval_id": "apr_synthA",
+        "session_id": "ses_synthA"
+      },
+      "occurred_at": "2026-10-05T11:55:00Z",
+      "ingested_at": "2026-10-05T11:55:00Z"
+    },
+    {
+      "event_id": "evt_synth103",
+      "cursor": 103,
+      "origin": "hub",
+      "kind": "run.ended",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthB",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthB",
+        "session_id": "ses_synthB",
+        "node_id": "node_synth-linux",
+        "adapter": "",
+        "harness": "codex",
+        "cwd": "/synth/ci",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "failed",
+        "state_reason": "no eligible Codex account",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "ended_at": "2026-10-05T10:30:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "occurred_at": "2026-10-05T10:30:00Z",
+      "ingested_at": "2026-10-05T10:30:00Z"
+    },
+    {
+      "event_id": "evt_synth104",
+      "cursor": 104,
+      "origin": "hub",
+      "kind": "artifact.published",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthC",
+      "payload_version": 1,
+      "payload": {
+        "artifact": {
+          "artifact_id": "art_synthC",
+          "project_id": null,
+          "session_id": "ses_synthC",
+          "title": "synth digest spec",
+          "version_count": 0,
+          "created_by": {
+            "kind": "",
+            "id": ""
+          },
+          "created_at": "0001-01-01T00:00:00Z",
+          "updated_at": "0001-01-01T00:00:00Z"
+        },
+        "version": {
+          "version_id": "ver_synthC2",
+          "artifact_id": "art_synthC",
+          "seq": 2,
+          "digest": "",
+          "size": 0,
+          "media_type": "",
+          "filename": "",
+          "author": {
+            "kind": "",
+            "id": ""
+          },
+          "provenance": {
+            "session_id": "ses_synthC",
+            "run_id": "run_synthC"
+          },
+          "created_at": "0001-01-01T00:00:00Z",
+          "content_url": ""
+        }
+      },
+      "occurred_at": "2026-10-05T10:05:00Z",
+      "ingested_at": "2026-10-05T10:05:00Z"
+    },
+    {
+      "event_id": "evt_synth105",
+      "cursor": 105,
+      "origin": "hub",
+      "kind": "message.stored",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthD",
+      "payload_version": 1,
+      "payload": {
+        "envelope": {
+          "schema_version": 0,
+          "message_id": "msg_synthCD",
+          "operation_id": "",
+          "sender": {
+            "kind": "session",
+            "id": "ses_synthC"
+          },
+          "recipient": {
+            "kind": "session",
+            "id": "ses_synthD"
+          },
+          "project_id": null,
+          "mode": "",
+          "body": {
+            "text": "Synthetic: the docs are ready for review. Ping me if the index needs them."
+          },
+          "created_at": "0001-01-01T00:00:00Z"
+        },
+        "status": {
+          "storage": "",
+          "runtime": "",
+          "ack": "",
+          "updated_at": "0001-01-01T00:00:00Z"
+        },
+        "cursor": 0
+      },
+      "occurred_at": "2026-10-05T10:10:00Z",
+      "ingested_at": "2026-10-05T10:10:00Z"
+    },
+    {
+      "event_id": "evt_synth106",
+      "cursor": 106,
+      "origin": "hub",
+      "kind": "document.revised",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthC",
+      "payload_version": 1,
+      "payload": {
+        "revision_id": "rev_synthC",
+        "document_id": "doc_synthBrief",
+        "seq": 4,
+        "digest": "",
+        "size": 0,
+        "author": {
+          "kind": "session",
+          "id": "ses_synthC"
+        },
+        "created_at": "0001-01-01T00:00:00Z",
+        "summary": "synth brief: digest section"
+      },
+      "occurred_at": "2026-10-05T10:06:00Z",
+      "ingested_at": "2026-10-05T10:06:00Z"
+    },
+    {
+      "event_id": "evt_synth107",
+      "cursor": 107,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:10:00Z",
+      "ingested_at": "2026-10-05T09:10:00Z"
+    },
+    {
+      "event_id": "evt_synth108",
+      "cursor": 108,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:11:00Z",
+      "ingested_at": "2026-10-05T09:11:00Z"
+    },
+    {
+      "event_id": "evt_synth109",
+      "cursor": 109,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:12:00Z",
+      "ingested_at": "2026-10-05T09:12:00Z"
+    },
+    {
+      "event_id": "evt_synth110",
+      "cursor": 110,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:13:00Z",
+      "ingested_at": "2026-10-05T09:13:00Z"
+    },
+    {
+      "event_id": "evt_synth111",
+      "cursor": 111,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:14:00Z",
+      "ingested_at": "2026-10-05T09:14:00Z"
+    },
+    {
+      "event_id": "evt_synth112",
+      "cursor": 112,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:15:00Z",
+      "ingested_at": "2026-10-05T09:15:00Z"
+    },
+    {
+      "event_id": "evt_synth113",
+      "cursor": 113,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:16:00Z",
+      "ingested_at": "2026-10-05T09:16:00Z"
+    },
+    {
+      "event_id": "evt_synth114",
+      "cursor": 114,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:17:00Z",
+      "ingested_at": "2026-10-05T09:17:00Z"
+    },
+    {
+      "event_id": "evt_synth115",
+      "cursor": 115,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:18:00Z",
+      "ingested_at": "2026-10-05T09:18:00Z"
+    },
+    {
+      "event_id": "evt_synth116",
+      "cursor": 116,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:19:00Z",
+      "ingested_at": "2026-10-05T09:19:00Z"
+    },
+    {
+      "event_id": "evt_synth117",
+      "cursor": 117,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:20:00Z",
+      "ingested_at": "2026-10-05T09:20:00Z"
+    },
+    {
+      "event_id": "evt_synth118",
+      "cursor": 118,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:21:00Z",
+      "ingested_at": "2026-10-05T09:21:00Z"
+    },
+    {
+      "event_id": "evt_synth119",
+      "cursor": 119,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:22:00Z",
+      "ingested_at": "2026-10-05T09:22:00Z"
+    },
+    {
+      "event_id": "evt_synth120",
+      "cursor": 120,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:23:00Z",
+      "ingested_at": "2026-10-05T09:23:00Z"
+    },
+    {
+      "event_id": "evt_synth121",
+      "cursor": 121,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:24:00Z",
+      "ingested_at": "2026-10-05T09:24:00Z"
+    },
+    {
+      "event_id": "evt_synth122",
+      "cursor": 122,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:25:00Z",
+      "ingested_at": "2026-10-05T09:25:00Z"
+    },
+    {
+      "event_id": "evt_synth123",
+      "cursor": 123,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:26:00Z",
+      "ingested_at": "2026-10-05T09:26:00Z"
+    },
+    {
+      "event_id": "evt_synth124",
+      "cursor": 124,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:27:00Z",
+      "ingested_at": "2026-10-05T09:27:00Z"
+    },
+    {
+      "event_id": "evt_synth125",
+      "cursor": 125,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:28:00Z",
+      "ingested_at": "2026-10-05T09:28:00Z"
+    },
+    {
+      "event_id": "evt_synth126",
+      "cursor": 126,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:29:00Z",
+      "ingested_at": "2026-10-05T09:29:00Z"
+    },
+    {
+      "event_id": "evt_synth127",
+      "cursor": 127,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:30:00Z",
+      "ingested_at": "2026-10-05T09:30:00Z"
+    },
+    {
+      "event_id": "evt_synth128",
+      "cursor": 128,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:31:00Z",
+      "ingested_at": "2026-10-05T09:31:00Z"
+    },
+    {
+      "event_id": "evt_synth129",
+      "cursor": 129,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:32:00Z",
+      "ingested_at": "2026-10-05T09:32:00Z"
+    },
+    {
+      "event_id": "evt_synth130",
+      "cursor": 130,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:33:00Z",
+      "ingested_at": "2026-10-05T09:33:00Z"
+    },
+    {
+      "event_id": "evt_synth131",
+      "cursor": 131,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:34:00Z",
+      "ingested_at": "2026-10-05T09:34:00Z"
+    },
+    {
+      "event_id": "evt_synth132",
+      "cursor": 132,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:35:00Z",
+      "ingested_at": "2026-10-05T09:35:00Z"
+    },
+    {
+      "event_id": "evt_synth133",
+      "cursor": 133,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:36:00Z",
+      "ingested_at": "2026-10-05T09:36:00Z"
+    },
+    {
+      "event_id": "evt_synth134",
+      "cursor": 134,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:37:00Z",
+      "ingested_at": "2026-10-05T09:37:00Z"
+    },
+    {
+      "event_id": "evt_synth135",
+      "cursor": 135,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:38:00Z",
+      "ingested_at": "2026-10-05T09:38:00Z"
+    },
+    {
+      "event_id": "evt_synth136",
+      "cursor": 136,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:39:00Z",
+      "ingested_at": "2026-10-05T09:39:00Z"
+    },
+    {
+      "event_id": "evt_synth137",
+      "cursor": 137,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:40:00Z",
+      "ingested_at": "2026-10-05T09:40:00Z"
+    },
+    {
+      "event_id": "evt_synth138",
+      "cursor": 138,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:41:00Z",
+      "ingested_at": "2026-10-05T09:41:00Z"
+    },
+    {
+      "event_id": "evt_synth139",
+      "cursor": 139,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:42:00Z",
+      "ingested_at": "2026-10-05T09:42:00Z"
+    },
+    {
+      "event_id": "evt_synth140",
+      "cursor": 140,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:43:00Z",
+      "ingested_at": "2026-10-05T09:43:00Z"
+    },
+    {
+      "event_id": "evt_synth141",
+      "cursor": 141,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:44:00Z",
+      "ingested_at": "2026-10-05T09:44:00Z"
+    },
+    {
+      "event_id": "evt_synth142",
+      "cursor": 142,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:45:00Z",
+      "ingested_at": "2026-10-05T09:45:00Z"
+    },
+    {
+      "event_id": "evt_synth143",
+      "cursor": 143,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:46:00Z",
+      "ingested_at": "2026-10-05T09:46:00Z"
+    },
+    {
+      "event_id": "evt_synth144",
+      "cursor": 144,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:47:00Z",
+      "ingested_at": "2026-10-05T09:47:00Z"
+    },
+    {
+      "event_id": "evt_synth145",
+      "cursor": 145,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:48:00Z",
+      "ingested_at": "2026-10-05T09:48:00Z"
+    },
+    {
+      "event_id": "evt_synth146",
+      "cursor": 146,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthE",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T09:49:00Z",
+      "ingested_at": "2026-10-05T09:49:00Z"
+    },
+    {
+      "event_id": "evt_synth147",
+      "cursor": 147,
+      "origin": "hub",
+      "kind": "run.observed",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthD",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthD",
+        "session_id": "ses_synthD",
+        "node_id": "",
+        "adapter": "",
+        "harness": "",
+        "cwd": "",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "0001-01-01T00:00:00Z",
+        "capabilities": null
+      },
+      "occurred_at": "2026-10-05T11:50:00Z",
+      "ingested_at": "2026-10-05T11:50:00Z"
+    },
+    {
+      "event_id": "evt_synth148",
+      "cursor": 148,
+      "origin": "hub",
+      "kind": "run.ended",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthH",
+      "payload_version": 1,
+      "payload": {
+        "run_id": "run_synthH",
+        "session_id": "ses_synthH",
+        "node_id": "node_synth-mac",
+        "adapter": "",
+        "harness": "codex",
+        "cwd": "/synth/h",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "exited",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "ended_at": "2026-10-05T11:00:00Z",
+        "exit_code": 0,
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "occurred_at": "2026-10-05T11:00:00Z",
+      "ingested_at": "2026-10-05T11:00:00Z"
+    },
+    {
+      "event_id": "evt_synth149",
+      "cursor": 149,
+      "origin": "hub",
+      "kind": "session.updated",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "project_id": null,
+      "session_id": "ses_synthG",
+      "payload_version": 1,
+      "payload": {
+        "session_id": "ses_synthG",
+        "harness": "",
+        "title": "",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "0001-01-01T00:00:00Z",
+        "lineage": {},
+        "archived": true
+      },
+      "occurred_at": "2026-10-05T09:40:00Z",
+      "ingested_at": "2026-10-05T09:40:00Z"
+    }
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_synthA",
+        "harness": "claude",
+        "title": "synth-api-refactor",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthA",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synthA",
+        "session_id": "ses_synthA",
+        "node_id": "node_synth-mac",
+        "adapter": "",
+        "harness": "claude",
+        "cwd": "/synth/api",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "waiting_approval",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synthB",
+        "harness": "codex",
+        "title": "synth-flaky-ci",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthB",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synthB",
+        "session_id": "ses_synthB",
+        "node_id": "node_synth-linux",
+        "adapter": "",
+        "harness": "codex",
+        "cwd": "/synth/ci",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "failed",
+        "state_reason": "no eligible Codex account",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "ended_at": "2026-10-05T10:30:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synthC",
+        "harness": "claude",
+        "title": "synth-docs-pass",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthC",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synthC",
+        "session_id": "ses_synthC",
+        "node_id": "node_synth-mac",
+        "adapter": "",
+        "harness": "claude",
+        "cwd": "/synth/repo",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "waiting_input",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synthD",
+        "harness": "claude",
+        "title": "synth-search-index",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthD",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synthD",
+        "session_id": "ses_synthD",
+        "node_id": "node_synth-linux",
+        "adapter": "",
+        "harness": "claude",
+        "cwd": "/synth/vault",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synthE",
+        "harness": "shell",
+        "title": "synth-shell",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthE",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synthE",
+        "session_id": "ses_synthE",
+        "node_id": "node_synth-linux",
+        "adapter": "",
+        "harness": "shell",
+        "cwd": "/synth",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "running",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synthF",
+        "harness": "claude",
+        "title": "synth-old",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthF",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synthF",
+        "session_id": "ses_synthF",
+        "node_id": "node_synth-mac",
+        "adapter": "",
+        "harness": "claude",
+        "cwd": "/synth/f",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "exited",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synthG",
+        "harness": "claude",
+        "title": "synth-archived",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthG",
+        "lineage": {},
+        "archived": true
+      },
+      "run": {
+        "run_id": "run_synthG",
+        "session_id": "ses_synthG",
+        "node_id": "node_synth-mac",
+        "adapter": "",
+        "harness": "claude",
+        "cwd": "/synth/g",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "exited",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "ended_at": "2026-10-05T09:30:00Z",
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synthH",
+        "harness": "codex",
+        "title": "synth-codex-check",
+        "project_id": null,
+        "created_by": {
+          "kind": "",
+          "id": ""
+        },
+        "created_at": "2026-10-05T08:00:00Z",
+        "current_run_id": "run_synthH",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synthH",
+        "session_id": "ses_synthH",
+        "node_id": "node_synth-mac",
+        "adapter": "",
+        "harness": "codex",
+        "cwd": "/synth/h",
+        "runtime": {
+          "harness": "",
+          "version": ""
+        },
+        "state": "exited",
+        "freshness": {
+          "observed_at": "0001-01-01T00:00:00Z",
+          "source": "",
+          "stale": false
+        },
+        "started_at": "2026-10-05T08:00:00Z",
+        "ended_at": "2026-10-05T11:00:00Z",
+        "exit_code": 0,
+        "capabilities": [
+          "transcript.read",
+          "screen.read"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    }
+  ],
+  "attention": [
+    {
+      "attention_id": "att_synthA",
+      "kind": "approval",
+      "severity": "urgent",
+      "group_key": "",
+      "object": {
+        "kind": "approval",
+        "id": "apr_synthA"
+      },
+      "session_id": "ses_synthA",
+      "project_id": null,
+      "title": "Approve: go test -bench ./...",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-05T11:55:00Z",
+      "updated_at": "2026-10-05T11:55:00Z",
+      "deep_link": "pyre://approval/apr_synthA"
+    },
+    {
+      "attention_id": "att_synthNode",
+      "kind": "node",
+      "severity": "normal",
+      "group_key": "",
+      "object": {
+        "kind": "node",
+        "id": "node_synthLinux"
+      },
+      "project_id": null,
+      "title": "synth-linux was offline for 12 minutes",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-05T10:40:00Z",
+      "updated_at": "2026-10-05T10:40:00Z",
+      "deep_link": "pyre://node/node_synthLinux"
+    },
+    {
+      "attention_id": "att_synthOld",
+      "kind": "message",
+      "severity": "normal",
+      "group_key": "",
+      "object": {
+        "kind": "",
+        "id": ""
+      },
+      "session_id": "ses_synthF",
+      "project_id": null,
+      "title": "Old synthetic message",
+      "state": "open",
+      "count": 1,
+      "created_at": "2026-10-05T07:00:00Z",
+      "updated_at": "2026-10-05T07:00:00Z",
+      "deep_link": "pyre://attention/att_synthOld"
+    }
+  ],
+  "transcripts": {
+    "ses_synthA": {
+      "entries": [
+        {
+          "seq": 40,
+          "run_id": "run_synthA",
+          "at": "2026-10-05T08:50:00Z",
+          "kind": "user",
+          "text": "Refactor the synthetic API layer."
+        },
+        {
+          "seq": 41,
+          "run_id": "run_synthA",
+          "at": "2026-10-05T11:40:00Z",
+          "kind": "assistant",
+          "text": "The handlers are split; running the benchmarks next."
+        },
+        {
+          "seq": 42,
+          "run_id": "run_synthA",
+          "at": "2026-10-05T11:41:00Z",
+          "kind": "tool",
+          "text": "Edit: /synth/api/handlers.go; Bash: go test ./..."
+        },
+        {
+          "seq": 43,
+          "run_id": "run_synthA",
+          "at": "2026-10-05T11:54:00Z",
+          "kind": "tool",
+          "text": "Bash: go test -bench ./..."
+        }
+      ],
+      "gap": false,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    "ses_synthC": {
+      "entries": [
+        {
+          "seq": 800,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T08:55:00Z",
+          "kind": "assistant",
+          "text": "Earlier synthetic message before the cutoff."
+        },
+        {
+          "seq": 801,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T09:10:00Z",
+          "kind": "user",
+          "text": "Write the synthetic digest docs and tests."
+        },
+        {
+          "seq": 802,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T09:20:00Z",
+          "kind": "tool",
+          "text": "Read: /synth/repo/README.md; Edit: /synth/repo/docs/digest.md"
+        },
+        {
+          "seq": 803,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T09:21:00Z",
+          "kind": "tool",
+          "text": "tool result"
+        },
+        {
+          "seq": 804,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T09:40:00Z",
+          "kind": "tool",
+          "text": "Write: /synth/repo/internal/digest/digest_test.go; Bash: go test ./internal/digest"
+        },
+        {
+          "seq": 805,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T09:50:00Z",
+          "kind": "user",
+          "text": "Also publish the spec."
+        },
+        {
+          "seq": 806,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T10:04:00Z",
+          "kind": "tool",
+          "text": "MultiEdit: /synth/repo/docs/digest.md"
+        },
+        {
+          "seq": 812,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T10:08:00Z",
+          "kind": "assistant",
+          "text": "## Summary\n\n**Updated the digest docs** and added tests for ranking, e.g. needs-you first. Published the spec as v2.\n\n- docs/digest.md\n- internal/digest/digest_test.go"
+        },
+        {
+          "seq": 813,
+          "run_id": "run_synthC",
+          "at": "2026-10-05T10:08:00Z",
+          "kind": "system",
+          "text": "turn ended (58m0s)"
+        }
+      ],
+      "gap": false,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    "ses_synthD": {
+      "entries": [
+        {
+          "seq": 2001,
+          "run_id": "run_synthD",
+          "at": "2026-10-05T09:30:00Z",
+          "kind": "user",
+          "text": "Index the synthetic vault."
+        },
+        {
+          "seq": 2002,
+          "run_id": "run_synthD",
+          "at": "2026-10-05T09:31:00Z",
+          "kind": "tool",
+          "text": "command: synth-index --shards 7 (exit 0)"
+        },
+        {
+          "seq": 2003,
+          "run_id": "run_synthD",
+          "at": "2026-10-05T10:12:00Z",
+          "kind": "pyre_message",
+          "text": "[pyre message msg_synthCD] the docs are ready"
+        },
+        {
+          "seq": 2004,
+          "run_id": "run_synthD",
+          "at": "2026-10-05T11:50:00Z",
+          "kind": "assistant",
+          "text": "Indexing the synthetic vault: 3 of 7 shards done. The rest will take about an hour."
+        },
+        {
+          "seq": 2005,
+          "run_id": "run_synthD",
+          "at": "2026-10-05T11:51:00Z",
+          "kind": "tool",
+          "text": "file change: /synth/vault/index/shard-3.idx, /synth/vault/index/manifest.json"
+        }
+      ],
+      "gap": false,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    "ses_synthG": {
+      "entries": [
+        {
+          "seq": 10,
+          "run_id": "run_synthG",
+          "at": "2026-10-05T09:20:00Z",
+          "kind": "assistant",
+          "text": "Synthetic archived run finished its check."
+        }
+      ],
+      "gap": false,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    },
+    "ses_synthH": {
+      "entries": [],
+      "gap": false,
+      "freshness": {
+        "observed_at": "0001-01-01T00:00:00Z",
+        "source": "",
+        "stale": false
+      }
+    }
+  }
+}

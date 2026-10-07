@@ -1,0 +1,34 @@
+ Pyre  S Sessions · P Projects · M Machines · A Accounts › While you were away                                 ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ While you were away · since 02:00 (3h ago) · 5 agents, 2 need you                                        esc mark seen
+› ! synth-api-refactor  Approve: go test -bench ./...                            Claude on synth-mac                 5m
+  ✗ synth-flaky-ci      Failed: no eligible Codex account                        Codex on synth-linux                1h
+  ✓ synth-codex-check   Finished                                                 Codex on synth-mac                  1h
+  ✓ synth-docs-pass     Updated the digest docs and added tests for ranking, e.… 2 turns · 2 files · 1 artifact      1h
+  ● synth-search-index  Indexing the synthetic vault: 3 of 7 shards done.        2+ turns · 2 files · 1 message      9m
+    2 quiet sessions · ! synth-linux was offline for 12 minutes
+
+synth-api-refactor
+! needs you · Claude on synth-mac · 5m ago
+
+Approve: go test -bench ./...
+
+Activity   3 tool calls · 1 reply
+Needs you  Approve: go test -bench ./...
+Files      handlers.go
+
+enter open the session (a answers)
+pyre://approval/apr_synthA
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select   enter open   r transcript   esc mark seen                                                esc back   ? help

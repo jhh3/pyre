@@ -1,0 +1,25 @@
+{
+  "name": "jhh3-mem",
+  "version": "0.4.5",
+  "description": "Local-only episodic session memory: one SQLite file with FTS5, two additive hooks, no daemon, no network, one-command removal. the owner's machines only.",
+  "author": { "name": "John Holliman" },
+  "homepage": "https://github.com/Acme/agent-plugins",
+  "repository": "https://github.com/Acme/agent-plugins",
+  "license": "MIT",
+  "keywords": ["memory", "personal", "sqlite", "session"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "jhh3-mem",
+    "shortDescription": "Cross-session episodic memory, shared between Claude Code and Codex.",
+    "longDescription": "Writes one deterministic record per session to a local SQLite store, injects a bounded repo-scoped digest at session start, and exposes an explicit search path. No daemon, no listening socket, no network call. Sessions from Claude Code and Codex share a single store.",
+    "developerName": "John Holliman",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/Acme/agent-plugins",
+    "defaultPrompt": [
+      "What did I work on in this repo recently?",
+      "Search my session memory for the collab websocket work."
+    ],
+    "brandColor": "#3FB950"
+  }
+}

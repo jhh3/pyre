@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-08-17T11:00:00.000Z","cwd":"/repo","message":{"role":"assistant","content":[{"type":"text","text":"Nothing to do here, all clear."}]}}
+{"type":"assistant","timestamp":"2026-08-17T11:00:02.000Z","cwd":"/repo","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/repo/README.md"}}]}}

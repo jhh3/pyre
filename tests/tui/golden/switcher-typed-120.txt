@@ -1,0 +1,34 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                         ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+        ╭─ Switch session ─────────────────────────────────────────────────────────────────────────────────────╮
+        │                                                                                                      │
+        │ › wor▏                                                                                           1/5 │
+        │ ──────────────────────────────────────────────────────────────────────────────────────────────────── │
+        │ › ! worker                                                       synth-linux      claude needs you   │
+        │   ● migration work                                               synth-mac        claude working     │
+        │   ◔ api work (handoff successor)                                 synth-linux      codex  starting    │
+        │   ● outfit API client · Synthetic Outfit                         synth-linux      claude working     │
+        │   ● coordinator                                                  synth-mac        claude working     │
+        │                                                                                                      │
+        │                                                                                                      │
+        │                                                                                                      │
+        │                                                                                                      │
+        │                                                                                                      │
+        ╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+ enter switch   ↑↓ move   ctrl+j/k move   esc close

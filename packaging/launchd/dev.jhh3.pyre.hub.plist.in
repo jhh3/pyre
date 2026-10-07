@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  pyre-managed: rendered by scripts/install/install.sh from
+  packaging/launchd/dev.jhh3.pyre.hub.plist.in (Pyre @VERSION@).
+  Per-user LaunchAgent for the Pyre hub. Contains no secrets: the TLS key and
+  database stay in the hub data directory (0700); the owner credential
+  written by `pyre-hub init` is never referenced here.
+
+  A LaunchAgent runs only while the user has a login session (GUI login or
+  auto-login). For an always-on hub prefer a Linux host with a systemd user
+  unit and lingering enabled.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+@PROGRAM_ARGUMENTS@
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@PATH@</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>@HOME@</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>20</integer>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/pyre-hub.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/pyre-hub.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,7 @@
+{
+  "name": "hive",
+  "version": "0.2.5",
+  "description": "Unified session memory, workstreams, worktrees & lifecycle. Successor to jhh3-mem + ws + wt.",
+  "author": { "name": "John Holliman" },
+  "keywords": ["memory", "workstreams", "worktrees", "sessions"]
+}

@@ -1,0 +1,111 @@
+name: CI
+
+# PRs and branch pushes run the short suite (real-stack scenarios in
+# tests/resilience and tests/security skip under -short). main, the nightly
+# schedule and manual runs run the full suite.
+on:
+  # Private personal repo: CI runs only when started by hand
+  # (gh workflow run <name>); verify locally before pushing.
+  workflow_dispatch:
+
+permissions: {}
+
+# One run per branch: a PR event cancels the push run for the same branch.
+# Runs on main are queued, never cancelled, so every merge is tested.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  FULL_SUITE: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+
+jobs:
+  go:
+    name: go (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install tmux
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -q && sudo apt-get install -y -q tmux; else brew install tmux; fi
+      - name: Module graph is tidy
+        run: go mod tidy -diff
+      - name: Vet (all analyzers, incl. stdversion and tests)
+        run: go vet ./...
+      - name: Test
+        run: |
+          if [ "$FULL_SUITE" = "true" ]; then
+            go test -race ./...
+          else
+            go test -race -short ./...
+          fi
+      - name: Generated files are current
+        run: make GO=go check-generated
+      - name: Build
+        run: make GO=go build
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: gofmt
+        run: make GO=go fmt-check
+      - name: golangci-lint (pinned; linux and darwin build tags; see .golangci.yml)
+        run: make GO=go lint
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: govulncheck (linux and darwin build tags)
+        run: make GO=go vuln
+
+  repro:
+    name: reproducible build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build the release twice (release.sh; binaries, tarballs, SHA256SUMS) and compare
+        run: make GO=go verify-repro

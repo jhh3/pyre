@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "name": "account-availability",
+  "description": "Four Claude/Codex subscription accounts with fresh, stale, exhausted, and unknown observations. Unknown/stale never means unlimited.",
+  "synthetic": true,
+  "requirements": [
+    "R08"
+  ],
+  "cases": [
+    "A11",
+    "A13"
+  ],
+  "accounts": [
+    {
+      "account": {
+        "account_id": "acct_synth-claude-a",
+        "provider": "anthropic",
+        "label": "claude-personal-a",
+        "kind": "subscription",
+        "disabled": false,
+        "created_at": "2026-09-28T06:00:00Z"
+      },
+      "latest": {
+        "account_id": "acct_synth-claude-a",
+        "provider": "anthropic",
+        "reporting_node": "node_synth-mac",
+        "observed_at": "2026-10-04T11:59:00Z",
+        "source": "rota:usage-endpoint",
+        "confidence": "high",
+        "eligibility": "eligible",
+        "windows": [
+          {
+            "name": "five_hour",
+            "used_percent": 22,
+            "reset_at": "2026-10-04T14:20:00Z"
+          },
+          {
+            "name": "seven_day",
+            "used_percent": 41,
+            "reset_at": "2026-10-07T23:20:00Z"
+          }
+        ],
+        "stale": false
+      },
+      "grants": [
+        {
+          "grant_id": "grant_synth-claude-a-mac",
+          "account_id": "acct_synth-claude-a",
+          "node_id": "node_synth-mac",
+          "harness": "claude",
+          "profile_ref": "claude-personal-a",
+          "mechanism": "claude_config_dir",
+          "kind": "claude-profile-store",
+          "profile_dir": "/Users/synth/.local/state/pyre/profiles/acct_synth-claude-a/claude",
+          "max_procs": 0,
+          "state": "valid",
+          "refresh_owner": "harness",
+          "generation": 1,
+          "observed_at": "2026-10-04T11:58:00Z"
+        }
+      ],
+      "active_assignments": [
+        {
+          "assignment_id": "asg_synth-1",
+          "account_id": "acct_synth-claude-a",
+          "grant_generation": 0,
+          "run_id": "run_synth-standalone-1",
+          "session_id": "ses_synth-standalone",
+          "node_id": "node_synth-mac",
+          "reason": "most headroom (fresh)",
+          "assigned_at": "2026-10-04T11:30:00Z",
+          "freshness": {
+            "observed_at": "2026-10-04T11:29:00Z",
+            "source": "rota",
+            "stale": false
+          }
+        }
+      ]
+    },
+    {
+      "account": {
+        "account_id": "acct_synth-claude-b",
+        "provider": "anthropic",
+        "label": "claude-personal-b",
+        "kind": "subscription",
+        "disabled": false,
+        "created_at": "2026-09-28T06:00:00Z"
+      },
+      "latest": {
+        "account_id": "acct_synth-claude-b",
+        "provider": "anthropic",
+        "reporting_node": "node_synth-linux",
+        "observed_at": "2026-10-04T10:25:00Z",
+        "source": "rota:usage-endpoint",
+        "confidence": "low",
+        "eligibility": "unknown",
+        "windows": [
+          {
+            "name": "five_hour",
+            "used_percent": 60
+          }
+        ],
+        "stale": true,
+        "detail": "usage endpoint rate-limited; last good sample 95m old"
+      },
+      "grants": [
+        {
+          "grant_id": "grant_synth-claude-b-mac",
+          "account_id": "acct_synth-claude-b",
+          "node_id": "node_synth-mac",
+          "harness": "claude",
+          "profile_ref": "claude-personal-b",
+          "mechanism": "claude_config_dir",
+          "kind": "claude-profile-store",
+          "profile_dir": "/Users/synth/.local/state/pyre/profiles/acct_synth-claude-b/claude",
+          "max_procs": 0,
+          "state": "unknown",
+          "refresh_owner": "harness",
+          "generation": 1,
+          "observed_at": "2026-10-04T11:58:00Z"
+        }
+      ],
+      "active_assignments": []
+    },
+    {
+      "account": {
+        "account_id": "acct_synth-claude-c",
+        "provider": "anthropic",
+        "label": "claude-work-c",
+        "kind": "subscription",
+        "disabled": false,
+        "created_at": "2026-09-28T06:00:00Z"
+      },
+      "latest": {
+        "account_id": "acct_synth-claude-c",
+        "provider": "anthropic",
+        "reporting_node": "node_synth-mac",
+        "observed_at": "2026-10-04T11:57:00Z",
+        "source": "limit-event",
+        "confidence": "high",
+        "eligibility": "exhausted",
+        "windows": [
+          {
+            "name": "five_hour",
+            "used_percent": 100,
+            "reset_at": "2026-10-04T13:20:00Z"
+          }
+        ],
+        "reset_at": "2026-10-04T13:20:00Z",
+        "stale": false,
+        "detail": "usage limit reached"
+      },
+      "grants": [
+        {
+          "grant_id": "grant_synth-claude-c-mac",
+          "account_id": "acct_synth-claude-c",
+          "node_id": "node_synth-mac",
+          "harness": "claude",
+          "profile_ref": "claude-work-c",
+          "mechanism": "claude_config_dir",
+          "kind": "claude-profile-store",
+          "profile_dir": "/Users/synth/.local/state/pyre/profiles/acct_synth-claude-c/claude",
+          "max_procs": 0,
+          "state": "valid",
+          "refresh_owner": "harness",
+          "generation": 1,
+          "observed_at": "2026-10-04T11:58:00Z"
+        }
+      ],
+      "active_assignments": []
+    },
+    {
+      "account": {
+        "account_id": "acct_synth-codex-a",
+        "provider": "openai",
+        "label": "codex-personal-a",
+        "kind": "subscription",
+        "disabled": false,
+        "created_at": "2026-09-28T06:00:00Z"
+      },
+      "latest": {
+        "account_id": "acct_synth-codex-a",
+        "provider": "openai",
+        "reporting_node": "node_synth-linux",
+        "observed_at": "2026-10-04T02:00:00Z",
+        "source": "codex:app-server",
+        "confidence": "low",
+        "eligibility": "unknown",
+        "stale": true,
+        "detail": "no observation since node restart"
+      },
+      "grants": [
+        {
+          "grant_id": "grant_synth-codex-a-mac",
+          "account_id": "acct_synth-codex-a",
+          "node_id": "node_synth-mac",
+          "harness": "codex",
+          "profile_ref": "codex-personal-a",
+          "mechanism": "codex_home",
+          "kind": "codex-home-file",
+          "profile_dir": "/Users/synth/.local/state/pyre/profiles/acct_synth-codex-a/codex",
+          "max_procs": 1,
+          "state": "valid",
+          "refresh_owner": "harness",
+          "generation": 1,
+          "observed_at": "2026-10-04T11:58:00Z"
+        }
+      ],
+      "active_assignments": []
+    }
+  ],
+  "observations": [
+    {
+      "account_id": "acct_synth-claude-a",
+      "provider": "anthropic",
+      "reporting_node": "node_synth-mac",
+      "observed_at": "2026-10-04T11:59:00Z",
+      "source": "rota:usage-endpoint",
+      "confidence": "high",
+      "eligibility": "eligible",
+      "windows": [
+        {
+          "name": "five_hour",
+          "used_percent": 22,
+          "reset_at": "2026-10-04T14:20:00Z"
+        },
+        {
+          "name": "seven_day",
+          "used_percent": 41,
+          "reset_at": "2026-10-07T23:20:00Z"
+        }
+      ],
+      "stale": false
+    },
+    {
+      "account_id": "acct_synth-claude-b",
+      "provider": "anthropic",
+      "reporting_node": "node_synth-linux",
+      "observed_at": "2026-10-04T10:25:00Z",
+      "source": "rota:usage-endpoint",
+      "confidence": "low",
+      "eligibility": "unknown",
+      "windows": [
+        {
+          "name": "five_hour",
+          "used_percent": 60
+        }
+      ],
+      "stale": true,
+      "detail": "usage endpoint rate-limited; last good sample 95m old"
+    },
+    {
+      "account_id": "acct_synth-claude-c",
+      "provider": "anthropic",
+      "reporting_node": "node_synth-mac",
+      "observed_at": "2026-10-04T11:57:00Z",
+      "source": "limit-event",
+      "confidence": "high",
+      "eligibility": "exhausted",
+      "windows": [
+        {
+          "name": "five_hour",
+          "used_percent": 100,
+          "reset_at": "2026-10-04T13:20:00Z"
+        }
+      ],
+      "reset_at": "2026-10-04T13:20:00Z",
+      "stale": false,
+      "detail": "usage limit reached"
+    },
+    {
+      "account_id": "acct_synth-codex-a",
+      "provider": "openai",
+      "reporting_node": "node_synth-linux",
+      "observed_at": "2026-10-04T02:00:00Z",
+      "source": "codex:app-server",
+      "confidence": "low",
+      "eligibility": "unknown",
+      "stale": true,
+      "detail": "no observation since node restart"
+    }
+  ]
+}

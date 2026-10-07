@@ -1,0 +1,65 @@
+# hive configuration — copy to ~/.config/hive/hive.toml and edit.
+# Missing keys fall back to hive.config.DEFAULTS; a broken file falls back
+# entirely (hooks must never break on config).
+
+# [repos.NAME] — wt's repo registry (replaces _WT_REPOS in ~/.zsh/wt.zsh).
+#   path    = repo root; worktrees live in <path>/.worktrees
+#   default = true       -> `wt` with no -r/--repo targets this repo
+#   setup   = ["cmd", …] -> shell commands run in a fresh worktree; when
+#                           unset, the fallback runs `make setup` (and
+#                           `make -C backend setup`) if those Makefiles exist
+#   launch  = "cmd"      -> sent into freshly created tmux sessions
+#   env     = { K = "v" } -> extra environment for tmux sessions + setup
+
+[repos.webapp]
+path = "~/code/acme/webapp"
+default = true
+setup = ["make setup", "make -C backend setup"]
+# launch = "claude --dangerously-skip-permissions"
+
+[repos.skills]
+path = "~/code/acme/skills"
+
+[repos.agent-plugins]
+path = "~/code/acme/agent-plugins"
+
+[repos.expo]
+path = "~/code/expo"
+# env = { EXPO_NO_TELEMETRY = "1" }
+
+[repos.agent-deck]
+path = "~/code/agent-deck"
+
+# Tuning knobs (defaults shown; see hive.config.DEFAULTS).
+
+# [checkpoint]
+# min_new_bytes = 8192     # Stop-checkpoint gate: bytes of new transcript
+# min_interval_s = 600     # …or this many seconds since the last checkpoint
+
+# [enrich]
+# concurrency = 2          # parallel `claude -p` enrichment jobs per tick
+# job_budget_s = 120       # wall-clock budget per enrichment job
+# model = "haiku"          # model for enrichment (haiku-class)
+
+# [sync]
+# live_debounce_s = 900    # min seconds between live-session lane/raw pushes
+# close_debounce_s = 45    # settle time before a closed session syncs
+
+# [inject]
+# max_bytes = 3072         # SessionStart digest cap
+# budget_s = 4             # injection wall-clock budget
+
+# [tick]
+# memory_max = "2G"        # systemd-run MemoryMax for the tick scope
+# cpu_quota = "50%"        # systemd-run CPUQuota for the tick scope
+
+# [registration]
+# significant_files = 3    # auto-register a stray session after N files…
+# significant_minutes = 45 # …or N minutes of activity
+
+# [titles]
+# throttle_s = 300         # min seconds between title derivations
+# max_len = 40             # derived title length cap
+
+# [raw]
+# scratch_prune_months = 3 # scratch-class raw segments prunable after N months

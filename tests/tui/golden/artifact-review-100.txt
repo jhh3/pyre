@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts › Artifact                    ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Synthetic test report                              │ v1 · report.md
+  VERSIONS · newest first                          │ Type       text/markdown · 36 B
+  v2 report.html                               5m  │ Digest     sha256:7e6d3d270d85a569bd48ab1fbfc0…
+› v1 report.md                             20m ✎1  │ Author     worker (session:ses_synth-b)
+                                                   │ Provenance session worker · run run_synth-b-1 …
+                                                   │ Published  20m ago
+                                                   │
+                                                   │ Comments on v1 (1)
+                                                   │ you · 15m ago · line 3
+                                                   │   Synthetic: include the failure count.
+                                                   │
+                                                   │ Content
+                                                   │ Report
+                                                   │
+                                                   │ All synthetic tests pass.
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+
+ ↑↓ version   c comment   J/K scroll                                              esc back   ? help

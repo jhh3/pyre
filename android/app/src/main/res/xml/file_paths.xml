@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only verified artifact downloads are shareable through the FileProvider. -->
+<paths>
+    <cache-path name="artifacts" path="artifacts/" />
+</paths>

@@ -1,0 +1,30 @@
+ Pyre  S Sessions 3 · P Projects · [M Machines] · A Accounts › Connections                 ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  CONNECTIONS · updated now                        │ github-synth
+› ◐ partial  github-synth         github     1/2 … │ Service   github
+                                                   │ Modes     local_credential, remote_invoke
+                                                   │ Machines  all (owner-broad)
+                                                   │ Projects  prj_synth-outfit
+                                                   │
+                                                   │ Availability
+                                                   │ ● verified   synth-mac    local_credential · c…
+                                                   │ ! missing    synth-linux  remote_invoke · chec…
+                                                   │   invocations route to node_synth-mac — action…
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+                                                   │
+
+ ↑↓ select   r refresh                                                            esc back   ? help

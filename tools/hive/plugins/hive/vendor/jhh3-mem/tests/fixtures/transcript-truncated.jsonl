@@ -1,0 +1,5 @@
+{"type":"user","promptSource":"typed","timestamp":"2026-08-17T10:00:00.000Z","cwd":"/repo","gitBranch":"feature/flags","message":{"role":"user","content":"Fix the flag registry so reconnecting clients keep their room."}}
+{"type":"assistant","timestamp":"2026-08-17T10:00:05.000Z","cwd":"/repo","gitBranch":"feature/flags","message":{"role":"assistant","content":[{"type":"text","text":"Reading the registry first."},{"type":"tool_use","name":"Read","input":{"file_path":"/repo/lib/flags/registry.ts"}}]}}
+{"type":"user","timestamp":"2026-08-17T10:00:06.000Z","cwd":"/repo","message":{"role":"user","content":[{"type":"tool_result","content":"export const registry = {};"}]}}
+{"type":"user","promptSource":"slash","timestamp":"2026-08-17T10:00:07.000Z","cwd":"/repo","message":{"role":"user","content":"<command-name>/context</command-name>\n<local-command-stdout>slashcommandnoise must never reach the request field</local-command-stdout>"}}
+{"type":"assistant","timestamp":"2026-08-17T10:03:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/repo/lib/flags/reg

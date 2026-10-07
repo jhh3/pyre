@@ -1,0 +1,62 @@
+# pyre-managed: rendered by scripts/install/install.sh from
+# packaging/systemd/pyred.service.in (Pyre @VERSION@).
+# systemd user unit for the Pyre node daemon. No secrets: pyred reads its node
+# credential (0600) from its state directory.
+#
+# The user manager must outlive logout or it stops this unit and every run:
+#   loginctl enable-linger <user>
+# BEGIN scope
+#
+# Runs live outside this unit. pyred starts its tmux server (every agent,
+# shell and Codex app-server pane) in a transient scope in pyre-runs.slice:
+#   systemd-run --user --scope --slice=pyre-runs.slice --unit=pyre-tmux-<hash>.scope tmux ... start-server
+# so stop/restart/upgrade of this unit signals only pyred (default
+# KillMode=control-group) and the limits below apply to pyred alone; the
+# slice (pyre-runs.slice) carries the limits for runs. PYRE_SYSTEMD_SCOPE=require
+# makes pyred refuse to start runs in this cgroup if the scope cannot be
+# created. Inspect: systemd-cgls --user-unit pyre-runs.slice
+#
+# A scope moves runs to another cgroup, nothing else: the tmux server is still
+# forked from pyred and inherits its environment, rlimits, NoNewPrivileges
+# flag and mount namespace. So no NoNewPrivileges, ProtectSystem, ProtectHome
+# or PrivateTmp here: they would apply to agent sessions.
+# END scope
+# BEGIN legacy
+#
+# Legacy mode (install.sh --no-scope): runs stay in this unit's cgroup.
+# KillMode=process signals only the pyred main process, so runs survive
+# stop/restart/upgrade (runtime REPORT section 10.6). Every limit or sandbox
+# option here would also apply to the agent sessions, so none is set.
+# END legacy
+
+[Unit]
+Description=Pyre node daemon (pyred)
+Documentation=https://github.com/jhh3/pyre/blob/main/docs/operations.md
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=@EXEC_START@
+Environment="PATH=@PATH@"
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+LimitNOFILE=8192
+# BEGIN scope
+Environment=PYRE_SYSTEMD_SCOPE=require
+Environment=PYRE_SYSTEMD_SLICE=pyre-runs.slice
+MemoryHigh=@MEMORY_HIGH@
+MemoryMax=@MEMORY_MAX@
+CPUQuota=@CPU_QUOTA@
+TasksMax=512
+# END scope
+# BEGIN legacy
+Environment=PYRE_SYSTEMD_SCOPE=off
+KillMode=process
+# END legacy
+SyslogIdentifier=pyred
+
+[Install]
+WantedBy=default.target

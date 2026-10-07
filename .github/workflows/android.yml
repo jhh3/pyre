@@ -1,0 +1,64 @@
+name: Android
+
+# Unsigned debug build, JVM unit tests (Robolectric, reads the shared contract
+# fixtures) and lint. No signing secrets: the release signing config only
+# exists when ~/.config/pyre/android-signing.properties is present, and the
+# Firebase flavor only when app/google-services.json is present.
+on:
+  # Private personal repo: CI runs only when started by hand
+  # (gh workflow run <name>); verify locally before pushing.
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # AGP 8.11 (and 9.x) needs JDK 17+; the bytecode target stays 17 (set in
+      # app/build.gradle.kts). JDK 21 LTS also covers Robolectric on SDK 35,
+      # which requires 21 (ScreensUiTest currently pins sdk 34).
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+      # Validates gradle-wrapper.jar checksums and caches ~/.gradle. "basic" is
+      # the open-source (MIT) cache provider; the default "enhanced" provider
+      # is proprietary.
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
+          validate-wrappers: true
+          add-job-summary: on-failure
+      # The hosted ubuntu image ships the Android SDK with licenses accepted;
+      # install exactly the platform and build tools this build targets
+      # (compileSdk 35) instead of relying on whatever the image preinstalls.
+      - name: Android SDK packages
+        run: |
+          test -n "${ANDROID_HOME:-}" || { echo "ANDROID_HOME is not set" >&2; exit 1; }
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" >/dev/null
+      - name: Build, unit test, lint
+        run: ./gradlew --no-daemon --stacktrace assembleDebug testDebugUnitTest lintDebug
+      - name: Upload reports on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-reports
+          path: |
+            android/app/build/reports/
+            android/app/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="channel_attention">Needs you</string>
+    <string name="channel_attention_desc">Approvals, questions, failures and reviews that need your attention</string>
+    <string name="channel_info">Updates</string>
+    <string name="channel_info_desc">Informational Pyre events</string>
+    <string name="channel_stream">Hub connection</string>
+    <string name="channel_stream_desc">Ongoing notification while the hub event stream is held open</string>
+</resources>

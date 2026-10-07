@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v table · P Projects · M Machines · A Accounts                                                                         anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  STATUS       SESSION                                                                                                                       MACHINE     HARNESS ACCOUNT · USAGE                 ACTIVE
+  Synthetic Outfit 1 · 1 working
+› ● working    outfit API client                                                                                                             synth-linux claude  claude-personal-b 5h 60%           30m
+
+  No project 8 · ! 3 need you · 3 working · 1 idle · 1 stale
+  ◔ starting   api work (handoff successor)                                                                                                  synth-linux codex   acct_synth-codex-b                 30m
+  ◌ stale      long refactor                                                                                                                 synth-linux claude  own login                          30m
+  ! needs you  worker                                                                                                                        synth-linux claude  own login                          30m
+  ● working    coordinator                                                                                                                   synth-mac   claude  own login                          30m
+  ! approval   deploy prep                                                                                                                   synth-mac   claude  own login                          30m
+  ● working    migration work                                                                                                                synth-mac   claude  claude-personal-a 5h 22% wk 41%    30m
+  ○ idle       pairing session                                                                                                               synth-mac   claude  own login                          30m
+  ! needs you  scratch (standalone)                                                                                                          synth-mac   claude  claude-personal-a 5h 22% wk 41%    30m
+
+  machines  synth-linux ● 4 · synth-mac ● 5
+  1 ended — . show
+
+
+
+
+
+
+
+
+
+ Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)
+ Sessions: table
+ n new session   enter open terminal   m message   i info   v view   gb group by   / filter                                                                                                      ? help

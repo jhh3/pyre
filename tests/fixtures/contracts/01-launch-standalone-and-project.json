@@ -1,0 +1,707 @@
+{
+  "schema_version": 1,
+  "name": "launch-standalone-and-project",
+  "description": "A projectless Claude session on the Mac and a project-associated Codex session in a separate worktree. Standalone sessions have full basic capability.",
+  "synthetic": true,
+  "requirements": [
+    "R02",
+    "R05"
+  ],
+  "cases": [
+    "A02",
+    "A07"
+  ],
+  "nodes": [
+    {
+      "node_id": "node_synth-mac",
+      "name": "synth-mac",
+      "hostname": "synth-mac.local",
+      "ssh_alias": "synth-mac",
+      "platform": "darwin",
+      "arch": "arm64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "subagents.observe",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "hooks.events",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "0.160.0",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.steer",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.5a",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "stop",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-synth",
+        "tmux": "3.5a"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-04T11:00:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 10,
+        "load1": 2.1,
+        "mem_total_mb": 16384,
+        "mem_avail_mb": 6100,
+        "active_runs": 2,
+        "max_runs": 8,
+        "pyre_rss_mb": 38,
+        "pyre_cpu_pct": 0.4,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 18.5,
+        "load5": 2.4,
+        "load15": 2.2,
+        "swap_total_mb": 9216,
+        "swap_used_mb": 7816,
+        "mem_pressure": "warn",
+        "disks": [
+          {
+            "path": "/Users/synth",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 471482,
+            "free_mb": 15510
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_synth-a-1",
+            "session_id": "ses_synth-a",
+            "procs": 11,
+            "rss_mb": 1229.4,
+            "cpu_pct": 35.2,
+            "top": {
+              "pid": 4321,
+              "name": "claude",
+              "rss_mb": 702.1
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_synth-standalone-1",
+            "session_id": "ses_synth-standalone",
+            "procs": 4,
+            "rss_mb": 410,
+            "cpu_pct": 0.3,
+            "top": {
+              "pid": 4400,
+              "name": "claude",
+              "rss_mb": 380.5
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-27T13:20:00Z"
+    },
+    {
+      "node_id": "node_synth-linux",
+      "name": "synth-linux",
+      "hostname": "synth-linux",
+      "ssh_alias": "synth-linux",
+      "platform": "linux",
+      "arch": "amd64",
+      "harnesses": [
+        {
+          "harness": "claude",
+          "version": "2.1.289",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "input.queue",
+            "input.reconcile",
+            "approvals.answer",
+            "interrupt",
+            "stop",
+            "resume.native",
+            "resume.handoff",
+            "subagents.observe",
+            "transcript.read",
+            "screen.read",
+            "account.isolated_profile",
+            "hooks.events",
+            "agent.tools"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "codex",
+          "version": "",
+          "available": false,
+          "reason": "codex executable not found on node PATH",
+          "capabilities": [],
+          "probed_at": "2026-10-04T11:55:00Z"
+        },
+        {
+          "harness": "shell",
+          "version": "tmux 3.4",
+          "available": true,
+          "capabilities": [
+            "attach.native_terminal",
+            "attach.read_only",
+            "stop",
+            "screen.read"
+          ],
+          "probed_at": "2026-10-04T11:55:00Z"
+        }
+      ],
+      "versions": {
+        "protocol": "1",
+        "pyred": "0.1.0-synth",
+        "tmux": "3.4"
+      },
+      "capabilities": [
+        "launch",
+        "attach.ssh"
+      ],
+      "connection": {
+        "state": "connected",
+        "last_seen_at": "2026-10-04T12:00:00Z",
+        "connected_since": "2026-10-04T07:00:00Z",
+        "protocol": 1
+      },
+      "resources": {
+        "cpu_count": 32,
+        "load1": 5.5,
+        "mem_total_mb": 123904,
+        "mem_avail_mb": 74000,
+        "active_runs": 1,
+        "max_runs": 16,
+        "pyre_rss_mb": 41,
+        "pyre_cpu_pct": 0.3,
+        "agent_rss_mb": 0,
+        "agent_cpu_pct": 0,
+        "observed_at": "2026-10-04T12:00:00Z",
+        "cpu_pct": 7.2,
+        "load5": 4.9,
+        "load15": 4.1,
+        "swap_total_mb": 8192,
+        "swap_used_mb": 310,
+        "mem_pressure": "normal",
+        "mem_pressure_some10": 0.4,
+        "disks": [
+          {
+            "path": "/home/synth",
+            "roles": [
+              "home",
+              "data"
+            ],
+            "total_mb": 953869,
+            "free_mb": 612400
+          }
+        ],
+        "runs": [
+          {
+            "run_id": "run_synth-project-1",
+            "session_id": "ses_synth-project",
+            "procs": 23,
+            "rss_mb": 2310.7,
+            "cpu_pct": 112.5,
+            "top": {
+              "pid": 9001,
+              "name": "go",
+              "rss_mb": 980.2
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          },
+          {
+            "run_id": "run_synth-b-1",
+            "session_id": "ses_synth-b",
+            "procs": 6,
+            "rss_mb": 655,
+            "cpu_pct": 1.1,
+            "top": {
+              "pid": 9100,
+              "name": "claude",
+              "rss_mb": 512.3
+            },
+            "observed_at": "2026-10-04T12:00:00Z"
+          }
+        ]
+      },
+      "enrolled_at": "2026-09-28T06:00:00Z"
+    }
+  ],
+  "sessions": [
+    {
+      "session": {
+        "session_id": "ses_synth-standalone",
+        "harness": "claude",
+        "title": "scratch (standalone)",
+        "project_id": null,
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-standalone-1",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-standalone-1",
+        "session_id": "ses_synth-standalone",
+        "node_id": "node_synth-mac",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/Users/synth/scratch",
+        "checkout": {
+          "node_id": "node_synth-mac",
+          "path": "/Users/synth/scratch",
+          "mode": "plain"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "account_id": "acct_synth-claude-a",
+        "state": "waiting_input",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-mac",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "native_ref": {
+          "kind": "claude_session",
+          "id": "00000000-0000-4000-8000-000000000001"
+        },
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ]
+      },
+      "node_name": "synth-mac",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    },
+    {
+      "session": {
+        "session_id": "ses_synth-project",
+        "harness": "claude",
+        "title": "outfit API client",
+        "project_id": "prj_synth-outfit",
+        "created_by": {
+          "kind": "owner",
+          "id": "cli_synth-laptop",
+          "name": "owner (synthetic)"
+        },
+        "created_at": "2026-10-04T11:30:00Z",
+        "current_run_id": "run_synth-project-1",
+        "lineage": {},
+        "archived": false
+      },
+      "run": {
+        "run_id": "run_synth-project-1",
+        "session_id": "ses_synth-project",
+        "node_id": "node_synth-linux",
+        "adapter": "claude-synth",
+        "harness": "claude",
+        "cwd": "/home/synth/src/outfit-wt/api-client",
+        "checkout": {
+          "node_id": "node_synth-linux",
+          "path": "/home/synth/src/outfit-wt/api-client",
+          "repo_id": "outfit",
+          "mode": "worktree",
+          "branch": "api-client"
+        },
+        "runtime": {
+          "harness": "claude",
+          "version": "synthetic"
+        },
+        "account_id": "acct_synth-claude-b",
+        "state": "running",
+        "freshness": {
+          "observed_at": "2026-10-04T12:00:00Z",
+          "source": "node:node_synth-linux",
+          "stale": false
+        },
+        "started_at": "2026-10-04T11:30:00Z",
+        "native_ref": {
+          "kind": "claude_session",
+          "id": "00000000-0000-4000-8000-000000000002"
+        },
+        "capabilities": [
+          "attach.native_terminal",
+          "attach.read_only",
+          "input.queue",
+          "input.reconcile",
+          "approvals.answer",
+          "interrupt",
+          "stop",
+          "resume.native",
+          "resume.handoff",
+          "subagents.observe",
+          "transcript.read",
+          "screen.read",
+          "account.isolated_profile",
+          "hooks.events",
+          "agent.tools"
+        ]
+      },
+      "node_name": "synth-linux",
+      "attention": 0,
+      "freshness": {
+        "observed_at": "2026-10-04T12:00:00Z",
+        "source": "hub",
+        "stale": false
+      }
+    }
+  ],
+  "projects": [
+    {
+      "project_id": "prj_synth-outfit",
+      "name": "Synthetic Outfit",
+      "description": "Synthetic project with two repos",
+      "brief_document_id": "doc_synth-brief",
+      "repos": [
+        {
+          "repo_id": "outfit",
+          "name": "outfit",
+          "url": "https://example.invalid/synth/outfit.git"
+        },
+        {
+          "repo_id": "notes",
+          "name": "notes"
+        }
+      ],
+      "checkouts": [
+        {
+          "node_id": "node_synth-linux",
+          "path": "/home/synth/src/outfit",
+          "repo_id": "outfit",
+          "mode": "shared",
+          "branch": "main"
+        }
+      ],
+      "archived": false,
+      "version": 1,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T03:40:00Z",
+      "updated_at": "2026-10-04T03:40:00Z"
+    },
+    {
+      "project_id": "prj_synth-research",
+      "name": "Synthetic research (no repos)",
+      "repos": [],
+      "checkouts": [],
+      "archived": false,
+      "version": 1,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T05:20:00Z",
+      "updated_at": "2026-10-04T05:20:00Z"
+    }
+  ],
+  "documents": [
+    {
+      "document_id": "doc_synth-brief",
+      "project_id": "prj_synth-outfit",
+      "title": "Brief",
+      "slug": "brief",
+      "media_type": "text/markdown",
+      "head_revision_id": "rev_synth-brief-1",
+      "head_seq": 1,
+      "created_by": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T03:40:00Z",
+      "updated_at": "2026-10-04T03:40:00Z"
+    }
+  ],
+  "revisions": [
+    {
+      "revision_id": "rev_synth-brief-1",
+      "document_id": "doc_synth-brief",
+      "seq": 1,
+      "digest": "sha256:814fca9d2991715511e5f9cc0fd03ab1a4d9aec5039ccb034023c391a19f2685",
+      "size": 69,
+      "author": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "created_at": "2026-10-04T03:40:00Z",
+      "content": "# Synthetic brief\n\nShip the synthetic API client. See decisions doc.\n"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "start standalone session",
+      "op": "sessions.start",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-start-1",
+        "node_id": "node_synth-mac",
+        "harness": "claude",
+        "cwd": "/Users/synth/scratch",
+        "account_policy": {
+          "mode": "eligible"
+        }
+      },
+      "response": {
+        "session": {
+          "session": {
+            "session_id": "ses_synth-standalone",
+            "harness": "claude",
+            "title": "scratch (standalone)",
+            "project_id": null,
+            "created_by": {
+              "kind": "owner",
+              "id": "cli_synth-laptop",
+              "name": "owner (synthetic)"
+            },
+            "created_at": "2026-10-04T11:30:00Z",
+            "current_run_id": "run_synth-standalone-1",
+            "lineage": {},
+            "archived": false
+          },
+          "run": {
+            "run_id": "run_synth-standalone-1",
+            "session_id": "ses_synth-standalone",
+            "node_id": "node_synth-mac",
+            "adapter": "claude-synth",
+            "harness": "claude",
+            "cwd": "/Users/synth/scratch",
+            "checkout": {
+              "node_id": "node_synth-mac",
+              "path": "/Users/synth/scratch",
+              "mode": "plain"
+            },
+            "runtime": {
+              "harness": "claude",
+              "version": "synthetic"
+            },
+            "account_id": "acct_synth-claude-a",
+            "state": "waiting_input",
+            "freshness": {
+              "observed_at": "2026-10-04T12:00:00Z",
+              "source": "node:node_synth-mac",
+              "stale": false
+            },
+            "started_at": "2026-10-04T11:30:00Z",
+            "native_ref": {
+              "kind": "claude_session",
+              "id": "00000000-0000-4000-8000-000000000001"
+            },
+            "capabilities": [
+              "attach.native_terminal",
+              "attach.read_only",
+              "input.queue",
+              "input.reconcile",
+              "approvals.answer",
+              "interrupt",
+              "stop",
+              "resume.native",
+              "resume.handoff",
+              "subagents.observe",
+              "transcript.read",
+              "screen.read",
+              "account.isolated_profile",
+              "hooks.events",
+              "agent.tools"
+            ]
+          },
+          "node_name": "synth-mac",
+          "attention": 0,
+          "freshness": {
+            "observed_at": "2026-10-04T12:00:00Z",
+            "source": "hub",
+            "stale": false
+          }
+        },
+        "command_id": "cmd_synth-start-1"
+      },
+      "explanation": "No project is needed; project_id is null."
+    },
+    {
+      "name": "start project session in a worktree",
+      "op": "sessions.start",
+      "principal": {
+        "kind": "owner",
+        "id": "cli_synth-laptop",
+        "name": "owner (synthetic)"
+      },
+      "request": {
+        "operation_id": "op_synth-start-2",
+        "node_id": "node_synth-linux",
+        "harness": "claude",
+        "checkout": {
+          "repo_id": "outfit",
+          "mode": "worktree",
+          "branch": "api-client"
+        },
+        "project_id": "prj_synth-outfit",
+        "account_policy": {
+          "mode": "eligible"
+        },
+        "include_context": true
+      },
+      "response": {
+        "session": {
+          "session": {
+            "session_id": "ses_synth-project",
+            "harness": "claude",
+            "title": "outfit API client",
+            "project_id": "prj_synth-outfit",
+            "created_by": {
+              "kind": "owner",
+              "id": "cli_synth-laptop",
+              "name": "owner (synthetic)"
+            },
+            "created_at": "2026-10-04T11:30:00Z",
+            "current_run_id": "run_synth-project-1",
+            "lineage": {},
+            "archived": false
+          },
+          "run": {
+            "run_id": "run_synth-project-1",
+            "session_id": "ses_synth-project",
+            "node_id": "node_synth-linux",
+            "adapter": "claude-synth",
+            "harness": "claude",
+            "cwd": "/home/synth/src/outfit-wt/api-client",
+            "checkout": {
+              "node_id": "node_synth-linux",
+              "path": "/home/synth/src/outfit-wt/api-client",
+              "repo_id": "outfit",
+              "mode": "worktree",
+              "branch": "api-client"
+            },
+            "runtime": {
+              "harness": "claude",
+              "version": "synthetic"
+            },
+            "account_id": "acct_synth-claude-b",
+            "state": "running",
+            "freshness": {
+              "observed_at": "2026-10-04T12:00:00Z",
+              "source": "node:node_synth-linux",
+              "stale": false
+            },
+            "started_at": "2026-10-04T11:30:00Z",
+            "native_ref": {
+              "kind": "claude_session",
+              "id": "00000000-0000-4000-8000-000000000002"
+            },
+            "capabilities": [
+              "attach.native_terminal",
+              "attach.read_only",
+              "input.queue",
+              "input.reconcile",
+              "approvals.answer",
+              "interrupt",
+              "stop",
+              "resume.native",
+              "resume.handoff",
+              "subagents.observe",
+              "transcript.read",
+              "screen.read",
+              "account.isolated_profile",
+              "hooks.events",
+              "agent.tools"
+            ]
+          },
+          "node_name": "synth-linux",
+          "attention": 0,
+          "freshness": {
+            "observed_at": "2026-10-04T12:00:00Z",
+            "source": "hub",
+            "stale": false
+          }
+        },
+        "command_id": "cmd_synth-start-2"
+      }
+    }
+  ]
+}

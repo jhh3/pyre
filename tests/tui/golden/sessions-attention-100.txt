@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  STATUS       SESSION · by attention  MACHINE      AGE  │ outfit API client · ● working · Claude
+  Needs you 3                                            │ read-only snapshot · MOCK backend: there…
+  ! needs you  worker                  synth-linux  30s  │
+  ! approval   deploy prep             synth-mac    30s  │ [mock screen] outfit API client — running
+  ! needs you  scratch (standalone)    synth-mac    30s  │ Working on it (synthetic).
+                                                         │ >
+  Working 4                                              │
+  ◔ starting   api work (handoff succ… synth-linux  30s  │
+› ● working    outfit API client       synth-linux  30s  │
+  ● working    coordinator             synth-mac    30s  │
+  ● working    migration work          synth-mac    30s  │
+                                                         │
+  Idle 2                                                 │
+  ◌ stale      long refactor           synth-linux   7m  │
+  ○ idle       pairing session         synth-mac    30s  │
+                                                         │
+  machines  synth-linux ● 4 · synth-mac ● 5              │
+  1 ended — . show                                       │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+                                                         │
+
+ Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)
+ grouped by attention
+ n new session   enter type   F full-screen   m message   i info   / filter   ␣␣ find        ? help

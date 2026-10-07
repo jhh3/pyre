@@ -1,0 +1,30 @@
+name: Planning documentation
+
+on:
+  # Private personal repo: CI runs only when started by hand
+  # (gh workflow run <name>); verify locally before pushing.
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate documents and work graph
+        run: python3 scripts/check_docs.py
+      # Whole tree against the empty tree, so the result does not depend on
+      # clone depth or on what the last commit touched. Exemptions for
+      # verbatim captures and vendored files live in .gitattributes.
+      - name: Check whitespace
+        run: git diff --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD

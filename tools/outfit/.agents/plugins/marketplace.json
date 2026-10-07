@@ -1,0 +1,20 @@
+{
+  "name": "outfit",
+  "interface": {
+    "displayName": "Outfit"
+  },
+  "plugins": [
+    {
+      "name": "outfit",
+      "source": {
+        "source": "local",
+        "path": "./plugins/outfit"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
