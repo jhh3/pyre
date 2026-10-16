@@ -405,18 +405,29 @@ type syncAttention struct {
 }
 
 func (a *syncAttention) catchUp(ctx context.Context) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := 0; i < 100; i++ {
+	// A session list asks for every listed session's flag: catch up once
+	// per request, not once per session (W-dbhygiene).
+	if !hub.FirstInRequest(ctx, "attention.catchup") {
+		return
+	}
+	behind := func() bool {
 		head, err := a.stack.Events.Head(ctx)
 		if err != nil {
-			return
+			return false
 		}
 		cur, err := a.Store.Cursor(ctx, attention.DefaultConsumer)
-		if err != nil || cur >= head {
-			return
-		}
-		if n, err := a.stack.Deriver.Step(ctx); err != nil || n == 0 {
+		return err == nil && cur < head
+	}
+	// Caught up already: no lock (the background loop may hold it).
+	if !behind() {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := 0; i < 100 && behind(); i++ {
+		// No long poll: when only events the deriver does not consume are
+		// pending, a waiting step held this request for the full wait.
+		if _, err := a.stack.Deriver.StepNow(ctx); err != nil {
 			return
 		}
 	}
@@ -425,9 +436,14 @@ func (a *syncAttention) catchUp(ctx context.Context) {
 func (a *syncAttention) run(ctx context.Context) error {
 	backoff := 250 * time.Millisecond
 	for {
-		a.mu.Lock()
-		_, err := a.stack.Deriver.Step(ctx)
-		a.mu.Unlock()
+		// Wait for work without the lock, so read-your-writes catch-ups
+		// never queue behind an idle long poll; then apply under it.
+		err := a.stack.Deriver.WaitPending(ctx)
+		if err == nil {
+			a.mu.Lock()
+			_, err = a.stack.Deriver.StepNow(ctx)
+			a.mu.Unlock()
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -444,7 +460,7 @@ func (a *syncAttention) run(ctx context.Context) error {
 			continue
 		}
 		backoff = 250 * time.Millisecond
-		// Yield so catch-ups can take the lock between long polls.
+		// Yield so catch-ups can take the lock between steps.
 		select {
 		case <-ctx.Done():
 			return nil
@@ -478,11 +494,23 @@ func (a *syncAttention) SessionAttention(ctx context.Context, sessionID string) 
 	return a.Store.SessionAttention(ctx, sessionID)
 }
 
+func (a *syncAttention) SessionAttentionRun(ctx context.Context, sessionID string, run *contracts.Run) (int, *contracts.SessionFlag, error) {
+	a.catchUp(ctx)
+	return a.Store.SessionAttentionRun(ctx, sessionID, run)
+}
+
 // OwnerEngaged catches up first so a message derived from a not yet
 // consumed event is answered too.
 func (a *syncAttention) OwnerEngaged(ctx context.Context, sessionID, summary string, kinds ...contracts.AttentionKind) (int, error) {
 	a.catchUp(ctx)
 	return a.Store.OwnerEngaged(ctx, sessionID, summary, kinds...)
+}
+
+// RaiseWaiting catches up first so the deriver has applied what happened
+// before the turn ended (the hub's waiting.go).
+func (a *syncAttention) RaiseWaiting(ctx context.Context, sessionID string, projectID *string, question, summary string) (contracts.AttentionItem, error) {
+	a.catchUp(ctx)
+	return a.Store.RaiseWaiting(ctx, sessionID, projectID, question, summary)
 }
 
 func (a *syncAttention) FlagAttention(ctx context.Context, req contracts.FlagAttentionRequest) (contracts.AttentionItem, error) {

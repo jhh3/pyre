@@ -35,6 +35,12 @@ CREATE TABLE session_worktrees (
 	payload TEXT NOT NULL,
 	reported_at TEXT NOT NULL
 );
+`}, {Namespace: "hub_repos", Version: 2, Name: "github_repos", SQL: `
+CREATE TABLE github_repos (
+	node_id TEXT PRIMARY KEY,
+	payload TEXT NOT NULL,
+	reported_at TEXT NOT NULL
+);
 `}}
 
 func init() {
@@ -43,6 +49,9 @@ func init() {
 	// stays owner-only.
 	sessionActions[contracts.ActionWorktreeCreate] = true
 	sessionActions[contracts.ActionWorktreeScan] = true
+	// A launch on a machine that lacks the repository clones it first
+	// (never overwriting; W-newsession).
+	sessionActions[contracts.ActionRepoClone] = true
 }
 
 const (
@@ -71,6 +80,21 @@ func (h *Hub) applyRepoReportTx(ctx context.Context, tx *sql.Tx, nodeID string, 
 		idx.NodeID = nodeID
 		_, err = tx.ExecContext(ctx, `INSERT INTO node_repos(node_id,idx,reported_at) VALUES(?,?,?) ON CONFLICT(node_id) DO UPDATE SET idx=excluded.idx, reported_at=excluded.reported_at`,
 			nodeID, persistence.JSON(idx), persistence.Time(h.now()))
+		return true, err
+	case contracts.ReportGitHubRepos: // W-newsession
+		if len(rep.Payload) > maxRepoBytes {
+			return true, contracts.Errorf(contracts.ErrInvalid, "GitHub repo snapshot too large (%d bytes)", len(rep.Payload))
+		}
+		gi, err := decode[contracts.GitHubRepoIndex](rep.Payload)
+		if err != nil {
+			return true, err
+		}
+		if gi.NodeID != "" && gi.NodeID != nodeID {
+			return true, contracts.Errorf(contracts.ErrForbidden, "node %s cannot report GitHub repos for %s", nodeID, gi.NodeID)
+		}
+		gi.NodeID = nodeID
+		_, err = tx.ExecContext(ctx, `INSERT INTO github_repos(node_id,payload,reported_at) VALUES(?,?,?) ON CONFLICT(node_id) DO UPDATE SET payload=excluded.payload, reported_at=excluded.reported_at`,
+			nodeID, persistence.JSON(gi), persistence.Time(h.now()))
 		return true, err
 	case contracts.ReportSessionWorktrees:
 		sw, err := decode[contracts.SessionWorktrees](rep.Payload)
@@ -106,16 +130,31 @@ func (h *Hub) ListRepos(ctx context.Context, req contracts.ListReposRequest) (co
 		limit = 50
 	}
 	limit = min(limit, 500)
-	out := contracts.RepoList{Items: []contracts.RepoEntry{}, Nodes: map[string]time.Time{}}
+	all, nodes, err := h.repoEntries(ctx, req.NodeID)
+	if err != nil {
+		return contracts.RepoList{Items: []contracts.RepoEntry{}, Nodes: map[string]time.Time{}}, err
+	}
+	out := contracts.RepoList{Items: []contracts.RepoEntry{}, Nodes: nodes}
+	ranked := repoindex.Rank(req.Query, all)
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	out.Items = append(out.Items, ranked...)
+	return out, nil
+}
+
+// repoEntries reads every (or one) node's index with fleet context.
+func (h *Hub) repoEntries(ctx context.Context, nodeID string) ([]contracts.RepoEntry, map[string]time.Time, error) {
+	nodes := map[string]time.Time{}
 	q := `SELECT node_id, idx, reported_at FROM node_repos`
 	args := []any{}
-	if req.NodeID != "" {
+	if nodeID != "" {
 		q += ` WHERE node_id=?`
-		args = append(args, req.NodeID)
+		args = append(args, nodeID)
 	}
 	rows, err := h.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return out, err
+		return nil, nodes, err
 	}
 	type nodeIdx struct {
 		id  string
@@ -126,28 +165,28 @@ func (h *Hub) ListRepos(ctx context.Context, req contracts.ListReposRequest) (co
 		var id, raw, at string
 		if err := rows.Scan(&id, &raw, &at); err != nil {
 			rows.Close()
-			return out, err
+			return nil, nodes, err
 		}
 		var idx contracts.NodeRepoIndex
 		if json.Unmarshal([]byte(raw), &idx) != nil {
 			continue
 		}
 		idxs = append(idxs, nodeIdx{id, idx})
-		out.Nodes[id] = idx.IndexedAt
+		nodes[id] = idx.IndexedAt
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return out, err
+		return nil, nodes, err
 	}
 	used, err := h.lastUsedDirs(ctx)
 	if err != nil {
-		return out, err
+		return nil, nodes, err
 	}
 	var all []contracts.RepoEntry
 	for _, ni := range idxs {
 		info, err := h.nodeInfo(ctx, ni.id)
 		if err != nil || info.Revoked {
-			delete(out.Nodes, ni.id)
+			delete(nodes, ni.id)
 			continue
 		}
 		name := info.Name
@@ -162,11 +201,60 @@ func (h *Hub) ListRepos(ctx context.Context, req contracts.ListReposRequest) (co
 			all = append(all, e)
 		}
 	}
-	ranked := repoindex.Rank(req.Query, all)
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
+	return all, nodes, nil
+}
+
+var _ contracts.RepoCatalogAPI = (*Hub)(nil)
+
+// RepoCatalog merges the fleet's repo indexes with the GitHub snapshots
+// nodes reported (W-newsession).
+func (h *Hub) RepoCatalog(ctx context.Context, req contracts.RepoCatalogRequest) (contracts.RepoCatalog, error) {
+	if _, err := principal(ctx); err != nil {
+		return contracts.RepoCatalog{}, err
 	}
-	out.Items = append(out.Items, ranked...)
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	limit = min(limit, 2000)
+	all, nodes, err := h.repoEntries(ctx, "")
+	if err != nil {
+		return contracts.RepoCatalog{}, err
+	}
+	out := contracts.RepoCatalog{Items: []contracts.CatalogRepo{}, Nodes: nodes}
+	rows, err := h.db.QueryContext(ctx, `SELECT node_id, payload FROM github_repos`)
+	if err != nil {
+		return out, err
+	}
+	var ghs []contracts.GitHubRepoIndex
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return out, err
+		}
+		var gi contracts.GitHubRepoIndex
+		if json.Unmarshal([]byte(raw), &gi) != nil {
+			continue
+		}
+		if info, err := h.nodeInfo(ctx, id); err != nil || info.Revoked {
+			continue
+		}
+		gi.NodeID = id
+		ghs = append(ghs, gi)
+		if out.GitHub == nil || gi.FetchedAt.After(out.GitHub.FetchedAt) {
+			out.GitHub = &contracts.GitHubSource{Login: gi.Login, NodeID: id, FetchedAt: gi.FetchedAt}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	items := repoindex.Catalog(repoindex.Rank("", all), ghs, req.Query, h.now())
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out.Items = append(out.Items, items...)
 	return out, nil
 }
 

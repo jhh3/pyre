@@ -13,12 +13,14 @@ import (
 // with a session, and a session flagging itself.
 
 // EngageKinds are the kinds the owner engaging with a session (typing into
-// it, messaging it) answers: its messages to the owner and its own flag.
-// Approvals and questions resolve only through their own answer.
-var EngageKinds = []contracts.AttentionKind{contracts.AttnMessage, contracts.AttnFlag}
+// it, messaging it) answers: its messages to the owner, its own flag and
+// its "waiting on you". Approvals and questions resolve only through their
+// own answer.
+var EngageKinds = []contracts.AttentionKind{contracts.AttnMessage, contracts.AttnFlag, contracts.AttnWaiting}
 
-// ReadKinds are the kinds viewing a session's message answers.
-var ReadKinds = []contracts.AttentionKind{contracts.AttnMessage}
+// ReadKinds are the kinds viewing a session's message answers (the owner
+// has read what it said, including the question it is waiting on).
+var ReadKinds = []contracts.AttentionKind{contracts.AttnMessage, contracts.AttnWaiting}
 
 func flagGroup(sessionID string) string { return "flag:session:" + sessionID }
 
@@ -26,6 +28,12 @@ func flagGroup(sessionID string) string { return "flag:session:" + sessionID }
 // the session's flag (nil when nothing flags). No authorization check;
 // hub-internal.
 func (s *Store) SessionAttention(ctx context.Context, sessionID string) (int, *contracts.SessionFlag, error) {
+	return s.SessionAttentionRun(ctx, sessionID, nil)
+}
+
+// SessionAttentionRun is SessionAttention for a session whose current run
+// is run (sessionflag.ComputeRun: a launch failure is not "needs you").
+func (s *Store) SessionAttentionRun(ctx context.Context, sessionID string, run *contracts.Run) (int, *contracts.SessionFlag, error) {
 	rows, err := queryItems(ctx, s.db, `WHERE session_id=? AND state IN (?,?) ORDER BY updated_at DESC, attention_id DESC`,
 		sessionID, string(contracts.AttnOpen), string(contracts.AttnRead))
 	if err != nil {
@@ -39,7 +47,7 @@ func (s *Store) SessionAttention(ctx context.Context, sessionID string) (int, *c
 		}
 		items = append(items, r.item)
 	}
-	return n, sessionflag.Compute(items), nil
+	return n, sessionflag.ComputeRun(items, run), nil
 }
 
 // OwnerEngaged marks the session's active items of the given kinds handled

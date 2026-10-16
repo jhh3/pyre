@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/jhh3/pyre/internal/stablepath"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +27,34 @@ func expandHome(p string) string {
 		}
 	}
 	return p
+}
+
+// tempRoots are directories a reboot empties.
+var tempRoots = []string{os.TempDir(), "/tmp", "/private/tmp"}
+
+// recreateTempDir recreates p (owner-only) when it is missing and lies
+// inside a temporary root: a session resumed after a reboot whose working
+// directory was a scratch dir under /tmp (e.g. a Claude scratchpad) would
+// otherwise never come back. Its old contents are gone; the conversation
+// is not. It reports whether it created the directory.
+func recreateTempDir(p string) bool {
+	p = filepath.Clean(expandHome(p))
+	if !filepath.IsAbs(p) {
+		return false
+	}
+	if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	for _, r := range tempRoots {
+		r = filepath.Clean(r)
+		if r == "" || r == "/" {
+			continue
+		}
+		if rel, err := filepath.Rel(r, p); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			return os.MkdirAll(p, 0o700) == nil
+		}
+	}
+	return false
 }
 
 // validateDir requires an absolute existing directory.
@@ -125,6 +155,12 @@ func (d *Daemon) resolveCheckout(ctx context.Context, cmd contracts.StartRunComm
 	if path == "" {
 		name := strings.NewReplacer("/", "-").Replace(branch)
 		path = filepath.Join(filepath.Dir(top), filepath.Base(top)+"-worktrees", name)
+		if root := d.cfg.WorktreeRoot; root != "" {
+			// An existing worktree at the old place (a resume) stays there.
+			if _, err := os.Stat(path); err != nil {
+				path = filepath.Join(expandHome(root), filepath.Base(top), name)
+			}
+		}
 	}
 	path = expandHome(path)
 	if !filepath.IsAbs(path) {
@@ -202,6 +238,9 @@ func (d *Daemon) runEnv(base map[string]string, cmd contracts.StartRunCommand, r
 	env["PYRE_NODE_ID"] = d.nodeID
 	env["PYRE_SOCKET"] = d.SocketPath()
 	env["PYRE_RUN_DIR"] = runDir
+	if d.cfg.WorktreeRoot != "" {
+		env["PYRE_WORKTREE_ROOT"] = expandHome(d.cfg.WorktreeRoot)
+	}
 	if cmd.Session.ProjectID != nil && *cmd.Session.ProjectID != "" {
 		env["PYRE_PROJECT_ID"] = *cmd.Session.ProjectID
 	}

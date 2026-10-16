@@ -64,7 +64,7 @@ import dev.jhh3.pyre.data.Repository
 import dev.jhh3.pyre.data.valueOrNull
 import dev.jhh3.pyre.domain.Tone
 import dev.jhh3.pyre.files.HubArtifactContent
-import dev.jhh3.pyre.domain.Flags
+import dev.jhh3.pyre.domain.Leads
 import dev.jhh3.pyre.net.PyreApiException
 import dev.jhh3.pyre.ui.common.LoadingBox
 import androidx.compose.runtime.LaunchedEffect
@@ -82,6 +82,12 @@ import dev.jhh3.pyre.ui.common.PyreIcon
 import dev.jhh3.pyre.ui.common.RefreshWhileResumed
 import dev.jhh3.pyre.ui.common.ScreenChrome
 import dev.jhh3.pyre.ui.common.Supporting
+import dev.jhh3.pyre.model.AskState
+import dev.jhh3.pyre.model.AsksOps
+import dev.jhh3.pyre.model.AttentionKind
+import dev.jhh3.pyre.ui.inbox.InboxCountViewModel
+import dev.jhh3.pyre.ui.inbox.InboxScreen
+import dev.jhh3.pyre.ui.inbox.InboxViewModel
 import dev.jhh3.pyre.ui.launch.LaunchScreen
 import dev.jhh3.pyre.ui.launch.LaunchViewModel
 import dev.jhh3.pyre.ui.manage.AccountsScreen
@@ -128,17 +134,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-/** The bottom bar: Sessions · Projects · Machines · Accounts (as the TUI's tabs). Settings opens from the top bar. */
+/** The bottom bar: Sessions · Inbox · Projects · Machines · Accounts. Settings opens from the top bar. */
 private data class Destination(val screen: Screen, val label: String, val icon: Int)
 
 private val Destinations = listOf(
     Destination(Screen.Sessions, "Sessions", R.drawable.ic_terminal),
+    Destination(Screen.Inbox(), "Inbox", R.drawable.ic_inbox),
     Destination(Screen.Projects, "Projects", R.drawable.ic_folder),
     Destination(Screen.Machines, "Machines", R.drawable.ic_dns),
     Destination(Screen.Accounts, "Accounts", R.drawable.ic_person),
 )
 
-/** Sessions that need you (blocking flags), for the Sessions badge. Polls only while the app is in front. */
+/**
+ * Leads that ask or wait on you (domain/Leads: the needs-you rule rolled up
+ * to top-level sessions; "new" does not count), for the Sessions badge.
+ * Polls only while the app is in front.
+ */
 class NeedsYouCountViewModel(private val repo: Repository) : ViewModel() {
     private val _count = MutableStateFlow(0)
     val count: StateFlow<Int> = _count.asStateFlow()
@@ -147,7 +158,8 @@ class NeedsYouCountViewModel(private val repo: Repository) : ViewModel() {
 
     fun refresh() {
         viewModelScope.launch {
-            repo.sessions().valueOrNull()?.let { list -> _count.value = list.filterNot { it.session.archived }.count(Flags::needsYou) }
+            val asks = if (repo.asksSupported()) repo.asks("open", listOf(AskState.OPEN)).valueOrNull().orEmpty() else emptyList()
+            repo.sessions().valueOrNull()?.let { list -> _count.value = Leads.badge(Leads.signals(list, asks)) }
         }
     }
 }
@@ -179,7 +191,12 @@ fun PyreRoot(graph: AppGraph, navigator: Navigator, permissionTick: Int, actions
     val chrome = remember(entry) { ScreenChrome() }
     val badgeVm = viewModel(key = "needs-you-count-" + s.credentials.clientId) { NeedsYouCountViewModel(s.repo) }
     val needsYou by badgeVm.count.collectAsStateWithLifecycle()
-    RefreshWhileResumed(15_000) { badgeVm.refresh() }
+    val inboxVm = viewModel(key = "inbox-count-" + s.credentials.clientId) { InboxCountViewModel(s.repo) }
+    val unread by inboxVm.count.collectAsStateWithLifecycle()
+    RefreshWhileResumed(15_000) {
+        badgeVm.refresh()
+        inboxVm.refresh()
+    }
 
     // Predictive back: the screen shrinks and follows the finger, then pops.
     var backProgress by remember { mutableFloatStateOf(0f) }
@@ -203,7 +220,7 @@ fun PyreRoot(graph: AppGraph, navigator: Navigator, permissionTick: Int, actions
                 if (!fullScreen) TopBar(screen, chrome.title, navigator)
             },
             bottomBar = {
-                if (screen.isRoot) BottomBar(screen, needsYou, navigator)
+                if (screen.isRoot) BottomBar(screen, needsYou, unread, navigator)
             },
             floatingActionButton = {
                 if (screen == Screen.Sessions) {
@@ -300,6 +317,7 @@ private fun TopBar(screen: Screen, dynamicTitle: String?, navigator: Navigator) 
 
 private fun title(s: Screen) = when (s) {
     Screen.Sessions -> "Sessions"
+    is Screen.Inbox -> "Inbox"
     Screen.Projects -> "Projects"
     Screen.Machines, is Screen.Node -> "Machines"
     Screen.Accounts -> "Accounts"
@@ -321,15 +339,20 @@ private fun title(s: Screen) = when (s) {
 }
 
 @Composable
-private fun BottomBar(current: Screen, needsYou: Int, navigator: Navigator) {
+private fun BottomBar(current: Screen, needsYou: Int, unread: Int, navigator: Navigator) {
     NavigationBar {
         Destinations.forEach { d ->
+            val badge = when (d.screen) {
+                Screen.Sessions -> needsYou
+                is Screen.Inbox -> unread
+                else -> 0
+            }
             NavigationBarItem(
-                selected = current == d.screen,
+                selected = current.key == d.screen.key,
                 onClick = { navigator.root(d.screen) },
                 icon = {
-                    if (d.screen == Screen.Sessions && needsYou > 0) {
-                        BadgedBox(badge = { Badge { Text(if (needsYou > 99) "99+" else "$needsYou") } }) { PyreIcon(d.icon, null) }
+                    if (badge > 0) {
+                        BadgedBox(badge = { Badge { Text(if (badge > 99) "99+" else "$badge") } }) { PyreIcon(d.icon, null) }
                     } else {
                         PyreIcon(d.icon, null)
                     }
@@ -337,6 +360,7 @@ private fun BottomBar(current: Screen, needsYou: Int, navigator: Navigator) {
                 label = { Text(d.label, maxLines = 1) },
                 modifier = Modifier.testTag("nav-" + d.screen.key).semantics {
                     if (d.screen == Screen.Sessions && needsYou > 0) contentDescription = "Sessions, $needsYou need you"
+                    if (d.screen is Screen.Inbox && unread > 0) contentDescription = "Inbox, $unread waiting"
                 },
             )
         }
@@ -355,6 +379,11 @@ private fun ScreenHost(entry: NavEntry, s: HubSession, graph: AppGraph, nav: Nav
             onLaunch = { nav.push(Screen.Launch) },
             onOpenLink = openLink,
         ) { nav.push(Screen.SessionDetail(it)) }
+        is Screen.Inbox -> InboxScreen(
+            viewModel(entry) { InboxViewModel(repo, s.askAnswerer, screen.openAskId) },
+            onOpenSession = { nav.push(Screen.SessionDetail(it)) },
+            onOpenLink = openLink,
+        )
         Screen.Projects -> ProjectsScreen(viewModel(entry) { ProjectsViewModel(repo) }, { nav.push(Screen.Project(it)) }, { nav.push(Screen.AllArtifacts) })
         Screen.Machines -> MachinesScreen(viewModel(entry) { MachinesViewModel(repo) })
         is Screen.Node -> MachinesScreen(viewModel(entry) { MachinesViewModel(repo) }, highlight = screen.nodeId)
@@ -424,8 +453,9 @@ private fun ScreenHost(entry: NavEntry, s: HubSession, graph: AppGraph, nav: Nav
 }
 
 /**
- * Resolves an old inbox link (pyre://attention/<id>) to the session the item
- * is about (else the item's own link, else Sessions) and replaces itself.
+ * Resolves an attention link (pyre://attention/<id>) to the ask's sheet in
+ * the inbox, else the session the item is about, else the item's own link,
+ * else the inbox, and replaces itself.
  */
 @Composable
 private fun AttentionLinkHost(attentionId: String, repo: Repository, nav: Navigator) {
@@ -437,10 +467,11 @@ private fun AttentionLinkHost(attentionId: String, repo: Repository, nav: Naviga
         }
         val target = when {
             item == null -> null
+            item.kind == AttentionKind.ASK || item.`object`.kind == AsksOps.KIND -> Screen.Inbox(openAskId = item.`object`.id)
             item.sessionId.isNotEmpty() -> Screen.SessionDetail(item.sessionId)
             else -> DeepLinks.parse(item.deepLink)?.takeIf { it !is Screen.AttentionLink && it != Screen.Sessions }
         }
-        if (target == null) nav.root(Screen.Sessions) else nav.replace(target)
+        if (target == null) nav.root(Screen.Inbox()) else nav.replace(target)
     }
     LoadingBox()
 }

@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver; cross-compiles without cgo
@@ -18,6 +20,24 @@ import (
 
 // maxConns bounds each file database's connection pool.
 const maxConns = 8
+
+// DefaultBusyTimeout is how long a connection waits for SQLite's write lock
+// before failing with SQLITE_BUSY.
+const DefaultBusyTimeout = 10 * time.Second
+
+var busyTimeoutNanos atomic.Int64
+
+// SetBusyTimeout changes the busy timeout of databases opened afterwards (0
+// restores DefaultBusyTimeout). Tests lower it (about 1s) so a write that
+// waits on a lock its own goroutine holds fails fast instead of after 10s.
+func SetBusyTimeout(d time.Duration) { busyTimeoutNanos.Store(int64(d)) }
+
+func busyTimeout() time.Duration {
+	if d := time.Duration(busyTimeoutNanos.Load()); d > 0 {
+		return d
+	}
+	return DefaultBusyTimeout
+}
 
 // Open opens (creating if needed) a SQLite database at path with WAL,
 // foreign keys, and a busy timeout. Use ":memory:" only for tests (a single
@@ -27,7 +47,7 @@ func Open(path string) (*sql.DB, error) {
 	// WAL mode NORMAL may lose the last commits), which the durable
 	// stored/acknowledged semantics require. On macOS fsync does not flush
 	// the drive cache; fullfsync uses F_FULLFSYNC.
-	q := "_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=synchronous(FULL)&_txlock=immediate"
+	q := "_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(" + strconv.FormatInt(busyTimeout().Milliseconds(), 10) + ")&_pragma=synchronous(FULL)&_txlock=immediate"
 	if runtime.GOOS == "darwin" {
 		q += "&_pragma=fullfsync(1)&_pragma=checkpoint_fullfsync(1)"
 	}
@@ -139,8 +159,13 @@ func Migrate(ctx context.Context, db *sql.DB, migrations ...Migration) error {
 // (or wraps) a *StoredRejection from Idempotent, the transaction is
 // committed so the rejection persists for replay, and the rejection's
 // *contracts.Error is returned. Any other error rolls back.
+//
+// Tx is instrumented (txwatch.go): a nested Tx on the same db in the same
+// goroutine fails immediately with ErrNestedTx, and a BEGIN wait or a hold
+// above SlowTxThreshold is logged with the caller.
 func Tx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, end, err := Begin(ctx, db)
+	defer end()
 	if err != nil {
 		return err
 	}

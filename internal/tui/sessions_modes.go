@@ -203,7 +203,7 @@ type tableCols struct {
 func (m *Model) tableColumns(vs []contracts.SessionView, w int) tableCols {
 	longest, proj, mach, acct := 16, 0, 0, 0
 	for _, s := range vs {
-		longest = max(longest, width(s.Session.Title))
+		longest = max(longest, width(iconTitle(s)))
 		proj = max(proj, width(m.projectName(s.Session.ProjectID)))
 		mach = max(mach, width(s.NodeName))
 		acct = max(acct, width(m.tableAccountPlain(s)))
@@ -322,7 +322,7 @@ func (m *Model) viewSessionTable(w, h int) []string {
 	now := m.now()
 	return m.groupedSessionRows(vs, w, h, hdr, func(s contracts.SessionView, sel bool) string {
 		stt := listStatus(s, m.nodeOf(s))
-		row := m.cursor(sel) + m.statusCell(stt, 10) + " " + m.treeTitle(sel, s, c.titleW)
+		row := m.sessionCursor(sel, s) + m.statusCell(stt, 10) + " " + m.treeTitle(sel, s, c.titleW)
 		if c.projW > 0 {
 			p := m.projectName(s.Session.ProjectID)
 			if p == "" {

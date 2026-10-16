@@ -124,6 +124,7 @@ type stream struct {
 	runID     string
 	nodeID    string
 	readOnly  bool
+	fit       bool // the node sizes the stream to the window (read-only only)
 	principal contracts.Principal
 	nodeCh    chan *websocket.Conn // capacity 1
 	claimed   bool
@@ -307,7 +308,7 @@ func (r *Relay) serveClient(w http.ResponseWriter, req *http.Request) {
 		closeWithError(ws, contracts.Errorf(contracts.ErrInternal, "could not allocate a stream"))
 		return
 	}
-	st := &stream{id: id, runID: g.runID, nodeID: nodeID, readOnly: g.readOnly, principal: g.principal,
+	st := &stream{id: id, runID: g.runID, nodeID: nodeID, readOnly: g.readOnly, fit: f.Fit && g.readOnly, principal: g.principal,
 		nodeCh: make(chan *websocket.Conn, 1), done: make(chan struct{})}
 	r.register(st)
 	defer r.unregister(st)
@@ -336,7 +337,7 @@ func (r *Relay) serveClient(w http.ResponseWriter, req *http.Request) {
 	}()
 
 	cmdID, err := r.cfg.Backend.QueueTerminalOpen(ctx, g.principal, nodeID, contracts.TerminalOpenCommand{
-		StreamID: id, RunID: g.runID, ReadOnly: g.readOnly, Cols: cols, Rows: rows}, r.cfg.CommandTTL)
+		StreamID: id, RunID: g.runID, ReadOnly: g.readOnly, Cols: cols, Rows: rows, Fit: st.fit}, r.cfg.CommandTTL)
 	if err != nil {
 		closeWithError(ws, publicError(err))
 		return
@@ -431,9 +432,19 @@ func (r *Relay) pump(ctx context.Context, client, node *websocket.Conn, st *stre
 					return
 				}
 			case websocket.MessageText:
-				// The node may report a failure before closing.
-				if f, err := parseFrame(b); err == nil && f.Type == FrameError && f.Error != nil {
+				// The node may report a failure before closing, and a
+				// fitted stream's node reports the window's size.
+				f, err := parseFrame(b)
+				switch {
+				case err != nil:
+				case f.Type == FrameError && f.Error != nil:
 					_ = writeJSON(ctx, client, Frame{Type: FrameError, Error: f.Error})
+				case f.Type == FrameResize && st.fit:
+					cols, rows := ClampSize(f.Cols, f.Rows)
+					if err := writeJSON(ctx, client, Frame{Type: FrameResize, Cols: cols, Rows: rows}); err != nil {
+						nodeDone <- nil
+						return
+					}
 				}
 			}
 		}
@@ -486,8 +497,8 @@ func (r *Relay) pump(ctx context.Context, client, node *websocket.Conn, st *stre
 				}
 			case websocket.MessageText:
 				f, err := parseFrame(m.data)
-				if err != nil || f.Type != FrameResize {
-					continue // unknown control frames are ignored
+				if err != nil || f.Type != FrameResize || st.fit {
+					continue // unknown control frames are ignored; the node sizes a fitted stream
 				}
 				cols, rows := ClampSize(f.Cols, f.Rows)
 				if err := writeJSON(ctx, node, Frame{Type: FrameResize, Cols: cols, Rows: rows}); err != nil {

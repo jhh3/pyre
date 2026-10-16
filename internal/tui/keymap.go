@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // Keymap is the effective key configuration: Vim-style navigation, a
@@ -58,6 +60,7 @@ var actionDefs = []actionDef{
 	{id: "global.machines", group: "Go to", desc: "Machines", keys: []string{"M", "3", "<leader>m"}},
 	{id: "global.accounts", group: "Go to", desc: "Accounts", keys: []string{"A", "4", "<leader>a"}},
 	{id: "global.grid", group: "Go to", desc: "Grid: toggle the Sessions grid view (every live session as a live tile)", keys: []string{"G", "<leader>g"}},
+	{id: "global.inbox", group: "Go to", desc: "web inbox (asks, messages for you) in the browser, filtered to the selected lead's or project's asks when it has any; copies the link when there is no display (ssh)", keys: []string{"I"}},
 	{id: "global.digest", group: "Go to", desc: "While you were away: what each agent did since you last looked", keys: []string{"<leader>w"}},
 	{id: "global.connections", group: "Go to", desc: "Connections", keys: []string{"<leader>c"}},
 	{id: "global.environments", group: "Go to", desc: "Environments & updates", keys: []string{"<leader>e"}},
@@ -88,19 +91,20 @@ var actionDefs = []actionDef{
 	{id: "sessions.history", group: "Session", desc: "message history & reconcile (delivery states of messages to/from this session)", keys: []string{"H"}},
 	{id: "sessions.interrupt", group: "Session", desc: "interrupt (confirms)", keys: []string{"!"}},
 	{id: "sessions.stop", group: "Session", desc: "stop (confirms)", keys: []string{"x"}},
-	{id: "sessions.archive", group: "Session", desc: "archive (live: stop + archive, confirms); on a machine row: all its ended sessions", keys: []string{"X"}},
+	{id: "sessions.archive", group: "Session", desc: "archive (live: stop + archive, confirms; a run Pyre cannot stop: archive anyway, confirms); on a machine row: all its ended sessions; on a folded project group: the project", keys: []string{"X"}},
 	{id: "sessions.worktrees", group: "Session", desc: "review / remove the worktrees the session just archived created (offered in a toast; never pops up on its own)", keys: []string{"W"}},
 	{id: "sessions.toggle_ended", group: "Session", desc: "show / hide ended (exited, failed) sessions", keys: []string{"."}},
 	{id: "sessions.usage", group: "Session", desc: "show / hide each session's memory and CPU (process tree) in the list", keys: []string{"u"}},
 	{id: "sessions.read", group: "Session", desc: "read the transcript full-screen", keys: []string{"r"}},
 	{id: "sessions.yank", group: "Session", desc: "copy the session ID (OSC 52)", keys: []string{"y"}},
-	{id: "sessions.rename", group: "Session", desc: "rename (your name stays; automatic naming stops)", keys: []string{"R"}},
+	{id: "sessions.rename", group: "Session", desc: "rename (your name stays; automatic naming stops); on a session that never started: relaunch it (confirms)", keys: []string{"R"}},
 	{id: "sessions.project", group: "Session", desc: "open or associate a project", keys: []string{"p"}},
 	{id: "sessions.new", group: "Session", desc: "new session: a repo, or a path like ~/scratch", keys: []string{"n"}},
 	{id: "sessions.pin", group: "Session", desc: "pin / unpin (pinned sessions stay on top, synced to every client)", keys: []string{"*"}},
 	{id: "sessions.group", group: "Session", desc: "group by project → attention → machine → repo → none (cycles; remembered)", keys: []string{"g b"}},
-	{id: "sessions.sort", group: "Session", desc: "sort inside groups: name → attention (needs you first) → activity (cycles; remembered; also :sort)", keys: []string{"g s"}},
+	{id: "sessions.sort", group: "Session", desc: "sort inside groups: name → attention (needs you first) → activity → yours (you messaged or typed most recently) (cycles; remembered; also :sort)", keys: []string{"g s"}},
 	{id: "sessions.view", group: "Session", desc: "Sessions view: sidenav (list + terminal) → table → grid (cycles; remembered; also :view)", keys: []string{"v"}},
+	{id: "sessions.reparent", group: "Session", desc: "move under another parent session (a picker; its reports go there; also :parent <session|none>)", keys: []string{">"}},
 	{id: "sessions.fold", group: "Session", desc: "collapse / expand the group, or a parent session's children", keys: []string{"z a"}},
 	// switching (single chords with a modifier work from anywhere, inside the
 	// embedded terminal too; see switch.go)
@@ -116,6 +120,7 @@ var actionDefs = []actionDef{
 	// projects
 	{id: "projects.open", group: "Projects", desc: "open project home", keys: []string{"enter"}},
 	{id: "projects.new", group: "Projects", desc: "new session: a repo, or a path like ~/scratch", keys: []string{"n"}},
+	{id: "projects.archive", group: "Projects", desc: "archive the project (confirms; its ended sessions archive now, live ones when their current turn ends)", keys: []string{"X"}},
 	{id: "project.next_section", group: "Project", desc: "next section", keys: []string{"right", "]"}},
 	{id: "project.prev_section", group: "Project", desc: "previous section", keys: []string{"left", "["}},
 	{id: "project.open", group: "Project", desc: "open / read the selected item", keys: []string{"enter"}},
@@ -179,6 +184,9 @@ func DefaultKeymap() *Keymap {
 func DefaultKeysPath() string {
 	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
 		return filepath.Join(d, "pyre", "keys.toml")
+	}
+	if d := winenv.ConfigDir(os.Getenv); d != "" {
+		return filepath.Join(d, "keys.toml")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

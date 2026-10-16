@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/jhh3/pyre/internal/fileperm"
 )
 
 // FileStore is the explicit opt-in plaintext store: one JSON file, mode 0600,
@@ -51,8 +53,8 @@ func (f *FileStore) checkPerms() error {
 	if err != nil {
 		return storeErr(KindUnavailable, BackendFile, "open", Ref{}, "check the file store directory", Diagnostic(nil, []byte(err.Error())))
 	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return storeErr(KindRefused, BackendFile, "open", Ref{}, fmt.Sprintf("chmod 700 %s (currently %o); Pyre refuses group/world-accessible credential directories", f.dir, st.Mode().Perm()), "")
+	if desc, bad := fileperm.Exposed(f.dir, st); bad {
+		return storeErr(KindRefused, BackendFile, "open", Ref{}, fmt.Sprintf("%s (currently %s); Pyre refuses group/world-accessible credential directories", fixCmd(f.dir, true), modeDesc(st, desc)), "")
 	}
 	fst, err := os.Stat(f.path())
 	if errors.Is(err, fs.ErrNotExist) {
@@ -61,8 +63,8 @@ func (f *FileStore) checkPerms() error {
 	if err != nil {
 		return storeErr(KindUnavailable, BackendFile, "open", Ref{}, "check the file store", Diagnostic(nil, []byte(err.Error())))
 	}
-	if fst.Mode().Perm()&0o077 != 0 {
-		return storeErr(KindRefused, BackendFile, "open", Ref{}, fmt.Sprintf("chmod 600 %s (currently %o); Pyre refuses group/world-readable credential files", f.path(), fst.Mode().Perm()), "")
+	if desc, bad := fileperm.Exposed(f.path(), fst); bad {
+		return storeErr(KindRefused, BackendFile, "open", Ref{}, fmt.Sprintf("%s (currently %s); Pyre refuses group/world-readable credential files", fixCmd(f.path(), false), modeDesc(fst, desc)), "")
 	}
 	return nil
 }
@@ -96,7 +98,7 @@ func (f *FileStore) save(m map[string]string) error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
-	if err := tmp.Chmod(0o600); err == nil {
+	if err := fileperm.RestrictFile(tmp, 0o600); err == nil {
 		if _, err = tmp.Write(raw); err == nil {
 			err = tmp.Sync()
 		}

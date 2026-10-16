@@ -7,6 +7,9 @@
 //	pyred status [--state DIR] [--json]
 //	pyred hook claude <event>
 //	pyred channel [--run-dir DIR]
+//	pyred supervise [--log FILE] [--hide-console] -- run <flags>
+//	pyred service install|uninstall|status|start|stop  (Windows logon task)
+//	pyred verify-release --allowed-signers F --sums SHA256SUMS --sig SIG [--file F]
 //	pyred version [--json]
 //
 // Stopping pyred never stops runs: they live in Pyre-owned tmux servers
@@ -31,6 +34,12 @@ commands:
   status    show the local daemon's status
   hook      harness hook entry point (pyred hook claude <event>)
   channel   optional Claude dev-channel MCP bridge (stdio)
+  supervise keep "pyred run" running and carry out its self-update execs
+            (the Windows logon task runs this)
+  service   Windows: install|uninstall|status|start|stop the per-user logon task
+            (macOS/Linux: scripts/install/install.sh --service node)
+  verify-release
+            verify a release SHA256SUMS signature (installers without ssh-keygen -Y)
   version   print the version
 `)
 }
@@ -55,6 +64,12 @@ func main() {
 		err = cmdChannel(args)
 	case "inbox-watch":
 		err = cmdInboxWatch(args)
+	case "supervise":
+		err = cmdSupervise(args)
+	case "service":
+		err = cmdService(args)
+	case "verify-release":
+		err = cmdVerifyRelease(args)
 	case "version", "--version", "-v":
 		if len(args) > 0 && args[0] == "--json" {
 			b, _ := json.Marshal(map[string]any{"version": buildinfo.Version, "protocol": contracts.ProtocolVersion, "min_protocol": contracts.MinProtocolVersion})

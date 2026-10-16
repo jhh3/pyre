@@ -1,3 +1,5 @@
+//go:build !windows
+
 package tmux
 
 import (
@@ -76,7 +78,7 @@ func TestLaunchArgvHasNoSecrets(t *testing.T) {
 	if err != nil || envFile != "" || args[len(args)-2] != "sh" {
 		t.Fatalf("plain spec: %q %q %v", args, envFile, err)
 	}
-	if err := (SessionSpec{Name: "n", Argv: []string{"a", "b"}, Env: map[string]string{"K": "a\x00b"}}).validate(); err == nil {
+	if err := (SessionSpec{Name: "n", Argv: []string{"a", "b"}, Env: map[string]string{"K": "a\x00b"}}).Validate(); err == nil {
 		t.Fatal("NUL value accepted")
 	}
 }

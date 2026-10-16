@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -20,6 +23,12 @@ import (
 // matches enrollment.SSHBootstrapPlan:
 //
 //	pyred enroll --hub URL [--pin SHA256] --node-id ID --credential-file PATH --secret-stdin
+//	pyred enroll --ticket-stdin [--hub URL] [--state DIR | --credential-file PATH]
+//
+// --ticket-stdin reads the whole ticket JSON (`pyre --json enroll-node`
+// output: node_id, secret, hub_url, hub_cert_sha256) from stdin, for
+// unattended installers (scripts/install/install.ps1); --hub and --pin
+// override the ticket's values (the hub URL as reachable from this node).
 func cmdEnroll(args []string) error {
 	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
 	hub := fs.String("hub", "", "hub URL (https://host:port)")
@@ -28,15 +37,37 @@ func cmdEnroll(args []string) error {
 	credFile := fs.String("credential-file", "", "where to write the node credential (default <state>/node-credential.json)")
 	state := fs.String("state", "", "state directory (for the default credential path)")
 	secretStdin := fs.Bool("secret-stdin", false, "read the one-time enrollment secret from stdin")
+	ticketStdin := fs.Bool("ticket-stdin", false, "read the whole enrollment ticket JSON (pyre --json enroll-node) from stdin")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	secret := ""
+	if *ticketStdin {
+		if *secretStdin {
+			return errors.New("--ticket-stdin and --secret-stdin are exclusive")
+		}
+		var t contracts.EnrollmentTicket
+		if err := json.NewDecoder(io.LimitReader(os.Stdin, 64<<10)).Decode(&t); err != nil {
+			return errors.New("--ticket-stdin: stdin is not an enrollment ticket JSON (pyre --json enroll-node)")
+		}
+		if *hub == "" {
+			*hub = t.HubURL
+		}
+		if *pin == "" {
+			*pin = t.HubCertSHA256
+		}
+		if *nodeID == "" {
+			*nodeID = t.NodeID
+		} else if t.NodeID != "" && t.NodeID != *nodeID {
+			return fmt.Errorf("--node-id %s disagrees with the ticket's node %s", *nodeID, t.NodeID)
+		}
+		secret = strings.TrimSpace(t.Secret)
 	}
 	if *hub == "" || *nodeID == "" {
 		return errors.New("--hub and --node-id are required")
 	}
 	// The secret is accepted only on stdin: a command-line value would be
 	// visible to other local processes (ps).
-	secret := ""
 	if *secretStdin {
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil && line == "" {
@@ -53,7 +84,7 @@ func cmdEnroll(args []string) error {
 		if dir == "" {
 			dir = defaultState()
 		}
-		path = dir + "/node-credential.json"
+		path = filepath.Join(dir, "node-credential.json")
 	}
 	host, _ := os.Hostname()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

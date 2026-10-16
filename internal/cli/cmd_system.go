@@ -18,6 +18,7 @@ import (
 	c "github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/enrollment"
 	"github.com/jhh3/pyre/internal/tui"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // MockBanner is printed whenever the backend reports it is the mock.
@@ -195,6 +196,7 @@ where other local processes could read it.`,
 				return err
 			}
 			cfg := ClientConfig{HubURL: p.HubURL, HubCertSHA256: p.PinSHA256, ClientID: cred.ClientID, Token: cred.Token, PairedAt: time.Now().UTC()}
+			keepClientSettings(path, &cfg)
 			if err := SaveConfig(path, cfg); err != nil {
 				return err
 			}
@@ -286,6 +288,7 @@ and --pin when they are not given:
 					cfg.ClientID = h.Principal.ID
 				}
 			}
+			keepClientSettings(path, &cfg)
 			if err := SaveConfig(path, cfg); err != nil {
 				return err
 			}
@@ -336,9 +339,20 @@ func keysPath(getenv func(string) string) string {
 	if x := getenv("XDG_CONFIG_HOME"); x != "" {
 		return filepath.Join(x, "pyre", "keys.toml")
 	}
+	if d := winenv.ConfigDir(getenv); d != "" {
+		return filepath.Join(d, "keys.toml")
+	}
 	home := getenv("HOME")
 	if home == "" {
 		home, _ = os.UserHomeDir()
 	}
 	return filepath.Join(home, ".config", "pyre", "keys.toml")
+}
+
+// keepClientSettings carries settings that are not part of the credential
+// (web_url) over from the config being replaced (pair/login --force).
+func keepClientSettings(path string, cfg *ClientConfig) {
+	if old, err := LoadConfig(path); err == nil && cfg.WebURL == "" {
+		cfg.WebURL = old.WebURL
+	}
 }

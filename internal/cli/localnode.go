@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // localStatusPath mirrors daemon.PathLocalStatus (kept as a literal so the
@@ -27,7 +29,9 @@ func discoverLocalNode(getenv func(string) string) string {
 	if d := getenv("PYRE_STATE_DIR"); d != "" {
 		socks = append(socks, filepath.Join(d, "pyred.sock"))
 	}
-	if home := getenv("HOME"); home != "" {
+	if d := winenv.StateDir(getenv); d != "" {
+		socks = append(socks, filepath.Join(d, "pyred.sock")) // %LOCALAPPDATA%\Pyre
+	} else if home := getenv("HOME"); home != "" {
 		if runtime.GOOS == "darwin" {
 			socks = append(socks, filepath.Join(home, "Library", "Application Support", "pyre", "pyred.sock"))
 		} else if x := getenv("XDG_STATE_HOME"); x != "" {

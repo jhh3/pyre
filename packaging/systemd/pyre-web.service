@@ -1,0 +1,36 @@
+# systemd user unit for the Pyre web inbox (pyre web serve), docs/web.md.
+# Install (on the always-on machine, server):
+#   install -m 0644 packaging/systemd/pyre-web.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now pyre-web
+# It listens on 127.0.0.1:7390 only; pyre-web-tunnel.service puts it online.
+# It talks to the hub with the owner's client config
+# (~/.config/pyre/client.json, written by `pyre login`); no secret appears
+# here. Read marks live in ~/.local/state/pyre/web.
+#
+# Keep it running across logout: loginctl enable-linger <user>
+
+[Unit]
+Description=Pyre web inbox (pyre web serve)
+Documentation=https://github.com/jhh3/pyre/blob/main/docs/web.md
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pyre web serve --listen 127.0.0.1:7390
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Never run as an agent session or through a node's local proxy.
+UnsetEnvironment=PYRE_SESSION_TOKEN PYRE_TOKEN PYRE_SOCKET PYRE_HUB
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+MemoryMax=256M
+CPUQuota=100%
+TasksMax=64
+NoNewPrivileges=yes
+UMask=0077
+SyslogIdentifier=pyre-web
+
+[Install]
+WantedBy=default.target

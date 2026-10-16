@@ -15,6 +15,7 @@ import (
 
 	c "github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/sysstats"
+	"github.com/jhh3/pyre/internal/terminal"
 )
 
 func (a *App) addSessionCommands(root *cobra.Command) {
@@ -95,19 +96,24 @@ func (a *App) addSessionCommands(root *cobra.Command) {
 			return nil
 		}),
 	})
-	sessions.AddCommand(a.renameCommand()) // W-names
-	var force bool
+	sessions.AddCommand(a.renameCommand())   // W-names
+	sessions.AddCommand(a.iconCommand())     // W-archive2
+	sessions.AddCommand(a.reparentCommand()) // W-reparent
+	var force, whenDone bool
 	var archiveWT, pruneWT *worktreeMode // W-quicklaunch
 	archive := &cobra.Command{
-		Use:   "archive <session>...",
-		Short: "Archive ended sessions (hidden from listings; nothing is stopped)",
-		Long: `Archive hides sessions from pyre sessions, the TUI and the apps. A live
-session must be stopped first (pyre stop <session>); --force archives it
-anyway, leaving it running out of sight (archiving revokes its Pyre agent
-tokens). pyre sessions unarchive restores
-one; pyre sessions ls --all lists archived sessions too. --json prints the
-archived sessions as an array.`,
-		Args: cobra.MinimumNArgs(1),
+		Use:   "archive [session]...",
+		Short: "Archive sessions (hidden from listings; live ones when their turn ends)",
+		Long: `Archive hides sessions from pyre sessions, the TUI and the apps.
+With no session, archives the calling session ($PYRE_SESSION_ID).
+A live session is archived when done (its current turn ends, Pyre stops it
+gracefully, then archives it) when it is the calling session, a session the
+caller started, or --when-done is given; otherwise stop it first
+(pyre stop <session>). --force archives it at once, leaving it running out
+of sight (archiving revokes its Pyre agent tokens). pyre sessions unarchive
+restores one (and cancels a pending archive); pyre sessions ls --all lists
+archived sessions too. --json prints the sessions as an array.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			if a.opID != "" && len(args) > 1 {
 				return usagef("--operation-id applies to a single session")
@@ -116,10 +122,16 @@ archived sessions as an array.`,
 			if err != nil {
 				return err
 			}
+			if len(args) == 0 {
+				if ops.Self.SessionID == "" {
+					return usagef("a session is required outside a Pyre session (see `pyre sessions`)")
+				}
+				args = []string{"self"}
+			}
 			done := []c.SessionView{}
 			var firstErr error
 			for _, ref := range args {
-				sv, err := ops.Archive(cmd.Context(), ArchiveParams{Session: ref, OperationID: a.opID, Force: force})
+				sv, err := ops.Archive(cmd.Context(), ArchiveParams{Session: ref, OperationID: a.opID, Force: force, WhenDone: whenDone})
 				if err != nil {
 					a.warnf("pyre: archive %s: %v", ref, err)
 					if firstErr == nil {
@@ -131,17 +143,28 @@ archived sessions as an array.`,
 			}
 			if err := a.emit(done, func(w io.Writer) {
 				for _, sv := range done {
+					if !sv.Session.Archived {
+						fmt.Fprintf(w, "%s %q %s\n", sv.Session.SessionID, sv.Session.Title, archiveResult(sv, sv.Session.SessionID == ops.Self.SessionID).Note)
+						continue
+					}
 					fmt.Fprintf(w, "archived %s %q\n", sv.Session.SessionID, sv.Session.Title)
 				}
 			}); err != nil {
 				return err
 			}
-			a.afterArchive(cmd.Context(), ops, done, archiveWT) // W-quicklaunch
+			var now []c.SessionView
+			for _, sv := range done {
+				if sv.Session.Archived {
+					now = append(now, sv)
+				}
+			}
+			a.afterArchive(cmd.Context(), ops, now, archiveWT) // W-quicklaunch
 			return firstErr
 		}),
 	}
 	archiveWT = addWorktreeFlags(archive)
 	archive.Flags().BoolVar(&force, "force", false, "archive even if the session is still live (it keeps running, but its Pyre agent tokens are revoked)")
+	archive.Flags().BoolVar(&whenDone, "when-done", false, "archive a live session when its current turn ends (Pyre stops it gracefully first)")
 	sessions.AddCommand(archive)
 	sessions.AddCommand(&cobra.Command{
 		Use:   "unarchive <session>",
@@ -304,7 +327,7 @@ can tell them what you will change.`,
 	}
 	root.AddCommand(start)
 
-	var readOnly, takeover, printOnly bool
+	var readOnly, takeover, printOnly, relay bool
 	attach := &cobra.Command{
 		Use:   "attach <session>",
 		Short: "Attach to a session's real terminal (native tmux), or view it read-only",
@@ -312,15 +335,22 @@ can tell them what you will change.`,
 advertises. Native tmux attach runs the descriptor's command with this
 terminal and holds an input lease while attached (other clients see it; raw
 writes from others queue). Structured peer messages continue while attached.
-Detach with the tmux prefix (usually Ctrl-b d); the session keeps running.`,
+Detach with the tmux prefix (usually Ctrl-b d); the session keeps running.
+
+A node with no ssh route (no ssh alias, e.g. a Windows cloud VM) is attached
+through the hub's terminal relay instead, when this client talks to the hub
+directly: the same input lease, this terminal in raw mode, its size
+followed. Detach with Ctrl-b d (Ctrl-b Ctrl-b sends one Ctrl-b). --relay
+uses the relay even when ssh would work.`,
 		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
-			return a.attach(cmd.Context(), args[0], readOnly, takeover, printOnly)
+			return a.attach(cmd.Context(), args[0], attachOpts{readOnly: readOnly, takeover: takeover, printOnly: printOnly, relay: relay})
 		}),
 	}
 	attach.Flags().BoolVar(&readOnly, "read-only", false, "view without taking input")
 	attach.Flags().BoolVar(&takeover, "takeover", false, "take over an input lease held by another client (recorded)")
 	attach.Flags().BoolVar(&printOnly, "print", false, "print the attach descriptor instead of attaching")
+	attach.Flags().BoolVar(&relay, "relay", false, "attach through the hub's terminal relay instead of ssh")
 	root.AddCommand(attach)
 
 	var rp ReadParams
@@ -438,7 +468,12 @@ Detach with the tmux prefix (usually Ctrl-b d); the session keeps running.`,
 
 // ---- attach ----
 
-func (a *App) attach(ctx context.Context, ref string, readOnly, takeover, printOnly bool) error {
+type attachOpts struct {
+	readOnly, takeover, printOnly bool
+	relay                         bool // --relay: the hub's terminal relay, never ssh
+}
+
+func (a *App) attach(ctx context.Context, ref string, o attachOpts) error {
 	ops, err := a.connect()
 	if err != nil {
 		return err
@@ -447,19 +482,39 @@ func (a *App) attach(ctx context.Context, ref string, readOnly, takeover, printO
 	if err != nil {
 		return err
 	}
-	req := c.AttachRequest{Mutation: mut(a.opID), SessionID: sv.Session.SessionID, ClientNodeID: ops.Self.NodeID, ReadOnly: readOnly,
+	req := c.AttachRequest{Mutation: mut(a.opID), SessionID: sv.Session.SessionID, ClientNodeID: ops.Self.NodeID, ReadOnly: o.readOnly,
 		Preferred: []c.AttachMechanism{c.AttachLocalTmux, c.AttachSSHTmux, c.AttachWebTerminal, c.AttachReadOnly}}
+	td := a.relayDialer(ops)
+	if o.relay {
+		if td == nil {
+			return c.Errorf(c.ErrUnsupported, "--relay needs a direct hub connection (--hub, PYRE_HUB or the client config); the local daemon socket has no terminal relay")
+		}
+		return a.attachRelay(ctx, ops, td, sv, req, o)
+	}
 	d, err := ops.API.AttachSession(ctx, req)
 	if err != nil {
+		if td != nil && terminal.NoSSHRoute(err) {
+			// No ssh to that node (a Windows cloud VM has no ssh server):
+			// its terminal is still reachable through the hub.
+			a.warnf("pyre: no ssh route to the session's node; attaching through the hub's terminal relay")
+			return a.attachRelay(ctx, ops, td, sv, req, o)
+		}
 		return err
 	}
-	if printOnly || a.jsonOut {
+	if printOnly := o.printOnly || a.jsonOut; printOnly {
 		return a.emit(d, func(w io.Writer) { printDescriptor(w, d) })
 	}
 	switch d.Mechanism {
 	case c.AttachLocalTmux, c.AttachSSHTmux:
-		return a.attachNative(ctx, ops, d, takeover)
+		if td != nil && !runnableHere(d) {
+			a.warnf("pyre: %q is not on this machine; attaching through the hub's terminal relay", d.Command[0])
+			return a.attachRelay(ctx, ops, td, sv, req, o)
+		}
+		return a.attachNative(ctx, ops, d, o.takeover)
 	case c.AttachWebTerminal:
+		if td != nil {
+			return a.attachRelay(ctx, ops, td, sv, req, o)
+		}
 		fmt.Fprintf(a.Stdout, "this run is reachable through the authenticated web terminal: %s\n", d.URL)
 		fmt.Fprintln(a.Stdout, "open it from the Android app or a Pyre web client (its one-time ticket is presented by the client, never in the URL)")
 		if d.Notes != "" {
@@ -473,6 +528,16 @@ func (a *App) attach(ctx context.Context, ref string, readOnly, takeover, printO
 		a.warnf("read-only view of run %s (pyre read %s --follow for live output)", d.RunID, sv.Session.SessionID)
 		return a.read(ctx, ops, ReadParams{Session: sv.Session.SessionID, Run: d.RunID, Tail: 40}, false, true)
 	}
+}
+
+// runnableHere reports whether a native descriptor's command exists on
+// this machine.
+func runnableHere(d c.AttachDescriptor) bool {
+	if len(d.Command) == 0 {
+		return true // attachNative reports the malformed descriptor
+	}
+	_, err := exec.LookPath(d.Command[0])
+	return err == nil
 }
 
 func (a *App) attachNative(ctx context.Context, ops *Ops, d c.AttachDescriptor, takeover bool) error {
@@ -623,6 +688,9 @@ func printSession(w io.Writer, sv c.SessionView) {
 	fmt.Fprintf(w, "  harness:   %s   project: %s   created %s by %s %s\n", s.Harness, strPtr(s.ProjectID), ago(s.CreatedAt), s.CreatedBy.Kind, s.CreatedBy.ID)
 	if s.Lineage.ParentSessionID != "" || s.Lineage.ForkedFrom != "" || s.Lineage.HandoffNoteID != "" {
 		fmt.Fprintf(w, "  lineage:   parent %s, forked from %s, handoff %s\n", orDash(s.Lineage.ParentSessionID), orDash(s.Lineage.ForkedFrom), orDash(s.Lineage.HandoffNoteID))
+	}
+	if s.Lineage.ReparentedAt != nil { // W-reparent
+		fmt.Fprintf(w, "  reparented: from %s at %s\n", orDash(s.Lineage.ReparentedFrom), s.Lineage.ReparentedAt.Format(time.RFC3339))
 	}
 	if sv.Attention > 0 {
 		fmt.Fprintf(w, "  attention: %d open item(s) (pyre attention --session %s)\n", sv.Attention, s.SessionID)

@@ -3,7 +3,7 @@
 #
 #   packaging/release.sh [--version V] [--skip-build] [--out DIR]
 #                        [--signing-key FILE | --no-sign] [--allowed-signers FILE]
-#                        [--no-sbom] [--no-tools] [--strict]
+#                        [--no-sbom] [--no-tools] [--no-windows] [--strict]
 #
 # Steps: make dist VERSION=V (darwin/linux x arm64/amd64, CGO_ENABLED=0,
 # -trimpath) -> verify dist/SHA256SUMS -> stage one directory per platform
@@ -18,6 +18,15 @@
 # (same deterministic tar, listed in the same signed SHA256SUMS). They are
 # optional: install.sh installs them only with --with-tools.
 #
+# Windows: unless --no-windows, pyre.exe and pyred.exe are also built for
+# windows/amd64 and windows/arm64 (same CGO_ENABLED=0 -trimpath -ldflags; no
+# pyre-hub, which is unix-only; taken from dist/pyre-<V>-windows-<arch>/ when
+# present) and packed as pyre-<V>-windows-<arch>.zip: deterministic zip (sorted
+# entries, fixed DOS mtime = commit time in UTC, `zip -X`, no directory
+# entries) holding bin/, scripts/install/{install,uninstall}.ps1, README.md,
+# VERSION, BUILDINFO, NOTICE, sbom/ and an inner SHA256SUMS; listed in the
+# same signed SHA256SUMS. The darwin/linux tarballs are unchanged.
+#
 # Signing key: --signing-key, else $PYRE_RELEASE_SIGNING_KEY, else
 # ~/.config/pyre/release-signing when present (kept outside the repository).
 # SBOM tool: $CYCLONEDX_GOMOD, else cyclonedx-gomod on PATH or in $(go env GOPATH)/bin.
@@ -26,7 +35,7 @@
 set -euo pipefail
 umask 022
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-VERSION="" SKIP=0 OUT="" SIGNKEY=${PYRE_RELEASE_SIGNING_KEY:-} NOSIGN=0 NOSBOM=0 STRICT=0 TOOLS=1
+VERSION="" SKIP=0 OUT="" SIGNKEY=${PYRE_RELEASE_SIGNING_KEY:-} NOSIGN=0 NOSBOM=0 STRICT=0 TOOLS=1 WINDOWS=1
 ALLOWED="$ROOT/packaging/release-allowed-signers"
 NAMESPACE=pyre-release
 while [ $# -gt 0 ]; do
@@ -39,8 +48,9 @@ while [ $# -gt 0 ]; do
     --allowed-signers) ALLOWED=${2:?}; shift 2 ;;
     --no-sbom) NOSBOM=1; shift ;;
     --no-tools) TOOLS=0; shift ;;
+    --no-windows) WINDOWS=0; shift ;;
     --strict) STRICT=1; shift ;;
-    *) sed -n '2,25p' "$0"; exit 2 ;;
+    *) sed -n '2,34p' "$0"; exit 2 ;;
   esac
 done
 if [ "$NOSIGN" = 0 ] && [ -z "$SIGNKEY" ] && [ -f "$HOME/.config/pyre/release-signing" ]; then
@@ -122,6 +132,36 @@ pack() {
   LIST="$LIST $name.tar.gz"
   echo "==> $OUT/$name.tar.gz"
 }
+# macOS code signing (darwin tarballs): a stable identity keeps macOS privacy
+# grants (Full Disk Access, removable volumes, other apps' data) across
+# releases; ad-hoc signatures change with every build, so each release looked
+# like a new app. PYRE_MACOS_SIGN_IDENTITY picks the identity ("none" skips);
+# default: the first "Developer ID Application" identity in the keychain.
+# Signatures carry Apple's secure timestamp (they stay valid after the
+# certificate expires), so darwin tarballs are not byte-reproducible.
+MACSIGN=${PYRE_MACOS_SIGN_IDENTITY:-}
+if [ -z "$MACSIGN" ] && [ "$(uname)" = Darwin ] && command -v security >/dev/null 2>&1; then
+  MACSIGN=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+fi
+[ "$MACSIGN" != none ] || MACSIGN=""
+if [ -n "$MACSIGN" ]; then echo "==> macOS signing identity: $MACSIGN"; else echo "==> macOS binaries stay ad-hoc signed (no signing identity; macOS permissions will not carry across releases)" >&2; fi
+# darwin_app DIR SRC: Pyre.app (dev.jhh3.pyre) wrapping pyred, then sign the
+# binaries and the bundle.
+darwin_app() {
+  local d=$1 src=$2 app="$1/Pyre.app"
+  mkdir -p "$app/Contents/MacOS"
+  install -m 0755 "$src/pyred" "$app/Contents/MacOS/pyred"
+  sed -e "s/@VERSION@/$VERSION/g" "$ROOT/packaging/macos/Info.plist.in" >"$app/Contents/Info.plist"
+  chmod 0644 "$app/Contents/Info.plist"
+  [ -n "$MACSIGN" ] || return 0
+  local b
+  for b in pyre pyred pyre-hub; do
+    codesign --force --timestamp --sign "$MACSIGN" --identifier "dev.jhh3.pyre.$b" "$d/bin/$b" || { echo "codesign $b failed" >&2; exit 1; }
+  done
+  codesign --force --timestamp --sign "$MACSIGN" "$app" || { echo "codesign Pyre.app failed" >&2; exit 1; }
+  codesign --verify --strict "$app" && codesign --verify --strict "$d/bin/pyred" || { echo "codesign verification failed" >&2; exit 1; }
+}
+
 LIST=""
 for plat in $PLATFORMS; do
   src="$ROOT/dist/pyre-$VERSION-$plat"
@@ -130,6 +170,7 @@ for plat in $PLATFORMS; do
   d="$STAGE/$name"
   mkdir -p "$d/bin" "$d/scripts/install" "$d/scripts/backup" "$d/packaging/launchd" "$d/packaging/systemd"
   for b in pyre pyred pyre-hub; do install -m 0755 "$src/$b" "$d/bin/$b"; done
+  case "$plat" in darwin-*) darwin_app "$d" "$src" ;; esac
   if [ -n "$SBOMTOOL" ]; then
     mkdir -p "$d/sbom"
     for b in pyre pyred pyre-hub; do
@@ -154,6 +195,7 @@ for plat in $PLATFORMS; do
     echo "go: $("$GOBIN" version 2>/dev/null | awk '{print $3}')"
     echo "build: CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -X github.com/jhh3/pyre/internal/buildinfo.Version=$VERSION'"
     if [ -n "$SBOMTOOL" ]; then echo "sbom: sbom/<binary>.cdx.json (CycloneDX 1.6, cyclonedx-gomod ${SBOMVER:-unknown})"; fi
+    case "$plat" in darwin-*) echo "macos-signing: ${MACSIGN:-ad-hoc} (Pyre.app = dev.jhh3.pyre)" ;; esac
   } >"$d/BUILDINFO"
   if [ -f "$ROOT/LICENSE" ]; then install -m 0644 "$ROOT/LICENSE" "$d/LICENSE"; fi
   {
@@ -166,6 +208,68 @@ for plat in $PLATFORMS; do
   } >"$d/NOTICE"
   pack "$STAGE" "$name"
 done
+# pack_zip BASE NAME: deterministic zip of BASE/NAME into $OUT/NAME.zip (file
+# entries only, sorted, DOS mtime = $STAMP in UTC, no extra fields).
+pack_zip() {
+  local base=$1 name=$2
+  (cd "$base/$name" && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha "$f"; done >SHA256SUMS)
+  find "$base/$name" -exec env TZ=UTC touch -t "$STAMP" {} +
+  rm -f "$OUT/$name.zip"
+  (cd "$base" && find "$name" -type f -print | LC_ALL=C sort | TZ=UTC zip -X -D -9 -q "$OUT/$name.zip" -@)
+  LIST="$LIST $name.zip"
+  echo "==> $OUT/$name.zip"
+}
+if [ "$WINDOWS" = 1 ]; then
+  command -v zip >/dev/null 2>&1 || { echo "zip (Info-ZIP) is required for the Windows artifacts (or pass --no-windows)" >&2; exit 2; }
+  for arch in amd64 arm64; do
+    plat="windows-$arch"
+    name="pyre-$VERSION-$plat"
+    src="$ROOT/dist/$name"
+    if [ ! -f "$src/pyred.exe" ] || [ ! -f "$src/pyre.exe" ]; then
+      # `make dist` covers darwin/linux only; build the same way here.
+      src="$STAGE/winbuild/$name"
+      mkdir -p "$src"
+      echo "==> build $plat (pyre.exe, pyred.exe)"
+      for b in pyre pyred; do
+        CGO_ENABLED=0 GOOS=windows GOARCH=$arch "$GOBIN" -C "$ROOT" build -trimpath \
+          -ldflags "-s -w -X github.com/jhh3/pyre/internal/buildinfo.Version=$VERSION" -o "$src/$b.exe" "./cmd/$b"
+      done
+    fi
+    d="$STAGE/$name"
+    mkdir -p "$d/bin" "$d/scripts/install"
+    for b in pyre pyred; do install -m 0755 "$src/$b.exe" "$d/bin/$b.exe"; done
+    if [ -n "$SBOMTOOL" ]; then
+      mkdir -p "$d/sbom"
+      for b in pyre pyred; do
+        PATH="$GODIR:$PATH" "$SBOMTOOL" bin -json -std -noserial -notimestamp -short-purls \
+          -version "$VERSION" -output "$d/sbom/$b.cdx.json" "$d/bin/$b.exe"
+        chmod 0644 "$d/sbom/$b.cdx.json"
+        sbom_check "$d/bin/$b.exe" "$d/sbom/$b.cdx.json" || { echo "SBOM for $plat/$b is incomplete" >&2; exit 1; }
+      done
+    fi
+    for f in install.ps1 uninstall.ps1; do install -m 0644 "$ROOT/scripts/install/$f" "$d/scripts/install/$f"; done
+    sed -e "s/@VERSION@/$VERSION/g" -e "s/@PLATFORM@/$plat/g" "$ROOT/packaging/README.release-windows.md" >"$d/README.md"
+    echo "$VERSION" >"$d/VERSION"
+    {
+      echo "version: $VERSION"
+      echo "platform: $plat"
+      echo "commit: $COMMIT$DIRTY"
+      echo "go: $("$GOBIN" version 2>/dev/null | awk '{print $3}')"
+      echo "build: CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -trimpath -ldflags '-s -w -X github.com/jhh3/pyre/internal/buildinfo.Version=$VERSION'"
+      if [ -n "$SBOMTOOL" ]; then echo "sbom: sbom/<binary>.cdx.json (CycloneDX 1.6, cyclonedx-gomod ${SBOMVER:-unknown})"; fi
+    } >"$d/BUILDINFO"
+    if [ -f "$ROOT/LICENSE" ]; then install -m 0644 "$ROOT/LICENSE" "$d/LICENSE"; fi
+    {
+      echo "Pyre $VERSION"
+      if [ -f "$ROOT/LICENSE" ]; then echo "See LICENSE."; else echo "No LICENSE file is present in the source repository; this is a private build. All rights reserved by the owner."; fi
+      echo
+      echo "Third-party Go modules compiled into these binaries (go version -m):"
+      "$GOBIN" version -m "$src/pyred.exe" "$src/pyre.exe" 2>/dev/null | awk '$1 == "dep" {print "  " $2 " " $3}' | sort -u
+      if [ -f "$ROOT/NOTICE" ]; then echo; cat "$ROOT/NOTICE"; fi
+    } >"$d/NOTICE"
+    pack_zip "$STAGE" "$name"
+  done
+fi
 if [ "$TOOLS" = 1 ]; then
   echo "==> bundled tools (packaging/build-tools.sh)"
   TP=""

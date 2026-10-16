@@ -38,7 +38,11 @@ type ExhaustedPayload struct {
 //  3. pick another eligible account of the SAME provider and ask the daemon
 //     to continue: native_resume only when the harness advertises
 //     account.cross_account_resume and both profiles share the transcript
-//     store, otherwise a handoff successor;
+//     store (every Pyre Claude profile on a node does: sharedstore.go),
+//     otherwise a handoff successor. The successor's first prompt is a
+//     short "continue where you left off (account switched from X to Y
+//     because of the usage limit)", so the work goes on unattended; the
+//     daemon reports which continuation it actually used;
 //  4. if none is eligible: waiting (earliest reset) or intervention, plus an
 //     account.exhausted event so attention/notifications fire.
 //
@@ -83,6 +87,16 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 	provider := contracts.ProviderFor(h)
 	if provider == "" {
 		return finish(contracts.FallbackIntervention, "harness has no subscription provider")
+	}
+
+	// Circuit breaker: never switch in a loop. A limit right after an
+	// automatic switch is either a real second limit (a human should look)
+	// or a misdetection (switching again would loop): pause and ask.
+	if why, err := s.switchPaused(ctx, sessionID, asg.AccountID); err != nil {
+		return plan, err
+	} else if why != "" {
+		s.log.Warn("accounts: automatic account switching paused", "session", sessionID, "run", runID, "why", why)
+		return finish(contracts.FallbackIntervention, why)
 	}
 
 	// 1. Record what happened to the old account.
@@ -140,7 +154,8 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 			why = "native resume over the shared transcript store"
 		}
 		cont := Continuation{SessionID: sessionID, PreviousRunID: runID, Harness: h, AccountID: c.acct.AccountID,
-			Kind: kind, UncertainWork: plan.UncertainWork, Reason: c.why}
+			Kind: kind, UncertainWork: plan.UncertainWork, Reason: c.why,
+			Prompt: continuePrompt(s.accountLabel(ctx, asg.AccountID), acctName(c.acct), ev.Kind, plan.UncertainWork)}
 		if kind == contracts.ContinuationNativeResume {
 			ref := *info.NativeRef
 			cont.Resume = &ref
@@ -153,6 +168,15 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 			}
 			return finish(contracts.FallbackIntervention, "successor launch failed: "+err.Error())
 		}
+		if res.Kind != "" && res.Kind != kind {
+			// The daemon knows best what the new account can reach.
+			kind = res.Kind
+			if kind == contracts.ContinuationNativeResume {
+				why = "native resume over the shared transcript store"
+			} else {
+				why = "previous thread not reachable from " + c.acct.AccountID + "; linked successor with handoff"
+			}
+		}
 		plan.ToAccountID, plan.NewRunID = c.acct.AccountID, res.NewRunID
 		reason := fmt.Sprintf("%s on %s; %s; %s", ev.Kind, asg.AccountID, c.acct.AccountID+" "+c.why, why)
 		if plan.UncertainWork {
@@ -164,6 +188,83 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 		return finish(contracts.FallbackHandoff, reason)
 	}
 	return finish(contracts.FallbackIntervention, "every candidate account refused the successor launch")
+}
+
+// SwitchPausedPrefix starts the reason of a fallback plan that the switch
+// circuit breaker stopped (the hub words its inbox item and audit line from
+// it; keep in sync with internal/attention and internal/audit).
+const SwitchPausedPrefix = "account switching paused"
+
+// switchPaused returns the breaker's reason when an automatic switch for
+// sessionID must not happen now: the session already switched within
+// SessionSwitchWindow, or NodeSwitchMax different accounts already ran out on
+// this node within NodeSwitchWindow. The node-wide check counts accounts, not
+// switches: one account running out moves every session on it, and moving
+// the rest of them away from an account already known to be out is expected,
+// not a runaway. It reads the persisted fallback plans, so a daemon restart
+// does not reset it. A paused limit is not recorded as a cooldown and the run
+// is left running: nothing automatic happens until the owner acts (a
+// misdetected limit must not spread to the next account either).
+func (s *Service) switchPaused(ctx context.Context, sessionID, fromAccountID string) (string, error) {
+	now := s.now()
+	n, last, err := countSwitches(ctx, s.db, sessionID, now.Add(-s.cfg.SessionSwitchWindow))
+	if err != nil {
+		return "", err
+	}
+	if n > 0 {
+		return fmt.Sprintf("%s: repeated limits within %s (last automatic switch %s)", SwitchPausedPrefix,
+			shortDur(s.cfg.SessionSwitchWindow), last.UTC().Format("15:04Z")), nil
+	}
+	accts, err := switchedFromAccounts(ctx, s.db, now.Add(-s.cfg.NodeSwitchWindow))
+	if err != nil {
+		return "", err
+	}
+	if accts[fromAccountID] {
+		return "", nil
+	}
+	if len(accts) >= s.cfg.NodeSwitchMax {
+		return fmt.Sprintf("%s: %d accounts ran out on this node within %s", SwitchPausedPrefix, len(accts), shortDur(s.cfg.NodeSwitchWindow)), nil
+	}
+	return "", nil
+}
+
+// shortDur renders 30m0s as "30m" and 1h0m0s as "1h".
+func shortDur(d time.Duration) string {
+	out := d.String()
+	if strings.HasSuffix(out, "m0s") {
+		out = strings.TrimSuffix(out, "0s")
+	}
+	if strings.HasSuffix(out, "h0m") {
+		out = strings.TrimSuffix(out, "0m")
+	}
+	return out
+}
+
+// continuePrompt is the successor's first prompt after an automatic account
+// switch: the work continues without a human "go". It never repeats the
+// interrupted instruction; when a turn was cut off it asks the agent to
+// check that step's effects first.
+func continuePrompt(from, to, kind string, uncertain bool) string {
+	cause := "because of the usage limit"
+	switch kind {
+	case LimitRate:
+		cause = "because of a rate limit"
+	case LimitAuthInvalid:
+		cause = "because its login stopped working"
+	}
+	p := fmt.Sprintf("[pyre] Continue where you left off (account switched from %s to %s %s).", from, to, cause)
+	if uncertain {
+		p += " Your last step was cut off: check its effects before repeating anything."
+	}
+	return p
+}
+
+// accountLabel is an account's display name (its ID when unknown).
+func (s *Service) accountLabel(ctx context.Context, id string) string {
+	if a, err := s.Account(ctx, id); err == nil {
+		return acctName(a)
+	}
+	return id
 }
 
 // finishNoneEligible turns a selection failure into waiting/intervention and

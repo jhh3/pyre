@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/extensions"
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 func randName() string { return contracts.NewID("stg") }
@@ -84,6 +86,9 @@ func (m *Manager) Stage(ctx context.Context, p contracts.UpdateParams) (contract
 	bin := p.Tool
 	if b, ok := m.opt.BinNames[p.Tool]; ok {
 		bin = b
+	}
+	if runtime.GOOS == "windows" && filepath.Ext(bin) == "" && kind != "npm" && !isPlugin(p.Tool) {
+		bin += ".exe" // pyred.exe, pyre.exe in the Windows release zip
 	}
 	var digest contracts.Digest
 	var exe string
@@ -159,6 +164,9 @@ func (m *Manager) Stage(ctx context.Context, p contracts.UpdateParams) (contract
 			return contracts.ToolVersion{}, err
 		}
 		exe = filepath.Join("prefix", "node_modules", ".bin", bin)
+		if runtime.GOOS == "windows" {
+			exe += ".cmd" // npm's Windows shim
+		}
 	}
 	if artifact != "" {
 		switch {
@@ -166,7 +174,7 @@ func (m *Manager) Stage(ctx context.Context, p contracts.UpdateParams) (contract
 			if err := os.MkdirAll(payload, 0o755); err != nil {
 				return contracts.ToolVersion{}, err
 			}
-			if err := extractTarGz(artifact, payload, 4*m.opt.MaxDownloadBytes); err != nil {
+			if err := extractArchive(artifact, payload, 4*m.opt.MaxDownloadBytes); err != nil {
 				return contracts.ToolVersion{}, contracts.Errorf(contracts.ErrInvalid, "extract %s: %v", p.Source, err)
 			}
 		case isPlugin(p.Tool):
@@ -497,6 +505,23 @@ func orNone(s string) string {
 func (m *Manager) switchCurrent(tool, version string) error {
 	link := m.currentLink(tool)
 	tmp := link + ".tmp-" + randName()
+	if runtime.GOOS == "windows" {
+		// A junction (no admin/Developer Mode) to the absolute version dir.
+		// Windows cannot rename a directory link over an existing one, so
+		// the old link goes first (a brief gap; readers retry).
+		if err := osutil.Junction(filepath.Join(m.toolDir(tool), version), tmp); err != nil {
+			return err
+		}
+		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+			os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, link); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		return nil
+	}
 	if err := os.Symlink(version, tmp); err != nil {
 		return err
 	}

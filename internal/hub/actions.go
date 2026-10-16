@@ -142,6 +142,22 @@ func (h *Hub) AttachSession(ctx context.Context, req contracts.AttachRequest) (c
 		if err := h.requireConnected(ctx, run.NodeID); err != nil {
 			return contracts.AttachDescriptor{}, err
 		}
+		// A relayed web terminal needs nothing from the node yet: the
+		// node's descriptor was only converted (its command discarded), and
+		// the relay's terminal_open runs the node's own attach when the
+		// client dials, failing there if the terminal is gone. Minting the
+		// ticket here keeps attach off pyred's serial command queue, where
+		// it waited behind transcript reads (server: attach p50 393 ms).
+		if web && contracts.HasCap(run.Capabilities, contracts.CapAttachNative) && !run.State.Terminal() {
+			d, err := h.webDescriptor(ctx, p, contracts.AttachDescriptor{RunID: run.RunID, NodeID: run.NodeID}, req.ReadOnly)
+			if err != nil {
+				return contracts.AttachDescriptor{}, err
+			}
+			if l, err := h.activeLease(ctx, h.db, d.RunID); err == nil && l != nil {
+				d.Lease = l
+			}
+			return d, nil
+		}
 	}
 	var cmdID string
 	err = h.mutate(ctx, req.OperationID, contracts.OpAttachSession, p, req, &cmdID, func(tx *sql.Tx) (any, error) {

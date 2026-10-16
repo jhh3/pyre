@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/persistence"
+	"github.com/jhh3/pyre/internal/runfail"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
 
@@ -31,10 +33,23 @@ import (
 // records a durable report row; a background worker renders and sends it
 // after commit as an ordinary Pyre message from the child to the parent
 // (queue mode, so the parent's doorbell/[pyre-msg:…] delivery applies and
-// a reply threads back to the child). An idle report is skipped when the
-// child already messaged the parent during that turn, and every report is
-// dropped when the parent is archived or has no live run: the owner's inbox
-// is never used as a fallback.
+// a reply threads back to the child).
+//
+// Noise rules (I30; live data: 45 % of idle reports followed a message the
+// child had just sent its parent, hundreds of idle→ended pairs minutes apart):
+//
+//   - an idle report is skipped when the child messaged the parent during
+//     that turn or within the last childRecentMessage;
+//   - an ended report replaces the same turn's idle report when that one is
+//     still pending or undelivered (cancelled), is skipped when the idle
+//     report went out within childReportCoalesce, and otherwise refers to it
+//     instead of repeating the last message;
+//   - the body leads with one line "<title> finished: <first sentence>" and
+//     carries at most childSummaryMax runes of the last message.
+//
+// A report for a parent without a live run waits (pending) for the
+// parent's next run, up to childReportHold; it is dropped when the parent
+// is archived. The owner's inbox is never used as a fallback.
 
 var childReportMigrations = []sqlitex.Migration{{Namespace: "hub_childreport", Version: 1, Name: "child_reports", SQL: `
 CREATE TABLE child_turns (
@@ -82,8 +97,11 @@ const (
 )
 
 const (
-	// childSummaryMax bounds the relayed last assistant message (runes).
-	childSummaryMax = 1500
+	// childSummaryMax bounds the relayed last assistant message (runes);
+	// read_session has the rest.
+	childSummaryMax = 400
+	// childLeadMax bounds the first sentence on the lead line (runes).
+	childLeadMax = 160
 	// needsInputDelay lets the approval report that accompanies a
 	// waiting_approval state land before the report is rendered.
 	needsInputDelay = 2 * time.Second
@@ -93,6 +111,17 @@ const (
 	// parent and child that keep answering each other cannot loop forever.
 	childReportBurst  = 12
 	childReportWindow = 10 * time.Minute
+	// childRecentMessage: an idle report is skipped when the child messaged
+	// its parent this recently (even in an earlier turn).
+	childRecentMessage = 5 * time.Minute
+	// childReportCoalesce: an ended report this soon after the same turn's
+	// idle report went out is not sent.
+	childReportCoalesce = 3 * time.Minute
+	// childReportRecheck/childReportHold: a report for a parent without a
+	// live run is re-checked this often (and at once when a parent run
+	// becomes live), for at most childReportHold.
+	childReportRecheck = time.Minute
+	childReportHold    = 3 * 24 * time.Hour
 	// childReportRetention keeps settled report rows (sent/skipped/failed).
 	childReportRetention = 7 * 24 * time.Hour
 )
@@ -139,6 +168,11 @@ func (h *Hub) trackChildTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSt
 	if prev == r.State {
 		return nil
 	}
+	if r.State == contracts.RunRunning || r.State == contracts.RunWaitingInput {
+		if err := h.wakeHeldReportsTx(ctx, tx, r.SessionID); err != nil {
+			return err
+		}
+	}
 	sess, err := h.getSession(ctx, tx, r.SessionID)
 	if err != nil {
 		if contracts.IsCode(err, contracts.ErrNotFound) {
@@ -146,11 +180,14 @@ func (h *Hub) trackChildTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSt
 		}
 		return err
 	}
-	if !reportsToParent(sess) {
-		return nil
-	}
 	if cur := sess.CurrentRunID; cur != "" && cur != r.RunID && r.PreviousRunID != cur {
 		return nil // a non-current (conflicting) run speaks for nobody
+	}
+	if !reportsToParent(sess) {
+		if sess.Parent() == "" {
+			return h.trackLeadTx(ctx, tx, prev, r, sess) // waiting on you (waiting.go)
+		}
+		return h.trackChildFailureTx(ctx, tx, prev, r, sess)
 	}
 	var turn, closed, needs int64
 	var startedAt, closedAt sql.NullString
@@ -204,6 +241,12 @@ func (h *Hub) trackChildTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSt
 	case r.State.Terminal() && !prev.Terminal():
 		closed = turn
 		closedAt = sql.NullString{String: persistence.Time(now), Valid: true}
+		// One report for the turn: the ended report carries the last
+		// message, so this turn's unsent idle report is dropped.
+		if _, err := tx.ExecContext(ctx, `UPDATE child_reports SET status=?, detail=?, updated_at=? WHERE child_session_id=? AND kind=? AND status=? AND turn_started_at IS ?`,
+			reportSkip, "replaced by the ended report", persistence.Time(now), sess.SessionID, reportIdle, reportQueued, startedAt); err != nil {
+			return err
+		}
 		if err := enqueue(reportEnded, "ended:"+r.RunID, now); err != nil {
 			return err
 		}
@@ -215,6 +258,59 @@ func (h *Hub) trackChildTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSt
 		closed_at=excluded.closed_at, needs_seq=excluded.needs_seq`,
 		sess.SessionID, turn, startedAt, closed, closedAt, needs)
 	return err
+}
+
+// trackChildFailureTx: a session under a parent that does not take
+// reports (opted out, or reparented) still tells that parent when a run
+// fails, since the owner's inbox no longer carries failures of sessions
+// that sit under another session (attention deriver). One ended report per
+// run, same row and worker as the tagged path, so nothing is sent twice.
+func (h *Hub) trackChildFailureTx(ctx context.Context, tx *sql.Tx, prev contracts.RunState, r contracts.Run, sess contracts.Session) error {
+	parent := sess.Parent()
+	if parent == "" || r.State != contracts.RunFailed || prev.Terminal() {
+		return nil
+	}
+	now := h.now()
+	var exit any
+	if r.ExitCode != nil {
+		exit = *r.ExitCode
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO child_reports(child_session_id,parent_session_id,run_id,kind,dedupe_key,run_state,state_reason,exit_code,turn_started_at,created_at,not_before,status,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,NULL,?,?,?,?) ON CONFLICT(child_session_id,dedupe_key) DO NOTHING`,
+		sess.SessionID, parent, r.RunID, reportEnded, "ended:"+r.RunID, string(r.State), persistence.NullStr(r.StateReason), exit,
+		persistence.Time(now), persistence.Time(now), reportQueued, persistence.Time(now))
+	if err == nil {
+		h.reportKick.Store(true)
+	}
+	return err
+}
+
+// reportsTo reports whether child still reports cr to cr.Parent: its
+// reports are on and go there, or cr is a failure and cr.Parent is the
+// session it sits under (trackChildFailureTx).
+func reportsTo(child contracts.Session, cr childReport) bool {
+	if reportsToParent(child) && child.Lineage.ParentSessionID == cr.Parent {
+		return true
+	}
+	return cr.Kind == reportEnded && cr.RunState == contracts.RunFailed && child.Parent() == cr.Parent
+}
+
+// reportHeldDetail marks a pending report held for the parent's next run.
+const reportHeldDetail = "held: the parent has no live run"
+
+// wakeHeldReportsTx makes reports held for parent (no live run) due now:
+// its run is live again.
+func (h *Hub) wakeHeldReportsTx(ctx context.Context, tx *sql.Tx, parent string) error {
+	now := persistence.Time(h.now())
+	res, err := tx.ExecContext(ctx, `UPDATE child_reports SET not_before=? WHERE status=? AND parent_session_id=? AND detail=? AND not_before>?`,
+		now, reportQueued, parent, reportHeldDetail, now)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		h.reportKick.Store(true)
+	}
+	return nil
 }
 
 // childReport is one pending report row.
@@ -277,11 +373,16 @@ func (h *Hub) childReportLoop() {
 	}
 }
 
-// ProcessChildReports sends every due report and returns when the next
+// ProcessChildReports sends every due report, runs every due turn-end
+// check of a top-level session (waiting.go), and returns when the next
 // pending one becomes due (zero if none). Safe to call concurrently.
 func (h *Hub) ProcessChildReports(ctx context.Context) (time.Time, error) {
 	h.reportMu.Lock()
 	defer h.reportMu.Unlock()
+	waitNext, err := h.processLeadWaits(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
 	for range 64 { // bounded per pass
 		now := persistence.Time(h.now())
 		rows, err := h.db.QueryContext(ctx, `SELECT report_id, child_session_id, parent_session_id, run_id, kind, run_state, COALESCE(state_reason,''), exit_code,
@@ -324,9 +425,12 @@ func (h *Hub) ProcessChildReports(ctx context.Context) (time.Time, error) {
 		return time.Time{}, err
 	}
 	if !next.Valid {
-		return time.Time{}, nil
+		return waitNext, nil
 	}
-	return persistence.ParseTime(next.String), nil
+	if t := persistence.ParseTime(next.String); waitNext.IsZero() || t.Before(waitNext) {
+		return t, nil
+	}
+	return waitNext, nil
 }
 
 // settleChildReport records a report's final status.
@@ -343,7 +447,7 @@ func (h *Hub) processChildReport(ctx context.Context, cr childReport) {
 		skip("child session not found")
 		return
 	}
-	if !reportsToParent(child) || child.Lineage.ParentSessionID != cr.Parent {
+	if !reportsTo(child, cr) {
 		skip("reports to the parent are off")
 		return
 	}
@@ -360,26 +464,30 @@ func (h *Hub) processChildReport(ctx context.Context, cr childReport) {
 		skip("parent session is archived")
 		return
 	}
-	if parent.CurrentRunID == "" {
-		skip("parent session has no run")
-		return
-	}
-	if pr, err := h.getRun(ctx, h.db, parent.CurrentRunID); err != nil || pr.State.Terminal() {
-		skip("parent session has ended")
-		return
+	if cr.Kind == reportNeeds {
+		// The prompt may have been answered (by the owner, in the terminal)
+		// during the settle delay or while the report was held.
+		if r, err := h.getRun(ctx, h.db, cr.RunID); err != nil || r.State != contracts.RunWaitingApproval {
+			skip("no longer waiting for input")
+			return
+		}
 	}
 	if cr.Body == "" {
+		earlier := ""
 		switch cr.Kind {
 		case reportIdle:
-			if n := h.childMessagesToParent(ctx, cr.Child, cr.Parent, cr.TurnStart); n > 0 {
-				skip("the child already messaged the parent during this turn")
+			since := persistence.Time(h.now().Add(-childRecentMessage))
+			if cr.TurnStart != "" && cr.TurnStart < since {
+				since = cr.TurnStart
+			}
+			if n := h.childMessagesToParent(ctx, cr.Child, cr.Parent, since); n > 0 {
+				skip(fmt.Sprintf("the child messaged the parent during this turn or in the last %s", childRecentMessage))
 				return
 			}
-		case reportNeeds:
-			// The prompt may have been answered (by the owner, in the
-			// terminal) during the settle delay.
-			if r, err := h.getRun(ctx, h.db, cr.RunID); err != nil || r.State != contracts.RunWaitingApproval {
-				skip("no longer waiting for input")
+		case reportEnded:
+			var why string
+			if earlier, why = h.coalesceEnded(ctx, cr); why != "" {
+				skip(why)
 				return
 			}
 		}
@@ -390,10 +498,21 @@ func (h *Hub) processChildReport(ctx context.Context, cr childReport) {
 			skip(fmt.Sprintf("rate limited: %d reports in %s", recent, childReportWindow))
 			return
 		}
-		cr.Body = h.renderChildReport(ctx, child, cr)
+		cr.Body = h.renderChildReport(ctx, child, cr, earlier)
 		if _, err := h.db.ExecContext(ctx, `UPDATE child_reports SET body=?, updated_at=? WHERE report_id=?`, cr.Body, persistence.Time(h.now()), cr.ID); err != nil {
 			return // retried on the next pass
 		}
+	}
+	if !h.sessionLive(ctx, parent) {
+		// Rendered now (the child's transcript may be gone later), sent
+		// when the parent runs again (wakeHeldReportsTx).
+		if created := persistence.ParseTime(cr.CreatedAt); !created.IsZero() && h.now().Sub(created) > childReportHold {
+			skip(fmt.Sprintf("the parent had no live run for %s", childReportHold))
+			return
+		}
+		_, _ = h.db.ExecContext(ctx, `UPDATE child_reports SET detail=?, not_before=?, updated_at=? WHERE report_id=?`,
+			reportHeldDetail, persistence.Time(h.now().Add(childReportRecheck)), persistence.Time(h.now()), cr.ID)
+		return
 	}
 	sender := contracts.WithPrincipal(ctx, contracts.Principal{Kind: contracts.PrincipalSession, ID: cr.Child})
 	v, err := h.msgs.SendMessage(sender, contracts.SendMessageRequest{
@@ -417,8 +536,43 @@ func (h *Hub) processChildReport(ctx context.Context, cr childReport) {
 	h.settleChildReport(ctx, cr.ID, reportSent, "", v.Envelope.MessageID)
 }
 
+// sessionLive reports whether s has a current, non-terminal run.
+func (h *Hub) sessionLive(ctx context.Context, s contracts.Session) bool {
+	if s.CurrentRunID == "" {
+		return false
+	}
+	r, err := h.getRun(ctx, h.db, s.CurrentRunID)
+	return err == nil && !r.State.Terminal()
+}
+
+// coalesceEnded relates an ended report to the same turn's idle report that
+// was already sent: a still undelivered one is cancelled (the ended report
+// replaces it), one sent within childReportCoalesce makes the ended report
+// redundant (skip reason), an older one is referred to by message ID.
+func (h *Hub) coalesceEnded(ctx context.Context, cr childReport) (earlier, skipWhy string) {
+	var msgID, sentAt string
+	err := h.db.QueryRowContext(ctx, `SELECT COALESCE(message_id,''), updated_at FROM child_reports WHERE child_session_id=? AND parent_session_id=? AND kind=? AND status=?
+		AND report_id<? AND turn_started_at IS ? ORDER BY report_id DESC LIMIT 1`,
+		cr.Child, cr.Parent, reportIdle, reportSent, cr.ID, persistence.NullStr(cr.TurnStart)).Scan(&msgID, &sentAt)
+	if err != nil || msgID == "" {
+		return "", ""
+	}
+	if mv, err := h.msgs.GetMessage(h.systemCtx(ctx), contracts.GetRequest{ID: msgID}); err == nil &&
+		mv.Status.Runtime == contracts.DeliveryQueued && mv.Status.BoundRunID == "" && mv.Status.Ack == contracts.AckNone {
+		sender := contracts.WithPrincipal(ctx, contracts.Principal{Kind: contracts.PrincipalSession, ID: cr.Child})
+		if _, err := h.msgs.CancelMessage(sender, contracts.CancelMessageRequest{
+			Mutation: contracts.Mutation{OperationID: "op_childreport-cancel-" + strconv.FormatInt(cr.ID, 10)}, MessageID: msgID}); err == nil {
+			return "", ""
+		}
+	}
+	if ago := h.now().Sub(persistence.ParseTime(sentAt)); ago < childReportCoalesce {
+		return "", fmt.Sprintf("the parent got this turn's idle report %s %s ago", msgID, ago.Round(time.Second))
+	}
+	return msgID, ""
+}
+
 // childMessagesToParent counts messages the child itself sent the parent
-// after the previous turn closed (automatic reports excluded).
+// after since (automatic reports excluded).
 func (h *Hub) childMessagesToParent(ctx context.Context, child, parent, since string) int {
 	var n int
 	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE sender_kind=? AND sender_id=? AND recipient_kind=? AND recipient_id=? AND stored_at>?
@@ -427,10 +581,18 @@ func (h *Hub) childMessagesToParent(ctx context.Context, child, parent, since st
 	return n
 }
 
-// renderChildReport writes the message text.
-func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr childReport) string {
+// renderChildReport writes the message text: one lead line a reader can
+// stop at ("<title> finished: <first sentence>"), one line of facts, then
+// at most childSummaryMax runes of the last message. earlier (ended
+// reports) names this turn's idle report, which already carried it.
+func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr childReport, earlier string) string {
 	var b strings.Builder
+	title := oneLineText(child.Title, 80)
+	if title == "" {
+		title = child.SessionID
+	}
 	name := fmt.Sprintf("%q (%s)", child.Title, child.SessionID)
+	rel := startedOrReports(child, cr.Parent) // W-reparent
 	machine := ""
 	harness := string(child.Harness)
 	if r, err := h.getRun(ctx, h.db, cr.RunID); err == nil {
@@ -439,24 +601,25 @@ func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr
 			machine = r.NodeID
 		}
 	}
-	facts := func(state string) {
-		b.WriteString("Machine: ")
-		b.WriteString(orUnknown(machine))
-		b.WriteString(" · state: ")
-		b.WriteString(state)
-		b.WriteString(" · harness: ")
-		b.WriteString(orUnknown(harness))
+	facts := " · machine: " + orUnknown(machine) + " · state: " + string(cr.RunState) + " · harness: " + orUnknown(harness) + "\n"
+	lead := func(head, sentence string) {
+		b.WriteString(head)
+		if sentence != "" {
+			b.WriteString(": " + sentence)
+		}
 		b.WriteString("\n")
 	}
 	switch cr.Kind {
 	case reportIdle:
-		fmt.Fprintf(&b, "[pyre auto-report] Session %s, which you started, finished its turn and is waiting for input.\n", name)
-		facts(string(cr.RunState))
-		h.writeSummary(ctx, &b, cr, "\nIts last message:\n")
-		b.WriteString("\nReply to this message (send_message reply_to) to give it more work, or read_session for the full transcript. No reply is needed otherwise; ack_message it.\n")
+		text, err := h.childLastMessage(ctx, cr)
+		first := firstSentence(text)
+		lead(title+" finished", first)
+		fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, finished its turn and is waiting for input%s", name, rel, facts)
+		writeSummary(&b, text, first, err)
+		b.WriteString("Reply (send_message reply_to) to give it more work; read_session shows the whole transcript; otherwise ack_message.\n")
 	case reportNeeds:
-		fmt.Fprintf(&b, "[pyre auto-report] Session %s, which you started, needs input: it is waiting on an approval or question.\n", name)
-		facts(string(cr.RunState))
+		lead(title+" needs input", "")
+		fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, is waiting on an approval or question%s", name, rel, facts)
 		ids := h.pendingApprovalIDs(ctx, h.db, cr.RunID)
 		for _, id := range ids {
 			a, err := h.getApproval(ctx, h.db, id)
@@ -483,38 +646,105 @@ func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr
 		if cr.RunState == contracts.RunFailed {
 			verb = "failed"
 		}
-		fmt.Fprintf(&b, "[pyre auto-report] Session %s, which you started, has %s", name, verb)
+		launch := verb == "failed" && isLaunchFailure(cr.Reason)
+		var text string
+		var err error
+		if earlier == "" && !launch {
+			text, err = h.childLastMessage(ctx, cr)
+		}
+		first := firstSentence(text)
+		switch {
+		case launch:
+			// It never ran: no transcript to read; say why in plain words.
+			lead(title+" could not start", oneLineText(strings.TrimPrefix(runfail.Plain(cr.Reason, false, runfail.Names{}), "Couldn't start: "), childLeadMax))
+		case verb == "failed" && cr.Reason != "":
+			lead(title+" failed", oneLineText(cr.Reason, childLeadMax))
+		default:
+			lead(title+" "+verb, first)
+		}
+		fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, has %s", name, rel, verb)
 		if cr.Reason != "" {
 			fmt.Fprintf(&b, ": %s", oneLineText(cr.Reason, 300))
 		}
 		if cr.ExitCode != nil {
 			fmt.Fprintf(&b, " (exit code %d)", *cr.ExitCode)
 		}
-		b.WriteString(".\n")
-		facts(string(cr.RunState))
-		h.writeSummary(ctx, &b, cr, "\nIts last message:\n")
+		b.WriteString(facts)
+		if launch {
+			if _, capacity := runfail.Capacity(cr.Reason); capacity {
+				b.WriteString("It never ran: no account had capacity. Resume it (or start it again) after the reset, or archive it if it is no longer needed. The owner was not notified.\n")
+			} else {
+				b.WriteString("It never ran, so it has no transcript. Fix the cause and resume it, or archive it if it is no longer needed. The owner was not notified.\n")
+			}
+		} else if earlier != "" {
+			fmt.Fprintf(&b, "Its last message is in the earlier report %s.\n", earlier)
+		} else {
+			if verb == "failed" {
+				first = "" // the lead line carried the reason, not the message
+			}
+			writeSummary(&b, text, first, err)
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// writeSummary appends the child's last assistant message, or why it is
-// unavailable.
-func (h *Hub) writeSummary(ctx context.Context, b *strings.Builder, cr childReport, head string) {
+// childLastMessage fetches the child's last assistant message.
+func (h *Hub) childLastMessage(ctx context.Context, cr childReport) (string, error) {
 	fetch := h.childSummary
 	if fetch == nil {
 		fetch = h.lastAssistantText
 	}
-	text, err := fetch(ctx, cr.Child, cr.RunID)
+	return fetch(ctx, cr.Child, cr.RunID)
+}
+
+// writeSummary appends the last message (bounded), or why it is
+// unavailable. A message the lead line already showed whole is not
+// repeated.
+func writeSummary(b *strings.Builder, text, lead string, err error) {
+	text = strings.TrimSpace(text)
 	switch {
 	case err != nil:
-		fmt.Fprintf(b, "\n(Its last message is unavailable: %s. Use read_session.)\n", oneLineText(err.Error(), 200))
-	case strings.TrimSpace(text) == "":
-		b.WriteString("\n(No assistant message was found in its transcript.)\n")
+		fmt.Fprintf(b, "(Its last message is unavailable: %s. Use read_session.)\n", oneLineText(err.Error(), 200))
+	case text == "":
+		b.WriteString("(No assistant message was found in its transcript.)\n")
+	case lead != "" && oneLineText(text, childLeadMax+1) == lead:
 	default:
-		b.WriteString(head)
-		b.WriteString(clipRunes(strings.TrimSpace(text), childSummaryMax))
+		b.WriteString("Its last message: ")
+		b.WriteString(clipRunes(text, childSummaryMax))
+		if utf8.RuneCountInString(text) > childSummaryMax {
+			b.WriteString(" (read_session for the rest)")
+		}
 		b.WriteString("\n")
 	}
+}
+
+// firstSentence is the first sentence of the first non-empty line of text
+// that is not a markdown heading (else of the first heading), list/quote
+// markers dropped, at most childLeadMax runes.
+func firstSentence(text string) string {
+	var heading string
+	for _, line := range strings.Split(text, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "#") {
+			if heading == "" {
+				heading = strings.TrimSpace(strings.TrimLeft(l, "# "))
+			}
+			continue
+		}
+		l = strings.TrimSpace(strings.TrimLeft(l, ">-*• "))
+		if l == "" {
+			continue
+		}
+		r := []rune(l)
+		for i := 0; i+1 < len(r); i++ {
+			if (r[i] == '.' || r[i] == '!' || r[i] == '?') && r[i+1] == ' ' && (i+2 >= len(r) || !unicode.IsLower(r[i+2])) {
+				l = string(r[:i+1])
+				break
+			}
+		}
+		return oneLineText(l, childLeadMax)
+	}
+	return oneLineText(heading, childLeadMax)
 }
 
 // lastAssistantText reads the child's transcript tail through its node and
@@ -538,6 +768,12 @@ func (h *Hub) lastAssistantText(ctx context.Context, sessionID, runID string) (s
 func (h *Hub) pruneChildReports(ctx context.Context) error {
 	_, err := h.db.ExecContext(ctx, `DELETE FROM child_reports WHERE status!=? AND updated_at<?`, reportQueued, persistence.Time(h.now().Add(-childReportRetention)))
 	return err
+}
+
+// isLaunchFailure reports whether a failed run's reason says it never
+// started (the hub's "launch failed: ..." from a failed start command).
+func isLaunchFailure(reason string) bool {
+	return strings.HasPrefix(reason, "launch ") || strings.HasPrefix(reason, "Launch ")
 }
 
 func clipRunes(s string, n int) string {

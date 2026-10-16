@@ -125,6 +125,11 @@ func (m *Model) viewMachines(w, h int) []string {
 			out = append(out, m.kvl("Connected", "since "+ago(now, *n.Connection.ConnectedSince), lw))
 		}
 		out = append(out, m.kvl("Platform", n.Platform+"/"+n.Arch, lw))
+		if m.opts.CloudInfo != nil {
+			if ci := m.opts.CloudInfo(n.Name); ci != "" {
+				out = append(out, m.kvl("Cloud", trunc(ci, w-lw), lw))
+			}
+		}
 		if n.Hostname != "" {
 			out = append(out, m.kvl("Hostname", n.Hostname, lw))
 		}

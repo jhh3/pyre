@@ -22,6 +22,8 @@ import (
 	c "github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/hub"
 	"github.com/jhh3/pyre/internal/hub/assemble"
+	"github.com/jhh3/pyre/internal/runtime/sessionhost"
+	"github.com/jhh3/pyre/internal/runtime/termhost"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 	"github.com/jhh3/pyre/internal/supervisor"
 	"github.com/jhh3/pyre/internal/terminal"
@@ -73,6 +75,11 @@ type fakeNode struct {
 	// hold, when set, records terminal_open stream IDs without dialing.
 	hold atomic.Bool
 
+	// th, when set, hosts runs on a Pyre terminal host (the Windows
+	// backend) instead of tmux; thRuns maps run -> session name.
+	th     atomic.Pointer[termhost.Host]
+	thRuns sync.Map
+
 	mu      sync.Mutex
 	runs    map[string]c.Run
 	tmux    map[string]supervisor.Tmux
@@ -91,6 +98,19 @@ func (n *fakeNode) HandleCommand(ctx context.Context, cmd c.NodeCommand) (c.Comm
 		if err := json.Unmarshal(cmd.Payload, &sr); err != nil {
 			return c.CommandResult{}, err
 		}
+		if th := n.th.Load(); th != nil {
+			name := "pyre-" + sr.RunID[len(sr.RunID)-6:]
+			if err := th.NewSession(ctx, sessionhost.SessionSpec{Name: name, Argv: []string{"/bin/sh"}, Env: map[string]string{"PS1": "$ ", "HOME": n.dir}, Width: 80, Height: 24}); err != nil {
+				return c.CommandResult{}, err
+			}
+			n.thRuns.Store(sr.RunID, name)
+			run := c.Run{RunID: sr.RunID, SessionID: sr.Session.SessionID, Adapter: "synthetic-shell", Harness: c.HarnessShell, State: c.RunWaitingInput,
+				StartedAt: time.Now().UTC(), Capabilities: shellCaps}
+			n.mu.Lock()
+			n.runs[run.RunID] = run
+			n.mu.Unlock()
+			return ok(run)
+		}
 		tm := supervisor.Tmux{Socket: filepath.Join(n.dir, "tmux-"+sr.RunID[len(sr.RunID)-6:]+".sock"), OwnedRoot: n.dir}
 		if err := tm.NewSession(ctx, supervisor.SessionSpec{Name: "pyre", Argv: []string{"/bin/sh"}, Env: map[string]string{"PS1": "$ ", "HOME": n.dir}, Width: 80, Height: 24}); err != nil {
 			return c.CommandResult{}, err
@@ -106,6 +126,9 @@ func (n *fakeNode) HandleCommand(ctx context.Context, cmd c.NodeCommand) (c.Comm
 		var ac c.AttachCommand
 		if err := json.Unmarshal(cmd.Payload, &ac); err != nil {
 			return c.CommandResult{}, err
+		}
+		if argv, ok2 := n.termhostArgv(ac.RunID, ac.ReadOnly); ok2 {
+			return ok(c.AttachDescriptor{RunID: ac.RunID, Mechanism: c.AttachLocalTmux, Command: argv, ReadOnly: ac.ReadOnly})
 		}
 		tm, err := n.tmuxFor(ac.RunID)
 		if err != nil {
@@ -124,6 +147,12 @@ func (n *fakeNode) HandleCommand(ctx context.Context, cmd c.NodeCommand) (c.Comm
 		if n.hold.Load() {
 			return ok(map[string]string{"stream_id": tc.StreamID})
 		}
+		if argv, ok2 := n.termhostArgv(tc.RunID, tc.ReadOnly); ok2 {
+			if err := n.bridge.Open(ctx, tc, argv); err != nil {
+				return c.CommandResult{Outcome: c.OutcomeFailed, Error: c.AsError(err)}, nil
+			}
+			return ok(map[string]string{"stream_id": tc.StreamID})
+		}
 		tm, err := n.tmuxFor(tc.RunID)
 		if err != nil {
 			return c.CommandResult{Outcome: c.OutcomeFailed, Error: c.AsError(err)}, nil
@@ -134,6 +163,16 @@ func (n *fakeNode) HandleCommand(ctx context.Context, cmd c.NodeCommand) (c.Comm
 		return ok(map[string]string{"stream_id": tc.StreamID})
 	}
 	return c.CommandResult{Outcome: c.OutcomeSucceeded}, nil
+}
+
+// termhostArgv is the termhost attach command of a termhost-hosted run.
+func (n *fakeNode) termhostArgv(runID string, readOnly bool) ([]string, bool) {
+	th := n.th.Load()
+	name, ok := n.thRuns.Load(runID)
+	if th == nil || !ok {
+		return nil, false
+	}
+	return termhost.AttachArgv("/synthetic/pyred", th.Socket, name.(string), readOnly), true
 }
 
 func (n *fakeNode) tmuxFor(runID string) (supervisor.Tmux, error) {
@@ -201,7 +240,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bridge, err := terminal.NewNodeBridge(terminal.BridgeConfig{HubURL: "https://" + e.addr, Token: e.cred.Token, TLS: tlsCfg, Logger: quiet(), KillGrace: time.Second})
+	bridge, err := terminal.NewNodeBridge(terminal.BridgeConfig{HubURL: "https://" + e.addr, Token: e.cred.Token, TLS: tlsCfg, Logger: quiet(), KillGrace: time.Second, FitEvery: 200 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

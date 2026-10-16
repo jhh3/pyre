@@ -280,6 +280,22 @@ func removeString(xs []string, x string) []string {
 // engaging with that session, which answers its messages and own flag.
 func (b *Backend) ownerTypedLocked(p c.Principal, sessionID string) {
 	if p.Kind == c.PrincipalOwner {
-		b.engageLocked(sessionID, "You engaged with the session.", c.AttnMessage, c.AttnFlag)
+		b.engageLocked(sessionID, "You engaged with the session.", c.AttnMessage, c.AttnFlag, c.AttnWaiting)
+		b.ownerActiveLocked(p, sessionID)
 	}
+}
+
+// ownerActiveLocked marks the owner's activity on a session (like the hub:
+// owner principal only, at most once a minute) and emits session.updated.
+func (b *Backend) ownerActiveLocked(p c.Principal, sessionID string) {
+	s := b.sessions[sessionID]
+	if p.Kind != c.PrincipalOwner || s == nil {
+		return
+	}
+	now := b.now()
+	if s.OwnerActiveAt != nil && now.Sub(*s.OwnerActiveAt) < time.Minute {
+		return
+	}
+	s.OwnerActiveAt = &now
+	b.emit(c.EvSessionUpdated, ref(c.KindSession, s.SessionID), s.SessionID, s.ProjectID, s)
 }

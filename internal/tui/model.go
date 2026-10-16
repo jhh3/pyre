@@ -20,7 +20,7 @@ type viewID int
 const (
 	viewSessions viewID = iota
 	viewProjects
-	viewDigest // "While you were away" (W-digest); the Inbox view is gone (W-attn)
+	viewDigest // "While you were away" (W-digest); the inbox is in the web app (weblink.go)
 	viewProject
 	viewArtifact
 	viewDoc
@@ -59,7 +59,8 @@ type loadState struct {
 	started  time.Time // wall time the in-flight load started (latency, not a fact age)
 	dirty    bool      // reload once the in-flight load completes
 	stale    bool      // invalidated by an event; reload when next needed
-	seq      int
+	seq      int       // load generation (matches loadedMsg.seq)
+	rev      int       // bumped whenever val changes (a load landing or an in-place patch)
 }
 
 type loadedMsg struct {
@@ -84,6 +85,7 @@ type toast struct {
 	text  string
 	tone  tone
 	token int
+	open  bool // clicked: the sidebar shows the full text and keeps it until the next click
 }
 
 // Model is the root Bubble Tea model. It is driven only through Update;
@@ -112,12 +114,21 @@ type Model struct {
 	filtering  bool
 	filterIn   textinput.Model
 	overlay    overlay
+	nsMem      nsMemory // new-session panel: last-used choices per repository (newsession.go)
 	toast      *toast
 	toastSeq   int
 	previewTok int
+	previewAt  time.Time  // the last schedulePreview (bursts are debounced)
+	relay      relayState // relay.go
+	local      localTmux  // localterm.go: this machine's tmux server
+	// preview read pacing (sessions.go)
+	previewReadAt map[string]time.Time // clock time each preview read last started
+	previewQueued bool                 // a read waited for the in-flight cap
+	previewTick   bool                 // a previewRetryMsg is scheduled
 
 	// event handling
-	ev evState
+	ev        evState
+	sessPatch sessPatchState // per-session refresh (sessions_patch.go)
 
 	// navigation context
 	curProject  string
@@ -154,6 +165,7 @@ type Model struct {
 	cmdHist    []string
 	msgHist    []string
 	reader     readerState
+	footMode   int      // how this frame lays out its bottom (footer.go; render only)
 	boxAt      *boxGeom // geometry of the panel drawn by the current overlay (render only)
 
 	// mouse: regions marked while rendering, and where the last frame drew them
@@ -199,6 +211,11 @@ type Model struct {
 	dg       digestState // "while you were away" panel (digest.go)
 
 	act activityState // Activity filter (activity.go)
+	// asksUnsupported: the hub has no asks ops; the ask signals hide (asks.go)
+	asksUnsupported bool
+
+	leads leadState // lead signals, per frame (leads.go)
+	seen  seenState // when each session was last on screen (leads.go)
 }
 
 // Stats exposes counters for tests and diagnostics.
@@ -207,6 +224,7 @@ type Stats struct {
 	Refreshes    int // debounced refresh passes triggered by events
 	Loads        int // API loads started
 	DroppedLoads int // stale responses discarded
+	Patches      int // sessions.get_many calls started (per-session refresh)
 }
 
 // New builds a model. Run uses it; tests drive it directly.
@@ -233,6 +251,9 @@ func New(ctx context.Context, api contracts.API, opts Options) *Model {
 		defaultAttach: defaultAttach,
 	}
 	m.loadTUIState()
+	if m.seen.since.IsZero() { // no state file: nothing before this launch is new
+		m.seen.since = m.now()
+	}
 	m.km = opts.Keymap
 	if m.km == nil {
 		km, err := LoadKeymap(opts.KeysFile)
@@ -246,8 +267,8 @@ func New(ctx context.Context, api contracts.API, opts Options) *Model {
 	return m
 }
 
-// Close ends embedded terminals (releasing a held input lease) and cancels
-// background work (watchers and in-flight loads).
+// Close ends embedded terminals (releasing a held input lease) and
+// cancels background work (watchers and in-flight loads).
 func (m *Model) Close() {
 	m.digestClose()
 	m.closeTerms()
@@ -297,7 +318,10 @@ func (m *Model) now() time.Time { return m.opts.Clock.Now() }
 
 func (m *Model) Init() tea.Cmd {
 	cmds := m.loadBase(false)
-	cmds = append(cmds, m.scheduleRefresh(), m.startWatch(), tea.RequestBackgroundColor, m.digestInit())
+	cmds = append(cmds, m.scheduleRefresh(), m.startWatch(), tea.RequestBackgroundColor, m.digestInit(), m.loadAsks(false))
+	if m.seen.fresh { // leads.go: remember the seen baseline
+		cmds = append(cmds, m.saveState())
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -305,7 +329,11 @@ func (m *Model) scheduleRefresh() tea.Cmd {
 	if m.opts.RefreshInterval < 0 {
 		return nil
 	}
-	return tea.Tick(m.opts.RefreshInterval, func(time.Time) tea.Msg { return refreshTickMsg{} })
+	d := m.opts.RefreshInterval
+	if m.ev.connected {
+		d *= 6 // events drive refreshes; the tick is only a safety net
+	}
+	return tea.Tick(d, func(time.Time) tea.Msg { return refreshTickMsg{} })
 }
 
 // baseKeys are always kept fresh: they drive the header, rows and badges.
@@ -461,15 +489,34 @@ func (m *Model) onLoaded(msg loadedMsg) tea.Cmd {
 		st.err = msg.err
 		st.errAt = m.now()
 	} else {
-		st.val, st.have, st.err, st.at, st.stale = msg.val, true, nil, m.now(), false
+		val := msg.val
+		if msg.key == "sessions" {
+			if ss, ok := val.([]contracts.SessionView); ok {
+				val = m.reapplyOverlay(msg.seq, ss)
+			}
+		}
+		st.val, st.have, st.err, st.at, st.stale = val, true, nil, m.now(), false
+		st.rev++
 	}
 	var cmds []tea.Cmd
 	if st.dirty {
-		began := st.started
-		cmds = append(cmds, m.start(msg.key, st))
-		if msg.err != nil {
-			st.started = began // still no answer: keep counting from the first try
+		// Invalidated while loading: reload in the next debounce window,
+		// not back to back. Busy sessions emit events continuously, and an
+		// immediate restart kept one full list request per TUI permanently
+		// in flight against the hub.
+		st.dirty = false
+		if m.ev.dirty == nil {
+			m.ev.dirty = map[string]bool{}
 		}
+		m.ev.dirty[msg.key] = true
+		if !m.ev.pending {
+			m.ev.pending = true
+			cmds = append(cmds, tea.Tick(m.opts.Debounce, func(time.Time) tea.Msg { return debounceMsg{} }))
+		}
+	}
+	if m.previewQueued && strings.HasPrefix(msg.key, "preview:") {
+		m.previewQueued = false // a slot freed: the read that waited for it
+		cmds = append(cmds, m.previewRetry())
 	}
 	cmds = append(cmds, m.afterData(msg.key))
 	return tea.Batch(cmds...)
@@ -488,6 +535,7 @@ func (m *Model) afterData(key string) tea.Cmd {
 		var cmds []tea.Cmd
 		if key == "sessions" {
 			cmds = append(cmds, m.archivePending())
+			m.sweepTerms() // archived or gone: their terminals go too
 		}
 		if m.sessList.sel != before {
 			cmds = append(cmds, m.schedulePreview())
@@ -575,7 +623,11 @@ func errText(err error) string {
 // Update implements tea.Model. After every message the embedded terminals
 // are reconciled with the focus (see reconcileTerms).
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.leads.valid = false // lead signals are recomputed on the next frame
 	_, cmd := m.update(msg)
+	if sc := m.seenAfter(); sc != nil { // leads.go
+		cmd = tea.Batch(cmd, sc)
+	}
 	if rc := m.reconcileTerms(); rc != nil {
 		cmd = tea.Batch(cmd, rc)
 	}
@@ -590,10 +642,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case termFrameMsg:
 		return m, m.onTermFrame()
-	case gridFrameMsg, gridAttachMsg, gridPulseMsg, gridSettleMsg, gridProbeTickMsg, gridSizeMsg:
+	case gridFrameMsg, gridAttachMsg, gridPulseMsg, gridSettleMsg, gridProbeTickMsg, gridSizeMsg, gridRelayRetryMsg:
 		return m, m.onGridMsg(msg)
 	case termAttachMsg:
-		return m, m.onTermAttach(msg)
+		cmd := m.onTermAttach(msg)
+		if msg.localBad != "" && msg.sid == m.sessList.sel {
+			cmd = tea.Batch(cmd, m.loadPreview(false)) // no local capture after all: the hub's last screen
+		}
+		return m, cmd
 	case leaseTickMsg:
 		return m, m.onLeaseTick(msg)
 	case termRetryMsg:
@@ -632,15 +688,20 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case loadedMsg:
 		return m, m.onLoaded(msg)
+	case seenDwellMsg:
+		return m, m.onSeenDwell(msg)
 	case resultMsg:
 		if msg.then != nil {
 			return m, msg.then(m, msg.val, msg.err)
 		}
 		return m, nil
 	case refreshTickMsg:
+		m.sweepTerms()
 		return m, tea.Batch(m.refreshVisible(false), m.scheduleRefresh())
 	case debounceMsg:
 		return m, m.flushEvents()
+	case sessPatchMsg:
+		return m, m.onSessPatch(msg)
 	case eventsMsg:
 		return m, m.onEvents(msg)
 	case watchEndedMsg:
@@ -654,9 +715,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.view == viewSessions {
 			m.noteViewed(m.sessList.sel) // dwelt on: counts for alt+left and the switcher
 		}
-		return m, tea.Batch(m.loadPreview(false), m.openTermView())
+		return m, tea.Batch(m.loadPreview(false), m.openTermView(), m.schedulePrefetch(msg.token))
+	case termPrefetchMsg:
+		return m, m.onTermPrefetch(msg)
+	case previewRetryMsg:
+		m.previewTick = false
+		return m, m.previewRetry()
+	case loadingDueMsg:
+		return m, nil // a repaint: "loading…" may be due
 	case clearToastMsg:
-		if m.toast != nil && m.toast.token == msg.token {
+		if m.toast != nil && m.toast.token == msg.token && !m.toast.open {
 			m.toast = nil
 		}
 		return m, nil
@@ -698,7 +766,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // refreshVisible reloads base data plus whatever the current screen shows.
 func (m *Model) refreshVisible(force bool) tea.Cmd {
-	cmds := m.loadBase(true)
+	var cmds []tea.Cmd
+	for _, k := range baseKeys {
+		if !force && k == "sessions" && m.ev.connected {
+			// The periodic tick: events keep the list current (per-session
+			// patches), so the full re-list is only a safety net.
+			cmds = append(cmds, m.ensure(k, m.sessionsSafetyNet(), m.baseLoader(k)))
+			continue
+		}
+		cmds = append(cmds, m.reload(k, m.baseLoader(k)))
+	}
 	cmds = append(cmds, m.refreshView(force)...)
 	return tea.Batch(cmds...)
 }
@@ -708,7 +785,7 @@ func (m *Model) refreshView(force bool) []tea.Cmd {
 	var cmds []tea.Cmd
 	switch m.view {
 	case viewSessions:
-		cmds = append(cmds, m.loadPreview(true), m.openTermView())
+		cmds = append(cmds, m.loadPreview(force), m.openTermView())
 	case viewDigest:
 		cmds = append(cmds, m.digestPreview())
 	case viewProjects:
@@ -728,6 +805,9 @@ func (m *Model) refreshView(force bool) []tea.Cmd {
 	case viewReader:
 		cmds = append(cmds, m.loadTranscript(force))
 	}
+	// The header counts open asks on every screen; asks change only by
+	// events (ask.changed) and deadlines.
+	cmds = append(cmds, m.asksRefresh(force))
 	return cmds
 }
 

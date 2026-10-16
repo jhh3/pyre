@@ -8,8 +8,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // ParentWatch returns an Alive func for WatchOptions: it reports false
@@ -30,7 +31,7 @@ func ParentWatch() func() bool {
 		if q := os.Getppid(); q != p || q == 1 {
 			return false
 		}
-		if syscall.Kill(p, 0) != nil {
+		if osutil.SignalZero(p) != nil {
 			return false
 		}
 		if g <= 0 {
@@ -46,6 +47,9 @@ func ParentWatch() func() bool {
 
 // ppidOf returns the parent pid of pid.
 func ppidOf(pid int) (int, error) {
+	if runtime.GOOS == "windows" {
+		return osutil.ParentPID(pid)
+	}
 	if runtime.GOOS == "linux" {
 		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 		if err != nil {

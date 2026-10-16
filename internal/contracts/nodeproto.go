@@ -244,7 +244,23 @@ type TerminalOpenCommand struct {
 	ReadOnly bool   `json:"read_only"`
 	Cols     int    `json:"cols"`
 	Rows     int    `json:"rows"`
+	// Fit (read-only streams only) sizes the stream to the run's tmux
+	// window instead of Cols x Rows, so watching never resizes the window:
+	// the node reads the window size, attaches `-r -f ignore-size` (tmux
+	// >= 3.2) on a PTY of exactly that size, sends a {"type":"resize"}
+	// text frame with it before any terminal bytes (and again whenever the
+	// window changes), and ignores client resize frames. Requires
+	// TerminalFit on both the hub and the node.
+	Fit bool `json:"fit,omitempty"`
 }
+
+// TerminalFit names fitted read-only terminal streams
+// (TerminalOpenCommand.Fit): a hub feature (HelloResponse.Features) when
+// its relay forwards the fit request and the node's size frames, and a
+// node capability (Node.Capabilities) when its bridge serves them. A
+// client asks for fit only when both advertise it; an older hub or node
+// would otherwise attach at the client's size.
+const TerminalFit = "terminal.fit"
 
 type ResumeCommand struct {
 	StartRunCommand

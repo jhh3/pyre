@@ -27,6 +27,13 @@ data class LocalPrefs(
     val sessionsGrouping: String = "",
     /** Sessions list shows ended (exited, failed, no run) sessions, like the TUI's ".". */
     val showEndedSessions: Boolean = false,
+    /**
+     * Lead signals (domain/Leads): when this app last opened each session
+     * (RFC 3339, bounded), and the first launch with lead signals (nothing
+     * that finished before it reads "new").
+     */
+    val leadSeen: Map<String, String> = emptyMap(),
+    val leadSeenSince: String = "",
 )
 
 class LocalSettings(private val store: BlobStore) {

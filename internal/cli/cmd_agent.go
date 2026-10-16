@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jhh3/pyre/internal/agentguide"
+	"github.com/jhh3/pyre/internal/runtime/claudeplugin"
 )
 
 // GuideResult is `pyre guide --json`.
@@ -15,7 +16,45 @@ type GuideResult struct {
 	Text string `json:"text"`
 }
 
+// CommandDoc is `pyre commands <name> --json`: one agent slash command
+// with its full SKILL.md.
+type CommandDoc struct {
+	claudeplugin.Skill
+	Text string `json:"text"`
+}
+
 func (a *App) addAgentCommands(root *cobra.Command) {
+	root.AddCommand(&cobra.Command{
+		Use:   "commands [name]",
+		Short: "List the agent slash commands (/kickoff, /ship, ...) every Pyre Claude session has",
+		Long: `List the slash commands Pyre adds to every Claude session it starts: type
+/<name> in the session. They are skills Pyre writes into the session's Claude
+config dir (<config>/skills/<name>, marked .pyre-managed); your own skill with
+the same name wins. With a name, print that command's full procedure (the
+SKILL.md the agent follows).`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: a.run(func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				s, ok := claudeplugin.LookupSkill(args[0])
+				if !ok {
+					return usagef("no agent command %q (pyre commands lists them)", args[0])
+				}
+				return a.emit(CommandDoc{Skill: s, Text: s.Body}, func(w io.Writer) { fmt.Fprint(w, s.Body) })
+			}
+			skills := claudeplugin.Skills()
+			return a.emit(skills, func(w io.Writer) {
+				fmt.Fprintln(w, "Agent slash commands in every Claude session Pyre starts:")
+				fmt.Fprintln(w)
+				rows := make([][]string, 0, len(skills))
+				for _, s := range skills {
+					rows = append(rows, []string{"  " + s.Usage, s.Short})
+				}
+				table(w, "  USAGE\tDESCRIPTION", rows)
+				fmt.Fprintln(w, "\n`pyre commands <name>` prints a command's full procedure.")
+			})
+		}),
+	})
+
 	var gProject string
 	var gMCP bool
 	guide := &cobra.Command{
@@ -24,7 +63,7 @@ func (a *App) addAgentCommands(root *cobra.Command) {
 		Args:  cobra.NoArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			opts := agentguide.Options{MCP: gMCP, ParentSessionID: a.Getenv(agentguide.EnvParentSessionID),
-				ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1"}
+				ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT")}
 			if gProject != "" {
 				ops, err := a.connect()
 				if err != nil {
@@ -67,7 +106,7 @@ Codex:        codex -c 'mcp_servers.pyre.command="pyre"' -c 'mcp_servers.pyre.ar
 				return enc.Encode(tools)
 			}
 			srv := &MCPServer{Connect: a.connect, Tools: tools, Log: a.Stderr, Instructions: agentguide.Text(agentguide.Options{MCP: true,
-				ParentSessionID: a.Getenv(agentguide.EnvParentSessionID), ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1"})}
+				ParentSessionID: a.Getenv(agentguide.EnvParentSessionID), ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT")})}
 			return srv.Serve(cmd.Context(), a.Stdin, a.Stdout)
 		}),
 	}

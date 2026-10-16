@@ -61,7 +61,7 @@ func TestStatusesUseSymbolAndText(t *testing.T) {
 
 func TestEveryScreenFitsAtAllWidths(t *testing.T) {
 	tours := [][]string{
-		nil, {"I"}, {"I", "down"}, {"2"}, {"2", "enter"}, {"2", "enter", "right"}, {"2", "enter", "right", "right"},
+		nil, {"2"}, {"2", "enter"}, {"2", "enter", "right"}, {"2", "enter", "right", "right"},
 		{"2", "enter", "right", "right", "enter"}, {"2", "enter", "left"}, {"2", "enter", "left", "left"},
 		{":"}, {"?"}, {"m"}, {"n"}, {"n", "enter"}, {"n", "enter", "enter"},
 		{":", "M", "a", "c", "h", "enter"}, {":", "A", "c", "c", "o", "u", "n", "t", "s", "enter"},
@@ -217,9 +217,10 @@ func TestSlowAPIDoesNotBlockNavigation(t *testing.T) {
 	if !h.Contains("migration work") {
 		t.Fatalf("list not usable while loads are slow:\n%s", h.View())
 	}
-	if !h.Contains("loading preview") {
-		t.Errorf("preview should show loading state:\n%s", h.View())
+	if h.Contains("loading preview") {
+		t.Errorf("a read that just started should not say loading yet (300 ms):\n%s", h.View())
 	}
+	h.WaitFor("loading state", 2*sec, func() bool { return h.Contains("loading preview") })
 	// A forced refresh times out: previous data stays, labelled.
 	h.Key("ctrl+r")
 	h.WaitFor("timeout label", 3*sec, func() bool { return h.Contains("hub unreachable") })

@@ -4,10 +4,10 @@
   Pinned 1 •                                             │ read-only snapshot · MOCK backend: there…
 › ! needs you  worker                  synth-linux  30s  │
                                                          │ [mock screen] worker — waiting_input
-  Synthetic Outfit 1 · 1 working                         │ Working on it (synthetic).
+  Synthetic Outfit 1 · ◌ 1 working                       │ Working on it (synthetic).
   ● working    outfit API client       synth-linux  30s  │ >
                                                          │
-  No project 7 · ! 2 need you · 3 working · 1 idle       │
+  No project 7 · ◆ 2 waiting · ◌ 3 working               │
   ◔ starting   api work (handoff succ… synth-linux  30s  │
   ◌ stale      long refactor           synth-linux   7m  │
   ● working    coordinator             synth-mac    30s  │
@@ -22,9 +22,9 @@
                                                          │
                                                          │
                                                          │
-                                                         │
-                                                         │
-
- Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)
- pinned "worker"
- n new session   enter type   F full-screen   m message   i info   / filter   ␣␣ find        ? help
+ ──────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ⁇ worker   +1 more           │
+ pinned "worker"                                         │
+ n new session     enter type        F full-screen       │
+ m message         i info            / filter            │
+ ␣␣ find           ? keys                                │

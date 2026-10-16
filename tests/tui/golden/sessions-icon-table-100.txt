@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v table · P Projects · M Machines · A Accounts                       ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  STATUS       SESSION                   MACHINE     HARNESS ACCOUNT · USAGE                 ACTIVE
+  Synthetic Outfit 1 · ◌ 1 working
+› ● working    🚀 outfit API client      synth-linux claude  claude-personal-b 5h 60%           30m
+
+  No project 8 · ◆ 3 waiting · ◌ 3 working
+  ◔ starting   api work (handoff succes… synth-linux codex   acct_synth-codex-b                 30m
+  ◌ stale      long refactor             synth-linux claude  own login                          30m
+  ! needs you  🐛 worker                 synth-linux claude  own login                          30m
+  ● working    coordinator               synth-mac   claude  own login                          30m
+  ! approval   deploy prep               synth-mac   claude  own login                          30m
+  ● working    migration work            synth-mac   claude  claude-personal-a 5h 22% wk 41%    30m
+  ○ idle       pairing session           synth-mac   claude  own login                          30m
+  ! needs you  scratch (standalone)      synth-mac   claude  claude-personal-a 5h 22% wk 41%    30m
+
+  machines  synth-linux ● 4 · synth-mac ● 5
+  1 ended — . show
+
+
+
+
+
+
+
+
+
+
+
+ n new session   enter open terminal   m message   i info   v view         ? help   Sessions: table

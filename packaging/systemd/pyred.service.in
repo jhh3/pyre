@@ -42,7 +42,10 @@ Environment="PATH=@PATH@"
 WorkingDirectory=%h
 Restart=on-failure
 RestartSec=2s
-TimeoutStopSec=20s
+# pyred drains on SIGTERM: it refuses new launches and waits up to 20s for
+# in-flight launches to record their run handle (an upgrade restart must not
+# interrupt a launch), so the stop timeout stays above that grace period.
+TimeoutStopSec=30s
 LimitNOFILE=8192
 # BEGIN scope
 Environment=PYRE_SYSTEMD_SCOPE=require
@@ -51,6 +54,13 @@ MemoryHigh=@MEMORY_HIGH@
 MemoryMax=@MEMORY_MAX@
 CPUQuota=@CPU_QUOTA@
 TasksMax=512
+# systemd-oomd kills the cgroup with the highest reclaim rate when the user
+# manager is under memory pressure. pyred holds no agent memory (runs live in
+# pyre-runs.slice), and killing it interrupts launches and supervision, so it
+# is the last candidate. Honoured for pressure kills of a user unit because
+# the unit's cgroup and the monitored user@.service share an owner
+# (systemd.resource-control(5), verified on systemd 259).
+ManagedOOMPreference=avoid
 # END scope
 # BEGIN legacy
 Environment=PYRE_SYSTEMD_SCOPE=off

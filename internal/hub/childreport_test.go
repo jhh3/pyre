@@ -159,7 +159,13 @@ func TestChildReportIdleOncePerTurnWithSummary(t *testing.T) {
 	if m.Sender.Kind != contracts.PrincipalSession || m.Sender.ID != f.child.Session.SessionID || m.Mode != contracts.ModeQueue {
 		t.Fatalf("report envelope: %+v", m)
 	}
-	for _, want := range []string{"finished its turn", "synthetic child", f.child.Session.SessionID, "Synthetic final answer: the tests pass.", "state: waiting_input", "Machine: "} {
+	if lead, _, _ := strings.Cut(m.Body.Text, "\n"); lead != "synthetic child finished: Synthetic final answer: the tests pass." {
+		t.Fatalf("lead line: %q", lead)
+	}
+	if strings.Contains(m.Body.Text, "Its last message:") {
+		t.Fatalf("a message the lead line shows whole is repeated:\n%s", m.Body.Text)
+	}
+	for _, want := range []string{"[pyre auto-report]", "finished its turn", "synthetic child", f.child.Session.SessionID, "state: waiting_input", "machine: "} {
 		if !strings.Contains(m.Body.Text, want) {
 			t.Fatalf("report text lacks %q:\n%s", want, m.Body.Text)
 		}
@@ -241,13 +247,21 @@ func TestChildReportSkippedWhenChildAlreadyMessagedParent(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Body.Text != "all green" {
 		t.Fatalf("duplicate auto report: %d %v", len(msgs), f.statuses())
 	}
-	// The next turn, without a message of its own, is reported.
-	f.x.clock.Add(time.Second)
+	// The next turn, minutes after its message, is still covered by it.
+	f.x.clock.Add(2 * time.Minute)
+	f.observe(contracts.RunRunning, "working")
+	f.observe(contracts.RunWaitingInput, "idle")
+	f.process()
+	if n := len(f.toParent()); n != 1 {
+		t.Fatalf("turn within %s of the child's message: %d %v", childRecentMessage, n, f.statuses())
+	}
+	// A later turn without a message of its own is reported.
+	f.x.clock.Add(childRecentMessage)
 	f.observe(contracts.RunRunning, "working")
 	f.observe(contracts.RunWaitingInput, "idle")
 	f.process()
 	if n := len(f.toParent()); n != 2 {
-		t.Fatalf("next turn: %d", n)
+		t.Fatalf("next turn: %d %v", n, f.statuses())
 	}
 }
 
@@ -284,16 +298,57 @@ func TestChildReportParentGone(t *testing.T) {
 		t.Fatalf("statuses: %v", st)
 	}
 
-	// An ended (not archived) parent: nothing either.
+}
+
+// A parent without a live run gets the report when it runs again (held,
+// not dropped, never the owner's inbox).
+func TestChildReportHeldForParentsNextRun(t *testing.T) {
 	g := newChildFixture(t, nil)
 	pr := *g.x.session(g.parent.Session.SessionID).Run
 	pr.State, pr.StateReason = contracts.RunExited, "exited"
 	g.x.report(nodeMac, contracts.ReportRun, pr)
 	g.observe(contracts.RunRunning, "working")
-	g.observe(contracts.RunExited, "process exited")
+	g.observe(contracts.RunWaitingInput, "idle")
+	g.process()
+	g.x.clock.Add(10 * time.Minute)
 	g.process()
 	if n := len(g.toParent()); n != 0 || g.ownerInbox() != 0 {
-		t.Fatalf("report to an ended parent: %d", n)
+		t.Fatalf("report sent to an ended parent: %d, owner %d", n, g.ownerInbox())
+	}
+	if st := g.statuses(); len(st) != 1 || st[0] != "idle:pending:"+reportHeldDetail {
+		t.Fatalf("statuses: %v", st)
+	}
+	// The child's transcript may be gone later: the body is already rendered.
+	g.x.h.childSummary = func(ctx context.Context, sessionID, runID string) (string, error) {
+		return "", contracts.Errorf(contracts.ErrUnavailable, "node offline")
+	}
+	resp, err := g.x.h.ResumeSession(as(owner), contracts.ResumeRequest{Mutation: contracts.Mutation{OperationID: "op_synth-resume-parent"}, SessionID: g.parent.Session.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmds := g.x.ch.sentKinds(nodeMac, contracts.CmdResume)
+	g.x.ack(nodeMac, cmds[len(cmds)-1])
+	nr := *resp.Session.Run
+	nr.State, nr.Adapter = contracts.RunWaitingInput, "claude-synth"
+	g.x.result(nodeMac, cmds[len(cmds)-1], contracts.OutcomeSucceeded, nr)
+	g.process() // due at once (no recheck wait)
+	msgs := g.toParent()
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Body.Text, "Synthetic final answer") {
+		t.Fatalf("held report after the parent resumed: %d %v", len(msgs), g.statuses())
+	}
+
+	// Held too long: dropped.
+	h := newChildFixture(t, nil)
+	hr := *h.x.session(h.parent.Session.SessionID).Run
+	hr.State = contracts.RunExited
+	h.x.report(nodeMac, contracts.ReportRun, hr)
+	h.observe(contracts.RunRunning, "working")
+	h.observe(contracts.RunWaitingInput, "idle")
+	h.process()
+	h.x.clock.Add(childReportHold + time.Hour)
+	h.process()
+	if st := h.statuses(); len(st) != 1 || !strings.Contains(st[0], "skipped:the parent had no live run") {
+		t.Fatalf("expired hold: %v", st)
 	}
 }
 
@@ -311,6 +366,9 @@ func TestChildReportExitAndFailure(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("want one exit report, got %d: %v", len(msgs), f.statuses())
 	}
+	if lead, _, _ := strings.Cut(msgs[0].Body.Text, "\n"); lead != "synthetic child failed: claude exited with an API error" {
+		t.Fatalf("lead line: %q", lead)
+	}
 	for _, want := range []string{"has failed", "claude exited with an API error", "exit code 1", "Synthetic final answer"} {
 		if !strings.Contains(msgs[0].Body.Text, want) {
 			t.Fatalf("exit report lacks %q:\n%s", want, msgs[0].Body.Text)
@@ -327,8 +385,11 @@ func TestChildReportSummaryClippedAndUnavailable(t *testing.T) {
 	f.observe(contracts.RunWaitingInput, "idle")
 	f.process()
 	msgs := f.toParent()
-	if len(msgs) != 1 || strings.Count(msgs[0].Body.Text, "é") != childSummaryMax || !strings.Contains(msgs[0].Body.Text, "…") {
-		t.Fatalf("summary not clipped to %d runes", childSummaryMax)
+	_, last, _ := strings.Cut(msgs[0].Body.Text, "Its last message: ")
+	lead, _, _ := strings.Cut(msgs[0].Body.Text, "\n")
+	if len(msgs) != 1 || strings.Count(last, "é") != childSummaryMax || !strings.Contains(last, "… (read_session for the rest)") ||
+		strings.Count(lead, "é") != childLeadMax {
+		t.Fatalf("summary not clipped to %d runes (lead %d):\n%s", childSummaryMax, childLeadMax, msgs[0].Body.Text)
 	}
 	f.x.h.childSummary = func(ctx context.Context, sessionID, runID string) (string, error) {
 		return "", contracts.Errorf(contracts.ErrUnavailable, "node offline")
@@ -339,6 +400,108 @@ func TestChildReportSummaryClippedAndUnavailable(t *testing.T) {
 	msgs = f.toParent()
 	if len(msgs) != 2 || !strings.Contains(msgs[1].Body.Text, "unavailable") {
 		t.Fatalf("unavailable summary: %v", msgs)
+	}
+}
+
+// A turn that finishes and then ends gets one report, not two.
+func TestChildReportEndedCoalescesWithIdle(t *testing.T) {
+	// Both observed before the worker runs: the ended report replaces the
+	// pending idle one and carries the last message.
+	f := newChildFixture(t, nil)
+	f.observe(contracts.RunRunning, "working")
+	f.observe(contracts.RunWaitingInput, "idle")
+	f.observe(contracts.RunExited, "process exited")
+	f.process()
+	msgs := f.toParent()
+	if len(msgs) != 1 || !strings.HasPrefix(msgs[0].Body.Text, "synthetic child exited: Synthetic final answer") {
+		t.Fatalf("pending idle + ended: %d %v", len(msgs), f.statuses())
+	}
+	if st := f.statuses(); len(st) != 2 || st[0] != "idle:skipped:replaced by the ended report" || st[1] != "ended:sent:" {
+		t.Fatalf("statuses: %v", st)
+	}
+
+	// The idle report went out but is still undelivered: cancelled and
+	// replaced by the ended report.
+	g := newChildFixture(t, nil)
+	g.observe(contracts.RunRunning, "working")
+	g.observe(contracts.RunWaitingInput, "idle")
+	g.process()
+	idle := g.toParent()
+	g.x.clock.Add(time.Minute)
+	g.observe(contracts.RunExited, "process exited")
+	g.process()
+	msgs = g.toParent()
+	if len(idle) != 1 || len(msgs) != 2 || !strings.Contains(msgs[1].Body.Text, "Synthetic final answer") {
+		t.Fatalf("undelivered idle + ended: %d %v", len(msgs), g.statuses())
+	}
+	if v := g.x.msg(idle[0].MessageID); v.Status.Runtime != contracts.DeliveryCancelled {
+		t.Fatalf("replaced idle report not cancelled: %+v", v.Status)
+	}
+
+	// The parent already has the idle report (acked): an ended report
+	// within childReportCoalesce is not sent; a later one refers to it.
+	for _, tc := range []struct {
+		after time.Duration
+		sent  bool
+	}{{time.Minute, false}, {childReportCoalesce + time.Minute, true}} {
+		h := newChildFixture(t, nil)
+		h.observe(contracts.RunRunning, "working")
+		h.observe(contracts.RunWaitingInput, "idle")
+		h.process()
+		idle := h.toParent()
+		if len(idle) != 1 {
+			t.Fatalf("idle: %v", h.statuses())
+		}
+		if _, err := h.x.h.AckMessage(as(sesPrincipal(h.parent.Session.SessionID)), contracts.AckMessageRequest{
+			Mutation: contracts.Mutation{OperationID: "op_synth-ack-idle"}, MessageID: idle[0].MessageID}); err != nil {
+			t.Fatal(err)
+		}
+		h.x.clock.Add(tc.after)
+		h.observe(contracts.RunExited, "process exited")
+		h.process()
+		msgs := h.toParent()
+		switch {
+		case !tc.sent && len(msgs) != 1:
+			t.Fatalf("ended %s after a delivered idle report was sent: %v", tc.after, h.statuses())
+		case tc.sent && (len(msgs) != 2 || !strings.Contains(msgs[1].Body.Text, "earlier report "+idle[0].MessageID) ||
+			strings.Contains(msgs[1].Body.Text, "Synthetic final answer")):
+			t.Fatalf("ended %s later: %d %v", tc.after, len(msgs), msgs)
+		}
+	}
+}
+
+// The lead line is the title and the first sentence; the rest is bounded.
+func TestChildReportLeadLine(t *testing.T) {
+	f := newChildFixture(t, nil)
+	f.x.h.childSummary = func(ctx context.Context, sessionID, runID string) (string, error) {
+		return "## Summary\n\nAll 12 synthetic tests pass, e.g. the parser ones. Next I would refactor.\n\nDetails follow.", nil
+	}
+	f.observe(contracts.RunRunning, "working")
+	f.observe(contracts.RunWaitingInput, "idle")
+	f.process()
+	msgs := f.toParent()
+	if len(msgs) != 1 {
+		t.Fatalf("%v", f.statuses())
+	}
+	lines := strings.Split(msgs[0].Body.Text, "\n")
+	if lines[0] != "synthetic child finished: All 12 synthetic tests pass, e.g. the parser ones." || !strings.HasPrefix(lines[1], "[pyre auto-report]") {
+		t.Fatalf("report:\n%s", msgs[0].Body.Text)
+	}
+	if !strings.Contains(msgs[0].Body.Text, "Its last message: ## Summary") {
+		t.Fatalf("summary:\n%s", msgs[0].Body.Text)
+	}
+	for in, want := range map[string]string{
+		"All 12 synthetic tests pass, e.g. the parser ones. Next I would refactor.": "All 12 synthetic tests pass, e.g. the parser ones.",
+		"\n- Done! Merged.":     "Done!",
+		"What next? Tell me.":   "What next?",
+		"v1.2 ships. ok":        "v1.2 ships. ok",
+		"   ":                   "",
+		"no punctuation at all": "no punctuation at all",
+		"> quoted. Then more":   "quoted.",
+	} {
+		if got := firstSentence(in); got != want {
+			t.Errorf("firstSentence(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -408,6 +571,16 @@ func TestSessionPrincipalArchiveAndRenameScope(t *testing.T) {
 	if err := upd(childP, "op_synth-a5", f.child.Session.SessionID, &yes, nil); err != nil {
 		t.Fatalf("self archive: %v", err)
 	}
+	// Refused: a session the owner started archiving itself (an owner
+	// conversation; Codex agents archived owner chats after answering).
+	if f.parent.Session.CreatedBy.Kind == contracts.PrincipalOwner {
+		wantCode(t, upd(parentP, "op_synth-a6", f.parent.Session.SessionID, &yes, nil), contracts.ErrForbidden)
+		if x.session(f.parent.Session.SessionID).Session.Archived {
+			t.Fatal("owner-started session archived itself")
+		}
+	} else {
+		t.Fatalf("fixture parent not owner-started: %+v", f.parent.Session.CreatedBy)
+	}
 	// Rename: any session, never over the owner's title. The title the
 	// parent gave the child at launch is agent-chosen, so the parent can
 	// rename its reviewer later; the unrelated session's title is automatic.
@@ -427,5 +600,101 @@ func TestSessionPrincipalArchiveAndRenameScope(t *testing.T) {
 	}
 	if err := upd(parentP, "op_synth-r4", other.Session.SessionID, nil, &name); err != nil {
 		t.Fatalf("renaming over an owner title: %v", err)
+	}
+}
+
+// A session started by a session in a project joins that project unless
+// the start names a project (or "" for none).
+func TestChildInheritsParentProject(t *testing.T) {
+	x := newHarness(t)
+	x.connect(nodeMac, 0)
+	parent := x.start(owner, "op_synth-proj-parent", nodeMac)
+	if _, err := x.db.Exec(`UPDATE sessions SET project_id='prj_synthetic000000000000001' WHERE session_id=?`, parent.Session.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	start := func(op string, project *string) contracts.Session {
+		resp, err := x.h.StartSession(as(sesPrincipal(parent.Session.SessionID)), contracts.StartSessionRequest{
+			Mutation: contracts.Mutation{OperationID: op}, NodeID: nodeMac, Harness: contracts.HarnessClaude, Cwd: "/home/synth/child",
+			Title: "synthetic child", ProjectID: project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Session.Session
+	}
+	if s := start("op_synth-proj-inherit", nil); s.ProjectID == nil || *s.ProjectID != "prj_synthetic000000000000001" {
+		t.Fatalf("child did not join the parent's project: %v", s.ProjectID)
+	}
+	other := "prj_synthetic000000000000002"
+	if s := start("op_synth-proj-explicit", &other); s.ProjectID == nil || *s.ProjectID != other {
+		t.Fatalf("explicit project not kept: %v", s.ProjectID)
+	}
+	none := ""
+	if s := start("op_synth-proj-none", &none); s.ProjectID != nil {
+		t.Fatalf("explicit no-project not kept: %v", *s.ProjectID)
+	}
+}
+
+// startFailingChild starts a child whose launch fails with reason (no
+// process ever runs).
+func (f *childFixture) startFailingChild(op string, report *bool, reason string) contracts.SessionView {
+	x := f.x
+	x.t.Helper()
+	resp, err := x.h.StartSession(as(sesPrincipal(f.parent.Session.SessionID)), contracts.StartSessionRequest{
+		Mutation: contracts.Mutation{OperationID: op}, NodeID: nodeMac, Harness: contracts.HarnessClaude, Cwd: "/home/synth/child",
+		Title: "synthetic reviewer", InitialPrompt: "review the synthetic diff", ReportToParent: report})
+	if err != nil {
+		x.t.Fatalf("start child: %v", err)
+	}
+	cmds := x.ch.sentKinds(nodeMac, contracts.CmdStartRun)
+	cmd := cmds[len(cmds)-1]
+	x.ack(nodeMac, cmd)
+	x.report(nodeMac, contracts.ReportCommandResult, contracts.CommandResult{CommandID: cmd.CommandID, Kind: cmd.Kind, Outcome: contracts.OutcomeFailed,
+		Error: contracts.Errorf(contracts.ErrCapacityExhausted, "%s", reason), At: x.clock.Now()})
+	return x.session(resp.Session.Session.SessionID)
+}
+
+// A child whose launch fails (2026-10-12: Codex reviewers started while
+// every account waited on a reset) tells its parent in plain words, without
+// reading a transcript it never had; a child that opted out of reports
+// still reports the failure (the owner's inbox no longer carries it), once.
+func TestChildReportLaunchFailure(t *testing.T) {
+	const reason = "no eligible openai subscription on this node: acct_synth-1: cooldown until 2026-10-12T20:00:00Z (usage limit)"
+	for _, report := range []*bool{nil, boolp(false)} {
+		f := newChildFixture(t, nil)
+		f.x.h.childSummary = func(ctx context.Context, sessionID, runID string) (string, error) {
+			if sessionID != f.child.Session.SessionID {
+				t.Errorf("transcript read for a launch that never ran: %s", sessionID)
+			}
+			return "Synthetic final answer: the tests pass.", nil
+		}
+		c := f.startFailingChild("op_synth-failing", report, reason)
+		if c.Run == nil || c.Run.State != contracts.RunFailed {
+			t.Fatalf("child run: %+v", c.Run)
+		}
+		f.process()
+		f.process()
+		var got []contracts.MessageEnvelope
+		rows, _ := f.x.db.Query(`SELECT envelope FROM messages WHERE recipient_kind='session' AND recipient_id=? AND sender_id=?`, f.parent.Session.SessionID, c.Session.SessionID)
+		for rows.Next() {
+			var body string
+			rows.Scan(&body)
+			var e contracts.MessageEnvelope
+			json.Unmarshal([]byte(body), &e)
+			got = append(got, e)
+		}
+		rows.Close()
+		if len(got) != 1 || f.ownerInbox() != 0 {
+			t.Fatalf("report=%v: parent got %d reports, owner %d", report, len(got), f.ownerInbox())
+		}
+		text := got[0].Body.Text
+		lead, _, _ := strings.Cut(text, "\n")
+		if lead != "synthetic reviewer could not start: no Codex account with capacity right now; it can resume after the reset" {
+			t.Fatalf("lead: %q", lead)
+		}
+		for _, want := range []string{"has failed", "It never ran: no account had capacity", "The owner was not notified"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("report lacks %q:\n%s", want, text)
+			}
+		}
 	}
 }

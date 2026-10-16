@@ -7,7 +7,7 @@
 #              [--service none|node|hub] [--no-activate] [--no-prune] [--edit-path]
 #              [node: --state DIR --credential FILE --name NAME --ssh-alias A --max-runs N
 #                     --dev-mock --no-integrations --pyred-arg ARG (repeatable)]
-#              [hub:  --hub-data DIR --hub-listen ADDR --hub-url URL --preview-listen ADDR]
+#              [hub:  --hub-data DIR --hub-listen ADDR --hub-also-listen ADDR (repeatable) --hub-url URL --preview-listen ADDR]
 #              [--memory-max V --memory-high V --cpu-quota V --no-harden] [--path PATH]
 #              [Linux node: --no-scope --runs-memory-high V --runs-cpu-weight N --force-scope-switch]
 #              [--with-tools [--tools-tarball FILE | --tools-from DIR] [--tools-alongside]]
@@ -67,6 +67,7 @@ usage() { sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 FROM="" TARBALL="" SUMS="" SIG="" ALLOWED_ARG="" ALLOW_UNSIGNED=0 VERSION="" SERVICE=none ACTIVATE=1 EDIT_PATH=0 PRUNE=1
 PYRED_ARGS=()
+HUB_ALSO_LISTEN=()
 CREDENTIAL="" NODE_NAME="" SSH_ALIAS="" MAX_RUNS="" DEV_MOCK=0 NO_INTEG=0
 HUB_LISTEN=":7443" HUB_URL="" PREVIEW_LISTEN=""
 MEM_MAX="" CPU_QUOTA="" HARDEN=1 SVC_PATH=""
@@ -98,6 +99,7 @@ while [ $# -gt 0 ]; do
     --no-integrations) NO_INTEG=1; shift ;;
     --hub-data) HUB_DATA=${2:?}; shift 2 ;;
     --hub-listen) HUB_LISTEN=${2:?}; shift 2 ;;
+    --hub-also-listen) HUB_ALSO_LISTEN+=("${2:?}"); shift 2 ;;
     --hub-url) HUB_URL=${2:?}; shift 2 ;;
     --preview-listen) PREVIEW_LISTEN=${2:?}; shift 2 ;;
     --memory-max) MEM_MAX=${2:?}; shift 2 ;;
@@ -322,6 +324,10 @@ else
     act cp "$SRC_BIN/$b" "$STAGE/bin/$b"
     act chmod 755 "$STAGE/bin/$b"
   done
+  SRC_APP="$(dirname "$SRC_BIN")/Pyre.app"
+  if [ -d "$SRC_APP" ]; then
+    if command -v ditto >/dev/null 2>&1; then act ditto "$SRC_APP" "$STAGE/Pyre.app"; else act cp -R "$SRC_APP" "$STAGE/Pyre.app"; fi
+  fi
   if [ "$DRY" = 0 ]; then
     for b in $PYRE_BINS; do
       [ "$(sha256_of "$SRC_BIN/$b")" = "$(sha256_of "$STAGE/bin/$b")" ] || die "copy of $b does not match its source"
@@ -357,6 +363,7 @@ if [ "$ACTIVATE" = 1 ]; then
     note "current -> $VERSION${PREV:+ (was $PREV)}"
   fi
   [ "$PRUNE" = 0 ] || prune_versions
+  [ "$T_OS" != darwin ] || sync_app
 else
   note "staged only (--no-activate); current stays ${PREV:-unset}"
 fi
@@ -472,7 +479,9 @@ fi
 CUR_BIN="$PREFIX/current/bin"
 set --
 if [ "$SERVICE" = node ]; then
-  set -- "$CUR_BIN/pyred" run --state "$NODE_STATE"
+  PYRED_PROG="$CUR_BIN/pyred"
+  if [ "$T_OS" = darwin ] && [ -d "$(r "$PREFIX/Pyre.app")" ]; then PYRED_PROG="$PREFIX/Pyre.app/Contents/MacOS/pyred"; fi
+  set -- "$PYRED_PROG" run --state "$NODE_STATE"
   if [ -z "$CREDENTIAL" ] && [ ! -f "$(r "$NODE_STATE/node-credential.json")" ] && [ -f "$(r "$PREFIX/node-credential.json")" ]; then
     CREDENTIAL="$PREFIX/node-credential.json"  # written by `pyre enroll-node --bootstrap`
     note "using the bootstrap credential $CREDENTIAL"
@@ -491,6 +500,7 @@ if [ "$SERVICE" = node ]; then
   act chmod 700 "$(r "$NODE_STATE")"
 else
   set -- "$CUR_BIN/pyre-hub" serve --data "$HUB_DATA" --listen "$HUB_LISTEN"
+  for a in ${HUB_ALSO_LISTEN[@]+"${HUB_ALSO_LISTEN[@]}"}; do set -- "$@" --also-listen "$a"; done
   [ -z "$HUB_URL" ] || set -- "$@" --hub-url "$HUB_URL"
   [ -z "$PREVIEW_LISTEN" ] || set -- "$@" --preview-listen "$PREVIEW_LISTEN"
   if [ ! -f "$(r "$HUB_DATA/hub.db")" ]; then

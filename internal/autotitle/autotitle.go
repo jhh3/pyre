@@ -14,6 +14,8 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/clipperhouse/uax29/v2/graphemes"
+
 	"github.com/jhh3/pyre/internal/contracts"
 )
 
@@ -211,4 +213,37 @@ func StartTags(title string, h contracts.Harness, tags []string) []string {
 		return tags
 	}
 	return append(slices.Clone(tags), TagAuto)
+}
+
+// MaxIconBytes bounds a session icon (one grapheme cluster: an emoji with
+// modifiers or a ZWJ sequence stays well under it).
+const MaxIconBytes = 64
+
+// ValidIcon checks a session icon (W-archive2): empty (no icon) or a
+// single emoji — one grapheme cluster, one or two cells wide, not plain
+// ASCII or a control character. It returns the trimmed icon.
+func ValidIcon(icon string) (string, error) {
+	icon = strings.TrimSpace(icon)
+	if icon == "" {
+		return "", nil
+	}
+	bad := contracts.Errorf(contracts.ErrInvalid, "icon must be a single emoji (one character, at most two cells wide), got %q", icon)
+	if len(icon) > MaxIconBytes {
+		return "", bad
+	}
+	// One grapheme cluster only (uax29, no terminal-width tables: pyred
+	// must not link the TUI's width libraries). Emoji render 1–2 cells.
+	seg := graphemes.FromString(icon)
+	if !seg.Next() || seg.Value() != icon {
+		return "", bad
+	}
+	for _, r := range icon {
+		if r < 0x80 && r != 0x23 && r != 0x2a && (r < '0' || r > '9') || unicode.IsControl(r) || unicode.IsSpace(r) {
+			return "", bad // keycaps (#️⃣, 1️⃣) start with ASCII; letters never do
+		}
+	}
+	if r := []rune(icon)[0]; r < 0x80 && len([]rune(icon)) == 1 {
+		return "", bad // a bare digit, # or *
+	}
+	return icon, nil
 }

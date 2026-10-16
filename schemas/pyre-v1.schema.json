@@ -1413,6 +1413,31 @@
         "updated_at"
       ]
     },
+    "DeliverySummary": {
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "final": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "state",
+        "summary"
+      ]
+    },
     "DeviceGrant": {
       "properties": {
         "grant_id": {
@@ -2358,6 +2383,13 @@
         },
         "handoff_note_id": {
           "type": "string"
+        },
+        "reparented_from": {
+          "type": "string"
+        },
+        "reparented_at": {
+          "type": "string",
+          "format": "date-time"
         }
       },
       "type": "object"
@@ -2486,6 +2518,9 @@
         },
         "cursor": {
           "type": "integer"
+        },
+        "delivery_status": {
+          "$ref": "#/$defs/DeliverySummary"
         }
       },
       "type": "object",
@@ -3651,6 +3686,9 @@
         },
         "archived": {
           "type": "boolean"
+        },
+        "icon": {
+          "type": "string"
         }
       },
       "type": "object",

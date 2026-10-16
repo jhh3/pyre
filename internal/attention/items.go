@@ -248,6 +248,7 @@ const (
 	opRaise    opKind = iota + 1 // create or collapse into the active item for groupKey
 	opWithdraw                   // underlying request resolved elsewhere
 	opHandle                     // the owner acted (e.g. replied in the thread)
+	opLeave                      // sessionID leaves every grouped item (members.go)
 )
 
 func (o opKind) String() string {
@@ -258,6 +259,8 @@ func (o opKind) String() string {
 		return "withdraw"
 	case opHandle:
 		return "handle"
+	case opLeave:
+		return "leave"
 	}
 	return "?"
 }
@@ -283,6 +286,11 @@ type change struct {
 	// before, when set, limits a withdraw/handle to items last updated at
 	// or before it, so a late-processed event cannot clear a newer item.
 	before time.Time
+	// member, with a raise, joins that session to the group's item instead
+	// of counting a repeat: the item lists its member sessions (labels are
+	// their titles) and is withdrawn when the last one leaves (members.go).
+	member      string
+	memberLabel string
 }
 
 func activeBySessionKindsTx(ctx context.Context, tx *sql.Tx, sessionID string, kinds []contracts.AttentionKind) ([]itemRow, error) {
@@ -297,7 +305,12 @@ func activeBySessionKindsTx(ctx context.Context, tx *sql.Tx, sessionID string, k
 // applyChangeTx applies one change. It reports whether anything changed.
 func (s *Store) applyChangeTx(ctx context.Context, tx *sql.Tx, ch change, cursor int64, now time.Time) (bool, error) {
 	switch ch.op {
+	case opLeave:
+		return s.leaveTx(ctx, tx, ch, cursor, now)
 	case opRaise:
+		if ch.member != "" {
+			return s.raiseMemberTx(ctx, tx, ch, cursor, now)
+		}
 		active, err := activeByGroupTx(ctx, tx, ch.groupKey)
 		if err != nil {
 			return false, err

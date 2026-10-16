@@ -153,3 +153,33 @@ func (m *Model) renameCommand() command {
 func (m *Model) markTitle(title string) string {
 	return m.mark(zoneDef{kind: zoneHint, name: "R"}, title)
 }
+
+// iconCommand is :icon [emoji] (W-archive2): sets the selected session's
+// emoji, shown before its title; no emoji clears it.
+func (m *Model) iconCommand() command {
+	return command{name: "icon", aliases: []string{"emoji"}, args: "[emoji]", desc: "set the selected session's emoji (shown before its title; none clears it)",
+		run: func(m *Model, args string) tea.Cmd {
+			s, ok := m.selectedSession()
+			if !ok {
+				return m.setToast("select a session first", toneWarn)
+			}
+			icon := strings.TrimSpace(args)
+			sid := s.Session.SessionID
+			key := "icon:" + sid + ":" + icon
+			req := contracts.UpdateSessionRequest{Mutation: contracts.Mutation{OperationID: m.opID(key)}, SessionID: sid, Icon: &icon}
+			api := m.api
+			return m.do(func(ctx context.Context) (any, error) {
+				return api.UpdateSession(ctx, req)
+			}, func(m *Model, v any, err error) tea.Cmd {
+				delete(m.opIDs, key)
+				if err != nil {
+					return m.errToast("icon", err)
+				}
+				msg := "icon cleared"
+				if icon != "" {
+					msg = "icon set to " + icon
+				}
+				return tea.Batch(m.setToast(msg, toneMuted), m.reload("sessions", nil))
+			})
+		}}
+}

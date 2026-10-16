@@ -15,19 +15,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
+	"github.com/jhh3/pyre/internal/buildinfo"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/osutil"
 	"github.com/jhh3/pyre/internal/runtime/claudeplugin"
+	"github.com/jhh3/pyre/internal/runtime/hostsel"
+	"github.com/jhh3/pyre/internal/runtime/sessionhost"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // AdapterName is the RunHandle.Adapter value.
@@ -77,6 +84,11 @@ type Options struct {
 	// validation; off by default, in which case ProfileDir is ignored and the
 	// node's default login is used).
 	ProfileAsConfigDir bool
+	// TranscriptHomes are further Claude config homes (globs allowed) where
+	// a resumed session's transcript may live besides the default login,
+	// e.g. the accounts' shared store and every profile. A resume imports
+	// it into the new run's config home (resumeimport.go).
+	TranscriptHomes []string
 	// StopHookSteer enables ModeSteer via Stop-hook injection (delivered when
 	// the current turn ends; the TUI shows "Stop hook error").
 	StopHookSteer bool
@@ -93,6 +105,13 @@ type Options struct {
 	// human detaches races the queued notification and the agent would see
 	// the message twice.
 	DoorbellPasteHold time.Duration
+	// DisablePluginDelivery turns off plugin prompt delivery (capability
+	// input.plugin_prompt): by default every run's generated plugin carries
+	// a hooks module that submits Pyre messages with $.prompt.submit between
+	// turns, and Deliver prefers it whenever the module reports it is
+	// loaded; paste remains the fallback (older Claude Code, module not
+	// loaded, steering mid-turn).
+	DisablePluginDelivery bool
 	// DisableApprovalBroker leaves permission prompts to the TUI only.
 	DisableApprovalBroker bool
 	// ApprovalWait is how long the PermissionRequest hook waits for a Pyre
@@ -112,12 +131,14 @@ type Options struct {
 // Adapter implements contracts.RuntimeAdapter for Claude Code.
 type Adapter struct {
 	o   Options
-	srv *tmux.Server
+	srv sessionhost.Host
 
 	mu   sync.Mutex
 	runs map[string]*runEntry
 
 	automated sync.Map // action+run already reported through OnAutomation
+
+	tails tailCache // sessions.read's per-transcript state (transcript_tail.go)
 }
 
 var _ contracts.RuntimeAdapter = (*Adapter)(nil)
@@ -142,6 +163,9 @@ type runMeta struct {
 	// ManagedSettings is the environment generation's settings overlay that
 	// was merged into this run's pyre-hooks.json ("" = none).
 	ManagedSettings string `json:"managed_settings,omitempty"`
+	// InitialPrompt: launched with a prompt, so the run's first
+	// UserPromptSubmit is that prompt, not the owner typing (askNudge).
+	InitialPrompt bool `json:"initial_prompt,omitempty"`
 }
 
 // New validates options. The tmux server starts lazily on first launch.
@@ -152,11 +176,8 @@ func New(o Options) (*Adapter, error) {
 	if len(o.HookCommand) == 0 {
 		return nil, errors.New("claude: HookCommand is required")
 	}
-	srv, err := tmux.NewServer(o.TmuxBin, o.TmuxSocket)
+	srv, err := hostsel.New(o.TmuxBin, o.TmuxSocket)
 	if err != nil {
-		return nil, err
-	}
-	if err := srv.WriteConfig(); err != nil {
 		return nil, err
 	}
 	if o.PermissionMode == "" {
@@ -183,8 +204,8 @@ func New(o Options) (*Adapter, error) {
 	return &Adapter{o: o, srv: srv, runs: map[string]*runEntry{}}, nil
 }
 
-// Server exposes the tmux server (for daemon housekeeping).
-func (a *Adapter) Server() *tmux.Server { return a.srv }
+// Server exposes the session host (for daemon housekeeping).
+func (a *Adapter) Server() sessionhost.Host { return a.srv }
 
 func (a *Adapter) Name() string               { return AdapterName }
 func (a *Adapter) Harness() contracts.Harness { return contracts.HarnessClaude }
@@ -206,10 +227,18 @@ func (a *Adapter) Capabilities() []string {
 		caps = append(caps, contracts.CapInputSteer, contracts.CapInputStopHook)
 	}
 	if a.o.ProfileAsConfigDir {
-		caps = append(caps, contracts.CapAccountProfile)
+		// Cross-account resume: every Pyre Claude profile on a node links
+		// its conversation store (projects/, todos/, ...) to one shared
+		// store, so `claude --resume <uuid>` under another account's
+		// CLAUDE_CONFIG_DIR finds the same transcript. The daemon still
+		// checks both profiles resolve to the same store before resuming.
+		caps = append(caps, contracts.CapAccountProfile, contracts.CapAccountCrossResume)
 	}
 	if len(a.o.DoorbellCommand) > 0 {
 		caps = append(caps, contracts.CapInputMonitor)
+	}
+	if !a.o.DisablePluginDelivery {
+		caps = append(caps, contracts.CapInputPlugin)
 	}
 	return caps
 }
@@ -217,6 +246,10 @@ func (a *Adapter) Capabilities() []string {
 var claudeVersionRe = regexp.MustCompile(`(\d+\.\d+\.\d+)`)
 
 func (a *Adapter) claudeBin(l *contracts.ResolvedLaunch) string {
+	return nativeClaude(a.claudeBinRaw(l))
+}
+
+func (a *Adapter) claudeBinRaw(l *contracts.ResolvedLaunch) string {
 	if l != nil && l.Executable != "" {
 		return l.Executable
 	}
@@ -229,12 +262,38 @@ func (a *Adapter) claudeBin(l *contracts.ResolvedLaunch) string {
 	return "claude"
 }
 
+// nativeClaude runs the native claude.exe instead of npm's claude.cmd on
+// Windows: cmd.exe truncates the command line at the first newline, which
+// dropped the agent guide and the initial prompt.
+func nativeClaude(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	if n := winenv.Default().NativeClaude(p); n != "" {
+		return n
+	}
+	return p
+}
+
+// monitorCommand is the plugin monitor's shell command line. On Windows it
+// is parsed by Git Bash, so paths use forward slashes (which Win32 accepts)
+// and POSIX quoting.
+func monitorCommand(argv []string) string {
+	if runtime.GOOS == "windows" {
+		for i, a := range argv {
+			if filepath.IsAbs(a) {
+				argv[i] = winenv.PosixPath(a)
+			}
+		}
+	}
+	return tmux.ShellJoin(argv)
+}
+
 func (a *Adapter) Probe(ctx context.Context) (contracts.ProbeResult, error) {
 	bin := a.claudeBin(nil)
 	pr := contracts.ProbeResult{Harness: contracts.HarnessClaude, Adapter: AdapterName, Executable: bin, Capabilities: a.Capabilities()}
-	v, err := a.srv.Version(ctx)
-	if err != nil || !v.AtLeast(3, 2) {
-		pr.Reason = fmt.Sprintf("tmux >= 3.2 required (%v %v)", v.Raw, err)
+	if _, err := a.srv.Check(ctx); err != nil {
+		pr.Reason = err.Error()
 		return pr, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -258,6 +317,13 @@ func (a *Adapter) Probe(ctx context.Context) (contracts.ProbeResult, error) {
 	}
 	if !tested {
 		pr.Reason = "untested Claude Code version (tested: " + strings.Join(TestedVersions, ", ") + "); paste/screen parsing may differ"
+	}
+	if runtime.GOOS == "windows" && winenv.Default().GitBash() == "" {
+		note := "Git for Windows (bash.exe) not found: Claude Code uses PowerShell for its shell and hooks and the Pyre doorbell monitor is off (install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH)"
+		if pr.Reason != "" {
+			note = pr.Reason + "; " + note
+		}
+		pr.Reason = note
 	}
 	return pr, nil
 }
@@ -335,7 +401,7 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	if err := tmux.PrepareDir(l.StateDir); err != nil {
 		return contracts.RunHandle{}, err
 	}
-	for _, d := range []string{dirPending, dirAnswers, dirInject} {
+	for _, d := range []string{dirPending, dirAnswers, dirInject, claudeplugin.SpoolDir} {
 		if err := tmux.PrepareDir(filepath.Join(l.StateDir, d)); err != nil {
 			return contracts.RunHandle{}, err
 		}
@@ -345,6 +411,10 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	if doorbell {
 		if k := doorbellBlocked(l.Env, l.Unset); k != "" {
 			doorbell, doorbellOff = false, "disabled: "+k+" is set (Claude Code runs no plugin monitors)"
+		} else if runtime.GOOS == "windows" && winenv.Default().GitBash() == "" {
+			// Plugin monitors are shell command lines; Pyre writes them for
+			// Git Bash only (PowerShell would need different quoting).
+			doorbell, doorbellOff = false, "disabled: Git for Windows (bash.exe) not found; Claude Code runs plugin monitors in its shell"
 		}
 	}
 	bypass := l.Env[PermissionsEnv] == "bypass"
@@ -396,9 +466,16 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	if l.AgentGuide != "" {
 		argv = append(argv, "--append-system-prompt", l.AgentGuide)
 	}
+	var spec claudeplugin.Spec
 	if doorbell {
-		cmd := tmux.ShellJoin(append(append([]string{}, a.o.DoorbellCommand...), "--run-dir", l.StateDir))
-		dir, err := claudeplugin.Generate(filepath.Join(l.StateDir, "pyre-plugin"), cmd)
+		spec.MonitorCommand = monitorCommand(append(append([]string{}, a.o.DoorbellCommand...), "--run-dir", l.StateDir))
+	}
+	if !a.o.DisablePluginDelivery {
+		spec.Module = &claudeplugin.Module{RunDir: l.StateDir, HookArgv: a.o.HookCommand}
+		a.resetPluginSpool(l.StateDir)
+	}
+	if spec.MonitorCommand != "" || spec.Module != nil {
+		dir, err := claudeplugin.Write(filepath.Join(l.StateDir, "pyre-plugin"), spec)
 		if err != nil {
 			return contracts.RunHandle{}, err
 		}
@@ -420,7 +497,7 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	if _, ok := env["PYRE_SESSION_ID"]; !ok && l.SessionID != "" {
 		env["PYRE_SESSION_ID"] = l.SessionID
 	}
-	meta := &runMeta{RunID: l.RunID, SessionUUID: sid, Cwd: l.Cwd, Resumed: resumed, LaunchedAt: a.o.Now().UTC(), ConfigMech: "default", ManagedSettings: managed}
+	meta := &runMeta{RunID: l.RunID, SessionUUID: sid, Cwd: l.Cwd, Resumed: resumed, LaunchedAt: a.o.Now().UTC(), ConfigMech: "default", ManagedSettings: managed, InitialPrompt: l.InitialPrompt != ""}
 	if a.o.ProfileAsConfigDir && l.ProfileDir != "" {
 		env["CLAUDE_CONFIG_DIR"] = l.ProfileDir
 		meta.ConfigDir, meta.ConfigMech = l.ProfileDir, "claude_config_dir"
@@ -428,6 +505,15 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 		meta.ConfigDir = d
 	} else {
 		meta.ConfigDir = defaultConfigDir()
+	}
+	if meta.ConfigMech == "claude_config_dir" {
+		ensureFirstRunAnswers(meta.ConfigDir)
+	}
+	installSkills(meta.ConfigDir)
+	if resumed {
+		if err := a.importTranscript(meta.ConfigDir, l.Cwd, sid); err != nil {
+			return contracts.RunHandle{}, contracts.Errorf(contracts.ErrUnavailable, "resume: bring the conversation into %s: %v", meta.ConfigDir, err)
+		}
 	}
 	mb, _ := json.MarshalIndent(meta, "", "  ")
 	if err := writeFileAtomic(filepath.Join(l.StateDir, fileRun), mb); err != nil {
@@ -440,12 +526,15 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	}
 	h := contracts.RunHandle{
 		RunID: l.RunID, SessionID: l.SessionID, Adapter: AdapterName, Harness: contracts.HarnessClaude,
-		TmuxSocket: a.o.TmuxSocket, TmuxTarget: l.RunID, StateDir: l.StateDir,
+		TmuxSocket: a.srv.SocketPath(), TmuxTarget: l.RunID, StateDir: l.StateDir,
 		NativeRef: &contracts.NativeRef{Kind: "claude_session", ID: sid},
 		Data:      map[string]string{"claude_session_id": sid, "config_mechanism": meta.ConfigMech},
 	}
 	if bypass {
 		h.Data["permissions"] = "bypass"
+	}
+	if !a.o.DisablePluginDelivery {
+		h.Data["plugin_delivery"] = "on"
 	}
 	switch {
 	case doorbell:
@@ -459,6 +548,27 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	}
 	a.waitStartup(ctx, h)
 	return h, nil
+}
+
+// skillNotes dedupes installSkills log lines (config dir + skill name).
+var skillNotes sync.Map
+
+// installSkills writes the agent slash commands into the session's Claude
+// config dir (bare /<name>; plugin skills need /pyre-session:<name>). A
+// failure or an owner's same-named skill is logged once and never blocks
+// the launch.
+func installSkills(configDir string) {
+	skipped, err := claudeplugin.MaterializeSkills(configDir, buildinfo.Version)
+	for _, name := range skipped {
+		if _, seen := skillNotes.LoadOrStore(configDir+"\x00"+name, true); !seen {
+			log.Printf("claude: %s/skills/%s is the owner's own skill (no %s); leaving it, /%s runs it", configDir, name, claudeplugin.ManagedMarker, name)
+		}
+	}
+	if err != nil {
+		if _, seen := skillNotes.LoadOrStore(configDir+"\x00error", true); !seen {
+			log.Printf("claude: install agent slash commands into %s: %v", configDir, err)
+		}
+	}
 }
 
 // waitStartup waits (bounded) for SessionStart while driving known startup
@@ -619,8 +729,7 @@ func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return osutil.ProcessAlive(pid)
 }
 
 type exitRecord struct {
@@ -730,6 +839,11 @@ func (a *Adapter) evalApprovals(h contracts.RunHandle, rs *runState, derived con
 			return ""
 		}
 		switch {
+		case !t.ScreenAnsweredAt.IsZero() && (t.AnsweredAt.IsZero() || t.AnsweredAt.After(t.ScreenAnsweredAt)):
+			// The dialog closed and the tool runs: answered in the terminal
+			// (a broker answer consumed later had no effect: C14, the hook
+			// keeps waiting after a TUI "Yes").
+			resolve("native", superseded(), t.ScreenAnsweredAt, "")
 		case !t.AnsweredAt.IsZero():
 			option := ans.option
 			if option == "" {
@@ -769,20 +883,62 @@ func (a *Adapter) evalApprovals(h contracts.RunHandle, rs *runState, derived con
 	return out
 }
 
-func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor string) (contracts.Observation, error) {
-	now := a.o.Now()
-	obs := contracts.Observation{ObservedAt: now, NativeRef: h.NativeRef}
-	pane, perr := a.srv.Pane(ctx, h.TmuxTarget)
-	gone := perr != nil && (errors.Is(perr, tmux.ErrNoSession) || errors.Is(perr, tmux.ErrNoServer))
+// permDialogGrace: a permission request younger than this whose dialog no
+// observation has shown yet is never judged answered by the screen (Claude
+// may not have drawn the dialog yet).
+const permDialogGrace = 3 * time.Second
 
-	e := a.entry(h)
-	e.mu.Lock()
-	a.refresh(h, e)
-	rs := e.rs
-	state, reason := rs.derive()
-	obs.Approvals = a.evalApprovals(h, rs, state)
-	for _, ap := range obs.Approvals {
+// observeApprovals evaluates the broker requests against the current screen
+// (si, nil when unavailable) and returns them with the run state (e.mu
+// held). Claude fires no hook when a permission dialog is answered "Yes" in
+// the terminal (C14: the broker hook keeps waiting) until the tool finishes,
+// so without the screen a long tool kept the run waiting_approval and its
+// expired request flagged "answer in its terminal". Every observation
+// re-checks the screen: a request is answered in the terminal once the
+// dialog is gone and the turn works ("esc to interrupt"), or, after the
+// remote answer window expired, once no dialog covers the input box. A
+// visible dialog keeps it waiting; nothing persists from a past screen
+// except the answered mark.
+func (a *Adapter) observeApprovals(h contracts.RunHandle, rs *runState, state contracts.RunState, reason string, si *screenInfo, now time.Time) ([]contracts.Approval, contracts.RunState, string) {
+	aps := a.evalApprovals(h, rs, state)
+	answered := false
+	if si != nil {
+		open := func(ap contracts.Approval) *approvalTrack {
+			if ap.State != contracts.ApprovalPending && ap.State != contracts.ApprovalExpired {
+				return nil
+			}
+			t := rs.approvals[ap.RequestID]
+			if t == nil || !t.AnsweredAt.IsZero() {
+				return nil
+			}
+			return t
+		}
+		for _, ap := range aps {
+			t := open(ap)
+			if t == nil {
+				continue
+			}
+			switch {
+			case si.DialogKind == "permission":
+				if t.DialogSeenAt.IsZero() {
+					t.DialogSeenAt = now
+				}
+			case !si.Clear():
+			case t.DialogSeenAt.IsZero() && now.Sub(t.CreatedAt) < permDialogGrace:
+			case si.Working() || ap.State == contracts.ApprovalExpired:
+				t.ScreenAnsweredAt = now
+				rs.activity = t.ToolName + ": " + oneLine(t.Summary, 120)
+				answered = true
+			}
+		}
+		if answered {
+			aps = a.evalApprovals(h, rs, state)
+		}
+	}
+	waiting := false
+	for _, ap := range aps {
 		if ap.State == contracts.ApprovalPending || ap.State == contracts.ApprovalExpired {
+			waiting = true
 			state = contracts.RunWaitingApproval
 			if ap.State == contracts.ApprovalExpired {
 				reason = "needs human: permission prompt waiting in its terminal (remote answer window expired; attach to answer it, or interrupt to cancel)"
@@ -791,6 +947,38 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 			}
 		}
 	}
+	// A permission prompt reported by a hook is waiting only while the
+	// screen shows it: answered in the terminal, the tool runs.
+	if !waiting && state == contracts.RunWaitingApproval && rs.permPrompt && si != nil && si.Clear() &&
+		(answered || (si.Working() && now.Sub(rs.lastStateAt) >= permDialogGrace)) {
+		rs.set(contracts.RunRunning, "permission answered in the terminal; tool running", now)
+		state, reason = rs.state, rs.reason
+	}
+	return aps, state, reason
+}
+
+func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor string) (contracts.Observation, error) {
+	now := a.o.Now()
+	obs := contracts.Observation{ObservedAt: now, NativeRef: h.NativeRef}
+	pane, perr := a.srv.Pane(ctx, h.TmuxTarget)
+	gone := perr != nil && (errors.Is(perr, tmux.ErrNoSession) || errors.Is(perr, tmux.ErrNoServer))
+
+	// The screen is read before the hook events so a permission request
+	// folded in below is never judged by an older screen (the grace in
+	// observeApprovals covers a request whose dialog is not drawn yet).
+	var si *screenInfo
+	if perr == nil && !pane.Dead {
+		if s, err := a.screen(ctx, h.TmuxTarget); err == nil {
+			si = &s
+		}
+	}
+
+	e := a.entry(h)
+	e.mu.Lock()
+	a.refresh(h, e)
+	rs := e.rs
+	state, reason := rs.derive()
+	obs.Approvals, state, reason = a.observeApprovals(h, rs, state, reason, si, now)
 	if rs.sessionID != "" {
 		obs.NativeRef = &contracts.NativeRef{Kind: "claude_session", ID: rs.sessionID}
 	}
@@ -833,8 +1021,8 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 		obs.ExitCode = pane.ExitStatus
 		writeExit(h.StateDir, exitRecord{ExitCode: pane.ExitStatus, Reason: reason, At: now})
 	default:
-		si, serr := a.screen(ctx, h.TmuxTarget)
-		if serr == nil {
+		if si != nil {
+			si := *si
 			// A dialog covering the input box blocks the run until a human
 			// answers it in the terminal: report it as waiting on a prompt
 			// (waiting_approval, "needs human: ..."), never as idle at the
@@ -848,9 +1036,10 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 			} else if state == contracts.RunWaitingInput && si.Dialog != "" && !si.HasInputBox {
 				state, reason = contracts.RunWaitingApproval, "needs human: "+si.Dialog+" (attach to answer it in the terminal)"
 			}
-			if obs.LimitEvent == nil && state != contracts.RunRunning {
-				obs.LimitEvent = screenLimit(si.Lines, now)
-			}
+			// No screen-based limit detection: a resumed session's screen still
+			// shows the previous run's "You've hit your limit", which re-triggered
+			// account switches. The StopFailure hook and timestamped transcript
+			// API-error records report real limits.
 			// A paste Pyre could not submit (indeterminate) may sit unsent in
 			// the input box: say so, and what a human does about it.
 			if state == contracts.RunWaitingInput && si.HasInputBox && !si.InputEmpty() {
@@ -864,23 +1053,6 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 	}
 	obs.State, obs.StateReason = state, reason
 	return obs, nil
-}
-
-// screenLimit looks for Claude's error lines ("⎿ …") near the bottom of the
-// screen that report a usage limit or a login problem.
-func screenLimit(lines []string, now time.Time) *contracts.LimitEvent {
-	start := len(lines) - 15
-	if start < 0 {
-		start = 0
-	}
-	var errs []string
-	for _, l := range lines[start:] {
-		t := strings.TrimSpace(l)
-		if strings.HasPrefix(t, "⎿") || strings.Contains(t, "/login") || strings.Contains(t, "/upgrade") || strings.Contains(t, "/extra-usage") {
-			errs = append(errs, t)
-		}
-	}
-	return detectLimit(strings.Join(errs, "\n"), now)
 }
 
 // cursor: "e<eventsOffset>.t<transcriptOffset>.p<pathHash>"
@@ -978,7 +1150,7 @@ func (a *Adapter) Attach(ctx context.Context, h contracts.RunHandle, req contrac
 	if ok, err := a.srv.HasSession(ctx, h.TmuxTarget); err != nil || !ok {
 		return contracts.AttachDescriptor{}, contracts.Errorf(contracts.ErrNotFound, "tmux session %s is gone", h.TmuxTarget)
 	}
-	d, err := tmux.BuildAttach(tmux.AttachConfig{NodeID: a.o.NodeID, SSHAlias: a.o.SSHAlias, TmuxBin: a.srv.Bin, Socket: a.o.TmuxSocket},
+	d, err := a.srv.AttachDescriptor(sessionhost.AttachConfig{NodeID: a.o.NodeID, SSHAlias: a.o.SSHAlias},
 		h.RunID, h.TmuxTarget, req, a.o.Now())
 	if err == nil && !d.ReadOnly {
 		d.Notes += "; while attached, Pyre queues structured input instead of pasting"
@@ -1222,26 +1394,9 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 	if req.Cursor != "" {
 		fmt.Sscanf(req.Cursor, "%d", &start)
 	}
-	var recs []transcriptRecord
-	if path != "" {
-		_, _ = readJSONLFrom(path, 0, 0, func(line []byte, _ int64) {
-			var t transcriptRecord
-			if json.Unmarshal(line, &t) == nil {
-				recs = append(recs, t)
-			}
-		})
-	}
-	entries := entriesFromTranscript(h.RunID, recs, 0)
 	var sel []contracts.TranscriptEntry
-	for _, en := range entries {
-		if en.Seq > start {
-			sel = append(sel, en)
-		}
-	}
-	if req.Tail && len(sel) > limit {
-		sel = sel[len(sel)-limit:]
-	} else if len(sel) > limit {
-		sel = sel[:limit]
+	if path != "" {
+		sel, _ = a.tails.read(path, h.RunID, start, limit, req.Tail)
 	}
 	resp.Entries = sel
 	if len(sel) > 0 {
@@ -1259,8 +1414,9 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 }
 
 // ResumeSpec: native `--resume <id>` keeps the same Claude session id when
-// the same account/config dir is available. Cross-account native resume is
-// not proven (WP02), so it returns a handoff.
+// the previous thread is reachable from the new binding: the same account,
+// or (daemon-checked, CapAccountCrossResume) another account whose profile
+// resolves to the same shared transcript store. Otherwise a handoff.
 func (a *Adapter) ResumeSpec(ctx context.Context, prev contracts.Run, sameAccount bool) (contracts.ContinuationKind, *contracts.NativeRef, error) {
 	if prev.NativeRef == nil || prev.NativeRef.Kind != "claude_session" || !uuidRe.MatchString(prev.NativeRef.ID) {
 		return contracts.ContinuationHandoff, nil, nil
@@ -1270,4 +1426,34 @@ func (a *Adapter) ResumeSpec(ctx context.Context, prev contracts.Run, sameAccoun
 	}
 	ref := *prev.NativeRef
 	return contracts.ContinuationNativeResume, &ref, nil
+}
+
+// ensureFirstRunAnswers adds Claude's non-secret first-run answers to a Pyre
+// profile's .claude.json when they are missing, at every launch: a profile
+// composed before the defaults existed (or rewritten by Claude) otherwise
+// stops at the theme picker and never runs the initial prompt (first GCP
+// Windows node). Existing values are never changed.
+func ensureFirstRunAnswers(dir string) {
+	p := filepath.Join(dir, ".claude.json")
+	cfg := map[string]json.RawMessage{}
+	if b, err := os.ReadFile(p); err == nil {
+		if json.Unmarshal(b, &cfg) != nil {
+			return // unparseable: leave it alone
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	changed := false
+	for k, v := range map[string]string{"hasCompletedOnboarding": "true", "theme": `"dark"`} {
+		if raw, ok := cfg[k]; !ok || string(raw) == "null" {
+			cfg[k] = json.RawMessage(v)
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	if b, err := json.MarshalIndent(cfg, "", "  "); err == nil {
+		_ = writeFileAtomic(p, b)
+	}
 }

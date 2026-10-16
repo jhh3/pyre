@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // Daemon self-update (the in-product `pyre update ... --tool pyred` path).
@@ -167,7 +168,7 @@ func (m *Manager) DaemonBoot(self string) (BootDecision, error) {
 			return dec, nil
 		}
 		exe := m.exePath(*act)
-		if st, err := os.Stat(exe); err != nil || st.IsDir() || st.Mode()&0o111 == 0 {
+		if st, err := os.Stat(exe); err != nil || !osutil.IsExecutable(exe, st) {
 			dec.Notes = append(dec.Notes, fmt.Sprintf("managed pyred %s has no executable at %s; rolling back", act.Version, exe))
 			m.rollbackHandoff(act.Version, "executable missing", self, &dec)
 			continue

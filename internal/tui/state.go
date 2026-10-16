@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -26,6 +27,14 @@ type tuiState struct {
 	// the list order (sort.go): grouped (default) or attention.
 	SessionsView string `json:"sessions_view,omitempty"`
 	Sort         string `json:"sort,omitempty"`
+	// NewSession remembers the new-session panel's last machine, agent and
+	// workspace per repository (newsession.go).
+	NewSession *nsMemory `json:"new_session,omitempty"`
+	// Lead signals (leads.go): when each session was last on screen past
+	// the dwell (bounded, archived pruned), and the baseline before which
+	// nothing reads new (the first launch with lead signals).
+	Seen      map[string]time.Time `json:"seen,omitempty"`
+	SeenSince *time.Time           `json:"seen_since,omitempty"`
 }
 
 // loadTUIState reads Options.StateFile. Without a state file there is no
@@ -43,6 +52,10 @@ func (m *Model) loadTUIState() {
 	m.showEnded = st.ShowEnded
 	m.grouping.load(st)
 	m.sessView.load(st)
+	m.seen.load(st, m.now())
+	if st.NewSession != nil {
+		m.nsMem = *st.NewSession
+	}
 }
 
 // saveState writes the remembered TUI state (tips dismissed, ended
@@ -55,6 +68,11 @@ func (m *Model) saveState() tea.Cmd {
 	st := tuiState{TipsDismissed: !m.showTips, ShowEnded: m.showEnded}
 	m.grouping.save(&st)
 	m.sessView.save(&st)
+	m.seen.save(&st)
+	if m.nsMem.Agent != "" || len(m.nsMem.Repos) > 0 {
+		mem := m.nsMem.clone()
+		st.NewSession = &mem
+	}
 	return func() tea.Msg {
 		_ = saveTUIState(p, st)
 		return nil

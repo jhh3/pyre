@@ -16,7 +16,10 @@ import (
 // at the top level with a faint "↳ parent title" hint. Children of a pinned
 // parent follow it into the Pinned group. za on a parent, or a click on a
 // child's glyph, folds the parent's children (a folded parent shows a faint
-// "+N"; a click on it unfolds). ⌥↑/⌥↓ and the Grid follow the tree order.
+// "+N"; a click on it unfolds). A lead (a top-level session with children
+// in its group) has a bold title and a faint descendant count, "▾N" while
+// open; a single session (no parent, no children) is plain. ⌥↑/⌥↓ and the
+// Grid follow the tree order.
 
 // treeRow is one session's place in its group's tree (last layout).
 type treeRow struct {
@@ -28,15 +31,8 @@ type treeRow struct {
 }
 
 // lineageParent is the session that started s ("" when none).
-func lineageParent(s contracts.Session) string {
-	if p := s.Lineage.ParentSessionID; p != "" && p != s.SessionID {
-		return p
-	}
-	if s.CreatedBy.Kind == contracts.PrincipalSession && s.CreatedBy.ID != "" && s.CreatedBy.ID != s.SessionID {
-		return s.CreatedBy.ID
-	}
-	return ""
-}
+// A reparented session sits under its new parent (W-reparent).
+func lineageParent(s contracts.Session) string { return s.Parent() }
 
 // treeLayout orders ss (already sorted, each group contiguous; groups[i] is
 // ss[i]'s group) as trees: within each group a child follows its parent
@@ -259,8 +255,47 @@ func (m *Model) revealInTree(id string) bool {
 // treeTitle decorates a row's title cell of w cells: the faint tree prefix
 // (a click folds the parent), then the title (with the doing suffix), then
 // a faint "+N" on a folded parent (a click unfolds) or "↳ parent" hint.
+// A lead (a top-level row with descendants in its group and no "↳ parent"
+// elsewhere) has a bold title and always shows its descendant count: "▾N"
+// open (a click folds), "+N" folded.
+//
+// A top-level row (no "↳ parent") carries its lead signal (leads.go) as a
+// chip at the right of the cell, unless the row's own status already says
+// it (the lead itself works, or itself needs you); a quiet lead has a dim
+// title instead.
 func (m *Model) treeTitle(sel bool, s contracts.SessionView, w int) string {
 	r := m.tree.rows[s.Session.SessionID]
+	if r.depth > 0 || r.hint != "" {
+		return m.treeTitleCell(sel, false, s, w)
+	}
+	g, ok := m.leadSignal(s.Session.SessionID)
+	if !ok {
+		return m.treeTitleCell(sel, false, s, w)
+	}
+	if (g.kind == leadWorking && m.sessionWorking(s)) || (g.kind == leadWaiting && needsYou(s, m.nodeOf(s))) {
+		return m.treeTitleCell(sel, false, s, w) // its own status already says it
+	}
+	chip, cw := m.leadChip(g)
+	if g.kind == leadAsks { // a link to the lead's asks in the web inbox (weblink.go)
+		chip = m.askLink("session", s.Session.SessionID, chip)
+	}
+	if cw == 0 || w-cw-1 < 10 {
+		return m.treeTitleCell(sel, g.kind == leadQuiet && !sel, s, w)
+	}
+	return m.treeTitleCell(sel, false, s, w-cw-1) + " " + chip
+}
+
+// treeTitleCell is treeTitle without the lead chip; quiet dims the title.
+func (m *Model) treeTitleCell(sel, quiet bool, s contracts.SessionView, w int) string {
+	r := m.tree.rows[s.Session.SessionID]
+	lead := r.depth == 0 && r.kids > 0 && r.hint == "" && !quiet
+	bold := sel || lead // titleCell's bold is the selected row's
+	title := func(tw int) string {
+		if quiet {
+			return m.highlight(pad(iconTitle(s), tw), m.filterPos(iconTitle(s)), m.th.dim)
+		}
+		return m.titleCell(bold, iconTitle(s), tw)
+	}
 	pre := ""
 	if r.prefix != "" {
 		p := r.prefix
@@ -272,22 +307,28 @@ func (m *Model) treeTitle(sel bool, s contracts.SessionView, w int) string {
 	}
 	post, postW := "", 0
 	switch {
-	case r.kids > 0 && m.treeFolded(s.Session.SessionID):
+	case r.kids > 0 && (lead || m.treeFolded(s.Session.SessionID)):
 		t := " +" + itoa(r.kids)
+		if !m.treeFolded(s.Session.SessionID) {
+			t = " ▾" + itoa(r.kids)
+		}
 		post, postW = m.mark(zoneDef{kind: zoneTree, name: s.Session.SessionID}, m.th.faint.Render(t)), width(t)
 	case r.hint != "":
-		room := w - width(s.Session.Title) // the hint never cuts the title
+		room := w - width(iconTitle(s)) // the hint never cuts the title
 		if room >= 8 {
 			t := trunc(" ↳ "+r.hint, min(room, 28))
 			post, postW = m.th.faint.Render(t), width(t)
 		}
 	}
 	if postW == 0 || postW >= w {
-		return pre + m.titleDoingCell(sel, s, w)
+		if quiet {
+			return pre + title(w)
+		}
+		return pre + m.titleDoingCell(bold, s, w)
 	}
-	tw := min(width(s.Session.Title), w-postW)
-	if tw < width(s.Session.Title) || tw+postW >= w {
-		return pre + m.titleCell(sel, s.Session.Title, tw) + post + pad("", w-tw-postW)
+	tw := min(width(iconTitle(s)), w-postW)
+	if tw < width(iconTitle(s)) || tw+postW >= w {
+		return pre + title(tw) + post + pad("", w-tw-postW)
 	}
 	// The title fits with its decoration: the doing suffix takes the rest.
 	rest := w - tw - postW
@@ -296,7 +337,7 @@ func (m *Model) treeTitle(sel bool, s contracts.SessionView, w int) string {
 	if ok && rest >= 8 {
 		tail = m.th.faint.Render(pad(" · "+phrase, rest))
 	}
-	return pre + m.titleCell(sel, s.Session.Title, tw) + post + tail
+	return pre + title(tw) + post + tail
 }
 
 // ---- accessors for tests ----

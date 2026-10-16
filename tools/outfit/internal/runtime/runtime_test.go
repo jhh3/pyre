@@ -283,12 +283,27 @@ func TestHTTPUsesProviderNamesForSanitizedImportedArguments(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorStatusShowsProviderMessage(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"object":"error","status":404,"message":"Could not find page"}`)
+	}))
+	defer server.Close()
+	mode := kit.Mode{Executor: kit.Executor{Kind: "http", BaseURL: server.URL + "/", PrivateNet: true}}
+	operation := kit.Operation{HTTP: &kit.HTTPOperation{Method: "GET", Path: "/"}}
+	_, err := (Executor{HTTPClient: server.Client()}).Run(context.Background(), mode, operation, nil, nil)
+	if err == nil || err.Error() != "upstream returned 404 Not Found: Could not find page" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestHTTPRejectsProviderErrorEnvelopesOnSuccessfulStatus(t *testing.T) {
 	tests := []struct {
 		name, body, successField, errorField, want string
 	}{
 		{name: "Slack false", body: `{"ok":false,"error":"invalid_auth"}`, successField: "ok", errorField: "error", want: "invalid_auth"},
-		{name: "GraphQL errors", body: `{"errors":[{"message":"bad token"}]}`, errorField: "errors", want: "errors"},
+		{name: "GraphQL errors", body: `{"errors":[{"message":"bad token"},{"message":"no team"}]}`, errorField: "errors", want: "bad token; no team"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -439,5 +454,101 @@ func TestPlanIsExactAndRedactsCredentialWithoutIO(t *testing.T) {
 	}
 	if _, err := (Executor{}).PlanWithCredentials(mode, op, map[string]string{}, credentials); err == nil || !strings.Contains(err.Error(), "missing required argument id") {
 		t.Fatalf("missing argument was not rejected: %v", err)
+	}
+}
+
+func TestHTTPRetriesStandardRetryAfterHeaderThenStops(t *testing.T) {
+	attempts := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.Header.Get("User-Agent") != "Fixture (https://example.test, 1)" || r.URL.Query().Get("with_counts") != "true" {
+			t.Errorf("executor header or fixed query missing: %v %s", r.Header, r.URL.RawQuery)
+		}
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	mode := kit.Mode{Executor: kit.Executor{Kind: "http", BaseURL: server.URL + "/", PrivateNet: true, Headers: map[string]string{"User-Agent": "Fixture (https://example.test, 1)"}}}
+	op := kit.Operation{HTTP: &kit.HTTPOperation{Method: "GET", Path: "/guilds", QueryValues: map[string]string{"with_counts": "true"}}}
+	if _, err := (Executor{HTTPClient: server.Client()}).Run(context.Background(), mode, op, nil, nil); err != nil || attempts != 2 {
+		t.Fatalf("retry: err=%v attempts=%d", err, attempts)
+	}
+	plan, err := (Executor{}).Plan(mode, op, nil)
+	if err != nil || plan.Headers["User-Agent"] == "" || !strings.Contains(plan.Path, "with_counts=true") {
+		t.Fatalf("plan = %#v %v", plan, err)
+	}
+}
+
+func TestHTTPDoesNotSleepPastLongRateLimit(t *testing.T) {
+	attempts := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"retry_after":3600,"global":true}`)
+	}))
+	defer server.Close()
+	mode := kit.Mode{Executor: kit.Executor{Kind: "http", BaseURL: server.URL + "/", PrivateNet: true}}
+	op := kit.Operation{HTTP: &kit.HTTPOperation{Method: "POST", Path: "/messages", Body: []string{"content"}}}
+	started := time.Now()
+	_, err := (Executor{HTTPClient: server.Client()}).Run(context.Background(), mode, op, map[string]string{"content": "x"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "retry after 1h0m0s") || attempts != 1 || time.Since(started) > 5*time.Second {
+		t.Fatalf("long rate limit: err=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestHTTPStringArgumentsAndLargeIntegersKeepExactValues(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(raw), `"content":"true"`) || !strings.Contains(string(raw), `"ref":{"id":"345678901234567899"}`) || !strings.Contains(string(raw), `"tags":[345678901234567899]`) {
+			t.Errorf("body lost exact values: %s", raw)
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	mode := kit.Mode{Executor: kit.Executor{Kind: "http", BaseURL: server.URL + "/", PrivateNet: true}}
+	op := kit.Operation{HTTP: &kit.HTTPOperation{Method: "POST", Path: "/m", Body: []string{"content", "tags"}, BodyValues: map[string]any{"ref": map[string]any{"id": "{{arg.id}}"}}, StringArguments: []string{"content", "id"}}}
+	if _, err := (Executor{HTTPClient: server.Client()}).Run(context.Background(), mode, op, map[string]string{"content": "true", "id": "345678901234567899", "tags": "[345678901234567899]"}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestComposeRunsReadStepsAndProjectsFields(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/g/1/channels":
+			_, _ = io.WriteString(w, `[{"id":"a","last_message_id":"9","noise":true}]`)
+		case "/g/1/threads":
+			_, _ = io.WriteString(w, `{"threads":[{"id":"t","last_message_id":"8","noise":1}],"members":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	mode := kit.Mode{Executor: kit.Executor{Kind: "http", BaseURL: server.URL + "/", PrivateNet: true}, Operations: []kit.Operation{
+		kit.NormalizeOperation(kit.Operation{Name: "channels", Class: "read", HTTP: &kit.HTTPOperation{Method: "GET", Path: "/g/:guild/channels"}}),
+		kit.NormalizeOperation(kit.Operation{Name: "threads", Class: "read", HTTP: &kit.HTTPOperation{Method: "GET", Path: "/g/:guild/threads"}}),
+	}}
+	composite := kit.NormalizeOperation(kit.Operation{Name: "activity", Class: "read", Input: map[string]any{"properties": map[string]any{"guild": map[string]any{"type": "string", "description": "Guild.", "examples": []any{"1"}}}, "required": []any{"guild"}}, Compose: []kit.ComposeStep{
+		{As: "channels", Operation: "channels", Fields: []string{"id", "last_message_id"}},
+		{As: "threads", Operation: "threads", ItemsPath: "$.threads", Fields: []string{"id", "last_message_id"}},
+	}})
+	result, err := (Executor{HTTPClient: server.Client()}).Run(context.Background(), mode, composite, map[string]string{"guild": "1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Raw) != `{"channels":[{"id":"a","last_message_id":"9"}],"threads":[{"id":"t","last_message_id":"8"}]}` {
+		t.Fatalf("compose result = %s", result.Raw)
+	}
+	plan, err := (Executor{}).Plan(mode, composite, map[string]string{"guild": "1"})
+	if err != nil || plan.Executor != "compose" || len(plan.Steps) != 2 || plan.Steps[1].Path != "/g/1/threads" {
+		t.Fatalf("compose plan = %#v %v", plan, err)
+	}
+	if _, err := (Executor{}).Plan(mode, composite, nil); err == nil {
+		t.Fatal("compose plan accepted a missing required argument")
 	}
 }

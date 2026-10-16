@@ -1,0 +1,93 @@
+{
+ "_now": "2026-10-15T16:40:00Z",
+ "projects": [
+  {
+   "project_id": "prj_fx_backrooms",
+   "name": "Backrooms video",
+   "description": "Feature-length render pipeline and festival cut.",
+   "open_asks": 0,
+   "waiting": true,
+   "leads": [],
+   "page_updated_at": null,
+   "page_summary": "",
+   "last_activity_at": "2026-10-15T15:59:00Z",
+   "live_sessions": 1,
+   "active": true
+  },
+  {
+   "project_id": "prj_fx_pyreweb",
+   "name": "Pyre web inbox",
+   "description": "Email-like inbox and project pages for Pyre, on the web.",
+   "open_asks": 1,
+   "waiting": true,
+   "leads": [
+    {
+     "id": "ses_fx_web_lead",
+     "title": "Pyre web lead",
+     "state": "working",
+     "node": "server",
+     "is_lead": true,
+     "last_activity": {
+      "line": "Integrating web-server and web-ui branches",
+      "at": "2026-10-15T16:38:00Z"
+     }
+    }
+   ],
+   "page_updated_at": "2026-10-15T16:22:00Z",
+   "page_summary": "Status — building. Server runs on server behind ngrok, Google sign-in limited to example.org. Web app: inbox, threads with options, held answers, project pages.",
+   "last_activity_at": "2026-10-15T16:39:00Z",
+   "live_sessions": 3,
+   "active": true
+  },
+  {
+   "project_id": "prj_fx_studio",
+   "name": "Studio billing v2",
+   "description": "Usage-based invoices on billing_v2 for every customer.",
+   "open_asks": 2,
+   "waiting": true,
+   "leads": [
+    {
+     "id": "ses_fx_studio_lead",
+     "title": "Studio lead",
+     "state": "working",
+     "node": "server",
+     "is_lead": true,
+     "last_activity": {
+      "line": "Reviewing invoice PDF font fix",
+      "at": "2026-10-15T16:34:00Z"
+     }
+    }
+   ],
+   "page_updated_at": "2026-10-15T14:35:00Z",
+   "page_summary": "Status — on track, one decision pending. Schema and backfill are done and verified against prod snapshots. Waiting on you: merge before Friday’s freeze, or wait until Monday.",
+   "last_activity_at": "2026-10-15T16:37:00Z",
+   "live_sessions": 3,
+   "active": true
+  },
+  {
+   "project_id": "prj_fx_vortex",
+   "name": "Vortex onboarding",
+   "description": "Trial-to-paid conversion for Vortex.",
+   "open_asks": 1,
+   "waiting": true,
+   "leads": [
+    {
+     "id": "ses_fx_voy_lead",
+     "title": "Vortex lead",
+     "state": "idle",
+     "node": "mbp",
+     "is_lead": true,
+     "last_activity": {
+      "line": "Drafted the survey summary",
+      "at": "2026-10-15T15:52:00Z"
+     }
+    }
+   ],
+   "page_updated_at": "2026-10-15T11:40:00Z",
+   "page_summary": "Status — needs a decision. Conversion slipped to 6.4%. Users activate but don’t reach a second project before the 7-day trial ends.",
+   "last_activity_at": "2026-10-15T15:52:00Z",
+   "live_sessions": 2,
+   "active": true
+  }
+ ]
+}

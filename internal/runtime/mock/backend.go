@@ -93,6 +93,8 @@ type Backend struct {
 	accounts    map[string]*c.AccountView
 	fallbacks   []c.FallbackPlan
 	attention   map[string]*c.AttentionItem
+	asks        map[string]*c.Ask    // asks.go (created on first use)
+	held        map[string]heldEntry // webinbox.go: held answers by ask (created on first use)
 	events      []c.Event
 	eventHead   int64
 	eventFloor  int64 // events with cursor <= floor were trimmed

@@ -89,6 +89,10 @@ func (m *Model) keyProjects(k tea.KeyPressMsg) tea.Cmd {
 		if m.projList.sel != "" {
 			return m.openProject(m.projList.sel)
 		}
+	case "X":
+		if m.projList.sel != "" && !k.IsRepeat {
+			return m.confirmArchiveProject(m.projList.sel) // archive.go (W-archive2)
+		}
 	case "esc":
 		if m.filter != "" {
 			m.applyFilter("")
@@ -578,7 +582,7 @@ func (m *Model) projectSessionsView(p contracts.Project, w, h int) []string {
 		if s.Run != nil && s.Run.Checkout != nil {
 			branch = string(s.Run.Checkout.Mode) + " " + s.Run.Checkout.Branch
 		}
-		row := cur + m.statusCell(st, 10) + " " + pad(s.Session.Title, w-60) + " " + pad(s.NodeName, 12) + " " + pad(branch, 20) + " " + padLeft(age(now, observedAt(s)), 4)
+		row := cur + m.statusCell(st, 10) + " " + pad(iconTitle(s), w-60) + " " + pad(s.NodeName, 12) + " " + pad(branch, 20) + " " + padLeft(age(now, observedAt(s)), 4)
 		out = append(out, m.markRow(l, i, sel, trunc(row, w), w))
 	}
 	return out

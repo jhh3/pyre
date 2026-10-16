@@ -1,12 +1,10 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jhh3/pyre/internal/buildinfo"
@@ -127,15 +125,12 @@ func requestRestart(r *execRequest) {
 	}
 }
 
-// doExec replaces the process. Only returns on failure.
-func doExec(r *execRequest) error {
-	p := r.path
+// absExecPath resolves an exec request's path against the working directory.
+func absExecPath(p string) string {
 	if !filepath.IsAbs(p) {
 		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
+			return abs
 		}
 	}
-	argv := append([]string{p}, os.Args[1:]...)
-	fmt.Fprintf(os.Stderr, "pyred: exec %s (%s)\n", p, r.why)
-	return syscall.Exec(p, argv, r.env)
+	return p
 }

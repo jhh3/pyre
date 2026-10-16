@@ -140,6 +140,7 @@ transferable.`,
 			if err != nil {
 				return err
 			}
+			ops.withDelivery(cmd.Context(), &m, nil) // older hubs omit delivery_status
 			return a.emit(m, func(w io.Writer) { printMessage(w, m) })
 		}),
 	})
@@ -265,6 +266,9 @@ func principalText(p c.Principal) string {
 func factLines(m c.MessageView) []string {
 	st := m.Status
 	var out []string
+	if l := deliveryLine(m); l != "" {
+		out = append(out, "status:        "+l) // derived summary (W-stuckmail); the facts follow
+	}
 	switch st.Storage {
 	case c.StorageStored:
 		out = append(out, "stored:        yes, on the hub "+agoPtr(st.StoredAt))

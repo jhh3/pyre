@@ -7,6 +7,8 @@ package runfail
 import (
 	"regexp"
 	"strings"
+
+	"github.com/jhh3/pyre/internal/contracts"
 )
 
 // Names resolves IDs in a reason to friendly names (both optional).
@@ -86,13 +88,38 @@ func describe(reason string, started bool, n Names) (string, bool) {
 			fix = "pyre accounts add-token (or log in again" + on + ")"
 		}
 		return prefix + login + on + " needs re-auth (401). Fix: " + fix, true
-	case strings.Contains(l, "no eligible") && (strings.Contains(l, "cooldown") || strings.Contains(l, "limit reached") || strings.Contains(l, "usage limit") ||
-		strings.Contains(l, "exhausted") || strings.Contains(l, "window at")):
+	case capacity(l):
 		return prefix + "no " + harness + " account with capacity right now; it can resume after the reset", true
 	case strings.Contains(l, "no eligible"):
 		return prefix + "no usable " + harness + " account" + on + " (" + tail(reason) + ")", false
 	}
 	return prefix + strings.TrimPrefix(strings.TrimPrefix(reason, "launch failed: "), "Launch failed: "), false
+}
+
+// capacity reports whether a lowercased reason is "no account with
+// capacity" (every account limited or cooling down; it can resume after the
+// reset).
+func capacity(l string) bool {
+	return strings.Contains(l, "no eligible") && !rejected(l) && (strings.Contains(l, "cooldown") || strings.Contains(l, "limit reached") ||
+		strings.Contains(l, "usage limit") || strings.Contains(l, "exhausted") || strings.Contains(l, "window at"))
+}
+
+// Capacity reports whether reason is a launch or run that failed only
+// because no account of its provider had capacity (Summary reads "no
+// <harness> account with capacity right now; it can resume after the
+// reset"), and which provider it names ("" when the reason does not say).
+func Capacity(reason string) (contracts.Provider, bool) {
+	l := strings.ToLower(reason)
+	if !capacity(l) {
+		return "", false
+	}
+	switch {
+	case strings.Contains(l, "openai") || strings.Contains(l, "codex"):
+		return contracts.ProviderOpenAI, true
+	case strings.Contains(l, "anthropic") || strings.Contains(l, "claude"):
+		return contracts.ProviderAnthropic, true
+	}
+	return "", true
 }
 
 func rejected(l string) bool {

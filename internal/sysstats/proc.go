@@ -22,6 +22,9 @@ type Proc struct {
 	RSSBytes  int64
 	CPU       time.Duration
 	Name      string
+	// Start is the process creation time where the table provides it
+	// (Windows); zero elsewhere. It guards tree walks against PID reuse.
+	Start time.Time
 }
 
 // RunRoot names a run and the PID of its tmux pane process.
@@ -51,6 +54,8 @@ type RunSampler struct {
 	Exec        func(ctx context.Context, name string, args ...string) (string, error)
 	PageSize    int64
 	ClockTicks  int64 // Linux USER_HZ
+	// NativeTable is the Windows process table (Toolhelp snapshot).
+	NativeTable func() (map[int]Proc, error)
 
 	mu   sync.Mutex
 	prev map[string]treeMark
@@ -69,7 +74,7 @@ type treeMark struct {
 func NewRunSampler() *RunSampler {
 	s := NewSampler()
 	return &RunSampler{GOOS: s.GOOS, ProcRoot: "/proc", MinInterval: 10 * time.Second, Now: time.Now, Exec: execOut,
-		PageSize: int64(os.Getpagesize()), ClockTicks: 100}
+		PageSize: int64(os.Getpagesize()), ClockTicks: 100, NativeTable: NativeProcTable}
 }
 
 // Sample returns usage for each root whose process exists. With no roots
@@ -93,7 +98,7 @@ func (s *RunSampler) Sample(ctx context.Context, roots []RunRoot) []RunUsage {
 	}
 	children := map[int][]int{}
 	for _, p := range table {
-		if p.PID != p.PPID {
+		if p.PID != p.PPID && ParentLink(table[p.PPID], p) {
 			children[p.PPID] = append(children[p.PPID], p.PID)
 		}
 	}
@@ -154,6 +159,12 @@ func rootsKey(roots []RunRoot) string {
 func (s *RunSampler) table(ctx context.Context) (map[int]Proc, error) {
 	if s.GOOS == "linux" {
 		return readProcTable(s.ProcRoot, s.PageSize, s.ClockTicks)
+	}
+	if s.GOOS == "windows" {
+		if s.NativeTable == nil {
+			return nil, errors.New("sysstats: no native process table")
+		}
+		return s.NativeTable()
 	}
 	out, err := s.Exec(ctx, "ps", "-A", "-S", "-o", "pid=,ppid=,rss=,time=,comm=")
 	if err != nil && out == "" {

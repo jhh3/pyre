@@ -1,11 +1,14 @@
+//go:build !windows
+
 // Command pyre-hub is the shared hub service (WP05).
 //
 //	pyre-hub init    --data DIR [--hub-url URL] [--tls-host H]...
-//	pyre-hub serve   --data DIR [--listen ADDR] [--preview-listen ADDR] [--preview-url URL] [--hub-url URL]
+//	pyre-hub serve   --data DIR [--listen ADDR] [--also-listen ADDR]... [--preview-listen ADDR] [--preview-url URL] [--hub-url URL]
 //	                 [--fcm-service-account FILE] [--log-file FILE [--log-max-bytes N] [--log-backups N]]
 //	pyre-hub backup  --data DIR --out FILE.tar.age|- [--recipient R]... [--recipients-file F]...
 //	                 [--passphrase-file F] [--unencrypted] [--verify]
 //	pyre-hub restore --in FILE|- (--data NEWDIR | --verify-only) [--identity F]... [--passphrase-file F]
+//	pyre-hub compact --data DIR [--dry-run] [--no-vacuum]
 //	pyre-hub version [--json]
 package main
 
@@ -38,17 +41,19 @@ import (
 	"github.com/jhh3/pyre/internal/hub/assemble"
 	"github.com/jhh3/pyre/internal/hub/backup"
 	"github.com/jhh3/pyre/internal/notifications"
+	"github.com/jhh3/pyre/internal/storage/sqlitex"
 	"github.com/jhh3/pyre/internal/supervisor"
 	"github.com/jhh3/pyre/internal/transport"
 )
 
 const usage = `usage:
   pyre-hub init    --data DIR [--hub-url URL] [--tls-host HOST]...
-  pyre-hub serve   --data DIR [--listen ADDR] [--preview-listen ADDR] [--preview-url URL] [--hub-url URL]
+  pyre-hub serve   --data DIR [--listen ADDR] [--also-listen ADDR]... [--preview-listen ADDR] [--preview-url URL] [--hub-url URL]
                    [--fcm-service-account FILE] [--log-file FILE [--log-max-bytes N] [--log-backups N]]
   pyre-hub backup  --data DIR --out FILE.tar.age|- [--recipient age1…|age1pq1…|ssh-…]... [--recipients-file F]...
                    [--passphrase-file F] [--unencrypted] [--verify]
   pyre-hub restore --in FILE|- (--data NEWDIR | --verify-only) [--identity KEYFILE]... [--passphrase-file F]
+  pyre-hub compact --data DIR [--dry-run] [--no-vacuum]   (hub stopped: retention pass + VACUUM)
   pyre-hub version [--json]
 `
 
@@ -77,6 +82,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		err = cmdBackup(ctx, rest, stdout, stderr)
 	case "restore":
 		err = cmdRestore(ctx, rest, stdout, stderr)
+	case "compact":
+		err = cmdCompact(ctx, rest, stdout, stderr)
 	case "version", "--version":
 		if len(rest) > 0 && rest[0] == "--json" {
 			b, _ := json.Marshal(map[string]any{"version": buildinfo.Version, "protocol": contracts.ProtocolVersion, "min_protocol": contracts.MinProtocolVersion,
@@ -227,14 +234,23 @@ func cmdServe(ctx context.Context, args []string, stderr io.Writer) error {
 	auditMaxAge := fs.Duration("audit-max-age", 0, "keep audit log entries (pyre audit) this long (default 2160h = 90 days)")
 	auditMaxRows := fs.Int("audit-max-rows", 0, "keep at most this many audit log entries (default 100000)")
 	previewURL := fs.String("preview-url", "", "origin of the preview listener used in minted preview links (default: --hub-url host with the --preview-listen port)")
-	var hosts multiFlag
+	var hosts, alsoListen multiFlag
 	fs.Var(&hosts, "tls-host", "DNS name or IP for a newly generated certificate (repeatable)")
+	fs.Var(&alsoListen, "also-listen", "another HTTPS listen address for the same API, e.g. the tailnet address 100.x.y.z:7443 when --listen is a LAN address (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err.Error()}
 	}
 	if *data == "" {
 		return usageError{"--data is required"}
 	}
+	if err := os.MkdirAll(*data, 0o700); err != nil {
+		return err
+	}
+	unlock, err := lockDataDir(*data) // W-dbhygiene: compact refuses while we serve
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var logW io.Writer = stderr
 	if *logFile != "" {
 		rf := &supervisor.RotatingFile{Path: *logFile, MaxBytes: *logMax, Backups: *logBackups}
@@ -242,6 +258,7 @@ func cmdServe(ctx context.Context, args []string, stderr io.Writer) error {
 		logW = rf
 	}
 	logger := transport.NewRedactingLogger(slog.NewTextHandler(logW, nil))
+	sqlitex.SetLogger(logger.With("component", "sqlite")) // slow/nested transaction warnings
 	var fcm notifications.Provider
 	if *fcmFile != "" {
 		f, err := notifications.NewFCM(notifications.FCMConfig{ServiceAccountFile: *fcmFile})
@@ -294,8 +311,19 @@ func cmdServe(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	servers := []*http.Server{srv}
-	errc := make(chan error, 2)
+	errc := make(chan error, 2+len(alsoListen))
 	go func() { errc <- srv.ServeTLS(ln, "", "") }()
+	// --also-listen: the same server on more addresses (W-gcp: the tailnet
+	// address for cloud nodes). Clients pin the certificate, so any address works.
+	for _, addr := range alsoListen {
+		xl, err := net.Listen("tcp", addr)
+		if err != nil {
+			srv.Close()
+			return fmt.Errorf("--also-listen %s: %w", addr, err)
+		}
+		logger.Info("pyre-hub also serving", "listen", xl.Addr().String())
+		go func() { errc <- srv.ServeTLS(xl, "", "") }()
+	}
 	if *previewListen != "" {
 		psrv := &http.Server{Handler: st.Preview, TLSConfig: st.Cert.ServerTLSConfig(), ReadHeaderTimeout: 10 * time.Second, BaseContext: base}
 		psrv.RegisterOnShutdown(onShutdown)

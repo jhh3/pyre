@@ -53,6 +53,58 @@ func TestStripeReferenceHasFocusedCLIAndRESTSurfaces(t *testing.T) {
 	}
 }
 
+func TestDiscordUsesABotTokenAndSeparatesReadsFromWrites(t *testing.T) {
+	pkg := mustPackage(t, "discord")
+	rest := mustMode(t, pkg, "rest")
+	method := mustCredentialMethod(t, pkg, "managed-token")
+	if len(method.Bindings) != 1 || method.Bindings[0].Value != "Bot {{secret.TOKEN}}" || !strings.Contains(method.Description, "Terms of Service") {
+		t.Fatalf("Discord credential = %#v", method)
+	}
+	if rest.Verify != "me" || !strings.HasPrefix(rest.Executor.Headers["User-Agent"], "DiscordBot (https://") || rest.Executor.BaseURL != "https://discord.com/api/v10/" {
+		t.Fatalf("Discord executor = %#v verify=%s", rest.Executor, rest.Verify)
+	}
+	required := map[string]string{
+		"me": "read", "guilds": "read", "guild": "read", "channels": "read", "channel": "read", "activity": "read", "messages": "read", "message": "read",
+		"pins": "read", "active_threads": "read", "archived_threads": "read", "thread_members": "read", "member": "read", "members": "read", "search_members": "read",
+		"roles": "read", "reactions": "read",
+		"send_message": "write", "reply": "write", "edit_message": "write", "delete_message": "destructive", "create_thread_from_message": "write",
+		"create_thread": "write", "create_forum_post": "write", "update_thread": "write", "join_thread": "write", "leave_thread": "write",
+		"add_reaction": "write", "remove_own_reaction": "write", "typing": "write", "pin": "write", "unpin": "write",
+		"create_poll": "write", "poll_voters": "read", "end_poll": "write",
+		"timeout_member": "write", "kick_member": "destructive", "ban_member": "destructive", "unban_member": "write", "bans": "read",
+		"add_member_role": "write", "remove_member_role": "write", "audit_log": "read", "bulk_delete": "destructive",
+		"create_channel": "write", "edit_channel": "write", "delete_channel": "destructive", "scheduled_events": "read", "create_scheduled_event": "write",
+		"invites": "read", "create_invite": "write", "webhooks": "read", "execute_webhook": "write",
+		"commands": "read", "register_command": "write", "delete_command": "destructive", "api_get": "read", "api_call": "destructive",
+	}
+	if apiGet, _ := findOperation(rest, "api_get"); apiGet.HTTP.PathArgument != "path" || apiGet.HTTP.Method != "GET" || apiGet.HTTP.MethodArgument != "" {
+		t.Fatalf("api_get must be a GET-only raw-path read: %#v", apiGet.HTTP)
+	}
+	for _, name := range []string{"timeout_member", "kick_member", "ban_member", "bulk_delete", "delete_channel", "api_call"} {
+		operation, _ := findOperation(rest, name)
+		if len(operation.HTTP.ArgumentHeaders) != 1 || operation.HTTP.ArgumentHeaders[0].Name != "X-Audit-Log-Reason" || operation.HTTP.ArgumentHeaders[0].Encoding != "url" {
+			t.Errorf("Discord %s does not send a URL-encoded audit-log reason: %#v", name, operation.HTTP.ArgumentHeaders)
+		}
+	}
+	for name, class := range required {
+		operation, ok := findOperation(rest, name)
+		if !ok || operation.Class != class {
+			t.Errorf("Discord %s class = %q, want %q", name, operation.Class, class)
+		}
+	}
+	activity, _ := findOperation(rest, "activity")
+	if len(activity.Compose) != 2 {
+		t.Fatalf("activity must compose channels and active threads: %#v", activity.Compose)
+	}
+	for _, name := range []string{"send_message", "reply", "edit_message"} {
+		operation, _ := findOperation(rest, name)
+		mentions, _ := operation.HTTP.BodyValues["allowed_mentions"].(map[string]any)
+		if parse, ok := mentions["parse"].([]any); !ok || len(parse) != 0 {
+			t.Errorf("Discord %s does not default allowed_mentions to parse:[]: %#v", name, operation.HTTP.BodyValues)
+		}
+	}
+}
+
 func TestEveryBlessedSkillFollowsTheCompiledInvocationPolicy(t *testing.T) {
 	packages, err := All()
 	if err != nil {
@@ -268,7 +320,7 @@ func TestEveryBlessedConnectorHasHeavyLinkEvidence(t *testing.T) {
 			}
 		}
 	}
-	for _, key := range []string{"github", "google-workspace", "intercom", "linear", "notion", "sentry", "slack", "stripe"} {
+	for _, key := range []string{"discord", "github", "google-workspace", "intercom", "linear", "notion", "sentry", "slack", "stripe"} {
 		if !seen[key] {
 			t.Errorf("blessed connector %s is missing heavy link support", key)
 		}

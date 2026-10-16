@@ -2,6 +2,7 @@ package updates
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // Runner runs a command with a bounded output capture.
@@ -193,7 +195,76 @@ func (m *Manager) download(ctx context.Context, src, dst string) (contracts.Dige
 }
 
 func isArchive(p string) bool {
-	return strings.HasSuffix(p, ".tar.gz") || strings.HasSuffix(p, ".tgz")
+	return strings.HasSuffix(p, ".tar.gz") || strings.HasSuffix(p, ".tgz") || isZip(p)
+}
+
+func isZip(p string) bool { return strings.HasSuffix(strings.ToLower(p), ".zip") }
+
+// extractArchive extracts a .tar.gz/.tgz or (Windows release) .zip.
+func extractArchive(archive, dir string, limit int64) error {
+	if isZip(archive) {
+		return extractZip(archive, dir, limit)
+	}
+	return extractTarGz(archive, dir, limit)
+}
+
+// extractZip extracts a zip into dir with the same rules as extractTarGz:
+// no absolute or escaping paths, bounded total size, symlinks and special
+// files skipped.
+func extractZip(archive, dir string, limit int64) error {
+	zr, err := zip.OpenReader(archive)
+	if err != nil {
+		return fmt.Errorf("not a zip archive: %w", err)
+	}
+	defer zr.Close()
+	var total int64
+	for _, f := range zr.File {
+		name := filepath.Clean(filepath.FromSlash(f.Name))
+		if name == "." {
+			continue
+		}
+		if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("archive entry %q escapes the destination", f.Name)
+		}
+		target := filepath.Join(dir, name)
+		mode := f.Mode()
+		switch {
+		case mode.IsDir():
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+		case mode.IsRegular():
+			total += int64(f.UncompressedSize64)
+			if f.UncompressedSize64 > uint64(limit) || total > limit {
+				return fmt.Errorf("archive expands beyond %d bytes", limit)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			perm := fs.FileMode(0o644)
+			if mode&0o111 != 0 || strings.EqualFold(filepath.Ext(name), ".exe") {
+				perm = 0o755
+			}
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_EXCL, perm)
+			if err != nil {
+				rc.Close()
+				return err
+			}
+			_, err = io.Copy(out, io.LimitReader(rc, int64(f.UncompressedSize64)))
+			rc.Close()
+			out.Close()
+			if err != nil {
+				return err
+			}
+		default:
+			// symlinks, devices: skipped
+		}
+	}
+	return nil
 }
 
 // extractTarGz extracts an archive into dir, rejecting unsafe paths and
@@ -281,7 +352,9 @@ func findExecutable(dir, name string) (string, error) {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() && d.Name() == name {
-			if info, err := os.Stat(p); err == nil && info.Mode()&0o111 != 0 {
+			// Windows has no execute bit: the name (pyred.exe, codex.cmd)
+			// is what makes a file executable there.
+			if info, err := os.Stat(p); err == nil && osutil.IsExecutable(p, info) {
 				found = append(found, rel)
 			}
 		}
@@ -339,7 +412,7 @@ func copyDir(src, dst string) error {
 				return err
 			}
 			mode := fs.FileMode(0o644)
-			if info.Mode()&0o111 != 0 {
+			if osutil.IsExecutable(p, info) {
 				mode = 0o755
 			}
 			return copyFile(p, target, mode)

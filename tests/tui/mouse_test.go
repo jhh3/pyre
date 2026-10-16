@@ -138,9 +138,9 @@ func TestMouseWheelScrollsListAndDetail(t *testing.T) {
 
 func TestMouseClickFooterHints(t *testing.T) {
 	h, _ := start(t, 160, 40, nil, nil)
-	click(t, h, "? help")
+	click(t, h, "? keys") // the sidebar footer's help cell (W-archive2)
 	if !h.M.OverlayOpen() {
-		t.Fatal("clicking ? help did not open help")
+		t.Fatal("clicking ? keys did not open help")
 	}
 	// The wheel scrolls the help overlay; a click on its esc hint closes it.
 	x, y := at(t, h, "Move")
@@ -225,12 +225,6 @@ func TestNumberKeysSwitchViews(t *testing.T) {
 			t.Fatalf("%s: view %s, want %s", c.key, h.M.ActiveView(), c.view)
 		}
 	}
-	// I no longer opens an Inbox: there is none.
-	h.Key("I")
-	h.Settle()
-	if h.M.ActiveView() != "Sessions" {
-		t.Fatalf("I: view %s", h.M.ActiveView())
-	}
 }
 
 func TestHeaderTabsShowKeys(t *testing.T) {
@@ -241,7 +235,7 @@ func TestHeaderTabsShowKeys(t *testing.T) {
 			t.Errorf("header lacks %q: %s", want, head)
 		}
 	}
-	for _, gone := range []string{"Inbox", "Grid"} { // no longer tabs
+	for _, gone := range []string{"Grid", "Inbox"} { // no longer tabs (the inbox is the web app)
 		if strings.Contains(head, gone) {
 			t.Errorf("header still has %q: %s", gone, head)
 		}

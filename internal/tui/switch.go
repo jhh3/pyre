@@ -356,12 +356,20 @@ type switcherOverlay struct {
 	query  string
 	items  []switchItem
 	res    []switchRow
-	seq    int // sessions load the items were built from
+	rev    int // sessions value revision the items were built from
 	sel    string
 	idx    int
 	top    int
 	typing bool   // opened from the embedded terminal
 	origin string // session selected when it opened
+	// Pick mode (W-reparent, reparent.go): enter calls pick with the chosen
+	// session ID instead of switching; exclude hides sessions; none adds a
+	// "top level" row (ID reparentNone); curParent is marked.
+	pick      func(m *Model, id string) tea.Cmd
+	exclude   map[string]bool
+	none      bool
+	curParent string
+	boxTitle  string
 }
 
 // openSwitcher opens the quick switcher; typing remembers that the keyboard
@@ -385,7 +393,7 @@ func (m *Model) openSwitcher(typing bool) tea.Cmd {
 
 func (o *switcherOverlay) build(m *Model) {
 	if st := m.loads["sessions"]; st != nil {
-		o.seq = st.seq
+		o.rev = st.rev
 	}
 	rank := make(map[string]int, len(m.mru))
 	for i, id := range m.mru {
@@ -396,9 +404,13 @@ func (o *switcherOverlay) build(m *Model) {
 		at time.Time
 	}
 	o.items = o.items[:0]
+	if o.none {
+		top := contracts.SessionView{Session: contracts.Session{SessionID: reparentNone, Title: "top level (no parent)"}}
+		o.items = append(o.items, switchItem{s: top, st: status{sym: "↑", tone: toneMuted}, fields: []string{top.Session.Title, "none"}, recent: -1})
+	}
 	var rest []act
 	for _, s := range m.sessions() {
-		if s.Session.Archived || (!m.showEnded && sessionEnded(s)) {
+		if s.Session.Archived || (!m.showEnded && sessionEnded(s)) || o.exclude[s.Session.SessionID] {
 			continue
 		}
 		nd := m.nodeOf(s)
@@ -459,13 +471,16 @@ func (o *switcherOverlay) rank(m *Model) {
 
 // refresh rebuilds the rows when the session list changed while open.
 func (o *switcherOverlay) refresh(m *Model) {
-	if st := m.loads["sessions"]; st != nil && st.seq != o.seq {
+	if st := m.loads["sessions"]; st != nil && st.rev != o.rev {
 		o.build(m)
 		o.rank(m)
 	}
 }
 
 func (o *switcherOverlay) hints() []hint {
+	if o.pick != nil {
+		return []hint{{"enter", "move here"}, {"↑↓", "move"}, {"esc", "cancel"}}
+	}
 	return []hint{{"enter", "switch"}, {"↑↓", "move"}, {"ctrl+j/k", "move"}, {"esc", "close"}}
 }
 
@@ -528,6 +543,9 @@ func (o *switcherOverlay) update(m *Model, k tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		m.overlay = nil
+		if o.pick != nil {
+			return o.pick(m, o.res[o.idx].it.s.Session.SessionID)
+		}
 		return m.switchTo(o.res[o.idx].it.s.Session.SessionID, o.typing)
 	case "down", "ctrl+j", "ctrl+n", "tab":
 		o.move(1)
@@ -601,7 +619,7 @@ func (o *switcherOverlay) view(m *Model, w, h int) []string {
 		r := o.res[i]
 		sel := i == o.idx
 		s := r.it.s
-		title := r.it.s.Session.Title
+		title := iconTitle(r.it.s)
 		if title == "" {
 			title = shortID(s.Session.SessionID)
 		}
@@ -615,6 +633,9 @@ func (o *switcherOverlay) view(m *Model, w, h int) []string {
 		if s.Session.SessionID == o.origin {
 			cur += m.th.faint.Render(" · current")
 		}
+		if o.curParent != "" && s.Session.SessionID == o.curParent {
+			cur += m.th.faint.Render(" · current parent")
+		}
 		tw := titleW - width(cur)
 		row := m.cursor(sel) + m.th.tone(r.it.st.tone, r.it.st.sym) + " " +
 			pad(m.highlight(trunc(title, tw), r.pos, styleIf(sel, m.th.selText))+cur, titleW) + " " +
@@ -626,5 +647,9 @@ func (o *switcherOverlay) view(m *Model, w, h int) []string {
 	for n := max(1, len(o.res)); n < min(rows, max(3, len(o.items))); n++ {
 		lines = append(lines, "") // a stable height: the panel does not jump while typing
 	}
-	return m.box("Switch session", lines, bw, w, h)
+	head := "Switch session"
+	if o.boxTitle != "" {
+		head = o.boxTitle
+	}
+	return m.box(head, lines, bw, w, h)
 }

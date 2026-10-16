@@ -7,13 +7,13 @@ category: Engineering
 credentialMethods:
   - id: managed-key
     label: outfit-managed personal API key
-    description: Store a Linear personal API key in Outfit for direct GraphQL reads.
+    description: Store a Linear personal API key in Outfit for direct GraphQL reads and writes.
     recommended: true
     custody: outfit
     fields:
       - key: TOKEN
         label: Personal API key
-        description: 'Open https://linear.app/settings/account/security, create a Personal API key, and copy it once. Read permission is sufficient for Outfit’s current GraphQL operations; optionally restrict the key to the teams this connection should see.'
+        description: 'Open https://linear.app/settings/account/security, create a Personal API key, and copy it once. Read permission covers the read operations; creating, updating and commenting on issues needs Write; optionally restrict the key to the teams this connection should see.'
         secret: true
         environment: [LINEAR_API_KEY, LINEAR_TOKEN]
     bindings: [{target: http-header, name: Authorization, value: '{{secret.TOKEN}}'}]
@@ -60,6 +60,140 @@ modes:
           bodyValues:
             query: 'query Issue($id: String!) { issue(id: $id) { id identifier title description url state { name } assignee { name } project { id name } cycle { id name } labels { nodes { id name } } relations { nodes { id type relatedIssue { id identifier title state { name } } } } comments { nodes { id body createdAt updatedAt user { id name } } } updatedAt } }'
             variables: {id: '{{arg.id}}'}
+      - name: teams
+        description: List teams with their IDs and workflow states (needed to create or move issues).
+        class: read
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues: {query: '{ teams(first: 50) { nodes { id key name states(first: 50) { nodes { id name type } } } } }'}
+      - name: labels
+        description: List issue labels with their IDs and teams.
+        class: read
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues: {query: '{ issueLabels(first: 250) { nodes { id name team { key } } } }'}
+      - name: projects
+        description: List projects with their IDs, state and teams.
+        class: read
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues: {query: '{ projects(first: 100, orderBy: updatedAt) { nodes { id name state url teams { nodes { key } } } } }'}
+      - name: users
+        description: List workspace members with their IDs (for assigning issues).
+        class: read
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues: {query: '{ users(first: 250) { nodes { id name displayName email active } } }'}
+      - name: search_issues
+        description: Search issues by text; returns identifiers, titles, state and URLs.
+        class: read
+        input:
+          type: object
+          properties:
+            term: {type: string, description: Search text., examples: ['login bug']}
+            first: {type: integer, description: Maximum results (default 25)., examples: [25]}
+          required: [term]
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues:
+            query: 'query Search($term: String!, $first: Int) { searchIssues(term: $term, first: $first) { nodes { id identifier title url state { name } assignee { name } team { key } updatedAt } } }'
+            variables: {term: '{{arg.term}}', first: '{{arg.first}}'}
+          stringArguments: [term]
+      - name: create_issue
+        description: Create an issue. team_id is the team UUID from teams; state IDs come from teams, and assignee, project and label IDs from users, projects and labels. Priority is 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+        class: write
+        input:
+          type: object
+          properties:
+            team_id: &teamid {type: string, description: Team UUID (from teams)., examples: ['9cfb482a-81e3-4154-b5b9-2c805e70a02d']}
+            title: &title {type: string, description: Issue title., examples: ['Inbox archive button misses open asks']}
+            description: &desc {type: string, description: Markdown description., examples: ['Steps to reproduce…']}
+            priority: &priority {type: integer, description: 0 none, 1 urgent, 2 high, 3 medium, 4 low., enum: [0, 1, 2, 3, 4]}
+            assignee_id: &assignee {type: string, description: User UUID (from users)., examples: ['a1b2c3d4-0000-0000-0000-000000000000']}
+            state_id: &state {type: string, description: Workflow state UUID (from teams)., examples: ['a1b2c3d4-0000-0000-0000-000000000001']}
+            project_id: &project {type: string, description: Project UUID (from projects)., examples: ['a1b2c3d4-0000-0000-0000-000000000002']}
+            label_ids: &labels {type: array, items: {type: string}, description: Label UUIDs (from labels)., examples: [['a1b2c3d4-0000-0000-0000-000000000003']]}
+            parent_id: {type: string, description: Parent issue UUID to create a sub-issue., examples: ['a1b2c3d4-0000-0000-0000-000000000004']}
+            due_date: &due {type: string, description: Due date YYYY-MM-DD., examples: ['2026-10-31']}
+          required: [team_id, title]
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues:
+            query: 'mutation Create($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title url state { name } assignee { name } } } }'
+            variables:
+              input: {teamId: '{{arg.team_id}}', title: '{{arg.title}}', description: '{{arg.description}}', priority: '{{arg.priority}}', assigneeId: '{{arg.assignee_id}}', stateId: '{{arg.state_id}}', projectId: '{{arg.project_id}}', labelIds: '{{arg.label_ids}}', parentId: '{{arg.parent_id}}', dueDate: '{{arg.due_date}}'}
+          stringArguments: [team_id, title, description, assignee_id, state_id, project_id, parent_id, due_date]
+      - name: update_issue
+        description: Update an issue (title, description, state, assignee, priority, project, labels, due date). Only the fields you pass change; label_ids replaces the label set.
+        class: write
+        input:
+          type: object
+          properties:
+            id: {type: string, description: Issue identifier or UUID., examples: ['ENG-123']}
+            title: *title
+            description: *desc
+            priority: *priority
+            assignee_id: *assignee
+            state_id: *state
+            project_id: *project
+            label_ids: *labels
+            due_date: *due
+          required: [id]
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues:
+            query: 'mutation Update($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier title url state { name } assignee { name } } } }'
+            variables:
+              id: '{{arg.id}}'
+              input: {title: '{{arg.title}}', description: '{{arg.description}}', priority: '{{arg.priority}}', assigneeId: '{{arg.assignee_id}}', stateId: '{{arg.state_id}}', projectId: '{{arg.project_id}}', labelIds: '{{arg.label_ids}}', dueDate: '{{arg.due_date}}'}
+          stringArguments: [id, title, description, assignee_id, state_id, project_id, due_date]
+      - name: comment
+        description: Add a markdown comment to an issue.
+        class: write
+        input:
+          type: object
+          properties:
+            issue_id: {type: string, description: Issue identifier or UUID., examples: ['ENG-123']}
+            body: {type: string, description: Markdown comment., examples: ['Fixed in rc72.']}
+          required: [issue_id, body]
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          bodyValues:
+            query: 'mutation Comment($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id url } } }'
+            variables:
+              input: {issueId: '{{arg.issue_id}}', body: '{{arg.body}}'}
+          stringArguments: [issue_id, body]
+      - name: graphql
+        description: 'Run any Linear GraphQL query or mutation (full API: https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference). Pass query and optional variables as a JSON object. Use this for anything the typed operations do not cover.'
+        class: write
+        input:
+          type: object
+          properties:
+            query: {type: string, description: GraphQL document (query or mutation)., examples: ['query { viewer { id name } }']}
+            variables: {type: object, description: GraphQL variables as a JSON object., examples: [{id: ENG-123}]}
+          required: [query]
+        http:
+          method: POST
+          path: /graphql
+          errorField: errors
+          body: [query, variables]
+          stringArguments: [query]
   - id: hosted_mcp
     label: Linear hosted MCP
     description: Linear's hosted MCP tool surface, using an OAuth grant transferred from Claude or Codex.

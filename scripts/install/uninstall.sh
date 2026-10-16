@@ -198,6 +198,8 @@ if [ -d "$P" ]; then
       case "$n" in
         node-credential.json) continue ;;
         current) act rm -f "$e" ;;
+        Pyre.app)
+          if [ -f "$e/Contents/Info.plist" ] && grep -q dev.jhh3.pyre "$e/Contents/Info.plist"; then act rm -rf "$e"; note "removed $PREFIX/Pyre.app"; else warn "$PREFIX/Pyre.app is not Pyre's app bundle; left alone"; fi ;;
         tools)
           if [ -f "$e/.pyre-tools" ]; then act rm -rf "$e"; note "removed $PREFIX/tools (bundled tools)"; else warn "$PREFIX/tools has no .pyre-tools marker; left alone"; fi ;;
         bin)

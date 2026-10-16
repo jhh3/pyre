@@ -65,6 +65,8 @@ var httpExecutionCases = []executionCase{
 	{"stripe-charge", "stripe/charge", "https://dashboard.stripe.com/test/payments/ch_123", "stripe-work", "duplicate transaction"},
 	{"stripe-event", "stripe/event", "https://dashboard.stripe.com/test/events/evt_123", "stripe-work", "invoice.payment_failed"},
 	{"stripe-webhook", "stripe/webhook_endpoint", "https://dashboard.stripe.com/test/workbench/webhooks/we_123", "stripe-work", "https://hooks.example.com/stripe"},
+	{"discord-message", "discord/message", "https://discord.com/channels/123456789012345678/234567890123456789/345678901234567890", "discord-work", "logs me out after the update"},
+	{"discord-channel", "discord/channel", "https://discord.com/channels/123456789012345678/234567890123456789", "discord-work", "Ask questions about the synthetic app"},
 }
 
 var gwsExecutionCases = []executionCase{
@@ -109,6 +111,7 @@ func TestBlessedExecutionEvalReadsProviderShapedResources(t *testing.T) {
 	installEvalConnection(t, store, vault, "linear", "graphql", "managed-key", "linear-work", server.URL+"/", map[string]string{"TOKEN": "linear-token"}, nil)
 	installEvalConnection(t, store, vault, "intercom", "rest", "managed-token", "intercom-work", server.URL+"/", map[string]string{"TOKEN": "intercom-token"}, nil)
 	installEvalConnection(t, store, vault, "stripe", "rest", "managed-restricted-key", "stripe-work", server.URL+"/v1/", map[string]string{"STRIPE_API_KEY": "rk_test_fixture"}, map[string]string{"environment": "test"})
+	installEvalConnection(t, store, vault, "discord", "rest", "managed-token", "discord-work", server.URL+"/api/v10/", map[string]string{"TOKEN": "discord-token"}, nil)
 
 	for _, test := range httpExecutionCases {
 		t.Run(test.name, func(t *testing.T) {
@@ -335,6 +338,16 @@ func executionFixtureServer(t *testing.T) *httptest.Server {
 			inline = `{"id":"ch_123","description":"Order 42","failure_message":"duplicate transaction","status":"failed","customer":"cus_123"}`
 		case request.URL.Path == "/v1/events/evt_123":
 			inline = `{"id":"evt_123","type":"invoice.payment_failed","pending_webhooks":2,"data":{"object":{"id":"in_123"}}}`
+		case request.URL.Path == "/api/v10/channels/234567890123456789/messages/345678901234567890":
+			inline = `{"id":"345678901234567890","channel_id":"234567890123456789","content":"The synthetic app logs me out after the update","timestamp":"2026-10-01T12:00:00.000000+00:00","author":{"id":"456789012345678901","username":"synthetic-user"}}`
+		case request.URL.Path == "/api/v10/channels/234567890123456789/messages":
+			if request.URL.Query().Get("limit") == "" {
+				http.Error(response, `{"message":"limit missing"}`, http.StatusBadRequest)
+				return
+			}
+			inline = `[{"id":"345678901234567891","content":"Same here on Android","author":{"id":"456789012345678902","username":"synthetic-other"}}]`
+		case request.URL.Path == "/api/v10/channels/234567890123456789":
+			inline = `{"id":"234567890123456789","guild_id":"123456789012345678","name":"support","type":0,"topic":"Ask questions about the synthetic app","last_message_id":"345678901234567891"}`
 		case request.URL.Path == "/v1/webhook_endpoints/we_123":
 			inline = `{"id":"we_123","url":"https://hooks.example.com/stripe","enabled_events":["invoice.payment_failed"],"status":"enabled"}`
 		default:
@@ -363,6 +376,10 @@ func executionFixtureServer(t *testing.T) *httptest.Server {
 		}
 		if strings.HasPrefix(request.URL.Path, "/v1/") && request.Header.Get("Authorization") != "Bearer rk_test_fixture" && !strings.HasPrefix(request.URL.Path, "/v1/pages/") && !strings.HasPrefix(request.URL.Path, "/v1/blocks/") {
 			http.Error(response, `{"error":{"message":"unauthorized"}}`, http.StatusUnauthorized)
+			return
+		}
+		if strings.HasPrefix(request.URL.Path, "/api/v10/") && (request.Header.Get("Authorization") != "Bot discord-token" || !strings.HasPrefix(request.Header.Get("User-Agent"), "DiscordBot (")) {
+			http.Error(response, `{"message":"401: Unauthorized","code":0}`, http.StatusUnauthorized)
 			return
 		}
 		if inline != "" {

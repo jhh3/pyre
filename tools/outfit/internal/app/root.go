@@ -2775,7 +2775,7 @@ func renderExecutionPlan(cmd *cobra.Command, plan connection.ExecutionPlan, json
 			fmt.Fprintf(cmd.OutOrStdout(), "header: %s: %s\n", name, plan.Runtime.Headers[name])
 		}
 	}
-	if len(plan.Runtime.Body) > 0 {
+	if plan.Runtime.Body != nil {
 		encoded, _ := json.Marshal(plan.Runtime.Body)
 		fmt.Fprintf(cmd.OutOrStdout(), "body: %s\n", encoded)
 	}

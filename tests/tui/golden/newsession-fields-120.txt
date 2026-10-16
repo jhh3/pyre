@@ -1,0 +1,34 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                         ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    ╭─ New session ────────────────────────────────────────────────────────────────────────────────────────────────╮
+    │                                                                                                              │
+    │   Where      atlas                                                                                           │
+    │              On synth-mac                                                                                    │
+    │              › atlas                   demo/atlas                   synth-mac +1        contributed 26h ago  │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                📁 Browse folders…      any folder, or a new one on synth-mac                                 │
+    │                                                                                                              │
+    │   Machine    ○ synth-linux · has it   ● synth-mac · has it                                                   │
+    │   Agent      ○ Claude   ● Codex   ○ Shell                                                                    │
+    │   Workspace  ○ main checkout   ● fresh worktree   ○ new branch                                               │
+    │   Account    ● auto   ○ codex-personal-a                                                                     │
+    │   Prompt     fix the tile cache                                                                              │
+    │              and add a test                                                                                  │
+    │ › Title      tile cache▏                                                                                     │
+    │ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+    │ Codex on synth-mac · demo/atlas · fresh worktree pyre/tile-cache · account auto                              │
+    │ enter: next field · ^s or ^⏎: start · esc: cancel · ^a step-by-step                 [ Start ^s ]  [ Cancel ] │
+    │                                                                                                              │
+    ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+ enter start   ↑↓ field   ^s start   esc cancel   ^a step-by-step

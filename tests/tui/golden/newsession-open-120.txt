@@ -1,0 +1,34 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                         ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    ╭─ New session ────────────────────────────────────────────────────────────────────────────────────────────────╮
+    │                                                                                                              │
+    │ › Where      ▏repo, owner/name or path                                                                       │
+    │              type a repo name, or a path like ~/scratch · ↓ Browse folders                                   │
+    │              Recent                                                                                          │
+    │              › ses_synth-a             ~/work/ses_synth-a           synth-mac           used 30m ago         │
+    │                ses_synth-apr           ~/work/ses_synth-apr         synth-mac           used 30m ago         │
+    │                ses_synth-b             ~/work/ses_synth-b           synth-linux         used 30m ago         │
+    │                ses_synth-fb            ~/work/ses_synth-fb          synth-mac           used 30m ago         │
+    │              On synth-linux                                                                                  │
+    │                atlas                   demo/atlas                   synth-linux +1      contributed 26h ago  │
+    │                web                     demo/web                     synth-linux         contributed 2d ago   │
+    │                tundra-old              demo/tundra-old              synth-linux         active 14h ago       │
+    │                api                     demo/api                     synth-linux +1      active 21h ago       │
+    │                ↓ 9 more                                                                                      │
+    │                📁 Browse folders…      any folder, or a new one on synth-linux                               │
+    │                                                                                                              │
+    │   Machine    ○ synth-linux   ● synth-mac   auto                                                              │
+    │   Agent      ● Claude   ○ Codex   ○ Shell   auto                                                             │
+    │   Workspace  — a folder: no git workspace                                                                    │
+    │   Account    ● auto   ○ claude-personal-a   ○ claude-personal-b   ○ claude-work-c                            │
+    │   Prompt     optional first prompt (shift+enter: new line)                                                   │
+    │   Title      auto (named from the prompt)                                                                    │
+    │ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+    │ Claude on synth-mac · ~/work/ses_synth-a · folder, no project · account auto                                 │
+    │ enter: next field · ^s or ^⏎: start · esc: cancel · ^a step-by-step                 [ Start ^s ]  [ Cancel ] │
+    │                                                                                                              │
+    ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+ ↑↓ choose   tab next field   + add repo   ^s start   esc cancel   ^a step-by-step

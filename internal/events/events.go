@@ -69,7 +69,7 @@ type Options struct {
 	Clock     contracts.Clock
 	Retention Retention
 	// PollInterval bounds how long a long poll may miss a commit made by a
-	// package that does not call Notify. Default 250ms.
+	// package that does not call Notify. Default 5s (waiters wake on Notify).
 	PollInterval time.Duration
 }
 
@@ -113,7 +113,7 @@ func Open(ctx context.Context, db *sql.DB, opt Options) (*Log, error) {
 		opt.Clock = contracts.SystemClock{}
 	}
 	if opt.PollInterval <= 0 {
-		opt.PollInterval = 250 * time.Millisecond
+		opt.PollInterval = 5 * time.Second
 	}
 	return &Log{db: db, clock: opt.Clock, ret: opt.Retention, poll: opt.PollInterval}, nil
 }
@@ -339,47 +339,63 @@ const (
 	pruneAgeQuery       = `SELECT MAX(cursor) FROM events INDEXED BY events_ingested WHERE ingested_at < ?`
 )
 
+// pruneBatchBound is the cursor at which one prune batch ends: the
+// PruneBatch-th oldest event at or below the retention boundary.
+const pruneBatchBound = `SELECT cursor FROM events WHERE cursor <= ? ORDER BY cursor LIMIT 1 OFFSET ?`
+
 // Prune applies the retention policy and returns how many events were
 // deleted. It records the highest deleted cursor so stale readers get
-// reset_required.
+// reset_required. It deletes from the oldest end in short write
+// transactions of at most sqlitex.PruneBatch events (W-dbhygiene: one
+// statement deleting a backlog of large events held the write lock for
+// seconds), so pruned_through only ever covers deleted events.
 func (l *Log) Prune(ctx context.Context) (int64, error) {
 	if l.ret.MaxEvents <= 0 && l.ret.MaxAge <= 0 {
 		return 0, nil
 	}
-	var deleted int64
-	err := sqlitex.Tx(ctx, l.db, func(tx *sql.Tx) error {
-		var through int64
-		if l.ret.MaxEvents > 0 {
-			var c sql.NullInt64
-			if err := tx.QueryRowContext(ctx, pruneMaxCursorQuery).Scan(&c); err != nil {
-				return err
-			}
-			if c.Valid && c.Int64-int64(l.ret.MaxEvents) > through {
-				through = c.Int64 - int64(l.ret.MaxEvents)
-			}
+	// The boundary is read outside the write transactions: cursors only
+	// grow, so it stays valid.
+	var through int64
+	if l.ret.MaxEvents > 0 {
+		var c sql.NullInt64
+		if err := l.db.QueryRowContext(ctx, pruneMaxCursorQuery).Scan(&c); err != nil {
+			return 0, err
 		}
-		if l.ret.MaxAge > 0 {
-			cutoff := persistence.Time(l.clock.Now().Add(-l.ret.MaxAge))
-			var c sql.NullInt64
-			if err := tx.QueryRowContext(ctx, pruneAgeQuery, cutoff).Scan(&c); err != nil {
-				return err
-			}
-			if c.Valid && c.Int64 > through {
-				through = c.Int64
-			}
+		if c.Valid && c.Int64-int64(l.ret.MaxEvents) > through {
+			through = c.Int64 - int64(l.ret.MaxEvents)
 		}
-		if through == 0 {
-			return nil
+	}
+	if l.ret.MaxAge > 0 {
+		cutoff := persistence.Time(l.clock.Now().Add(-l.ret.MaxAge))
+		var c sql.NullInt64
+		if err := l.db.QueryRowContext(ctx, pruneAgeQuery, cutoff).Scan(&c); err != nil {
+			return 0, err
 		}
-		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE cursor <= ?`, through)
+		if c.Valid && c.Int64 > through {
+			through = c.Int64
+		}
+	}
+	if through == 0 {
+		return 0, nil
+	}
+	return sqlitex.Batched(ctx, l.db, sqlitex.PruneBatch, 0, func(tx *sql.Tx, limit int) (int64, error) {
+		upTo := through
+		var b sql.NullInt64
+		if err := tx.QueryRowContext(ctx, pruneBatchBound, through, limit-1).Scan(&b); err == nil && b.Valid {
+			upTo = b.Int64
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE cursor <= ?`, upTo)
 		if err != nil {
-			return err
+			return 0, err
 		}
-		deleted, _ = res.RowsAffected()
-		_, err = tx.ExecContext(ctx, `UPDATE events_meta SET pruned_through = MAX(pruned_through, ?) WHERE id=1`, through)
-		return err
+		n, _ := res.RowsAffected()
+		if _, err := tx.ExecContext(ctx, `UPDATE events_meta SET pruned_through = MAX(pruned_through, ?) WHERE id=1`, upTo); err != nil {
+			return 0, err
+		}
+		return n, nil
 	})
-	return deleted, err
 }
 
 // Get returns one event by cursor.

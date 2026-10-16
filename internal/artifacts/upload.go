@@ -356,7 +356,8 @@ func (s *Store) prepare(u uploadRow) (*verified, error) {
 // complete one. Finalizing an already-finalized upload returns its receipt.
 func (s *Store) FinalizeUpload(ctx context.Context, req contracts.FinalizeUploadRequest) (contracts.PublishReceipt, error) {
 	var out contracts.PublishReceipt
-	if _, err := svcutil.RequirePrincipal(ctx); err != nil {
+	who, err := svcutil.RequirePrincipal(ctx)
+	if err != nil {
 		return out, err
 	}
 	defer s.lock(req.UploadID)()
@@ -365,8 +366,20 @@ func (s *Store) FinalizeUpload(ctx context.Context, req contracts.FinalizeUpload
 		if pre, err = s.prepare(u); err != nil {
 			return out, internalf("verify upload: %v", err)
 		}
+		// Place verified bytes before the write transaction: re-hashing an
+		// existing blob of the same digest (up to MaxBytes) and the directory
+		// fsync must not hold the database write lock (W-dbhygiene). If the
+		// transaction then fails, prepare finds the bytes in place (inBlob).
+		if pre != nil && !pre.inBlob && !pre.missing && pre.size == u.Size && pre.digest == u.Digest && canWrite(u, who) == nil {
+			if _, hexd, perr := parseDigest(u.Digest); perr == nil {
+				if err := s.placeBlob(u, s.blobPath(hexd)); err != nil {
+					return out, internalf("place blob: %v", err)
+				}
+				pre.inBlob = true
+			}
+		}
 	}
-	err := svcutil.Mutate(ctx, s.db, req.Mutation, contracts.OpFinalizeUpload, req, &out, func(tx *sql.Tx, who contracts.Principal) (any, error) {
+	err = svcutil.Mutate(ctx, s.db, req.Mutation, contracts.OpFinalizeUpload, req, &out, func(tx *sql.Tx, who contracts.Principal) (any, error) {
 		return s.finalizeTx(ctx, tx, who, req.UploadID, pre)
 	})
 	// Staged bytes of a terminal upload are no longer needed.

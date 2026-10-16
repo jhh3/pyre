@@ -113,10 +113,14 @@ type Options struct {
 	// keeps operation-idempotency records (30 days): a retry of a mutation
 	// older than that executes again. Both are pruned at most every
 	// PruneInterval (1h).
-	CommandRetention   time.Duration
-	OperationRetention time.Duration
-	PruneInterval      time.Duration
-	PollInterval       time.Duration // long-poll fallback cadence (250ms)
+	CommandRetention time.Duration
+	// CommandCompactAfter drops the large payload and result of a finished
+	// command this long after completion (1 day); the record itself is kept
+	// for CommandRetention (W-dbhygiene).
+	CommandCompactAfter time.Duration
+	OperationRetention  time.Duration
+	PruneInterval       time.Duration
+	PollInterval        time.Duration // long-poll safety net for a commit that missed its Notify (5s); waiters wake on Notify
 
 	HubVersion string // default buildinfo.Version
 }
@@ -138,9 +142,10 @@ func (o *Options) defaults() {
 	def(&o.AccountStaleAfter, 30*time.Minute)
 	def(&o.MaintenanceInterval, 10*time.Second)
 	def(&o.CommandRetention, 7*24*time.Hour)
+	def(&o.CommandCompactAfter, 24*time.Hour)
 	def(&o.OperationRetention, 30*24*time.Hour)
 	def(&o.PruneInterval, time.Hour)
-	def(&o.PollInterval, 250*time.Millisecond)
+	def(&o.PollInterval, 5*time.Second)
 	if o.MaxPendingCommandsPerNode <= 0 {
 		o.MaxPendingCommandsPerNode = 10_000
 	}
@@ -181,10 +186,16 @@ type Hub struct {
 
 	// Automatic reports to parent sessions (childreport.go).
 	reportKick   atomic.Bool   // a committed write may have recorded a report
+	summaryFill  atomic.Bool   // message item summaries were backfilled (attention_sweep.go)
 	reportWake   chan struct{} // wakes the report worker
 	reportMu     sync.Mutex    // one report pass at a time
 	childSummary func(ctx context.Context, sessionID, runID string) (string, error)
-	engage       engageState // owner engagement updates (attention_flags.go)
+	waiting      waitingRaiser    // "waiting on you" items (waiting.go; nil: cfg.Attention)
+	engage       engageState      // owner engagement updates (attention_flags.go)
+	ownerAct     ownerActiveState // owner activity marks (owner_activity.go)
+	awd          archiveWhenState // archive when done (archivewhen.go)
+	stuck        stuckMailState   // stuck-mail notices to senders (stuckmail.go)
+	heldMu       sync.Mutex       // one held-answer flush at a time (asks_hold.go)
 }
 
 var _ contracts.API = (*Hub)(nil)
@@ -218,9 +229,28 @@ func New(cfg Config) (*Hub, error) {
 	if err := sqlitex.Migrate(ctx, cfg.DB, auditMigrations...); err != nil { // W-audit
 		return nil, err
 	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, sessionIconMigrations...); err != nil { // W-archive2
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, sessionOwnerActiveMigrations...); err != nil { // owner activity
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, retentionMigrations...); err != nil { // W-dbhygiene
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, askMigrations...); err != nil { // W-asks
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, waitingMigrations...); err != nil { // waiting on you
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, askHeldMigrations...); err != nil { // W-web-inbox: held answers
+		return nil, err
+	}
 	h := &Hub{
 		cfg: cfg, db: cfg.DB, clock: cfg.Clock, opt: cfg.Options,
 		dirty: map[string]bool{}, nodeLocks: map[string]*sync.Mutex{}, stop: make(chan struct{}), reportWake: make(chan struct{}, 1),
+		awd:    archiveWhenState{wake: make(chan struct{}, 1), stops: map[string]time.Time{}, scheduled: map[string]time.Time{}},
 		tokens: tokenVault{dir: cfg.DataDir},
 	}
 	if cfg.Events != nil {
@@ -286,6 +316,8 @@ func (h *Hub) Start() {
 	h.wg.Add(1)
 	go h.childReportLoop()
 	h.wg.Add(1)
+	go h.archiveWhenDoneLoop() // W-archive2
+	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
 		t := time.NewTicker(h.opt.MaintenanceInterval)
@@ -329,6 +361,7 @@ func (h *Hub) afterCommit() {
 		h.flushNode(context.Background(), n)
 	}
 	h.kickChildReports()
+	h.kickArchiveWhenDone() // W-archive2
 }
 
 func (h *Hub) markDirty(nodeID string) {

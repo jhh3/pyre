@@ -454,7 +454,7 @@ func (m *Model) digestRelated(w, h int) []string {
 		return []string{m.sectionTitle("Context", w), m.th.dim.Render(trunc("Session "+a.Title+" is not listed (archived or ended).", w))}
 	}
 	stt := sessionStatus(s, m.nodeOf(s))
-	out := []string{m.th.bold.Render(trunc(s.Session.Title, w)), trunc(m.th.status(stt)+m.th.dim.Render(" · "+titleCase(string(s.Session.Harness))+" on "+s.NodeName), w), ""}
+	out := []string{m.th.bold.Render(trunc(iconTitle(s), w)), trunc(m.th.status(stt)+m.th.dim.Render(" · "+titleCase(string(s.Session.Harness))+" on "+s.NodeName), w), ""}
 	return append(out, m.activityLines(s, w, h-len(out))...)
 }
 

@@ -22,7 +22,7 @@ const (
 var knownKinds = []contracts.AttentionKind{
 	contracts.AttnApproval, contracts.AttnQuestion, contracts.AttnFailure, contracts.AttnAccountPool,
 	contracts.AttnReviewReady, contracts.AttnMessage, contracts.AttnIndeterminate, contracts.AttnConflict,
-	contracts.AttnComment, contracts.AttnUpdate, contracts.AttnNode,
+	contracts.AttnComment, contracts.AttnUpdate, contracts.AttnNode, contracts.AttnAsk, contracts.AttnWaiting,
 }
 
 // ValidatePrefs checks preferences, returning an ErrInvalid *contracts.Error.
@@ -154,6 +154,21 @@ func GenericTitle(k contracts.AttentionKind) string {
 		return "Pyre: update problem"
 	case contracts.AttnNode:
 		return "Pyre: machine needs attention"
+	case contracts.AttnAsk:
+		return "Pyre: a decision is waiting"
+	case contracts.AttnWaiting:
+		return "Pyre: a lead is waiting on you"
 	}
 	return "Pyre: needs attention"
+}
+
+// RepeatWindow is the minimum time between pushes for one group of kind k
+// (0: no limit). A "waiting" item is one per session and reopens at each
+// turn that ends with a question, so it pushes at most once per session
+// per hour; the item itself always updates.
+func RepeatWindow(k contracts.AttentionKind) time.Duration {
+	if k == contracts.AttnWaiting {
+		return time.Hour
+	}
+	return 0
 }

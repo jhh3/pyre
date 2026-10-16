@@ -439,3 +439,80 @@ func TestFCMPayloadCarriesNoBodyText(t *testing.T) {
 		t.Fatalf("status: %+v", st)
 	}
 }
+
+// A lead waiting on the owner: generic title, quiet hours apply, and at
+// most one push per session per hour however often its item reopens.
+func TestWaitingPushOncePerSessionPerHour(t *testing.T) {
+	fp := &fakeProvider{}
+	e := newEnv(t, fp, nil)
+	e.register("synthetic-token-1")
+	raise := func(sid string) {
+		t.Helper()
+		if _, err := e.store.RaiseWaiting(context.Background(), sid, nil, "Should I ship the synthetic build?", secret); err != nil {
+			t.Fatal(err)
+		}
+		e.pump()
+	}
+	nextTurn := func(sid string) {
+		t.Helper()
+		if _, err := e.store.WithdrawWaiting(context.Background(), sid, "next turn"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pushes := func() []notifications.Message { // dismissals of withdrawn alerts aside
+		var out []notifications.Message
+		for _, m := range fp.sent() {
+			if m.Action == notifications.ActionNotify {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	raise("ses_synth-a")
+	msgs := pushes()
+	if len(msgs) != 1 || msgs[0].Title != "Pyre: a lead is waiting on you" || msgs[0].Kind != contracts.AttnWaiting {
+		t.Fatalf("push: %+v", msgs)
+	}
+	for _, v := range msgs[0].Data() {
+		if strings.Contains(v, secret) || strings.Contains(v, "synthetic build") {
+			t.Fatalf("push carries content: %+v", msgs[0].Data())
+		}
+	}
+	// It reopens at the next turns within the hour: no new push.
+	for range 3 {
+		nextTurn("ses_synth-a")
+		e.clock.Advance(10 * time.Minute)
+		raise("ses_synth-a")
+	}
+	if n := len(pushes()); n != 1 {
+		t.Fatalf("pushes within the hour = %d", n)
+	}
+	if it := e.item("waiting:ses_synth-a"); it.State != contracts.AttnOpen || it.Count != 4 || it.Notification == nil ||
+		it.Notification.State != notifications.StateDisabled || !strings.Contains(it.Notification.Detail, "1h0m0s") {
+		t.Fatalf("suppressed repeat: %+v %+v", it, it.Notification)
+	}
+	// Another session pushes on its own.
+	raise("ses_synth-b")
+	if n := len(pushes()); n != 2 {
+		t.Fatalf("second session pushes = %d", n)
+	}
+	// After the hour, the first session pushes again.
+	nextTurn("ses_synth-a")
+	e.clock.Advance(time.Hour)
+	raise("ses_synth-a")
+	if n := len(pushes()); n != 3 {
+		t.Fatalf("after an hour pushes = %d", n)
+	}
+	// Quiet hours suppress it (and do not use up the hour).
+	now := e.clock.Now().UTC()
+	e.setPrefs(contracts.NotificationPrefs{QuietHoursStart: now.Format("15:04"), QuietHoursEnd: now.Add(2 * time.Hour).Format("15:04"), TZ: "UTC"})
+	nextTurn("ses_synth-b")
+	e.clock.Advance(time.Hour)
+	raise("ses_synth-b")
+	if it := e.item("waiting:ses_synth-b"); len(pushes()) != 3 || it.Notification.State != notifications.StateQuietHours {
+		t.Fatalf("quiet hours: %d %+v", len(pushes()), it.Notification)
+	}
+	if err := notifications.ValidatePrefs(contracts.NotificationPrefs{Kinds: map[contracts.AttentionKind]bool{contracts.AttnWaiting: false}}); err != nil {
+		t.Fatalf("waiting is a known kind: %v", err)
+	}
+}

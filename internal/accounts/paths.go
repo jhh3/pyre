@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/fileperm"
 )
 
 // Canonicalize returns the absolute, cleaned path with every symlink
@@ -37,7 +38,7 @@ func ensureDir(p string) (string, error) {
 	if err := os.MkdirAll(p, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(p, 0o700); err != nil {
+	if err := fileperm.Restrict(p, 0o700); err != nil {
 		return "", err
 	}
 	return Canonicalize(p)

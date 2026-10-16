@@ -527,7 +527,9 @@ func finish(x *acc, in Input) {
 	switch {
 	case x.exhausted != "" && (state == "" || state.Terminal() || state == c.RunWaitingInput):
 		a.Blocked = x.exhausted
-	case state == c.RunFailed:
+	case state == c.RunFailed && (x.sv == nil || x.sv.Session.Parent() == ""):
+		// A session started by another session reports its failure to
+		// that parent (decision I32), not to the owner.
 		a.Blocked = firstNonEmpty(x.failed, failReasonView(x.sv), "run failed")
 	case state == c.RunWaitingApproval && len(a.NeedsYou) == 0:
 		a.Blocked = "waiting on a prompt in its terminal"

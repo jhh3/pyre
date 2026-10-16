@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/runtime/claudeplugin"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
 )
 
@@ -58,7 +60,10 @@ type brokerConfig struct {
 type hookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
-	Timeout int    `json:"timeout"`
+	// Args (Windows): exec form — Command is the executable and Args its
+	// arguments, run without a shell, so no Git Bash/PowerShell quoting.
+	Args    []string `json:"args,omitempty"`
+	Timeout int      `json:"timeout"`
 }
 
 type hookMatcher struct {
@@ -84,12 +89,21 @@ func writeRunSettings(stateDir string, hookCmd []string, approvalWait time.Durat
 	}
 	hooks := map[string][]hookMatcher{}
 	for _, ev := range HookEvents {
-		cmd := tmux.ShellJoin(append(append([]string{}, hookCmd...), ev, stateDir))
+		argv := append(append([]string{}, hookCmd...), ev, stateDir)
 		timeout := 15
 		if ev == "PermissionRequest" {
 			timeout = int(approvalWait/time.Second) + 15
 		}
-		m := hookMatcher{Hooks: []hookEntry{{Type: "command", Command: cmd, Timeout: timeout}}}
+		entry := hookEntry{Type: "command", Command: tmux.ShellJoin(argv), Timeout: timeout}
+		if runtime.GOOS == "windows" {
+			// Claude Code on Windows runs hook commands through Git Bash and
+			// ignores an exec-form args list (2.1.296 ran pyred.exe with no
+			// arguments, so no hook ever reached Pyre). Give Bash a command
+			// line: the executable as a Git Bash path, arguments single-quoted
+			// (backslashes stay literal).
+			entry.Command = tmux.ShellJoin(append([]string{gitBashPath(argv[0])}, argv[1:]...))
+		}
+		m := hookMatcher{Hooks: []hookEntry{entry}}
 		if toolMatcherEvents[ev] {
 			m.Matcher = "*"
 		}
@@ -242,7 +256,9 @@ func HookMain(args []string, stdin io.Reader, stdout io.Writer) int {
 // payload to <stateDir>/events.jsonl with flock+fsync and returns the hook's
 // stdout. The payload never leaves the node. PermissionRequest runs the
 // approval broker (when broker.json exists); Stop claims one queued Stop-hook
-// injection (when the inject dir has one). exit is always 0.
+// injection (when the inject dir has one), else may block once to have a
+// top-level session file its owner question as an ask (askNudge) or, as a
+// project lead, update its project page (pageNudge). exit is always 0.
 func RunHook(ctx context.Context, eventName string, stdin io.Reader, stateDir string) (stdout []byte, exit int) {
 	if stateDir == "" {
 		return nil, 0
@@ -276,12 +292,29 @@ func RunHook(ctx context.Context, eventName string, stdin io.Reader, stateDir st
 	}
 	events := filepath.Join(stateDir, fileEvents)
 	switch ev {
+	case claudeplugin.EvPluginClaim:
+		return claimPluginMessage(stateDir, rec, str(p, "name")), 0
+	case claudeplugin.EvPluginSubmitted, claudeplugin.EvPluginDropped, claudeplugin.EvPluginFailed:
+		id := str(p, "message_id")
+		if !safeID(id) {
+			return nil, 0
+		}
+		rec.MessageID = id
+		if ev == claudeplugin.EvPluginSubmitted {
+			rec.Markers = []string{id}
+		}
 	case "PermissionRequest":
 		if cfg, ok := readBroker(stateDir); ok {
 			return runBroker(ctx, stateDir, rec, p, cfg), 0
 		}
 	case "Stop":
 		if out := claimInjection(stateDir, rec); out != nil {
+			return out, 0
+		}
+		if out := askNudge(stateDir, rec, p, time.Now()); out != nil {
+			return out, 0
+		}
+		if out := pageNudge(stateDir, rec, p, time.Now()); out != nil { // pagenudge.go (W-web-inbox)
 			return out, 0
 		}
 	}
@@ -471,6 +504,38 @@ func claimInjection(stateDir string, rec hookRecord) []byte {
 	return nil
 }
 
+// claimPluginMessage atomically claims one queued plugin delivery for the
+// run's hooks module (rename .msg -> .claimed, racing the adapter's
+// withdrawal) and returns the message for $.prompt.submit; nil when it was
+// withdrawn or claimed already.
+func claimPluginMessage(stateDir string, rec hookRecord, name string) []byte {
+	if name == "" || filepath.Base(name) != name || !strings.HasSuffix(name, ".msg") {
+		return nil
+	}
+	src := filepath.Join(stateDir, claudeplugin.SpoolDir, name)
+	dst := strings.TrimSuffix(src, ".msg") + ".claimed"
+	if os.Rename(src, dst) != nil {
+		return nil
+	}
+	b, err := os.ReadFile(dst)
+	var inj injection
+	if err != nil || json.Unmarshal(b, &inj) != nil || !safeID(inj.MessageID) {
+		return nil
+	}
+	rec.MessageID = inj.MessageID
+	_ = appendJSONL(filepath.Join(stateDir, fileEvents), rec)
+	out, _ := json.Marshal(map[string]string{"message_id": inj.MessageID, "attempt_id": inj.AttemptID, "text": inj.Text})
+	return out
+}
+
 func injectionName(seq int64, messageID string) string {
 	return fmt.Sprintf("%020d-%s", seq, messageID)
+}
+
+// gitBashPath turns C:\x\y.exe into /c/x/y.exe, the form Git Bash executes.
+func gitBashPath(p string) string {
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
+		return "/" + strings.ToLower(p[:1]) + "/" + strings.ReplaceAll(p[3:], "\\", "/")
+	}
+	return strings.ReplaceAll(p, "\\", "/")
 }

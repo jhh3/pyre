@@ -33,10 +33,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // CredRotaCheckout is the credential kind for a grant backed by a rota
@@ -464,8 +464,7 @@ func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return osutil.ProcessAlive(pid)
 }
 
 func (s *Service) newLock(g grantRow, runID string) LockInfo {

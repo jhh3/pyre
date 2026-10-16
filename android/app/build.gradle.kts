@@ -50,8 +50,8 @@ android {
         applicationId = "dev.jhh3.pyre"
         minSdk = 26
         targetSdk = 36
-        versionCode = (findProperty("pyreVersionCode") as String?)?.toInt() ?: 10
-        versionName = (findProperty("pyreVersionName") as String?) ?: "0.2.8"
+        versionCode = (findProperty("pyreVersionCode") as String?)?.toInt() ?: 13
+        versionName = (findProperty("pyreVersionName") as String?) ?: "0.2.11"
         buildConfigField("int", "PYRE_PROTOCOL", "1")
         buildConfigField("boolean", "FCM_ENABLED", "false")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

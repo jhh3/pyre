@@ -360,6 +360,10 @@ func (d *Daemon) attachedClients(ctx context.Context, h contracts.RunHandle) boo
 	if h.TmuxSocket == "" || h.TmuxTarget == "" {
 		return false
 	}
+	if host := termhostFor(h); host != nil {
+		cs, err := host.ListClients(ctx, h.TmuxTarget)
+		return err == nil && len(cs) > 0
+	}
 	n, err := supervisor.Tmux{Socket: h.TmuxSocket, Timeout: 3 * time.Second}.Clients(ctx, h.TmuxTarget)
 	return err == nil && n > 0
 }
@@ -515,26 +519,46 @@ func (d *Daemon) applyLimit(ctx context.Context, lr *liveRun, ev *contracts.Limi
 		lr.mu.Unlock()
 		return
 	}
-	lr.lastLimitAt = ev.At
 	run := lr.rec.Run
+	// A resumed run replays the previous run's history (transcript records,
+	// screen): a limit observed before this run started belongs to the run it
+	// replaced and must not trigger another switch.
+	if !ev.At.IsZero() && !run.StartedAt.IsZero() && ev.At.Before(run.StartedAt) {
+		lr.mu.Unlock()
+		return
+	}
+	lr.lastLimitAt = ev.At
 	lr.mu.Unlock()
 	d.cfg.Logger.Warn("run reported a limit event", "run", run.RunID, "kind", ev.Kind)
 	lh, ok := d.cfg.Accounts.(LimitHandler)
 	if !ok {
 		return
 	}
-	plan, err := lh.OnLimit(ctx, run, *ev)
-	if err != nil {
-		d.noteErr("fallback planning for run %s: %v", run.RunID, err)
-		return
-	}
-	if plan == nil {
-		return
-	}
-	if plan.PlannedAt.IsZero() {
-		plan.PlannedAt = d.now()
-	}
-	if _, err := d.rep.Enqueue(ctx, contracts.ReportFallback, plan); err != nil {
-		d.noteErr("fallback report: %v", err)
-	}
+	// Planned outside this poll: the fallback quiesces this very run (stop,
+	// then polls it until it has ended), which cannot happen while this
+	// poll holds the run's observation slot. WaitLaunches waits for it.
+	ev2 := *ev
+	d.asyncWG.Add(1)
+	go func() {
+		defer d.asyncWG.Done()
+		fctx, cancel := context.WithTimeout(ctx, limitPlanTimeout)
+		defer cancel()
+		plan, err := lh.OnLimit(fctx, run, ev2)
+		if err != nil {
+			d.noteErr("fallback planning for run %s: %v", run.RunID, err)
+			return
+		}
+		if plan == nil {
+			return
+		}
+		if plan.PlannedAt.IsZero() {
+			plan.PlannedAt = d.now()
+		}
+		if _, err := d.rep.Enqueue(fctx, contracts.ReportFallback, plan); err != nil {
+			d.noteErr("fallback report: %v", err)
+		}
+	}()
 }
+
+// limitPlanTimeout bounds one limit fallback (quiesce + successor launch).
+const limitPlanTimeout = 3 * time.Minute

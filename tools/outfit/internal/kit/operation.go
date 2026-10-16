@@ -80,6 +80,20 @@ func EffectiveInput(operation Operation) map[string]any {
 		for _, value := range operation.HTTP.Headers {
 			addTemplates([]string{value}, false)
 		}
+		for _, header := range operation.HTTP.ArgumentHeaders {
+			add(header.Argument, false)
+		}
+		add(operation.HTTP.PathArgument, true)
+		add(operation.HTTP.MethodArgument, true)
+		add(operation.HTTP.QueryArgument, false)
+		add(operation.HTTP.BodyArgument, false)
+	}
+	for _, step := range operation.Compose {
+		for _, source := range step.Arguments {
+			if !strings.HasPrefix(source, "=") {
+				add(source, false)
+			}
+		}
 	}
 	if operation.Pagination != nil {
 		add(operation.Pagination.CursorArgument, false)

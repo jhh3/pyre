@@ -22,9 +22,9 @@
                                                          │
                                                          │
                                                          │
-                                                         │
-                                                         │
-
- Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)
- grouped by attention
- n new session   enter type   F full-screen   m message   i info   / filter   ␣␣ find        ? help
+ ──────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ⁇ worker   +1 more           │
+ grouped by attention                                    │
+ n new session     enter type        F full-screen       │
+ m message         i info            / filter            │
+ ␣␣ find           ? keys                                │

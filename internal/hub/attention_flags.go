@@ -14,11 +14,12 @@ import (
 // attention titles name sessions by title instead of ID at render time.
 
 // engageKinds are answered by the owner typing into or messaging a
-// session; readKinds by the owner viewing its message. Approvals and
-// questions resolve only through their own answer.
+// session; readKinds by the owner viewing its message. Both answer its
+// "waiting on you" (waiting.go). Approvals and questions resolve only
+// through their own answer.
 var (
-	engageKinds = []contracts.AttentionKind{contracts.AttnMessage, contracts.AttnFlag}
-	readKinds   = []contracts.AttentionKind{contracts.AttnMessage}
+	engageKinds = []contracts.AttentionKind{contracts.AttnMessage, contracts.AttnFlag, contracts.AttnWaiting}
+	readKinds   = []contracts.AttentionKind{contracts.AttnMessage, contracts.AttnWaiting}
 )
 
 // ownerEngager is implemented by the attention store.

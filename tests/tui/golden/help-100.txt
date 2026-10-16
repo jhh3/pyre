@@ -13,10 +13,10 @@
  │  ctrl+d / pgdown    half page down                                                             │
  │  ctrl+u / pgup      half page up                                                               │
  │  l / tab            focus the next pane                                                        │
- │  h / shift+tab      focus the previous pane                                                    │
- │ ↓ 116 more lines · j/k or ctrl+d scroll                                                        │
+ │ ↓ 136 more lines · j/k or ctrl+d scroll                                                        │
  │ ────────────────────────────────────────────────────────────────────────────────────────────── │
- │ ● working  ○ idle  ! approval  ◌ offline/stale  ✗ failed  ? unknown                            │
+ │ ● working  ○ idle  ! approval  ◌ offline/stale  ✗ failed  ? unknown  lead ▾N/+N  ├ child       │
+ │ single (plain)  ▎ yours <1h  ▎ yours <24h                                                      │
  │ Mouse: click a tab, row or footer key · click the selected row (or double-click) to open ·     │
  │ wheel scrolls · drag selects and copies (OSC 52), double-click a word; shift (option in        │
  │ iTerm2) leaves selection to the terminal. 1–4 switch tabs (Sessions, Projects, Machines,       │

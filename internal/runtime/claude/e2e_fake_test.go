@@ -67,6 +67,13 @@ func (f *fakeEnv) restart() *Adapter {
 
 func (f *fakeEnv) launch(runID string, env map[string]string, resume *contracts.NativeRef) contracts.RunHandle {
 	f.t.Helper()
+	return f.launchIn(runID, filepath.Join(f.dir, "cfg"), env, resume, "")
+}
+
+// launchIn launches under a given profile (CLAUDE_CONFIG_DIR) with an
+// optional initial prompt.
+func (f *fakeEnv) launchIn(runID, profile string, env map[string]string, resume *contracts.NativeRef, prompt string) contracts.RunHandle {
+	f.t.Helper()
 	work := filepath.Join(f.dir, "work")
 	_ = os.MkdirAll(work, 0o755)
 	e := map[string]string{"PYRE_TEST_ROLE": "fakeclaude", "PYRE_SESSION_ID": "ses_t"}
@@ -75,7 +82,7 @@ func (f *fakeEnv) launch(runID string, env map[string]string, resume *contracts.
 	}
 	h, err := f.a.Launch(context.Background(), contracts.ResolvedLaunch{
 		RunID: runID, SessionID: "ses_t", Harness: contracts.HarnessClaude, Cwd: work, Env: e,
-		StateDir: filepath.Join(f.dir, "runs", runID), ProfileDir: filepath.Join(f.dir, "cfg"), Resume: resume,
+		StateDir: filepath.Join(f.dir, "runs", runID), ProfileDir: profile, Resume: resume, InitialPrompt: prompt,
 	})
 	if err != nil {
 		f.t.Fatal(err)
@@ -618,5 +625,64 @@ func TestFakeStopConfirmsBackgroundTasksDialog(t *testing.T) {
 	rc, err := f.a.Stop(context.Background(), h)
 	if err != nil || rc.Outcome != contracts.OutcomeSucceeded || !strings.Contains(rc.Detail, "/exit") {
 		t.Fatalf("stop %+v %v", rc, err)
+	}
+}
+
+// waitDialogGone waits until the fake's permission dialog left the screen.
+func (f *fakeEnv) waitDialogGone(h contracts.RunHandle) {
+	f.t.Helper()
+	end := time.Now().Add(5 * time.Second)
+	for time.Now().Before(end) {
+		if si, err := f.a.screen(context.Background(), h.TmuxTarget); err == nil && si.Clear() && si.Working() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	f.t.Fatal("dialog did not close")
+}
+
+// A TUI "Yes" fires no hook until the tool finishes (C14): while a long
+// tool runs, the next observation reports running and the request resolved
+// in the terminal, before or after the remote answer window expired.
+func TestFakeApprovalTUIYesLongTool(t *testing.T) {
+	t.Parallel()
+	for _, expire := range []bool{false, true} {
+		expire := expire
+		t.Run(map[bool]string{false: "pending", true: "expired"}[expire], func(t *testing.T) {
+			t.Parallel()
+			f := newFakeEnv(t, func(o *Options) {
+				if expire {
+					o.ApprovalWait = time.Second
+				}
+			})
+			h := f.launch("run_tuilong", nil, nil)
+			f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
+			deliver(t, f.a, h, "msg_tl", "FAKE_PERMISSION FAKE_TOOL_MS=15000", contracts.ModeQueue)
+			want := contracts.ApprovalPending
+			if expire {
+				want = contracts.ApprovalExpired
+			}
+			obs := f.waitObs(f.a, h, 15*time.Second, func(o contracts.Observation) bool {
+				return len(o.Approvals) == 1 && o.Approvals[0].State == want
+			})
+			// The real dialog keeps flagging on every observation.
+			for i := 0; i < 2; i++ {
+				obs, _ = f.a.Observe(context.Background(), h, "")
+				if obs.State != contracts.RunWaitingApproval || obs.Approvals[0].State != want {
+					t.Fatalf("dialog up: %s %q %s", obs.State, obs.StateReason, obs.Approvals[0].State)
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			_ = f.a.srv.SendKeys(context.Background(), h.TmuxTarget, tmux.KeyEnter)
+			f.waitDialogGone(h)
+			obs, _ = f.a.Observe(context.Background(), h, "")
+			ap := obs.Approvals[0]
+			if obs.State != contracts.RunRunning || ap.State != contracts.ApprovalResolved || ap.Resolution.Source != "native" {
+				t.Fatalf("one observation after the TUI answer: %s %q %+v", obs.State, obs.StateReason, ap)
+			}
+			if _, err := f.a.Answer(context.Background(), h, ap, "deny", ""); err == nil {
+				t.Fatal("late answer accepted")
+			}
+		})
 	}
 }

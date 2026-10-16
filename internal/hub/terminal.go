@@ -131,7 +131,9 @@ func (h *Hub) TerminalInputAllowed(ctx context.Context, p contracts.Principal, r
 		return err
 	}
 	if p.Kind == contracts.PrincipalOwner {
-		h.ownerEngaged(p, h.runSession(ctx, runID), "You typed into the session.", engageKinds...)
+		sid := h.runSession(ctx, runID)
+		h.ownerEngaged(p, sid, "You typed into the session.", engageKinds...)
+		h.ownerActive(p, sid)
 	}
 	return nil
 }

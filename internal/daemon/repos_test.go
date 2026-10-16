@@ -166,3 +166,48 @@ func TestRepoIndexDisabled(t *testing.T) {
 		t.Fatalf("disabled index reported %d times", got)
 	}
 }
+
+// repo.clone (W-newsession): a synthetic bare remote is cloned into the
+// node's repo root (laid out like the repositories there) and the index
+// reports it at once; cloning again reuses it.
+func TestRepoCloneActionUpdatesIndex(t *testing.T) {
+	home := synthHome(t)
+	code := filepath.Join(home, "code")
+	mkRepo(t, filepath.Join(code, "alpha"))
+	work := filepath.Join(shortDir(t), "widget-src")
+	mkRepo(t, work)
+	bare := filepath.Join(shortDir(t), "synth-owner", "widget.git")
+	gitT(t, filepath.Dir(work), "clone", "-q", "--bare", work, bare)
+	n := startNode(t, shortDir(t), Config{RepoIndex: RepoIndexConfig{Enabled: true, Roots: []string{code}, StartDelay: -1, Interval: time.Hour, WorktreeInterval: time.Hour}})
+	waitFor(t, "repo report", func() bool { return len(n.rep.Reports(contracts.ReportRepos)) == 1 })
+
+	raw, _ := json.Marshal(contracts.RepoCloneParams{Remote: "file://" + bare})
+	v, err := n.d.actionRepoClone(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := v.(contracts.RepoCloneResult)
+	if res.Path != filepath.Join(code, "widget") || !res.Cloned {
+		t.Fatalf("clone: %+v", res)
+	}
+	reps := n.rep.Reports(contracts.ReportRepos)
+	if len(reps) != 2 {
+		t.Fatalf("index not reported after the clone (%d reports)", len(reps))
+	}
+	var idx contracts.NodeRepoIndex
+	_ = json.Unmarshal(reps[1].Payload, &idx)
+	found := false
+	for _, r := range idx.Repos {
+		found = found || r.Path == res.Path
+	}
+	if !found || len(idx.Repos) != 2 {
+		t.Fatalf("reported index: %+v", idx.Repos)
+	}
+	if l := n.d.localRepos(contracts.ListReposRequest{Query: "widget"}); len(l.Items) != 1 {
+		t.Fatalf("local repos: %+v", l.Items)
+	}
+	v, err = n.d.actionRepoClone(context.Background(), raw)
+	if err != nil || v.(contracts.RepoCloneResult).Cloned {
+		t.Fatalf("second clone: %+v %v", v, err)
+	}
+}

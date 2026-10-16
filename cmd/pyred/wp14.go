@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"github.com/jhh3/pyre/internal/stablepath"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/jhh3/pyre/internal/osutil"
+	"github.com/jhh3/pyre/internal/stablepath"
 
 	"github.com/jhh3/pyre/internal/agentguide"
 	"github.com/jhh3/pyre/internal/client"
@@ -135,7 +137,7 @@ func wireEnvironment(in *integrations, cfg *daemon.Config, o runOpts, hubURL, pi
 	mcp := w.pyreBin != ""
 	cfg.AgentGuide = func(h contracts.Harness, s contracts.Session) string {
 		// Claude (--mcp-config) and Codex (per-thread config) get the MCP tools.
-		return agentguide.Text(agentguide.Options{CLI: w.pyreBin, MCP: mcp && h != contracts.HarnessShell})
+		return agentguide.Text(agentguide.Options{CLI: w.pyreBin, MCP: mcp && h != contracts.HarnessShell, WorktreeRoot: cfg.WorktreeRoot})
 	}
 	return w
 }
@@ -158,8 +160,8 @@ func findPyreCLI() string {
 			exe = r
 		}
 		exe = stablepath.Of(exe)
-		p := filepath.Join(filepath.Dir(exe), "pyre")
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+		p := filepath.Join(filepath.Dir(exe), osutil.ExeName("pyre"))
+		if st, err := os.Stat(p); err == nil && osutil.IsExecutable(p, st) {
 			return p
 		}
 	}

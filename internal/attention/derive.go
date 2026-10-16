@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -29,6 +30,21 @@ type LabelLookup interface {
 	NodeName(ctx context.Context, nodeID string) (string, error)
 }
 
+// SessionLookup is optionally implemented by a Lookup to name sessions in
+// titles.
+type SessionLookup interface {
+	SessionTitle(ctx context.Context, sessionID string) (string, error)
+}
+
+// SessionParentLookup is optionally implemented by a Lookup to tell
+// whether a session sits under another session (contracts.Session.Parent).
+// A failed run of such a session is reported to that parent (the hub's
+// child report), not raised for the owner. Without it, or on error, the
+// session counts as top level (the owner hears of it).
+type SessionParentLookup interface {
+	SessionParent(ctx context.Context, sessionID string) (string, error)
+}
+
 // derivedKinds are the event kinds that can produce attention. The deriver
 // asks the hub for only these; attention.changed is deliberately absent.
 var derivedKinds = []contracts.EventKind{
@@ -42,11 +58,14 @@ var derivedKinds = []contracts.EventKind{
 	contracts.EvAccountExhausted,
 	contracts.EvFallbackPlanned,
 	contracts.EvRunStarted,
+	contracts.EvRunObserved,
 	contracts.EvRunEnded,
+	contracts.EvSessionUpdated,
 	contracts.EvArtifactPublished,
 	contracts.EvCommentCreated,
 	contracts.EvDocumentConflict,
 	contracts.EvUpdateResult,
+	contracts.EvAskChanged,
 }
 
 const (
@@ -54,9 +73,12 @@ const (
 	maxSummary = 160
 )
 
-// derive maps one hub event to inbox changes. It never reads message
-// bodies, approval bodies, comment bodies, or transcript text into titles or
-// summaries; titles come from short record titles and fixed phrases.
+// derive maps one hub event to inbox changes. Titles come from short
+// record titles and fixed phrases. The only body text it copies is the
+// summary of a "message" item: a sanitized excerpt of the newest message
+// to the owner (MessageExcerpt; owner request 2026-10-12: the inbox showed
+// a dash). Approval, comment and transcript text is never copied, and push
+// payloads carry only generic titles (contracts.PushDataKeys).
 func derive(ctx context.Context, ev contracts.Event, lk Lookup) []change {
 	switch ev.Kind {
 	case contracts.EvAttentionChanged:
@@ -93,10 +115,12 @@ func derive(ctx context.Context, ev contracts.Event, lk Lookup) []change {
 		return deriveExhausted(ctx, ev, lk)
 	case contracts.EvFallbackPlanned:
 		return deriveFallback(ctx, ev, lk)
-	case contracts.EvRunStarted:
-		return deriveRunStarted(ev)
+	case contracts.EvRunStarted, contracts.EvRunObserved:
+		return deriveRunLive(ev)
 	case contracts.EvRunEnded:
 		return deriveRunEnded(ctx, ev, lk)
+	case contracts.EvSessionUpdated:
+		return deriveSessionArchived(ev)
 	case contracts.EvArtifactPublished:
 		return deriveArtifact(ev)
 	case contracts.EvCommentCreated:
@@ -105,6 +129,8 @@ func derive(ctx context.Context, ev contracts.Event, lk Lookup) []change {
 		return deriveConflict(ev)
 	case contracts.EvUpdateResult:
 		return deriveUpdate(ev)
+	case contracts.EvAskChanged:
+		return deriveAsk(ev)
 	}
 	return nil
 }
@@ -300,6 +326,9 @@ func deriveMessageStored(ev contracts.Event) []change {
 		if env.Sender.Kind == contracts.PrincipalOwner {
 			return nil // a note to self is not attention
 		}
+		if contracts.ValidID(env.ThreadID, contracts.PrefixAsk) {
+			return nil // the message carrying an ask: its "ask" item stands for it
+		}
 		ch := change{
 			op:        opRaise,
 			kind:      contracts.AttnMessage,
@@ -310,6 +339,7 @@ func deriveMessageStored(ev contracts.Event) []change {
 		if env.Mode == contracts.ModeInfo {
 			ch.severity = "info"
 		}
+		ch.summary = MessageExcerpt(env.Body.Text)
 		if env.Sender.Kind == contracts.PrincipalSession {
 			ch.sessionID = env.Sender.ID
 		}
@@ -338,6 +368,20 @@ func deriveMessageStored(ev contracts.Event) []change {
 	// Agent-to-agent (and channel/project) traffic, including progress
 	// updates, is not owner attention.
 	return nil
+}
+
+// maxExcerpt bounds a message item's summary (runes).
+const maxExcerpt = 300
+
+// ansiRe matches terminal escape sequences (CSI, OSC, and two-byte ESC
+// sequences) so pasted terminal output does not leave "[31m" behind.
+var ansiRe = regexp.MustCompile(`\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])`)
+
+// MessageExcerpt is the summary of a message item: the body with escape
+// sequences and control characters removed, whitespace collapsed, at most
+// maxExcerpt runes.
+func MessageExcerpt(body string) string {
+	return short(ansiRe.ReplaceAllString(body, ""), maxExcerpt)
 }
 
 // ownerMessageGroup is the group of the "message" item raised for a
@@ -547,6 +591,12 @@ func deriveFallback(ctx context.Context, ev contracts.Event, lk Lookup) []change
 		sessionID: session,
 		projectID: ev.ProjectID,
 	}
+	if paused, cause := switchPaused(p.Reason); paused {
+		// The node's switch circuit breaker stopped an automatic switch.
+		ch.title = "Account switching paused for " + quoteTitle(sessionTitle(ctx, lk, session)) + ": " + cause
+		ch.summary = "Pyre stopped switching accounts automatically; the session is still on its limited account. Check it, then resume or switch it yourself."
+		return []change{ch}
+	}
 	if p.Outcome == contracts.FallbackWaiting {
 		ch.title = "No eligible " + providerLabel(prov) + " account"
 		ch.summary = "Session paused and resumable; waiting for an eligible account or reset."
@@ -558,6 +608,40 @@ func deriveFallback(ctx context.Context, ev contracts.Event, lk Lookup) []change
 		ch.summary += " In-flight work is uncertain; the last instruction was not replayed."
 	}
 	return []change{ch}
+}
+
+// switchPausedPrefix matches accounts.SwitchPausedPrefix (a fallback plan
+// the node's switch circuit breaker stopped).
+const switchPausedPrefix = "account switching paused"
+
+// switchPaused reports whether a plan reason comes from the switch circuit
+// breaker and returns its cause as a fixed phrase (never free text).
+func switchPaused(reason string) (bool, string) {
+	l := strings.ToLower(reason)
+	if !strings.HasPrefix(l, switchPausedPrefix) {
+		return false, ""
+	}
+	if strings.Contains(l, "on this node") {
+		return true, "too many automatic switches on its machine"
+	}
+	return true, "repeated limits within 30m"
+}
+
+// sessionTitle resolves a session's title when the lookup can ("" otherwise).
+func sessionTitle(ctx context.Context, lk Lookup, sessionID string) string {
+	if sl, ok := lk.(SessionLookup); ok && sessionID != "" {
+		if t, err := sl.SessionTitle(ctx, sessionID); err == nil {
+			return t
+		}
+	}
+	return ""
+}
+
+func quoteTitle(t string) string {
+	if t = short(t, 40); t == "" {
+		return "this session"
+	}
+	return "'" + t + "'"
 }
 
 // deriveGrant raises a "node" item when a device login needs the owner to
@@ -620,18 +704,76 @@ func deriveGrant(ctx context.Context, ev contracts.Event, lk Lookup) []change {
 
 // ---- runs ----
 
-// deriveRunStarted: a later run of the session started (a retry, a resume,
-// a fallback), so an open failure for the session resolves itself.
-func deriveRunStarted(ev contracts.Event) []change {
+// LiveRun reports whether a run state means the session is running again
+// (working or idle at its prompt); starting, unknown and exiting do not.
+func LiveRun(st contracts.RunState) bool {
+	switch st {
+	case contracts.RunRunning, contracts.RunWaitingInput, contracts.RunWaitingApproval, contracts.RunWaitingBackground:
+		return true
+	}
+	return false
+}
+
+// resolveSession is what resolves a session's failure and account items:
+// its failure item, the account_exhausted items it raised, and its place
+// in grouped capacity items.
+func resolveSession(session, summary string) []change {
+	return []change{
+		{op: opWithdraw, sessionID: session, kinds: []contracts.AttentionKind{contracts.AttnFailure, contracts.AttnAccountPool}, summary: summary},
+		{op: opLeave, sessionID: session},
+	}
+}
+
+// deriveRunLive: a later run of the session reached a live state (a
+// retry, a resume, a fallback), so its failure and "no eligible account" /
+// "needs intervention" items are stale. A run that is only starting
+// resolves nothing: a retry that fails again keeps the one item.
+func deriveRunLive(ev contracts.Event) []change {
 	var r contracts.Run
-	if !unmarshal(ev, &r) {
+	if !unmarshal(ev, &r) || !LiveRun(r.State) {
 		return nil
 	}
 	session := firstNonEmpty(r.SessionID, ev.SessionID)
 	if session == "" {
 		return nil
 	}
-	return []change{{op: opWithdraw, groupKey: "failure:" + session, summary: "A later run of this session started."}}
+	out := resolveSession(session, "A later run of this session is running.")
+	if r.State == contracts.RunRunning {
+		// Its next turn started: whatever it was waiting on was answered
+		// or dropped (an item raised after this event is kept).
+		out = append(out, withdrawWaiting(session, "The session started its next turn.", ev.OccurredAt))
+	}
+	return out
+}
+
+// withdrawWaiting withdraws the session's "waiting on you" item last
+// updated at or before before (waiting.go).
+func withdrawWaiting(session, summary string, before time.Time) change {
+	return change{op: opWithdraw, groupKey: WaitingGroup(session), summary: summary, before: before}
+}
+
+// deriveSessionArchived: an archived session's failure and account items
+// are no longer the owner's concern.
+func deriveSessionArchived(ev contracts.Event) []change {
+	var s contracts.Session
+	if !unmarshal(ev, &s) || !s.Archived {
+		return nil
+	}
+	session := firstNonEmpty(s.SessionID, ev.SessionID)
+	if session == "" {
+		return nil
+	}
+	return append(resolveSession(session, "The session was archived."), withdrawWaiting(session, "The session was archived.", time.Time{}))
+}
+
+// sessionParent resolves a session's parent when the lookup can ("" otherwise).
+func sessionParent(ctx context.Context, lk Lookup, sessionID string) string {
+	if pl, ok := lk.(SessionParentLookup); ok && sessionID != "" {
+		if p, err := pl.SessionParent(ctx, sessionID); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 func deriveRunEnded(ctx context.Context, ev contracts.Event, lk Lookup) []change {
@@ -645,9 +787,19 @@ func deriveRunEnded(ctx context.Context, ev contracts.Event, lk Lookup) []change
 		// The run that flagged its session is gone: its own flag ends with
 		// it (a newer flag, from a later run, is kept).
 		out = append(out, change{op: opWithdraw, groupKey: flagGroup(session), summary: "The run ended.", before: ev.OccurredAt})
+		// Account limits the session hit are moot once it ended (events are
+		// applied in order, so only items raised before the end go).
+		out = append(out, change{op: opWithdraw, sessionID: session, kinds: []contracts.AttentionKind{contracts.AttnAccountPool}, summary: "The session's run ended."})
+		out = append(out, withdrawWaiting(session, "The session's run ended.", ev.OccurredAt))
 	}
 	// Only an explicit failure; "unknown" (lost contact) is never failure.
 	if r.State != contracts.RunFailed {
+		return out
+	}
+	if session != "" && sessionParent(ctx, lk, session) != "" {
+		// A session started by another session: the hub reports the
+		// failure to that parent (child report); the owner hears of it
+		// only if the parent asks.
 		return out
 	}
 	ch := change{
@@ -657,6 +809,18 @@ func deriveRunEnded(ctx context.Context, ev contracts.Event, lk Lookup) []change
 		projectID: ev.ProjectID,
 		sessionID: session,
 		title:     "Session run failed",
+	}
+	if prov, ok := runfail.Capacity(r.StateReason); ok && session != "" {
+		// Launches waiting on one provider's reset are one item, listing
+		// the sessions (not one item each).
+		if prov == "" {
+			prov = contracts.ProviderFor(r.Harness)
+		}
+		ch.groupKey = capacityGroup(prov)
+		ch.object = contracts.ObjectRef{Kind: contracts.KindSession, ID: session}
+		ch.sessionID, ch.projectID = "", nil // many sessions, maybe many projects
+		ch.member, ch.memberLabel = session, sessionTitle(ctx, lk, session)
+		return append(out, ch)
 	}
 	if r.ExitCode != nil {
 		ch.summary = fmt.Sprintf("Exit code %d.", *r.ExitCode)
@@ -887,4 +1051,67 @@ func runNames(ctx context.Context, r contracts.Run, lk Lookup) runfail.Names {
 		return lb
 	}
 	return n
+}
+
+// deriveAsk (W-asks): one "ask" item per ask, raised when it is created
+// (a merged repeat is not new attention), handled when it is decided and
+// withdrawn when the asker withdraws it or it is superseded.
+func deriveAsk(ev contracts.Event) []change {
+	var a contracts.Ask
+	if !unmarshal(ev, &a) || a.AskID == "" {
+		return nil
+	}
+	group := "ask:" + a.AskID
+	switch a.State {
+	case contracts.AskOpen:
+		// The session filed (or repeated) an ask: its question in chat is
+		// in the inbox as this ask now.
+		var waiting []change
+		if a.SessionID != "" {
+			waiting = append(waiting, withdrawWaiting(a.SessionID, "The session filed an ask.", ev.OccurredAt))
+		}
+		if a.Count > 1 {
+			return waiting
+		}
+		ch := change{
+			op:        opRaise,
+			groupKey:  group,
+			kind:      contracts.AttnAsk,
+			severity:  "normal",
+			object:    contracts.ObjectRef{Kind: contracts.KindAsk, ID: a.AskID},
+			sessionID: a.SessionID,
+			projectID: a.ProjectID,
+			title:     short("Ask: "+a.Title, maxTitle),
+			oneShot:   true,
+		}
+		if a.Urgent {
+			ch.severity = "urgent"
+		}
+		if a.DefaultOption != "" && a.DeadlineAt != nil {
+			ch.summary = short("Default "+a.DefaultOption+" applies "+askTime(*a.DeadlineAt), maxSummary)
+		} else if a.DeadlineAt != nil {
+			ch.summary = "No default; expires " + askTime(*a.DeadlineAt)
+		}
+		return append(waiting, ch)
+	case contracts.AskAnswered, contracts.AskDefaulted, contracts.AskExpired:
+		summary := "Answered."
+		switch a.State {
+		case contracts.AskDefaulted:
+			summary = "Default applied at the deadline."
+		case contracts.AskExpired:
+			summary = "Expired with no answer."
+		}
+		return []change{{op: opHandle, groupKey: group, summary: summary}}
+	case contracts.AskWithdrawn, contracts.AskSuperseded:
+		return []change{{op: opWithdraw, groupKey: group, summary: "Withdrawn.", oneShot: true}}
+	}
+	return nil
+}
+
+// askTime shows an ask deadline in the owner's Pacific time.
+func askTime(t time.Time) string {
+	if loc, err := time.LoadLocation("America/Los_Angeles"); err == nil {
+		return t.In(loc).Format("Mon 3:04 PM") + " PT"
+	}
+	return t.UTC().Format("Mon 15:04") + " UTC"
 }

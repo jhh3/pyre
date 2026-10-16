@@ -22,8 +22,10 @@ import (
 // Claude Code runs it as the per-run plugin's background monitor; it
 // inherits the run's environment from the claude process (PYRE_SOCKET/
 // PYRE_HUB, PYRE_SESSION_TOKEN, PYRE_SESSION_ID; the token is never on a
-// command line, see internal/runtime/tmux/execenv.go). It long-polls the session's inbox
-// and prints one line per batch of new mail ("Pyre: N new messages … read
+// command line, see internal/runtime/tmux/execenv.go). It waits for mail on
+// pyred's local inbox.wait (no request held against the hub; W-localwait),
+// falling back to a hub messages.list long-poll when the endpoint lacks it,
+// lists the session's inbox, and prints one line per batch of new mail ("Pyre: N new messages … read
 // them with the pyre inbox tool"). Each stdout line becomes a Claude
 // notification, so stdout carries nothing else; diagnostics go to stderr.
 // Message bodies are never printed. State (cursor, notified ids) lives in
@@ -53,7 +55,7 @@ func cmdInboxWatch(args []string) error {
 	if *runDir != "" {
 		state = filepath.Join(*runDir, claudeplugin.StateFile)
 	}
-	err = claudeplugin.Watch(ctx, claudeplugin.APISource{API: conn.Client, Session: *session}, claudeplugin.WatchOptions{
+	err = claudeplugin.Watch(ctx, &claudeplugin.APISource{API: conn.Client, Session: *session}, claudeplugin.WatchOptions{
 		Out: os.Stdout, Log: os.Stderr, StateFile: state, RunDir: *runDir,
 		MinInterval: *minInterval, Grace: *grace, Remind: *remind,
 		Alive: claudeplugin.ParentWatch(),

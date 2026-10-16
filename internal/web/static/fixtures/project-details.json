@@ -1,0 +1,621 @@
+{
+ "_now": "2026-10-15T16:40:00Z",
+ "details": {
+  "prj_fx_studio": {
+   "project": {
+    "project_id": "prj_fx_studio",
+    "name": "Studio billing v2",
+    "description": "Usage-based invoices on billing_v2 for every customer.",
+    "repos": [],
+    "checkouts": [],
+    "archived": false,
+    "version": 3,
+    "created_by": {
+     "kind": "owner",
+     "id": "owner",
+     "name": "You"
+    },
+    "created_at": "2026-10-01T19:20:00Z",
+    "updated_at": "2026-10-15T16:37:00Z"
+   },
+   "page": {
+    "project_id": "prj_fx_studio",
+    "document": {
+     "document_id": "doc_fx_studio",
+     "project_id": "prj_fx_studio",
+     "title": "Project page",
+     "slug": "page",
+     "media_type": "text/markdown",
+     "head_revision_id": "rev_fx_studio",
+     "head_seq": 7,
+     "created_by": {
+      "kind": "session",
+      "id": "ses_fx_studio_lead",
+      "name": "Studio lead"
+     },
+     "created_at": "2026-10-09T10:40:00Z",
+     "updated_at": "2026-10-15T14:35:00Z"
+    },
+    "revision": {
+     "revision_id": "rev_fx_studio",
+     "document_id": "doc_fx_studio",
+     "seq": 7,
+     "digest": "sha256:fixture",
+     "size": 977,
+     "author": {
+      "kind": "session",
+      "id": "ses_fx_studio_lead",
+      "name": "Studio lead"
+     },
+     "created_at": "2026-10-15T14:35:00Z",
+     "summary": "Status update"
+    },
+    "content": "# Studio billing v2\n\n**Goal:** move every customer to usage-based invoices generated from `billing_v2`, and retire the hand-built credits finance does each week.\n\n## Status — on track, one decision pending\n- Schema and backfill are done and verified against prod snapshots (5 nights, zero differences).\n- **Waiting on you:** merge the migration before Friday's freeze, or wait until Monday. See the open question.\n- New Stripe webhook endpoint is live; the old one stays up while retries drain.\n\n## Results so far\n| Metric | Before | Now |\n|---|---|---|\n| Manual credits per week | 11 | 3 |\n| Invoice generation time | 41 min | 6 min |\n| Invoice disputes (30 days) | 4 | 1 |\n\n## Next\n1. Cutover for the last three enterprise customers (Halcyon, Meridian Labs, Okapi).\n2. Remove the v1 invoice path two weeks after cutover.\n3. Hand the dashboards to finance.\n\n## Links\n- PR [#2214 — billing v2 migration](https://example.com/pr/2214)\n- Runbook: *Billing v2 rollback* (artifact)\n"
+   },
+   "sessions": [
+    {
+     "id": "ses_fx_studio_lead",
+     "title": "Studio lead",
+     "state": "working",
+     "node": "server",
+     "is_lead": true,
+     "last_activity": {
+      "line": "Reviewing invoice PDF font fix",
+      "at": "2026-10-15T16:34:00Z"
+     }
+    },
+    {
+     "id": "ses_fx_billing",
+     "title": "Billing migration",
+     "state": "needs_you",
+     "node": "server",
+     "is_lead": false,
+     "last_activity": {
+      "line": "Waiting for your answer on the merge window",
+      "at": "2026-10-15T16:31:00Z"
+     }
+    },
+    {
+     "id": "ses_fx_webhooks",
+     "title": "Stripe webhooks",
+     "state": "working",
+     "node": "mbp",
+     "is_lead": false,
+     "last_activity": {
+      "line": "Replaying 14 retried events against v2",
+      "at": "2026-10-15T16:37:00Z"
+     }
+    }
+   ],
+   "asks": [
+    {
+     "ask_id": "ask_fx_webhook",
+     "topic_key": "webhook",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_webhooks",
+     "title": "How long to keep the old Stripe webhook endpoint?",
+     "context": "**What's being decided:** how long to keep the old Stripe webhook endpoint (`/hooks/stripe`) running after the new one (`/hooks/stripe/v2`) takes over.\n\nBoth endpoints are live and verify signatures. Stripe retries failed deliveries for up to **3 days**, so anything less than that risks losing events sent to the old URL during the switch. Keeping it longer costs nothing but leaves two code paths to maintain.\n\nIf nobody answers by this morning, I keep it for 30 days and add a removal reminder.",
+     "options": [
+      {
+       "id": "30d",
+       "label": "Keep it for 30 days",
+       "detail": "Safe; I add a calendar reminder to remove it on Nov 14."
+      },
+      {
+       "id": "7d",
+       "label": "Keep it for 7 days",
+       "detail": "Covers Stripe retries with margin; removes the old path sooner."
+      }
+     ],
+     "default_option": "30d",
+     "urgent": false,
+     "deadline_at": "2026-10-15T17:30:00Z",
+     "deadline_rule": "morning",
+     "state": "open",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_webhook",
+     "thread_id": "thr_ask_fx_webhook",
+     "created_at": "2026-10-15T00:10:00Z",
+     "updated_at": "2026-10-15T00:10:00Z"
+    },
+    {
+     "ask_id": "ask_fx_billing",
+     "topic_key": "billing",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_billing",
+     "title": "Merge the billing migration before Friday's freeze?",
+     "context": "**What's being decided:** whether the billing v2 migration (PR #2214) merges *before* Friday's deploy freeze or waits until Monday.\n\n### Why it matters now\nThe freeze starts **Thursday 6 PM PT**. Three enterprise customers (Halcyon, Meridian Labs, Okapi) are still on legacy invoices, and finance is crediting them by hand each week — about **2 hours of manual work** per cycle. Merging before the freeze ends that this week; waiting means one more manual cycle.\n\n### What I already know\n- The PR is rebased on `main`, all 412 tests pass, and the migration ran cleanly against last night's prod snapshot (11 min, no lock waits over 200 ms).\n- The risky step is the **cutover**: new invoices start using `billing_v2.line_items`. If the totals are wrong, customers see it on Monday's invoices.\n- Rollback is a feature flag (`billing.v2_invoices`) — flipping it reverts invoice generation in under 10 minutes. The schema change itself is additive and safe to leave in place.\n\n| Option | Risk | Manual credits this week |\n|---|---|---|\n| Merge today | Medium — cutover lands right before the freeze | None |\n| Wait until Monday | Low | One more cycle (~2 h) |\n| Split | Low — schema now, cutover Monday | One more cycle (~2 h) |\n\n### What happens if nobody answers\nAt the deadline I take the default (**wait until Monday**), keep the branch rebased, and post a reminder Monday 9 AM.",
+     "options": [
+      {
+       "id": "merge",
+       "label": "Merge today, before the freeze",
+       "detail": "Ships Thursday 4 PM. I watch the first 2 hours of invoices and flip the flag back if totals drift."
+      },
+      {
+       "id": "wait",
+       "label": "Wait until Monday",
+       "detail": "Nothing changes this week; finance does one more round of manual credits."
+      },
+      {
+       "id": "split",
+       "label": "Split it: schema now, cutover Monday",
+       "detail": "About half a day of extra work. The risky part moves after the freeze."
+      }
+     ],
+     "default_option": "wait",
+     "urgent": false,
+     "deadline_at": "2026-10-15T17:03:00Z",
+     "deadline_rule": "1h",
+     "state": "open",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_billing",
+     "thread_id": "thr_ask_fx_billing",
+     "created_at": "2026-10-15T16:02:00Z",
+     "updated_at": "2026-10-15T16:02:00Z",
+     "updates": [
+      {
+       "seq": 1,
+       "session_id": "ses_fx_billing",
+       "text": "Update: CI is green on the rebased branch (run 48213) and the prod-snapshot dry run finished in 11 min.",
+       "at": "2026-10-15T16:31:00Z"
+      }
+     ]
+    },
+    {
+     "ask_id": "ask_fx_rotate",
+     "topic_key": "rotate",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_webhooks",
+     "title": "Rotate the staging webhook secret now?",
+     "context": "**What's being decided:** rotate the staging Stripe webhook secret now (staging is down ~5 minutes) or wait for the scheduled rotation on Oct 20.",
+     "options": [
+      {
+       "id": "now",
+       "label": "Rotate now",
+       "detail": "Staging is down ~5 minutes."
+      },
+      {
+       "id": "later",
+       "label": "Wait for Oct 20",
+       "detail": "No downtime now."
+      }
+     ],
+     "default_option": "later",
+     "urgent": false,
+     "deadline_at": "2026-10-14T17:20:00Z",
+     "deadline_rule": "1h",
+     "state": "withdrawn",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_rotate",
+     "thread_id": "thr_ask_fx_rotate",
+     "created_at": "2026-10-14T15:40:00Z",
+     "updated_at": "2026-10-14T15:40:00Z",
+     "updates": [
+      {
+       "seq": 1,
+       "session_id": "ses_fx_webhooks",
+       "text": "Not needed — the deploy already rotated the secret.",
+       "at": "2026-10-14T16:40:00Z"
+      }
+     ]
+    }
+   ],
+   "artifacts": [
+    {
+     "id": "art_fx_1",
+     "title": "Billing v2 rollback runbook",
+     "url": "/api/artifacts/art_fx_1/content",
+     "updated_at": "2026-10-15T13:20:00Z"
+    },
+    {
+     "id": "art_fx_2",
+     "title": "Prod snapshot dry-run report (Oct 14)",
+     "url": "/api/artifacts/art_fx_2/content",
+     "updated_at": "2026-10-15T06:30:00Z"
+    }
+   ]
+  },
+  "prj_fx_pyreweb": {
+   "project": {
+    "project_id": "prj_fx_pyreweb",
+    "name": "Pyre web inbox",
+    "description": "Email-like inbox and project pages for Pyre, on the web.",
+    "repos": [],
+    "checkouts": [],
+    "archived": false,
+    "version": 3,
+    "created_by": {
+     "kind": "owner",
+     "id": "owner",
+     "name": "You"
+    },
+    "created_at": "2026-10-01T19:20:00Z",
+    "updated_at": "2026-10-15T16:39:00Z"
+   },
+   "page": {
+    "project_id": "prj_fx_pyreweb",
+    "document": {
+     "document_id": "doc_fx_web",
+     "project_id": "prj_fx_pyreweb",
+     "title": "Project page",
+     "slug": "page",
+     "media_type": "text/markdown",
+     "head_revision_id": "rev_fx_web",
+     "head_seq": 7,
+     "created_by": {
+      "kind": "session",
+      "id": "ses_fx_web_lead",
+      "name": "Pyre web lead"
+     },
+     "created_at": "2026-10-09T10:40:00Z",
+     "updated_at": "2026-10-15T16:22:00Z"
+    },
+    "revision": {
+     "revision_id": "rev_fx_web",
+     "document_id": "doc_fx_web",
+     "seq": 7,
+     "digest": "sha256:fixture",
+     "size": 662,
+     "author": {
+      "kind": "session",
+      "id": "ses_fx_web_lead",
+      "name": "Pyre web lead"
+     },
+     "created_at": "2026-10-15T16:22:00Z",
+     "summary": "Status update"
+    },
+    "content": "# Pyre web inbox\n\n**Goal:** answer sessions from any device in seconds, with an unmistakable confirmation that the answer went out.\n\n## Status — building\n- Server (`pyre web serve`) runs on server behind ngrok, Google sign-in limited to example.org.\n- Web app: inbox, threads with options, held answers, project pages. Live updates over SSE.\n- **Open:** final hostname (held answer: the ngrok hostname, sending in a few minutes).\n\n## Decisions\n- Live updates use **Server-Sent Events** (decided today).\n- Held answers wait **5 minutes** after the last hold, then send together.\n\n## Next\n- Android deep links into threads.\n- Read receipts in the conversation view.\n"
+   },
+   "sessions": [
+    {
+     "id": "ses_fx_web_lead",
+     "title": "Pyre web lead",
+     "state": "working",
+     "node": "server",
+     "is_lead": true,
+     "last_activity": {
+      "line": "Integrating web-server and web-ui branches",
+      "at": "2026-10-15T16:38:00Z"
+     }
+    },
+    {
+     "id": "ses_fx_web_server",
+     "title": "web-server",
+     "state": "needs_you",
+     "node": "server",
+     "is_lead": false,
+     "last_activity": {
+      "line": "Waiting for the hostname answer",
+      "at": "2026-10-15T16:28:00Z"
+     }
+    },
+    {
+     "id": "ses_fx_web_ui",
+     "title": "web-ui",
+     "state": "working",
+     "node": "server",
+     "is_lead": false,
+     "last_activity": {
+      "line": "Taking screenshots for review",
+      "at": "2026-10-15T16:39:00Z"
+     }
+    }
+   ],
+   "asks": [
+    {
+     "ask_id": "ask_fx_hostname",
+     "topic_key": "hostname",
+     "project_id": "prj_fx_pyreweb",
+     "session_id": "ses_fx_web_server",
+     "title": "Which hostname for the web inbox?",
+     "context": "**What's being decided:** the public hostname for the Pyre web inbox.\n\n`pyre web serve` is running on server behind ngrok with the Google OAuth policy (only `@example.org` addresses get through). I need one hostname to put in the traffic policy and the Android deep links.\n\n- **pyre-example.ngrok.app** is already reserved on the ngrok account and works today.\n- **inbox.example.org** looks nicer but needs a CNAME in Cloudflare and a paid ngrok custom-domain slot (we have one unused).\n\nEither can be changed later; links in old notifications would break.\n\nIf nobody answers, I use the ngrok hostname.",
+     "options": [
+      {
+       "id": "ngrok",
+       "label": "pyre-example.ngrok.app",
+       "detail": "Works now, no DNS changes."
+      },
+      {
+       "id": "custom",
+       "label": "inbox.example.org",
+       "detail": "Needs a Cloudflare CNAME; about 30 minutes of setup."
+      }
+     ],
+     "default_option": "ngrok",
+     "urgent": false,
+     "deadline_at": "2026-10-15T17:35:00Z",
+     "deadline_rule": "1h",
+     "state": "open",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_hostname",
+     "thread_id": "thr_ask_fx_hostname",
+     "created_at": "2026-10-15T16:28:00Z",
+     "updated_at": "2026-10-15T16:28:00Z"
+    },
+    {
+     "ask_id": "ask_fx_sse",
+     "topic_key": "sse",
+     "project_id": "prj_fx_pyreweb",
+     "session_id": "ses_fx_web_lead",
+     "title": "Server-Sent Events or WebSockets for live updates?",
+     "context": "**What's being decided:** live updates for the web inbox — Server-Sent Events or WebSockets.\n\nSSE is one-way (server → browser), works through ngrok unchanged and reconnects on its own. WebSockets would only matter if the browser had to stream data *to* the server, which it doesn't: answers and replies are plain POSTs.\n\nDefault: SSE.",
+     "options": [
+      {
+       "id": "sse",
+       "label": "Server-Sent Events",
+       "detail": "Simpler; automatic reconnects; enough for one-way updates."
+      },
+      {
+       "id": "ws",
+       "label": "WebSockets",
+       "detail": "Two-way; needs a reconnect layer we would write ourselves."
+      }
+     ],
+     "default_option": "sse",
+     "urgent": false,
+     "deadline_at": "2026-10-15T14:20:00Z",
+     "deadline_rule": "1h",
+     "state": "answered",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_sse",
+     "thread_id": "thr_ask_fx_sse",
+     "created_at": "2026-10-15T13:20:00Z",
+     "updated_at": "2026-10-15T13:20:00Z",
+     "answer": {
+      "option_id": "sse",
+      "by": {
+       "kind": "owner",
+       "id": "owner",
+       "name": "You"
+      },
+      "at": "2026-10-15T13:40:00Z"
+     },
+     "decision_message_id": "msg_fx_014"
+    }
+   ],
+   "artifacts": [
+    {
+     "id": "art_fx_3",
+     "title": "Web inbox screenshots — review round 1",
+     "url": "/api/artifacts/art_fx_3/content",
+     "updated_at": "2026-10-15T16:35:00Z"
+    }
+   ]
+  },
+  "prj_fx_vortex": {
+   "project": {
+    "project_id": "prj_fx_vortex",
+    "name": "Vortex onboarding",
+    "description": "Trial-to-paid conversion for Vortex.",
+    "repos": [],
+    "checkouts": [],
+    "archived": false,
+    "version": 3,
+    "created_by": {
+     "kind": "owner",
+     "id": "owner",
+     "name": "You"
+    },
+    "created_at": "2026-10-01T19:20:00Z",
+    "updated_at": "2026-10-15T15:52:00Z"
+   },
+   "page": {
+    "project_id": "prj_fx_vortex",
+    "document": {
+     "document_id": "doc_fx_voy",
+     "project_id": "prj_fx_vortex",
+     "title": "Project page",
+     "slug": "page",
+     "media_type": "text/markdown",
+     "head_revision_id": "rev_fx_voy",
+     "head_seq": 7,
+     "created_by": {
+      "kind": "session",
+      "id": "ses_fx_voy_lead",
+      "name": "Vortex lead"
+     },
+     "created_at": "2026-10-09T10:40:00Z",
+     "updated_at": "2026-10-15T11:40:00Z"
+    },
+    "revision": {
+     "revision_id": "rev_fx_voy",
+     "document_id": "doc_fx_voy",
+     "seq": 7,
+     "digest": "sha256:fixture",
+     "size": 511,
+     "author": {
+      "kind": "session",
+      "id": "ses_fx_voy_lead",
+      "name": "Vortex lead"
+     },
+     "created_at": "2026-10-15T11:40:00Z",
+     "summary": "Status update"
+    },
+    "content": "# Vortex onboarding\n\n**Goal:** lift trial → paid conversion back above 9%.\n\n## Status — needs a decision\nConversion slipped to **6.4%**. Users activate but don't reach a second project before the 7-day trial ends (median 8.5 days). The trial-length question is with you.\n\n## What we've tried\n- New onboarding flow (Oct 8): activation up from 71% to 80%.\n- Onboarding survey to signups since Oct 8 (defaulted yesterday): 112 responses so far.\n\n## Next\n- Decide trial length.\n- Read the survey at 300 responses.\n"
+   },
+   "sessions": [
+    {
+     "id": "ses_fx_voy_lead",
+     "title": "Vortex lead",
+     "state": "idle",
+     "node": "mbp",
+     "is_lead": true,
+     "last_activity": {
+      "line": "Drafted the survey summary",
+      "at": "2026-10-15T15:52:00Z"
+     }
+    },
+    {
+     "id": "ses_fx_funnel",
+     "title": "Trial funnel analysis",
+     "state": "needs_you",
+     "node": "mbp",
+     "is_lead": false,
+     "last_activity": {
+      "line": "Waiting for your answer on trial length",
+      "at": "2026-10-15T15:45:00Z"
+     }
+    }
+   ],
+   "asks": [
+    {
+     "ask_id": "ask_fx_trial",
+     "topic_key": "trial",
+     "project_id": "prj_fx_vortex",
+     "session_id": "ses_fx_funnel",
+     "title": "Extend the Vortex free trial to 14 days?",
+     "context": "**What's being decided:** whether to extend the Vortex free trial from **7 to 14 days** starting with today's signups.\n\n### Why now\nPaid conversion dropped from 9.1% to 6.4% over the last three weeks. The funnel shows people *activate* fine but don't reach their second project before the trial ends:\n\n| Step | 7-day trial (last 3 weeks) |\n|---|---|\n| Signed up | 1,284 |\n| First generation | 1,027 (80%) |\n| Second project | 391 (30%) |\n| Converted | 82 (6.4%) |\n\nUsers who reach a second project convert at 19%. Median time to a second project is **8.5 days** — just past the trial.\n\n### What each option does\n- **Extend to 14 days:** a config change (`trial.days`), no deploy. Revenue from this week's cohort shifts one week later.\n- **Keep 7 days, add a day-5 nudge email:** about a day of work; doesn't address the 8.5-day median.\n\nThere's **no default**: pricing changes need your call. If this expires, nothing changes.",
+     "options": [
+      {
+       "id": "extend",
+       "label": "Extend to 14 days",
+       "detail": "Config-only; applies to today's signups onward."
+      },
+      {
+       "id": "nudge",
+       "label": "Keep 7 days, add a day-5 nudge",
+       "detail": "About a day of work; ships next week."
+      },
+      {
+       "id": "test",
+       "label": "A/B test 7 vs 14 days",
+       "detail": "Two weeks to a readable result at current volume."
+      }
+     ],
+     "urgent": true,
+     "deadline_at": "2026-10-15T18:50:00Z",
+     "deadline_rule": "custom",
+     "state": "open",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_trial",
+     "thread_id": "thr_ask_fx_trial",
+     "created_at": "2026-10-15T15:45:00Z",
+     "updated_at": "2026-10-15T15:45:00Z"
+    },
+    {
+     "ask_id": "ask_fx_survey",
+     "topic_key": "survey",
+     "project_id": "prj_fx_vortex",
+     "session_id": "ses_fx_voy_lead",
+     "title": "Who gets the onboarding survey?",
+     "context": "**What's being decided:** who receives the Vortex onboarding survey — every trial user, or only people who signed up after the new onboarding shipped (Oct 8).\n\nOlder users saw a different flow, so their answers would mix two experiences. Default: only new signups.",
+     "options": [
+      {
+       "id": "all",
+       "label": "All trial users",
+       "detail": "More responses (~1,200), mixed onboarding versions."
+      },
+      {
+       "id": "new",
+       "label": "Only signups since Oct 8",
+       "detail": "About 400 responses, all on the new flow."
+      }
+     ],
+     "default_option": "new",
+     "urgent": false,
+     "deadline_at": "2026-10-14T19:40:00Z",
+     "deadline_rule": "1h",
+     "state": "defaulted",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_survey",
+     "thread_id": "thr_ask_fx_survey",
+     "created_at": "2026-10-14T18:40:00Z",
+     "updated_at": "2026-10-14T18:40:00Z",
+     "answer": {
+      "option_id": "new",
+      "by": {
+       "kind": "system",
+       "id": "hub",
+       "name": "Pyre"
+      },
+      "by_default": true,
+      "at": "2026-10-14T19:40:00Z"
+     },
+     "decision_message_id": "msg_fx_016"
+    }
+   ],
+   "artifacts": [
+    {
+     "id": "art_fx_4",
+     "title": "Trial funnel, last 3 weeks",
+     "url": "/api/artifacts/art_fx_4/content",
+     "updated_at": "2026-10-15T15:40:00Z"
+    }
+   ]
+  },
+  "prj_fx_backrooms": {
+   "project": {
+    "project_id": "prj_fx_backrooms",
+    "name": "Backrooms video",
+    "description": "Feature-length render pipeline and festival cut.",
+    "repos": [],
+    "checkouts": [],
+    "archived": false,
+    "version": 3,
+    "created_by": {
+     "kind": "owner",
+     "id": "owner",
+     "name": "You"
+    },
+    "created_at": "2026-10-01T19:20:00Z",
+    "updated_at": "2026-10-15T15:59:00Z"
+   },
+   "page": {
+    "project_id": "prj_fx_backrooms",
+    "content": ""
+   },
+   "sessions": [
+    {
+     "id": "ses_fx_render",
+     "title": "Render farm",
+     "state": "needs_you",
+     "node": "server",
+     "is_lead": false,
+     "last_activity": {
+      "line": "Asked whether to switch the farm tonight",
+      "at": "2026-10-15T15:59:00Z"
+     }
+    }
+   ],
+   "asks": [
+    {
+     "ask_id": "ask_fx_4k",
+     "topic_key": "4k",
+     "project_id": "prj_fx_backrooms",
+     "session_id": "ses_fx_render",
+     "title": "Re-render chapter 3 at 4K?",
+     "context": "**What's being decided:** whether to re-render chapter 3 at 4K before the festival cut. It takes about 14 hours of farm time and blocks chapter 4 renders. No default: this spends the farm for most of a day.",
+     "options": [
+      {
+       "id": "yes",
+       "label": "Re-render at 4K",
+       "detail": "~14 h of farm time; chapter 4 waits."
+      },
+      {
+       "id": "no",
+       "label": "Keep the 1080p master",
+       "detail": "Upscale only if the festival asks."
+      }
+     ],
+     "urgent": false,
+     "deadline_at": "2026-10-13T15:00:00Z",
+     "deadline_rule": "1h",
+     "state": "expired",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_4k",
+     "thread_id": "thr_ask_fx_4k",
+     "created_at": "2026-10-13T13:00:00Z",
+     "updated_at": "2026-10-13T13:00:00Z"
+    }
+   ],
+   "artifacts": [
+    {
+     "id": "art_fx_5",
+     "title": "Renderer benchmark report",
+     "url": "/api/artifacts/art_fx_5/content",
+     "updated_at": "2026-10-15T13:35:00Z"
+    }
+   ]
+  }
+ }
+}

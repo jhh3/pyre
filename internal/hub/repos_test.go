@@ -100,3 +100,40 @@ func TestRepoLastUsedIncludesWorktrees(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+// repos.catalog (W-newsession): node indexes and a node's GitHub snapshot
+// merge into one deduplicated, ranked list.
+func TestRepoCatalogMergesGitHub(t *testing.T) {
+	x := newHarness(t)
+	x.connect(nodeMac, 0)
+	x.connect(nodeLin, 0)
+	now := x.clock.Now()
+	x.report(nodeMac, contracts.ReportRepos, contracts.NodeRepoIndex{IndexedAt: now, Repos: []contracts.Repo{
+		{Name: "atlas", Path: "/home/synth/code/atlas", RemoteURL: "git@github.com:synth-org/atlas.git", LastActivity: now.Add(-time.Hour)}}})
+	x.report(nodeLin, contracts.ReportRepos, contracts.NodeRepoIndex{IndexedAt: now, Repos: []contracts.Repo{
+		{Name: "atlas", Path: "/home/synth/src/atlas", RemoteURL: "https://github.com/synth-org/atlas", LastActivity: now.Add(-2 * time.Hour)}}})
+	contributed := now.Add(-3 * time.Hour)
+	x.report(nodeLin, contracts.ReportGitHubRepos, contracts.GitHubRepoIndex{Login: "synth-owner", FetchedAt: now, Repos: []contracts.GitHubRepo{
+		{FullName: "synth-org/atlas", CloneURL: "https://github.com/synth-org/atlas.git"},
+		{FullName: "synth-org/orbit", CloneURL: "https://github.com/synth-org/orbit.git", ContributedAt: &contributed},
+	}})
+	// A node cannot report another node's GitHub snapshot.
+	x.report(nodeMac, contracts.ReportGitHubRepos, contracts.GitHubRepoIndex{NodeID: nodeLin, Login: "evil", Repos: []contracts.GitHubRepo{{FullName: "evil/x", CloneURL: "https://github.com/evil/x.git"}}})
+	cat, err := x.h.RepoCatalog(as(owner), contracts.RepoCatalogRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Items) != 2 || cat.GitHub == nil || cat.GitHub.Login != "synth-owner" || cat.GitHub.NodeID != nodeLin {
+		t.Fatalf("catalog: %+v", cat)
+	}
+	if cat.Items[0].Name != "orbit" || cat.Items[0].Rank != contracts.CatalogRankContributed || len(cat.Items[0].Present) != 0 {
+		t.Fatalf("contributed first: %+v", cat.Items[0])
+	}
+	if a := cat.Items[1]; a.Name != "atlas" || len(a.Present) != 2 || !a.GitHub {
+		t.Fatalf("atlas merged: %+v", a)
+	}
+	x.restart()
+	if cat, _ = x.h.RepoCatalog(as(owner), contracts.RepoCatalogRequest{Query: "orb"}); len(cat.Items) != 1 {
+		t.Fatalf("after restart: %+v", cat.Items)
+	}
+}

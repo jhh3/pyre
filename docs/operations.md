@@ -51,7 +51,9 @@ owner's authorization step by step.
 
 1. **Direct TLS** (preferred): the hub port is reachable over the LAN or
    Twingate. Hub URL `https://<hub-name>:7443`. Twingate provides reachability
-   only; Pyre still authenticates every device with its own token.
+   only; Pyre still authenticates every device with its own token. Cloud
+   nodes reach the hub at its Tailscale address the same way
+   ([cloud nodes](#cloud-nodes-gcp-over-tailscale)).
 2. **ssh local forward** when the hub port is not reachable (as in
    `tests/e2e/two_host.sh`):
    `ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:7443:127.0.0.1:7443 <hub-alias>`,
@@ -100,7 +102,7 @@ use `python3` and `curl`.
 | Hub service | `~/Library/LaunchAgents/dev.jhh3.pyre.hub.plist` | `~/.config/systemd/user/pyre-hub.service` |
 | Service logs | `~/Library/Logs/pyre/*.log` (stdout/stderr) and `<state>/logs/pyred.log` (rotating, 5 MiB x 3) | `journalctl --user -u pyred -u pyre-hub` and `<state>/logs/pyred.log` |
 | Account profiles | `~/.local/state/pyre/profiles/<account>/<harness>/` (`$PYRE_PROFILE_ROOT`; an existing `<state>/profiles` keeps being used) | same |
-| Shared transcript store of the profiles (session histories and transcripts) | `shared/` next to the profile root: `~/.local/state/pyre/shared` by default | same |
+| Shared transcript store of the profiles (session histories and transcripts) | `shared/` next to the profile root: `~/.local/state/pyre/shared` by default. Every Claude profile (token, rota, device login) links `projects/ todos/ file-history/ plans/ tasks/ session-env/ shell-snapshots/ history.jsonl` to `shared/claude/`, so a session resumes natively under another account; pyred merges a profile's own copies into it at start (renamed aside to `<name>.pyre-migrating`, moved in, name clashes kept as `<name>.from-<account>-<profile>`) | same |
 | CLI local state (`pyre artifact get` verified cache, document drafts) | `~/.local/state/pyre/{cache,drafts}` (`$PYRE_STATE_DIR`), outside the node state directory | `~/.local/state/pyre/{cache,drafts}`, inside the node state directory |
 | Android signing key | `~/.config/pyre/pyre-release.jks` + `android-signing.properties` (never in Git or in hub backups) | — |
 
@@ -217,8 +219,25 @@ Service definitions (templates in `packaging/`):
   systemd support also put each pane in a `tmux-spawn-*.scope` in the same
   slice. `pyred.service` therefore keeps the default `KillMode=control-group`
   and caps pyred alone (`MemoryHigh=512M`, `MemoryMax=1G`, `CPUQuota=200%`,
-  `TasksMax=512`); `Restart=on-failure`, `RestartSec=2s`, start-limit 10 per
-  5 min, `LimitNOFILE=8192`. `pyre-runs.slice` (rendered next to the unit)
+  `TasksMax=512`, `ManagedOOMPreference=avoid`); `Restart=on-failure`,
+  `RestartSec=2s`, start-limit 10 per 5 min, `LimitNOFILE=8192`,
+  `TimeoutStopSec=30s` (launchd `ExitTimeOut` 30). On SIGTERM pyred refuses
+  new launches and waits up to 20 s for in-flight launches to record their
+  run handle; a launch still in flight after that (or after a crash/kill) is
+  reconciled on the next start: adopted if its tmux session or process
+  exists, failed with "launch interrupted … nothing ran — relaunch to retry"
+  when the run dir proves the harness was never started (no
+  `launch-started` marker), otherwise left `unknown`. Pyre never relaunches
+  it by itself. `ManagedOOMPreference=avoid` is honoured for systemd-oomd
+  memory-pressure kills of user units because the unit's cgroup and the
+  monitored `user@UID.service` have the same owner (systemd 259; swap kills
+  ignore it). On server (2026-10-06) oomd killed pyred.service at 529 MB: its
+  RSS was ~60 MB, the rest was reclaimable dentry/inode slab charged to it by
+  `git status` children of the worktree tracker (fixed: cached, budgeted
+  checks) and page cache of an 800 MB pyred.db bloated by stored
+  `read_transcript` results (fixed: 10-minute retention for read-only
+  command records). Constant reclaim at `MemoryHigh` made it the top pgscan
+  candidate. `pyre-runs.slice` (rendered next to the unit)
   carries `MemoryHigh=85%` (reclaim pressure, no kill) and `CPUWeight=90`.
   Because "-" is hierarchy in slice names, the slice sits at
   `user@UID.service/pyre.slice/pyre-runs.slice`. The unit sets
@@ -283,6 +302,37 @@ Run it as a service with `install.sh --service hub --hub-data <data>
 (unauthenticated, `{"ok":true}`), `pyre hello` (authenticated, prints hub id,
 version and protocol range).
 
+### Hub database size and write lock
+
+`serve` holds `<data>/hub.lock` (flock); a second `serve` or a `compact` on the
+same data directory refuses to start. Maintenance bounds `hub.db`: events keep
+7 days or 200 000 entries; finished node commands are deleted 7 days after
+completion and lose payloads/results over 1 KiB after 1 day; operation records
+keep 30 days; audit 90 days / 100 000 entries. Every retention pass runs in
+write transactions of at most 500 rows with a short pause between them, so it
+never holds the write lock long. `command.result` events no longer copy
+results over 1 KiB (the command record keeps them for `commands.get`).
+
+A database that grew before this (2026-10-08: 5.5 GB, 2.9 GB of it finished
+transcript reads) shrinks once offline:
+
+```sh
+pyre-hub compact --data <data> --dry-run   # bytes per event kind / command kind; changes nothing
+<stop the hub service>
+pyre-hub compact --data <data>             # retention to completion, then VACUUM
+<start the hub service>
+```
+
+VACUUM needs free disk space about the size of the remaining data. The first
+start of this version builds the retention indexes (`commands_finished`,
+`operations_created`, namespace `hub_retention`), which scans `commands` once.
+
+The hub (and pyred) log `sqlite: write transaction held the lock` or
+`sqlite: BEGIN waited for the write lock` with the caller when either exceeds
+1 s, and `sqlite: nested write transaction` when code opens a second write
+transaction on the same database inside one it holds (a self-deadlock; it fails
+at once instead of after the 10 s busy timeout).
+
 ## Clients
 
 First CLI (the owner's machine): copy `owner-credential.json` over ssh, then
@@ -297,6 +347,9 @@ under another name). A bare token on stdin works too (`… | pyre login --hub UR
 
 Delete the copied file afterwards; the token now lives in
 `~/.config/pyre/client.json` (0600, refused if group/world readable).
+The same file may carry `web_url`, the web app (`pyre web serve`) whose
+inbox the TUI links to (default `https://pyre-example.ngrok.app`;
+`PYRE_WEB_URL` overrides it); `pyre login`/`pair --force` keep it.
 
 More machines: `pyre pair-client --name laptop --kind cli` prints a one-time
 `pyre://pair?...` link (it expires; treat it like a password); on the other
@@ -354,6 +407,412 @@ unavailable; showing the copy cached on node …, last confirmed …` on stderr
 write, report the outage. Node and connection timestamps come from the
 hub's clock, so a node whose clock is off does not look fresher or older
 than it is.
+
+### Restarting a node
+
+Before rebooting a machine, drain it; after the reboot, resume what the
+reboot interrupted:
+
+```sh
+pyre node drain server --minutes 10 --wait   # tag + tell every live session to reach a stopping point
+sudo reboot                               # on server
+pyre node resume server                      # once server shows connected in `pyre nodes`
+```
+
+`node drain` tags every non-archived session whose current run is on the
+node and not ended `drained:<node_id>` and sends it an owner message to
+finish or pause its current step, save work and end its turn (`--message`
+replaces the text). Shell sessions are skipped, since a message would run
+as a command. With `--wait` it polls every 15 s until no tagged session is
+running, waiting on background work or starting; at the deadline the ones
+still working get a final steered STOP NOW message (a normal message where
+the runtime cannot steer). `--dry-run` lists what it would do.
+
+`node resume` handles each tagged session: archived ones and runs that
+ended deliberately (for example `stopped by pyre (/exit)`) lose the tag and
+are left alone; runs pyred could not find after its restart (state reason
+`exit not observed`) and failed resume launches are natively resumed, like
+`pyre resume`, one every ~1.5 s; runs that are still live (a Codex run that
+reconnected by itself) are not resumed. Every resumed or live session gets a
+restart note telling it background jobs were stopped. A resume that fails or
+does not come up within ~90 s keeps its tag and prints the run's state
+reason; rerun the command to retry. `--all` resumes every ended tagged
+session whatever the reason. Both commands are safe to rerun: tags are
+idempotent and message IDs are stable.
+
+The node must come back on its own: the hub and pyred are services that
+start at boot (launchd on macOS; systemd user services on Linux need
+`loginctl enable-linger <user>`, or nothing starts until that user logs in).
+
+## Cloud nodes (GCP over Tailscale)
+
+`pyre node create --cloud gcp` makes an on-demand Google Cloud VM and enrolls
+it as an ordinary node. Everything runs on the machine where you type it,
+with your own `gcloud` (its active account and configuration; Pyre stores no
+service-account key). Code: `internal/cloud`, `internal/cli/cmd_cloud.go`.
+Tested with fakes only; the first real create is an owner-approved rollout
+step.
+
+```sh
+pyre node create --cloud gcp --name dev1                       # e2-standard-8, 200 GB, Ubuntu 24.04
+pyre node create --cloud gcp --name gpu1 --gpu nvidia-l4:1 --spot
+pyre node create --cloud gcp --name win1 --os windows --rdp     # Windows Server 2025, RDP over the tailnet
+pyre node create --cloud gcp --name win-build --os windows --toolchain node@24.21.0 --toolchain bun@1.3.14,rust
+pyre nodes --cloud                  # VM state, type, uptime, estimated $/h now and while running
+pyre node stop dev1                 # power off, disk kept (refuses with live runs unless --force)
+pyre node start dev1                # boots with a fresh Tailscale key, waits for the node
+pyre node idle dev1 60              # idle auto-stop minutes (0 = off), live within a minute
+pyre node delete dev1               # VM + disks + hub enrollment (refuses with live runs or unpushed work)
+pyre node rdp win1 --reset-password --open
+pyre node image bake [--os windows] # image family so later creates boot in about a minute
+```
+
+Every VM is `pyre-<name>`, labelled `pyre-node=<name>`, `pyre-managed=true`
+and `pyre-os=<os>` (its boot disk too); listing and cleanup use only these
+labels and refuse instances without `pyre-managed=true`. Builder VMs of
+`image bake` carry `pyre-role=bake` and are deleted after the image is made.
+
+### Cloud configuration
+
+`cloud.json` beside the client config (`~/.config/pyre/cloud.json`, or
+`$PYRE_CLOUD_CONFIG`); every field is optional and flags override it:
+
+```json
+{
+  "hub_url": "https://server.<tailnet>.ts.net:7443",
+  "gcp": {"project": "<project>", "zone": "<zone>", "machine_type": "e2-standard-8", "disk_gb": 200,
+          "spot": false, "idle_stop_minutes": 30, "user": "pyre", "service_account": "",
+          "harnesses": ["claude", "codex", "gh"], "pyred_args": [],
+          "toolchains": ["electron"],
+          "windows_installers": [], "windows_gpu_driver": ""},
+  "release": {"url": "gs://<bucket>/pyre/<version>/", "version": "<version>", "with_tools": false},
+  "tailscale": {"tag": "tag:pyre-node", "oauth_client_id": "<id>",
+                "oauth_client_secret_file": "/Users/<you>/.config/pyre/tailscale-oauth-secret"}
+}
+```
+
+Project and zone default to `gcloud config get-value project` and
+`compute/zone`. `release.url` is a directory holding
+`pyre-<v>-linux-<arch>.tar.gz` (and `pyre-<v>-windows-amd64.zip` for Windows),
+`SHA256SUMS` and `SHA256SUMS.sig`, as `packaging/release.sh` writes them;
+upload with `gcloud storage cp dist/release/{pyre-<v>-linux-amd64.tar.gz,SHA256SUMS,SHA256SUMS.sig} gs://<bucket>/pyre/<v>/`.
+The release key the VM verifies with is your pinned
+`~/.config/pyre/release-allowed-signers` (or `release.allowed_signers`).
+Secrets are never flags: the Tailscale OAuth client secret comes from
+`TAILSCALE_OAUTH_CLIENT_SECRET` or a 0600 file, a pre-made key from
+`PYRE_TAILSCALE_AUTHKEY` or `tailscale.auth_key_file` (single use: one
+create; `start` then needs another).
+
+### Bootstrap flow and secrets
+
+1. The CLI refuses early (name taken on the hub or in the project, no hub
+   URL, no release key, no Tailscale key source), ensures the firewall rule
+   `pyre-deny-ingress` (DENY all inbound from 0.0.0.0/0 to tag `pyre-node`,
+   priority 100; firewall rules cannot carry labels, so its name and
+   description mark it), mints a one-time hub enrollment ticket (TTL 30 min)
+   and one Tailscale auth key (single use, ephemeral, pre-authorized, tagged
+   `tag:pyre-node`, 15 min).
+2. It writes the startup script, the non-secret `pyre-config` JSON and the
+   two secrets to 0600 files in a private 0700 temp dir and creates the VM
+   with `--metadata-from-file` (secrets never in argv or logs; the dir is
+   removed afterwards). The VM gets no service account at all, except
+   `devstorage.read_only` when the release is on `gs://` or a Windows node
+   has `gcp.windows_installers` (set
+   `gcp.service_account` to one with only `roles/storage.objectViewer` on the
+   bucket to narrow it further).
+3. First boot (`startup-script`, root, every boot, idempotent, output on the
+   serial console: `gcloud compute instances get-serial-port-output
+   pyre-<name> --zone <z>`): base packages, the lingering node user `pyre`,
+   Tailscale (`tailscale up --auth-key=file:<0600 tmpfs file> --hostname
+   pyre-<name> --ssh`), the release download, `ssh-keygen -Y verify` of
+   `SHA256SUMS.sig` (namespace `pyre-release`) and the tarball checksum
+   before extracting (as `install.sh` does), `pyred enroll --secret-stdin`
+   (secret on stdin), the developer toolchains (below), node/Claude
+   Code/Codex when missing, then
+   `install.sh --tarball … --allowed-signers … --service node --name <name>
+   --ssh-alias pyre@pyre-<name>` (which verifies again). Secret files are
+   deleted at once; the script never enables tracing.
+4. The CLI waits for the node to connect (default 15 min, Windows 60; the
+   Windows enrollment ticket also lives 60 min), then
+   removes `pyre-enroll-secret` and `pyre-ts-authkey` from the metadata and
+   revokes the minted key, also after a timeout. Until then any process on
+   the VM could read them from the metadata server; both are single use and
+   short-lived for that reason.
+
+`pyre node image bake` runs the same script in bake mode on a throwaway
+builder (toolchain and verified release; no tailnet login, enrollment or
+credential; machine-id cleared; Windows runs GCESysprep), waits for it to
+power off, creates an image in family `pyre-node` / `pyre-node-windows` and
+deletes the builder. `create` uses that family automatically when it exists.
+
+### Developer toolchains
+
+`gcp.toolchains` in `cloud.json` and `--toolchain` on `pyre node create` /
+`pyre node image bake` (repeatable, comma-separated also works) choose what
+the boot script installs, so a node can build a project the way its CI
+does. Entries are ids, ids with a version, or presets:
+
+| id | Windows | Linux |
+|---|---|---|
+| `node@lts`, `node@<major>`, `node@<x.y.z>` (`node` = `node@lts`) | official zip (`node-v<x.y.z>-win-x64.zip`) into `C:\Program Files\PyreTools\node\…`, first on the machine PATH; checked against nodejs.org `SHASUMS256.txt` | official tarball into `/opt/pyre-tools/node/v<x.y.z>`, `/opt/node` and `/usr/local/bin/{node,npm,npx,corepack}` links; `SHASUMS256.txt` |
+| `pnpm`, `pnpm@<x.y.z>` | `corepack enable pnpm` (Node 25+: corepack from npm first); `COREPACK_HOME=C:\ProgramData\pyre\corepack` (dev user can write), `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`; a repo's `packageManager` field picks the pnpm version at first use; with a version, `corepack install -g pnpm@<v>` | same, shims in `/usr/local/bin`; with a version, prepared for the node user |
+| `bun`, `bun@<x.y.z>` | release `bun-windows-x64.zip` of tag `bun-v<x.y.z>` (bare `bun`: latest), checked against that release's `SHASUMS256.txt`; `bun.exe`/`bunx.exe` in `PyreTools\bun\<v>` | `bun-linux-x64.zip` / `-aarch64`, same check; `/usr/local/bin/bun`, `bunx` |
+| `rust`, `rust@<channel or x.y.z>` | `rustup-init.exe` (checked against its `.sha256`), `--default-host x86_64-pc-windows-msvc`, machine-wide `RUSTUP_HOME`/`CARGO_HOME` under `C:\ProgramData\pyre\rust` (dev user can write), `cargo\bin` on the machine PATH; adds `vs-buildtools` | `rustup-init` (`.sha256`) as the node user (`~/.cargo`, linked into `~/.local/bin` for pyred's service PATH); `build-essential` for the linker |
+| `cmake`, `cmake@<x.y.z>` | Chocolatey `cmake` (`ADD_CMAKE_TO_PATH=System`, `--version` when given) | distro `cmake` (a version applies on Windows only) |
+| `llvm`, `llvm@<x.y.z>` | Chocolatey `llvm`; `LIBCLANG_PATH=C:\Program Files\LLVM\bin` for bindgen | distro `llvm clang libclang-dev` |
+| `python`, `python@<x.y.z>` | python.org installer (default 3.12.8), Authenticode publisher Python Software Foundation | distro `python3 python3-venv python3-pip python-is-python3` |
+| `vs-buildtools` | VS 2022 Build Tools, C++ workload with recommended components (Windows SDK); Authenticode publisher Microsoft | `build-essential` |
+| `git` | latest Git for Windows, checked against the GitHub release asset digest | distro `git` |
+| `gh` | latest gh MSI, GitHub release asset digest | GitHub's signed apt repository |
+| `parsec` (Windows only) | Parsec host (`parsec-windows.exe /silent /shared`), Authenticode publisher Parsec; sign in once as the dev user over RDP | refused |
+
+Presets: `default` (what nodes always got: Windows `git, node@lts, python,
+vs-buildtools`; Linux `git, python`), `electron` (`node@lts, pnpm, python,
+git, gh`, plus `vs-buildtools` on Windows) and `media` (`electron` plus
+`parsec`, Windows). Rules: nothing configured means `default`; the
+`--toolchain` flags are added after the configured list; a later entry for
+the same tool replaces an earlier one (`--toolchain node@24.21.0` overrides
+`electron`'s `node@lts`); `pnpm` adds `node@lts` when no node is listed;
+`rust` on Windows adds `vs-buildtools`; the `gh` harness adds `gh`.
+Versions are validated by the CLI before anything is created (`node`
+takes `lts`, a major or an exact `x.y.z`; the others an exact `x.y.z`).
+Claude Code and Codex still get node 22 (Linux) or LTS (Windows) when no
+toolchain installed one.
+
+Every id is idempotent and skipped when the requested version is present
+(`node@lts` and bare ids accept any installed version). The scripts run the
+list on every boot (Linux: first boot after enrollment, later boots before
+the ready line; Windows: before the later-boot exit), so a failed install is
+retried by a reboot; in node mode a failure is logged
+(`WARNING: toolchain … failed`) and the node still comes up, in bake mode it
+fails the bake. Nothing secret is involved or logged. Installs are
+machine-wide: on Windows the machine PATH and environment change, which the
+dev user's sessions (and pyred, started at logon) see from the next logon;
+the first boot reboots before that logon anyway.
+
+Trust: Node, Bun and rustup downloads are checked against SHA-256 files
+the vendor publishes beside them (same origin, over TLS: this catches
+corruption and mirror tampering, not a compromised vendor site; Node's and
+Bun's GPG signatures are not checked). Git and gh use the SHA-256 digest
+GitHub's release API reports for the asset. VS Build Tools, Python, Parsec
+and the NVIDIA driver must carry a valid Authenticode signature from their
+publisher. CMake and LLVM come from Chocolatey community packages, as the
+CI's `choco install cmake` / `choco install llvm`: Chocolatey's moderators
+review the package and the package checks the checksum its maintainer
+embedded for the upstream download, so the trust root is the community
+package maintainer plus `community.chocolatey.org/install.ps1` (fetched over
+TLS, unverified) — use an image bake you inspect if that is not enough.
+Windows Python's installer and Git for Windows' latest-release lookup carry
+no vendor checksum beyond those signatures/digests.
+
+The owner's Electron app (acme/video-editor, built on GitHub's
+`windows-2025` runner) needs this list on its Windows build node; the app's
+`.nvmrc` sets the node version (keep them in step), pnpm comes from the
+repo's `packageManager` field through corepack, and `git` is added because
+the base Windows image has none:
+
+```json
+"gcp": {"toolchains": ["node@24.21.0", "pnpm", "bun@1.3.14", "rust", "cmake", "llvm", "python", "vs-buildtools", "git"]}
+```
+
+then, on the node, `pnpm install --frozen-lockfile` and `pnpm run build`
+(the NSIS installer comes from `scripts/build-desktop-artifact.ts`). A
+Windows create with Build Tools, Rust and LLVM takes well over half an hour,
+so bake an image with the same list once
+(`pyre node image bake --os windows --toolchain …`, or with `gcp.toolchains`
+set) and creates boot ready; the default Windows image is Windows Server
+2025 Datacenter (`windows-2025`, as the CI runner), `--image` overrides it.
+
+### Cloud lifecycle and cost
+
+- **Idle auto-stop** runs on the node (`pyre-idle-stop.timer`, every
+  minute): when `pyred status` reports no live runs and nobody is logged in
+  for `pyre-idle-minutes` (instance metadata, default 30; `pyre node idle`
+  changes it), it powers the VM off from inside. GCE shows a guest power-off
+  as TERMINATED with the disk kept, like `gcloud compute instances stop`.
+  This needs no cloud credential on the VM (stopping itself through the API
+  would need a compute scope that also reaches every other VM) and works
+  while the CLI machine sleeps. If pyred does not answer but its tmux server
+  has sessions, the node stays up.
+- **Stop/start**: stop keeps the disk; Claude/Codex sessions resume from
+  their transcripts after start. At power-off the node logs out of the
+  tailnet (the ephemeral device disappears); `start` mints a fresh key,
+  passes it the same way and removes it after the node connects. Spot VMs
+  stop (not delete) on preemption.
+- **Delete** refuses while runs are live or a session-created worktree has
+  uncommitted changes or a branch neither merged nor pushed (the worktree
+  removal rules: a fresh scan when the node is online, else the last
+  report). Main checkouts are not covered by that scan. `--force` deletes
+  anyway and lists what it overrode. Delete removes the VM with its disks
+  and any leftover disk labelled `pyre-node=<name>`, revokes the hub node
+  and drops the local snapshot.
+- **Cost**: `pyre nodes --cloud` shows estimated $/h from built-in list
+  prices (e2-standard-8 ≈ $0.27/h; spot ≈ 35% of that; disk ≈ $0.10/GB-month,
+  also while stopped; Windows adds ≈ $0.046/vCPU-h). `prices` in `cloud.json`
+  overrides an entry. The TUI Machines detail shows a "Cloud" line from the
+  snapshot `cloud-nodes.json` the cloud commands write beside the client
+  config (the TUI never runs gcloud).
+
+### Hub reachability over Tailscale (owner steps on server)
+
+Clients and nodes pin the hub certificate by SHA-256 and do not check the
+hostname (`transport.PinnedTLSConfig`), so cloud nodes reach the existing
+hub at its tailnet address with the existing pin. The certificate is not
+reissued and enrolled nodes are unaffected.
+
+1. Install Tailscale on server (`curl -fsSL https://tailscale.com/install.sh | sh`)
+   and `sudo tailscale up` (owner login; the hub needs no tag).
+2. Tailnet policy (admin console, Access controls): define the tag, let it
+   reach only the hub port, and let your devices reach the nodes:
+
+   ```json
+   "tagOwners": {"tag:pyre-node": ["autogroup:admin"]},
+   "acls": [
+     {"action": "accept", "src": ["tag:pyre-node"], "dst": ["server:7443"]},
+     {"action": "accept", "src": ["autogroup:member"], "dst": ["tag:pyre-node:*"]}
+   ],
+   "ssh": [{"action": "accept", "src": ["autogroup:member"], "dst": ["tag:pyre-node"], "users": ["pyre"]}]
+   ```
+
+   (`server` as a `"hosts"` alias or its tailnet IP; keep the rules your
+   devices already need.)
+3. OAuth client (Settings, OAuth clients): scope Auth Keys (write), tag
+   `tag:pyre-node`. Keep the secret in a 0600 file or
+   `TAILSCALE_OAUTH_CLIENT_SECRET` on the CLI machine.
+4. Hub listen address: the hub listens on `--listen` (install default
+   `:7443`, all interfaces, which includes `tailscale0`: nothing to change).
+   If it is bound to the LAN address, add the tailnet address with
+   `pyre-hub serve --also-listen <tailnet-ip>:7443` (installer:
+   `install.sh … --service hub --hub-also-listen <tailnet-ip>:7443`) and
+   restart the hub (owner-approved rollout). Check from a tailnet device:
+   `curl -k https://<server tailnet name>:7443/healthz`.
+5. Set `hub_url` in `cloud.json` to `https://<server MagicDNS name or tailnet
+   IP>:7443`. The hub's own `--hub-url` stays the LAN URL; only cloud nodes
+   use the tailnet one (their credential records it).
+6. GCP: `gcloud auth login` (owner account), `gcloud config set project
+   <project>` and `compute/zone`, enable the Compute Engine API, create the
+   release bucket and upload a signed release. The `default` network keeps
+   its rules; `pyre-deny-ingress` overrides `default-allow-ssh` and
+   `default-allow-rdp` for Pyre nodes.
+
+### Accounts on cloud nodes
+
+Claude token accounts (`claude setup-token`, I23) reach a new node within
+3 minutes with no action. Codex needs one device login per machine:
+`pyre accounts login --node <name> [--register]` (link and code on your
+terminal; the credential stays on the VM). It survives stop/start and is
+lost with delete.
+
+### Windows nodes
+
+`--os windows` uses Windows Server 2025 (`windows-2025`; `--image
+windows-2022` for 2022) and the `windows-startup-script-ps1` metadata key. The script (SYSTEM, every
+boot) creates the dev user `pyre` with a random password stored only as the
+Winlogon LSA secret (never plaintext in the registry, never off the VM) and
+turns on auto-logon, so pyred, started by its Task Scheduler logon task,
+runs in an interactive session and can launch GUI (Electron) apps. It
+installs Tailscale (MSI, unattended, key from a file), the developer
+toolchains (default: Git for Windows, Node.js LTS, Python, Visual Studio
+Build Tools with the C++ workload; see Developer toolchains), gh, Claude
+Code and Codex, the owner's installers and, on GPU nodes, the NVIDIA
+driver; and verifies the release zip like
+Linux (`ssh-keygen -Y verify` of the Windows OpenSSH client, then the
+checksum). Pyre is a per-user install, so SYSTEM does not run `install.ps1`
+itself: it stages the zip, `SHA256SUMS(.sig)`, the allowed signers,
+`install.ps1` and, for the first enrollment only, the ticket file (JSON
+`node_id`, `secret`, `hub_url`, `hub_cert_sha256`) in
+`C:\ProgramData\pyre-install`, ACL'd to the dev user and SYSTEM only, and
+registers the one-shot task `pyre-first-install`: at the dev user's logon,
+as that user, interactive token, not elevated. The task runs
+`install.ps1 -Zip <zip> -AllowedSigners <file> -Service node -Name <name>
+-HubUrl <url> -Restart -EditPath -EnrollTicketFile <ticket>` (installing into
+the user's `%LOCALAPPDATA%` and registering pyred's logon task for that
+user), deletes the ticket file when `install.ps1` returns (success or
+failure), logs to `%LOCALAPPDATA%\Pyre\first-install.log` (no secrets) and
+unregisters itself (SYSTEM removes a leftover at the next boot and reports
+the outcome on the serial console). The first boot reboots once so
+auto-logon fires it. A new `release_version` takes the same path without a
+ticket (`install.ps1` skips enrollment once `node-credential.json` exists)
+and runs at once when the user is already logged on. `pyre node image bake
+--os windows` only installs Tailscale, the toolchains and the owner's
+installers and verifies the release: no user, task or ticket. Idle auto-stop is a SYSTEM scheduled task
+that asks the dev user's pyred (`pyred status --json --state <user state>`)
+for live runs; an active RDP session counts as busy.
+
+**GPU (media-test) nodes.** `--os windows --gpu nvidia-l4:1` (G2,
+`g2-standard-8`) or `--gpu nvidia-tesla-t4:1` (N1) attaches the NVIDIA RTX
+Virtual Workstation variant of the GPU (`--accelerator=type=nvidia-l4-vws,count=1`),
+which carries the GRID license the Windows graphics driver needs; GPUs
+without a vWS variant (A100, V100) are refused for Windows. The estimate
+adds about $0.20/GPU-hour for the license (`prices["gpu-license:vws"]`
+overrides it). When an NVIDIA PCI device is present the boot script
+installs the GRID driver from Google's public driver bucket
+(`gs://nvidia-drivers-us-public/GRID/`, read anonymously over HTTPS: the
+newest `vGPU<n>/…_grid_win…server20xx….exe`, or `gcp.windows_gpu_driver`,
+an `https://` URL or an object in that bucket; set it if the anonymous
+bucket listing is refused or to pin a driver), checks the download against
+the object's MD5 in the bucket and NVIDIA's Authenticode signature, runs it
+with `-s -noreboot -noeula`, and reboots once (the first boot's reboot, or
+an extra one on a later boot); it is skipped once `nvidia-smi` exists. It
+also sets the Remote Desktop policies "Use hardware graphics adapters for
+all Remote Desktop Services sessions" (`bEnumerateHWBeforeSW=1`) and H.264/AVC
+444 with hardware encoding, so GPU apps render over RDP. The `parsec`
+toolchain (or the `media` preset) installs the Parsec host for smoother
+viewing over Tailscale; sign in to Parsec yourself once over RDP. Images
+baked on the CPU builder carry no GPU driver: GPU nodes install it at
+first boot.
+
+**Owner installers.** `gcp.windows_installers` runs installers Pyre must
+not fetch itself (vendor downloads behind registration forms, licensed
+software): upload the file to the project's private bucket and list it:
+
+```json
+"windows_installers": [{"name": "davinci-resolve",
+  "gcs_uri": "gs://<bucket>/installers/DaVinci_Resolve_<v>_Windows.exe",
+  "sha256": "<sha256 of the file>", "args": ["/i", "/q", "/noreboot"]}]
+```
+
+The boot script downloads each with the VM's read-only storage identity
+(setting the list is what gives a Windows VM the `devstorage.read_only`
+scope), checks the SHA-256, runs it silently (`.msi` through `msiexec /i …
+/qn /norestart` plus `args`; an `.exe` with `args` as given, unquoted) and
+records `installer-<name>-<hash prefix>.done`, so it runs once per file
+(a new hash runs again). Failures are retried on the next boot (node mode)
+or fail the bake. Installers also run in Windows bakes. `sha256sum
+<file>` (Linux) or `shasum -a 256 <file>` (macOS) gives the hash.
+
+**Two Windows machines.** The toolchain list and the installers come from
+the config file, so keep one file per machine role (shared settings such as
+`hub_url`, `release` and `tailscale` repeated in both):
+
+```sh
+# ~/.config/pyre/cloud.json        gcp.toolchains = the Vortex list above, no installers
+# ~/.config/pyre/cloud-media.json  gcp.toolchains = ["media"],
+#                                  gcp.windows_installers = [the davinci-resolve entry above]
+
+# win-build: CPU, builds the Electron app like CI
+pyre node create --cloud gcp --name win-build --os windows --type e2-standard-8 --rdp
+
+# win-media: L4 GPU (RTX vWS, g2-standard-8), media preset, Resolve from the private bucket
+PYRE_CLOUD_CONFIG=~/.config/pyre/cloud-media.json \
+  pyre node create --cloud gcp --name win-media --os windows --gpu nvidia-l4:1 --rdp
+pyre node rdp win-media --reset-password --open   # then sign in to Parsec and Resolve once
+```
+
+win-build gets no storage identity (unless the release is on `gs://`);
+win-media gets the read-only storage scope for the installer. Stop
+win-media when idle: an L4 vWS node costs several times a CPU node.
+
+Remote Desktop (`--rdp`) is reachable from tailnet addresses only: no VPC
+rule opens 3389 (`pyre-deny-ingress` blocks it from the internet) and the
+Windows firewall's Remote Desktop rules are limited to `100.64.0.0/10` and
+`fd7a:115c:a1e0::/48`. `pyre node rdp <name>` prints the node's tailnet
+address (from the local `tailscale status`) and writes/opens a `.rdp` file
+without credentials (macOS: Windows App). `--reset-password` runs
+`gcloud compute reset-windows-password` and prints the password once; Pyre
+never logs or stores it. For the dev user the new password is also handed
+to the VM's auto-logon refresher through the `pyre-autologon-password`
+metadata key, removed again after 20 s.
 
 ## Account profiles
 
@@ -961,8 +1420,8 @@ transcripts) and live in the hub table `audit_log` (namespace `hub_audit`). Rete
   -p --model haiku`, override with `PYRE_DIGEST_SUMMARIZE_CMD`, prompt on
   stdin). The last-seen mark lives in `digest-state.json` beside the client
   config (12 h on first use); `--since last` moves it, an explicit `--since`
-  or `--no-mark` does not. The TUI shows the same digest as a dismissible
-  panel at the top of the Inbox (esc marks it seen), agents get the
+  or `--no-mark` does not. The TUI shows the same digest as its own
+  view (`␣w`, `:digest`; esc marks it seen), agents get the
   read-only MCP tool `get_digest` (pre-approved), and Android shows a
   digest card at the top of Sessions with its own per-app mark.
 - Exit codes of the CLI: `pyre exit-codes`.
@@ -1174,6 +1633,17 @@ user's tmux sessions are unaffected because the install never modified them.
 - Runbook entries exist for service restart, account re-authentication,
   update rollback and Android re-pairing (this document).
 
+## macOS privacy permissions (Pyre.app)
+
+On a Mac, pyred runs from `~/.local/share/pyre/Pyre.app`. It is a background-only app (no Dock icon), signed with the Developer ID that built the release; see decision I31. macOS sees one app, **Pyre**, whatever the version. Grant permissions to it once:
+
+- **System Settings → Privacy & Security → Full Disk Access**: click **+**, press ⌘⇧G and paste `~/.local/share/pyre/Pyre.app`. This covers external drives, Documents and Desktop, and other apps' data, which agents' tools (du, git, builds) touch.
+- If you grant permissions through the prompts instead, approve the prompts that name **Pyre**.
+
+Upgrades and rollbacks replace the bundle's contents in place and keep the same signed identity, so the grants stay. Entries left over from releases before I31, which show as `pyred` in the permission lists, can be removed.
+
+Releases built without a signing identity print a warning and stay ad-hoc signed. Those builds lose the grants again.
+
 ## Node run defaults: permissions, default account, macOS profile credentials
 
 - `pyred --permissions ask|bypass` (default `ask`) sets the permission mode of
@@ -1205,3 +1675,146 @@ user's tmux sessions are unaffected because the install never modified them.
   created into the file and deletes the item; a locked keychain defers this to
   the next start. The owner's `Claude Code-credentials` item and other config
   dirs' items are never touched.
+
+## Windows nodes
+
+A Windows 10 1809+/11 or Server 2019+ machine (amd64 or arm64) can be a node:
+`pyred.exe` and `pyre.exe` run natively (not WSL) and launch Claude Code and
+Codex as native Windows processes. The hub stays on macOS/Linux (`pyre-hub` is
+not built for Windows).
+
+**Install, upgrade, uninstall** (PowerShell, as the owning user, no
+Administrator; the release zip with `SHA256SUMS` and `SHA256SUMS.sig` beside
+it, `release-allowed-signers` from a trusted checkout):
+
+```powershell
+$I = "pyre-<V>-windows-amd64\scripts\install"   # extracted once from the zip
+powershell -NoProfile -ExecutionPolicy Bypass -File $I\install.ps1 -Zip pyre-<V>-windows-amd64.zip -AllowedSigners release-allowed-signers -EditPath
+# node + logon task, enrolled with a ticket (`pyre --json enroll-node --name win1` on any client):
+Get-Content ticket.json | powershell -NoProfile -ExecutionPolicy Bypass -File $I\install.ps1 `
+  -Zip pyre-<V>-windows-amd64.zip -AllowedSigners release-allowed-signers -Service node -Name win1 -HubUrl https://hub:7443
+# upgrade: the same command with the new zip, plus -Restart
+powershell -NoProfile -ExecutionPolicy Bypass -File $I\uninstall.ps1    # -Purge -Yes also deletes state
+```
+
+`install.ps1` mirrors `install.sh`: signature and checksum verification before
+anything is extracted (`ssh-keygen -Y verify` from Windows OpenSSH 8.1+, else
+the already installed `pyred.exe verify-release`, never a binary from the
+candidate zip; exit 3 on refusal), immutable version directories, pruning,
+`-DryRun`, `-Root DIR`. The enrollment ticket is read from stdin (or
+`-EnrollTicketFile`) and handed to `pyred enroll --ticket-stdin --state DIR
+[--hub URL]` on stdin, never on a command line; an existing
+`node-credential.json` skips enrollment. `-HubUrl` is the hub as reachable from
+this node. Manual enrollment without the installer pipes the ticket the same
+way: `Get-Content ticket.json | pyred enroll --ticket-stdin [--hub URL]`.
+
+**Layout:**
+
+| Path | Contents |
+| --- | --- |
+| `%LOCALAPPDATA%\Programs\Pyre\<version>\bin\{pyre,pyred}.exe` | immutable version directories |
+| `%LOCALAPPDATA%\Programs\Pyre\current` | directory junction to the active version (junctions need neither Administrator nor Developer Mode); pruned versions become junctions to `current`, so hook paths of older sessions keep resolving |
+| `%LOCALAPPDATA%\Pyre` | node state: database, logs, runs, AF_UNIX socket, node credential (`pyred --state` overrides) |
+| `%APPDATA%\Pyre` | config: `client.json`, pinned `release-allowed-signers`, `keys.toml` |
+
+State and config directories get a protected owner-only DACL (the user and
+SYSTEM, full control, inherited by everything below; the Windows equivalent of
+0700/0600). `-EditPath` adds `...\Pyre\current\bin` to the user `PATH`
+(`HKCU\Environment`; new shells see it).
+
+**Why a logon task, not a Windows service.** Services run in session 0, which
+has no interactive desktop: agents could not launch or test GUI desktop apps
+(Electron windows, installers, screenshots). `pyred service install --state DIR
+-- <run args>` registers a per-user Task Scheduler task with a logon trigger and
+an interactive token, so pyred runs in the user's desktop session with the
+user's environment (user and system `PATH`; pyred adds its own tool discovery:
+npm global `%APPDATA%\npm`, nvm-windows `%NVM_SYMLINK%`, `%ProgramFiles%\nodejs`,
+winget/scoop shims, Git for Windows). `pyred service status|start|stop|uninstall`
+manage it.
+
+**Restarts.** The task runs `pyred.exe supervise -- run ...`: a small
+supervisor that runs `pyred run` as a child, restarts it after a crash with
+backoff, and carries out the in-product update handoff (Windows has no
+`exec`, so the supervisor starts the managed version instead of the launcher
+replacing itself). The task itself repeats as a watchdog and ignores new
+instances while one runs (logon trigger repeating every 5 minutes,
+`MultipleInstancesPolicy=IgnoreNew`), so a dead supervisor comes back within
+minutes. `pyred service stop` ends the task's supervisor; the daemon watches
+the supervisor's process and shuts down cleanly. Stopping pyred does not stop
+runs. A `pyred run` started by hand becomes its own supervisor on its first
+update handoff.
+
+**Session host.** Runs live in the Pyre session host (`pyred.exe
+__pyre_termhost serve`), which must outlive pyred like a tmux server. pyred
+first starts it with `CREATE_BREAKAWAY_FROM_JOB`; Task Scheduler runs the node
+task in a job object that forbids breakaway, so pyred then registers (or
+updates, since the pyred path changes on upgrade) a hidden on-demand task
+`Pyre Session Host <user> <socket hash>` (interactive token, least privilege,
+no time limit, ignore new instances, normal priority) whose action runs the
+host through the install's `current` path, and starts it. The task instance has
+its own job, so a pyred or supervisor restart leaves the sessions running. The
+host's environment is handed over in a short-lived file in the private socket
+directory, and `termhost.log` there records which path was taken.
+`PYRE_TERMHOST_SPAWN=task` always uses the task, `=direct` never does (the host
+then shares pyred's job and ends with it). A running host keeps its binary
+until it is shut down; `pyred service uninstall` removes the session-host
+tasks without ending a running host. Ending the task (`schtasks /End`) ends the
+host and every session.
+
+**Unattended GUI testing needs an interactive logon.** The task starts only
+when the dev user logs on. For a test VM or lab PC that must come back after a
+reboot without a person, configure auto-logon for that user:
+
+- Sysinternals Autologon (`autologon.exe`) stores the password LSA-encrypted;
+  or `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`
+  `AutoAdminLogon=1` with `DefaultUserName`/`DefaultDomainName` (avoid the
+  plaintext `DefaultPassword` value).
+- Trade-off: anyone with console or physical access gets that user's unlocked
+  session, including its agent logins and the node credential. Use a dedicated
+  low-value dev account on a dedicated VM (or a BitLocker-encrypted machine in a
+  locked room), never your personal account. Screen lock on idle breaks GUI
+  tests (a locked desktop cannot be driven), which is another reason to keep this
+  to a VM with no other users.
+
+**Network and local API.** pyred only dials out to the hub; it listens on no
+TCP port, so no firewall rule is needed. The local API (CLI, hooks, agent
+tools) is an AF_UNIX socket in the owner-only state directory, the same
+transport as on macOS/Linux (Windows 10 1803+/Server 2019+). Codex's
+app-server also listens on `unix://` (AF_UNIX) on Windows.
+
+**Harness prerequisites** (`install.ps1` warns; nothing is installed for you):
+Claude Code native install plus Git for Windows (`bash.exe`; set
+`CLAUDE_CODE_GIT_BASH_PATH` if it is not in a standard place); the Codex CLI;
+for Electron work Node.js (`node`, `npm`, `npx`: PATH, nvm-windows or
+`%ProgramFiles%\nodejs`) and Visual Studio Build Tools with the C++ workload
+(found through `vswhere.exe`) for native modules. A missing harness shows up as
+unavailable in the node's probe rather than failing silently. pyred re-reads
+the registry `PATH` at start (tools installed after logon), sets
+`CLAUDE_CODE_GIT_BASH_PATH` for runs when it finds Git Bash and the variable is
+unset, and runs the native `codex.exe` behind npm's `codex.cmd` shim. Claude
+hooks are written in exec form (`command` + `args`, no shell). The doorbell
+monitor is a shell command line and needs Git Bash: without it the run reports
+`doorbell: disabled` and the probe says why.
+
+**Not on Windows yet:** the OS credential store for Pyre-provisioned
+connection credentials (`--credential-backend auto` refuses; the opt-in file
+store works and is owner-only by DACL), ssh connection multiplexing for remote
+attach, and anything that needs the terminal backend (W-winhost: run
+spawn/capture/attach, pty-based TUI embedding and web-terminal relay).
+
+**Still to verify on a real Windows machine** (not exercised by the
+cross-compiled builds or the unix test suite):
+
+- `install.ps1`/`uninstall.ps1` end to end on Windows PowerShell 5.1 and
+  PowerShell 7 (signature paths, junction swap and pruning while a version runs,
+  `-EditPath`, ticket on stdin).
+- `pyred service install|start|stop|status|uninstall` against Task Scheduler as
+  a standard user; restart after crash; watchdog; behaviour at logoff/reboot with
+  auto-logon.
+- Local API over AF_UNIX (CLI, hooks, doorbell) and the owner-only DACL checks
+  on credential and config files.
+- Claude Code and Codex runs (terminal backend, exec-form hooks, the doorbell
+  monitor under Git Bash, Codex app-server over `unix://`, the minimum Codex
+  version whose app-server supports `unix://` on Windows), GUI app launch from
+  a run, `npm`/`npx electron`/node-gyp builds from a session.
+- In-product update handoff through the supervisor; resource stats.

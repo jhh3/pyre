@@ -98,9 +98,20 @@ func (d *Daemon) dispatch(ctx context.Context, cmd contracts.NodeCommand) (contr
 	case contracts.CmdCancelDelivery:
 		p, err := decode[struct {
 			MessageID string `json:"message_id"`
+			Read      string `json:"read,omitempty"`   // W-delivery: the recipient read it; record acceptance, never paste
+			RunID     string `json:"run_id,omitempty"` // run the hub bound that acceptance to
+			Detail    string `json:"detail,omitempty"`
 		}](cmd.Payload)
 		if err != nil {
 			return contracts.CommandResult{}, err
+		}
+		if p.Read != "" {
+			m, err := d.engine.ApplyRead(ctx, p.MessageID, p.RunID, contracts.EvidenceCategory(p.Read), p.Detail)
+			if err != nil {
+				return contracts.CommandResult{}, err
+			}
+			return okResult(contracts.OutcomeSucceeded, contracts.DeliveryReceipt{MessageID: p.MessageID, SessionID: m.SessionID, NodeID: d.nodeID,
+				State: m.State, Evidence: contracts.EvidenceNone, Detail: m.Reason, ObservedAt: d.now()})
 		}
 		m, err := d.engine.Cancel(ctx, p.MessageID)
 		if err != nil {
@@ -187,12 +198,25 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 		}
 		return okResult(contracts.OutcomeSucceeded, rec.Run)
 	}
+	if d.isDraining() {
+		return contracts.CommandResult{}, errShuttingDown()
+	}
 	// Never two current runs for one session on this node.
 	if prev, ok, err := d.st.latestRunForSession(ctx, sc.Session.SessionID); err != nil {
 		return contracts.CommandResult{}, err
 	} else if ok && prev.Phase != phaseEnded {
 		return contracts.CommandResult{}, contracts.Errorf(contracts.ErrConflict, "session already has run %s (%s) on this node; stop it before starting another", prev.Run.RunID, prev.Run.State).WithRef(contracts.KindRun, prev.Run.RunID)
 	}
+	// A resume of a run pyred proved never started relaunches it fresh with
+	// its original spec (W-resilience): there is no thread to continue.
+	relaunchOf := ""
+	if resume {
+		if prev, ok := d.neverStartedPrev(ctx, sc.PreviousRun); ok {
+			relaunchOf = prev.Run.RunID
+			d.applyRelaunchSpec(ctx, &sc, relaunchOf)
+		}
+	}
+	rawArgs := append([]string(nil), sc.Args...)
 	harness := sc.Session.Harness
 	adapter := d.byHarness[harness]
 	if adapter == nil {
@@ -204,6 +228,9 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	}
 	if d.cfg.MaxRuns > 0 && d.activeRuns() >= d.cfg.MaxRuns {
 		return contracts.CommandResult{}, contracts.Errorf(contracts.ErrCapacityExhausted, "node is at its run capacity (%d)", d.cfg.MaxRuns)
+	}
+	if resume && recreateTempDir(sc.Cwd) {
+		d.cfg.Logger.Info("resume: recreated a temporary working directory a reboot removed", "session", sc.Session.SessionID, "cwd", sc.Cwd)
 	}
 	if sc.Checkout == nil || sc.Checkout.Mode == contracts.CheckoutWorktree {
 		if _, err := validateDir(sc.Cwd); err != nil {
@@ -251,7 +278,9 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	cont := contracts.ContinuationFresh
 	var resumeRef *contracts.NativeRef
 	prevRunID := ""
-	if resume {
+	if relaunchOf != "" {
+		prevRunID = relaunchOf
+	} else if resume {
 		prev := sc.PreviousRun
 		if prev == nil {
 			return contracts.CommandResult{}, contracts.Errorf(contracts.ErrInvalid, "resume requires previous_run")
@@ -269,6 +298,19 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 		// run that actually ran (a resume whose launch failed has no thread).
 		basis := d.resumeBasis(ctx, *prev)
 		same := assignment == nil && basis.AccountID == "" || assignment != nil && assignment.AccountID == basis.AccountID
+		if !same && contracts.HasCap(probe.Capabilities, contracts.CapAccountCrossResume) {
+			// Another account, but the thread is reachable when both config
+			// homes resolve to the same transcript store (accounts' shared
+			// store): ResumeSpec's "same account" means "thread reachable".
+			same = d.sharedTranscripts(ctx, harness, basis.RunID, binding.ProfileDir)
+		}
+		if !same {
+			// The conversation is on this node under another config home
+			// (e.g. the default login): the adapter imports it at launch.
+			if l, ok := adapter.(nativeThreadLocator); ok && l.NativeThreadOnNode(basis) {
+				same = true
+			}
+		}
 		kind, ref, rerr := adapter.ResumeSpec(ctx, basis, same)
 		if rerr == nil && kind != contracts.ContinuationNativeResume {
 			// An adapter that can only hand off is a native-resume refusal:
@@ -283,7 +325,11 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 			cont = kind
 		case contracts.IsCode(rerr, contracts.ErrUnsupported) && sc.AllowHandoff:
 			cont = contracts.ContinuationHandoff
-			sc.InitialPrompt = handoffPrompt(sc, basis) + strings.TrimSpace("\n\n"+sc.InitialPrompt)
+			hp := handoffPrompt(sc, basis)
+			if p := strings.TrimSpace(sc.InitialPrompt); p != "" {
+				hp += "\n\n" + p
+			}
+			sc.InitialPrompt = hp
 		case contracts.IsCode(rerr, contracts.ErrUnsupported):
 			return contracts.CommandResult{}, contracts.Errorf(contracts.ErrUnsupported, "native resume unsupported for run %s and handoff not allowed: %v", prev.RunID, rerr)
 		default:
@@ -321,12 +367,31 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	session.CurrentRunID = sc.RunID
 	rec := runRecord{Session: session, Run: run, Phase: phaseLaunching, CreatedAt: now}
 	rec.Fingerprint = fingerprint(run)
+	// Counted in flight before the launching record commits, so a shutdown
+	// drain either refuses this launch or waits for it (W-resilience).
+	if !d.beginLaunch() {
+		return contracts.CommandResult{}, errShuttingDown()
+	}
+	launchCounted := true
+	defer func() {
+		if launchCounted {
+			d.endLaunch()
+		}
+	}()
 	err = sqlitex.Tx(ctx, d.db, func(tx *sql.Tx) error {
 		if err := putRunTx(ctx, tx, rec, now); err != nil {
 			return err
 		}
 		if err := putSecretTx(ctx, tx, sc.RunID, sc.Session.SessionID, sc.SessionToken, now); err != nil {
 			return err
+		}
+		if err := putLaunchSpecTx(ctx, tx, sc.RunID, sc, rawArgs); err != nil {
+			return err
+		}
+		if relaunchOf != "" {
+			if err := deleteLaunchSpecTx(ctx, tx, relaunchOf); err != nil {
+				return err
+			}
 		}
 		if assignment != nil {
 			if _, err := d.rep.EnqueueTx(ctx, tx, contracts.ReportAssignment, now, *assignment); err != nil {
@@ -342,6 +407,7 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	d.rep.Kick()
 
 	handedOff = true
+	launchCounted = false // the launch goroutine ends it
 	// The launch goroutine mutates its record; give it its own map.
 	ad := make(map[string]string, len(rec.Run.AdapterData))
 	for k, v := range rec.Run.AdapterData {
@@ -351,9 +417,17 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	d.asyncWG.Add(1)
 	go func() {
 		defer d.asyncWG.Done()
+		defer d.endLaunch()
 		d.launch(context.WithoutCancel(ctx), cmd, sc, rec, adapter, binding, resumeRef)
 	}()
 	return okResult(contracts.OutcomeDelivered, run)
+}
+
+// nativeThreadLocator is an adapter that can continue a native thread
+// recorded under another config home on this node (Claude: transcript
+// import), whatever account the resume binds.
+type nativeThreadLocator interface {
+	NativeThreadOnNode(prev contracts.Run) bool
 }
 
 // resumeBasis returns the run a resume continues natively: prev itself, or,
@@ -364,16 +438,42 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 func (d *Daemon) resumeBasis(ctx context.Context, prev contracts.Run) contracts.Run {
 	cur := prev
 	for i := 0; i < 8; i++ {
-		if cur.NativeRef != nil || cur.State != contracts.RunFailed || cur.PreviousRunID == "" || cur.AccountID != "" {
+		// A failed launch never ran (no native thread), whatever account it was
+		// assigned: keep walking back to the run that actually holds the thread.
+		if cur.NativeRef != nil || cur.State != contracts.RunFailed || cur.PreviousRunID == "" {
 			return cur
 		}
 		rec, ok, err := d.st.run(ctx, cur.PreviousRunID)
 		if err != nil || !ok || rec.Run.Harness != prev.Harness {
+			// A failed launch may never have reached this node's store: fall
+			// back to the newest local run of the session holding a thread.
+			if n := d.latestNativeRun(ctx, prev.SessionID, prev.Harness); n != nil {
+				return *n
+			}
 			return cur
 		}
 		cur = rec.Run
 	}
 	return cur
+}
+
+// latestNativeRun is the newest run of the session in this node's store that
+// has a native thread (what a resume continues), or nil.
+func (d *Daemon) latestNativeRun(ctx context.Context, sessionID string, h contracts.Harness) *contracts.Run {
+	if sessionID == "" {
+		return nil
+	}
+	recs, err := d.st.runs(ctx, "session_id=?", sessionID)
+	if err != nil {
+		return nil
+	}
+	for i := len(recs) - 1; i >= 0; i-- {
+		r := recs[i].Run
+		if r.NativeRef != nil && r.Harness == h {
+			return &r
+		}
+	}
+	return nil
 }
 
 func handoffPrompt(sc contracts.StartRunCommand, prev contracts.Run) string {
@@ -415,6 +515,9 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 			if err := putRunTx(ctx, tx, rec, now); err != nil {
 				return err
 			}
+			if err := deleteLaunchSpecTx(ctx, tx, rec.Run.RunID); err != nil {
+				return err
+			}
 			if assignment != nil {
 				a := *assignment
 				a.ReleasedAt = &now
@@ -440,19 +543,32 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 		fail(err)
 		return
 	}
-	cwd, checkout, err := d.resolveCheckout(ctx, sc)
-	if err != nil {
+	// Everything before adapter.Launch is bounded (W-resilience: on server two
+	// launches sat in this phase for 27 minutes until pyred was killed).
+	// A stall is logged with goroutine stacks once, for diagnosis.
+	pctx, pcancel := context.WithTimeout(ctx, d.cfg.LaunchPrepTimeout)
+	defer pcancel()
+	stopWatch := d.watchLaunchStall(sc.RunID, d.cfg.LaunchPrepTimeout+d.cfg.LaunchTimeout+30*time.Second)
+	defer stopWatch()
+	failPrep := func(err error) {
+		if pctx.Err() != nil && ctx.Err() == nil {
+			err = contracts.Errorf(contracts.ErrUnavailable, "launch preparation exceeded %s (nothing was started): %v", d.cfg.LaunchPrepTimeout, err)
+		}
 		fail(err)
+	}
+	cwd, checkout, err := d.resolveCheckout(pctx, sc)
+	if err != nil {
+		failPrep(err)
 		return
 	}
 	envBase := map[string]string{}
 	var extraArgs, grants []string
 	genID := ""
 	if d.cfg.Environments != nil {
-		er, err := d.cfg.Environments.Resolve(ctx, EnvRequest{NodeID: d.nodeID, Harness: rec.Run.Harness, Profile: sc.EnvProfile,
+		er, err := d.cfg.Environments.Resolve(pctx, EnvRequest{NodeID: d.nodeID, Harness: rec.Run.Harness, Profile: sc.EnvProfile,
 			ProjectID: rec.Session.ProjectID, SessionID: sc.Session.SessionID, RunID: sc.RunID, Cwd: cwd, ConfigHome: profileDir})
 		if err != nil {
-			fail(err)
+			failPrep(err)
 			return
 		}
 		for k, v := range er.Env {
@@ -470,10 +586,10 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 		}
 	}
 	if d.cfg.LaunchPrep != nil {
-		lp, err := d.cfg.LaunchPrep(ctx, LaunchPrepRequest{SessionID: sc.Session.SessionID, RunID: sc.RunID,
+		lp, err := d.cfg.LaunchPrep(pctx, LaunchPrepRequest{SessionID: sc.Session.SessionID, RunID: sc.RunID,
 			ProjectID: rec.Session.ProjectID, Harness: rec.Run.Harness, ConnectionGrants: grants})
 		if err != nil {
-			fail(err)
+			failPrep(err)
 			return
 		}
 		for k, v := range lp.Env {
@@ -512,6 +628,16 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 		Cwd: cwd, Executable: rec.Run.Runtime.Executable, Args: args,
 		Env: d.runEnv(envBase, sc, runDir), Unset: binding.Unset, StateDir: runDir, ProfileDir: profileDir, InitialPrompt: sc.InitialPrompt,
 		EnvGeneration: genID, Resume: resumeRef, AgentGuide: guide}
+	if pctx.Err() != nil {
+		failPrep(pctx.Err())
+		return
+	}
+	// From here the adapter may start processes: the marker tells a later
+	// pyred that this launch can no longer be proven never-started.
+	if err := writeLaunchMarker(runDir, d.now()); err != nil {
+		fail(err)
+		return
+	}
 	lctx, cancel := context.WithTimeout(ctx, d.cfg.LaunchTimeout)
 	h, err := adapter.Launch(lctx, l)
 	cancel()
@@ -547,6 +673,9 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 		if err := putRunTx(ctx, tx, rec, now); err != nil {
 			return err
 		}
+		if err := deleteLaunchSpecTx(ctx, tx, rec.Run.RunID); err != nil {
+			return err
+		}
 		if _, err := d.rep.EnqueueTx(ctx, tx, contracts.ReportRun, now, rec.Run); err != nil {
 			return err
 		}
@@ -570,6 +699,10 @@ func (d *Daemon) deliver(ctx context.Context, dc contracts.DeliverCommand) (cont
 	if dc.SessionID == "" && dc.Message.Recipient.Kind == contracts.AddrSession {
 		dc.SessionID = dc.Message.Recipient.ID
 	}
+	// Wake the session's local doorbell wait (W-localwait) whatever the
+	// outcome below: the hub stored the message either way, and the watcher
+	// reads its state from the hub before deciding anything.
+	defer d.signalInbox(dc.SessionID)
 	m, _, err := d.inbox.Put(ctx, dc, d.now())
 	if err != nil {
 		return contracts.CommandResult{}, err

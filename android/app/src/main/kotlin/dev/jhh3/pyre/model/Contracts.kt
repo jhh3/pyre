@@ -193,6 +193,9 @@ data class Session(
     val lineage: Lineage = Lineage(),
     val tags: List<String> = emptyList(),
     val archived: Boolean = false,
+    val icon: String = "", // W-archive2: optional emoji shown before the title
+    /** When the owner last messaged or typed into it through Pyre (additive); null when never. */
+    val ownerActiveAt: String? = null,
 )
 
 @Serializable
@@ -200,6 +203,9 @@ data class Lineage(
     val parentSessionId: String = "",
     val forkedFrom: String = "",
     val handoffNoteId: String = "",
+    /** Set when the session was moved under another parent (W-reparent; additive). */
+    val reparentedFrom: String = "",
+    val reparentedAt: String? = null,
 )
 
 @Serializable

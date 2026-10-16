@@ -32,10 +32,50 @@ func sessionAttention(s contracts.SessionView) (level, reason string) {
 	return "", ""
 }
 
-// sessionNeedsYou reports a blocking flag (messages do not count).
+// sessionNeedsYou reports a blocking flag the owner can still act on
+// (messages do not count). A flag whose reason only reports how a run
+// ended — a launch or run failure, an exhausted account — counts while the
+// session is live; on an ended or archived session it is history: the row
+// still shows it (listStatus), but no needs-you count, strip or summary
+// does. Seen live: 44 "needs you" from Codex launches that never ran.
 func sessionNeedsYou(s contracts.SessionView) bool {
+	if s.Session.Archived {
+		return false
+	}
+	level, reason := sessionAttention(s)
+	if level != contracts.FlagNeedsYou {
+		return false
+	}
+	return sessionLive(s) || !endedOnlyReason(reason)
+}
+
+// sessionFlagged reports a blocking flag, actionable or not (the session
+// view still shows a failure's text).
+func sessionFlagged(s contracts.SessionView) bool {
 	level, _ := sessionAttention(s)
 	return level == contracts.FlagNeedsYou
+}
+
+// sessionLive reports a run in a live state: starting, working, idle,
+// waiting on approval or in the background.
+func sessionLive(s contracts.SessionView) bool {
+	if s.Run == nil {
+		return false
+	}
+	switch s.Run.State {
+	case contracts.RunStarting, contracts.RunRunning, contracts.RunWaitingInput,
+		contracts.RunWaitingApproval, contracts.RunWaitingBackground:
+		return true
+	}
+	return false
+}
+
+// endedOnlyReason: flag reasons that say how a run ended (failure items,
+// exhausted account pools; sessionflag ranks them above delivery and
+// conflict only, so the reason is the session's only blocking one in
+// practice) and leave nothing to answer once the session has ended.
+func endedOnlyReason(reason string) bool {
+	return reason == "failed" || reason == "reauth"
 }
 
 // sessionMessages is how many informational items (messages for you) the
@@ -73,6 +113,10 @@ func reasonStatus(reason string) status {
 		return status{"≠", "conflict", toneWarn}
 	case "message", "comment", "review":
 		return status{"✉", reason, toneAccent}
+	case "waiting": // a lead ended its turn waiting on you (leads.go)
+		return status{"◆", "waiting", toneWarn}
+	case "ask": // a decision waiting in the web inbox (asks.go)
+		return status{"◆", "decision", toneWarn}
 	}
 	return status{"!", reason, toneWarn}
 }
@@ -91,25 +135,30 @@ func flagCounts(ss []contracts.SessionView) (needs, messages int) {
 	return needs, messages
 }
 
-// headerNeedsYou is the Sessions tab's count: sessions that need you.
-func (m *Model) headerNeedsYou() int {
-	n, _ := flagCounts(m.sessions())
-	return n
+// needsYou is the one "needs you" rule every count, strip, group summary
+// and the Grid share: an actionable blocking flag (sessionNeedsYou) or a
+// run waiting on approval. A run that failed shows as failed in its row
+// but needs nothing from you.
+func needsYou(s contracts.SessionView, node *contracts.Node) bool {
+	if s.Session.Archived {
+		return false
+	}
+	return sessionNeedsYou(s) || sessionStatus(s, node).tone == toneWarn
 }
 
-// needsYouSessions are the visible sessions with a blocking flag, most
+// needsYouSessions are the visible sessions that need you, most
 // important first (approval/question before the rest), then list order.
 func (m *Model) needsYouSessions() []contracts.SessionView {
 	var out []contracts.SessionView
 	for _, s := range m.visibleSessions() {
-		if sessionNeedsYou(s) {
+		if needsYou(s, m.nodeOf(s)) {
 			out = append(out, s)
 		}
 	}
 	rank := func(s contracts.SessionView) int {
 		_, r := sessionAttention(s)
 		switch r {
-		case "approval", "question", "blocked":
+		case "approval", "question", "blocked", "waiting":
 			return 0
 		case "asked":
 			return 1
@@ -156,10 +205,19 @@ func (m *Model) messageForYou(s contracts.SessionView) (contracts.MessageView, b
 		return contracts.MessageView{}, false
 	}
 	ms, _ := get[[]contracts.MessageView](m, ownerInboxKey)
+	carriers := map[string]bool{} // messages carrying asks: answered in the web inbox, not here
+	for _, a := range m.asks() {
+		if a.MessageID != "" {
+			carriers[a.MessageID] = true
+		}
+	}
 	var best contracts.MessageView
 	found := false
 	for _, mv := range ms {
 		env := mv.Envelope
+		if carriers[env.MessageID] {
+			continue
+		}
 		if env.Sender.Kind != contracts.PrincipalSession || env.Sender.ID != s.Session.SessionID {
 			continue
 		}

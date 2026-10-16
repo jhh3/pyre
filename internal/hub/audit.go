@@ -217,6 +217,8 @@ func (h *Hub) auditEvent(ctx context.Context, tx *sql.Tx, ev contracts.Event) {
 			action = contracts.AuditNodeTrustAccepted
 		case contracts.AutomationExitConfirmed:
 			action = contracts.AuditNodeExitConfirmed
+		case contracts.AutomationCapacityRetry:
+			action = contracts.AuditNodeCapacityRetry
 		default:
 			return
 		}
@@ -516,34 +518,53 @@ func (h *Hub) resolveAudit(ctx context.Context, items []contracts.AuditEntry) {
 
 // pruneAudit applies AuditRetention (called from pruneHistory).
 func (h *Hub) pruneAudit(ctx context.Context) error {
+	_, err := h.pruneAuditN(ctx)
+	return err
+}
+
+// pruneAuditN applies the audit retention in short write transactions
+// (sqlitex.Batched, W-dbhygiene) and returns how many entries it deleted.
+func (h *Hub) pruneAuditN(ctx context.Context) (int64, error) {
 	ret := DefaultAuditRetention
 	if h.opt.AuditRetention != nil {
 		ret = *h.opt.AuditRetention
 	}
+	var total int64
 	if ret.MaxAge > 0 {
 		cut := persistence.Time(h.clock.Now().Add(-ret.MaxAge))
-		for i := 0; i < 100; i++ {
-			res, err := h.db.ExecContext(ctx, `DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log WHERE at < ? ORDER BY id LIMIT ?)`, cut, pruneBatch)
+		n, err := sqlitex.Batched(ctx, h.db, sqlitex.PruneBatch, 0, func(tx *sql.Tx, limit int) (int64, error) {
+			res, err := tx.ExecContext(ctx, `DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log WHERE at < ? ORDER BY id LIMIT ?)`, cut, limit)
 			if err != nil {
-				return err
+				return 0, err
 			}
-			if n, _ := res.RowsAffected(); n < pruneBatch {
-				break
-			}
+			return res.RowsAffected()
+		})
+		total += n
+		if err != nil {
+			return total, err
 		}
 	}
 	if ret.MaxRows > 0 {
 		var maxID sql.NullInt64
 		if err := h.db.QueryRowContext(ctx, `SELECT MAX(id) FROM audit_log`).Scan(&maxID); err != nil {
-			return err
+			return total, err
 		}
 		if maxID.Valid && maxID.Int64 > int64(ret.MaxRows) {
-			if _, err := h.db.ExecContext(ctx, `DELETE FROM audit_log WHERE id <= ?`, maxID.Int64-int64(ret.MaxRows)); err != nil {
-				return err
+			through := maxID.Int64 - int64(ret.MaxRows)
+			n, err := sqlitex.Batched(ctx, h.db, sqlitex.PruneBatch, 0, func(tx *sql.Tx, limit int) (int64, error) {
+				res, err := tx.ExecContext(ctx, `DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log WHERE id <= ? ORDER BY id LIMIT ?)`, through, limit)
+				if err != nil {
+					return 0, err
+				}
+				return res.RowsAffected()
+			})
+			total += n
+			if err != nil {
+				return total, err
 			}
 		}
 	}
-	return nil
+	return total, nil
 }
 
 // auditGrantTx records a machine's new login for an account and login
@@ -587,7 +608,9 @@ func (h *Hub) auditFallbackTx(ctx context.Context, tx *sql.Tx, nodeID string, f 
 		r.ToNote = h.usageNoteTx(ctx, tx, f.ToAccountID, nodeID)
 	default:
 		r.Action = contracts.AuditAccountWaiting
-		if f.Outcome == contracts.FallbackIntervention {
+		if strings.HasPrefix(strings.ToLower(f.Reason), "account switching paused") { // accounts.SwitchPausedPrefix
+			r.To = "switching paused"
+		} else if f.Outcome == contracts.FallbackIntervention {
 			r.To = "needs you"
 		} else {
 			r.To = "waiting for a reset"

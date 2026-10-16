@@ -205,15 +205,25 @@ isolated worktree created from it.`,
 	update.Flags().StringArrayVar(&uCheckouts, "checkout", nil, "add or replace a checkout node:path:repo:mode[:branch] (mode shared|worktree|plain; node ID or name)")
 	project.AddCommand(update)
 
-	var unarchive bool
+	var unarchive, withSessions bool
 	archive := &cobra.Command{
 		Use:   "archive <project>",
-		Short: "Archive a project (or --unarchive)",
-		Args:  cobra.ExactArgs(1),
+		Short: "Archive a project (or --unarchive); --with-sessions archives its sessions too",
+		Long: `Archive a project. A project with live sessions is refused unless
+--with-sessions, which archives its ended sessions now and its live ones
+when their current turns end (Pyre stops them gracefully first).`,
+		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
 			if err != nil {
 				return err
+			}
+			if !unarchive {
+				res, err := ops.ArchiveProject(cmd.Context(), ArchiveProjectParams{Project: args[0], WithSessions: withSessions, OperationID: a.opID})
+				if err != nil {
+					return err
+				}
+				return a.emit(res, func(w io.Writer) { fmt.Fprintf(w, "%s %q: %s\n", res.ProjectID, res.Name, res.Note) })
 			}
 			p, err := ops.ResolveProject(cmd.Context(), args[0])
 			if err != nil {
@@ -228,7 +238,9 @@ isolated worktree created from it.`,
 		}),
 	}
 	archive.Flags().BoolVar(&unarchive, "unarchive", false, "restore an archived project")
+	archive.Flags().BoolVar(&withSessions, "with-sessions", false, "also archive the project's sessions (ended now, live ones when their turns end)")
 	project.AddCommand(archive)
+	project.AddCommand(a.projectPageCommand()) // ops_projectpage.go (W-web-inbox)
 	root.AddCommand(project)
 
 	a.addDocCommands(root)

@@ -94,6 +94,9 @@ func (m *Model) archiveSelected() tea.Cmd {
 	if name, ok := machineOfRow(m.sessList.sel); ok {
 		return m.confirmArchiveMachine(name)
 	}
+	if pid := m.projectArchiveKey(m.sessList.sel); pid != "" { // W-archive2
+		return m.confirmArchiveProject(pid)
+	}
 	s, ok := m.selectedSession()
 	if !ok {
 		return nil
@@ -110,13 +113,20 @@ func (m *Model) archiveSession(s contracts.SessionView) tea.Cmd {
 	sid, title := s.Session.SessionID, s.Session.Title
 	if sessionEnded(s) {
 		done := "archived " + trunc(title, 40) + " — :archived lists it (u restores)"
+		if runNeverStarted(s) {
+			done = "never started — archived " + trunc(title, 40) + " — :archived lists it (u restores)"
+		}
 		// The worktree offer follows the archive's outcome, so its toast
 		// never races the archive's (W-quicklaunch).
 		return m.setArchived([]string{sid}, true, done, func(m *Model) tea.Cmd { return m.offerWorktreeCleanup(s) })
 	}
 	st := sessionStatus(s, m.nodeOf(s))
+	if runNoHandle(s) { // W-resilience: no handle, nothing to stop
+		return m.confirmArchiveUnstoppable(s, "its launch was interrupted before pyred recorded a run handle")
+	}
 	if r := m.actionReason(s, "stop"); r != "" {
-		return m.setToast("archive: "+trunc(title, 32)+" is still "+st.label+"; stop it first (stop unavailable: "+r+")", toneWarn)
+		// Never a dead end: offer to archive anyway (W-resilience).
+		return m.confirmArchiveUnstoppable(s, "stop unavailable: "+r)
 	}
 	runID := s.Run.RunID
 	api := m.api
@@ -368,10 +378,95 @@ func (a *archivedOverlay) view(m *Model, w, h int) []string {
 			stt := sessionStatus(s, m.nodeOf(s))
 			ag := age(now, observedAt(s))
 			tw := max(10, inner-2-12-1-8-1-width(ag))
-			row := m.cursor(sel) + m.statusCell(stt, 10) + " " + m.titleCell(sel, s.Session.Title, tw) + " " + m.th.dim.Render(pad(string(s.Session.Harness), 7)) + " " + m.th.dim.Render(ag)
+			row := m.cursor(sel) + m.statusCell(stt, 10) + " " + m.titleCell(sel, iconTitle(s), tw) + " " + m.th.dim.Render(pad(string(s.Session.Harness), 7)) + " " + m.th.dim.Render(ag)
 			lines = append(lines, m.rowSel(sel, row, inner))
 		}
 		lines = append(lines, "", m.th.faint.Render(plural(len(ss), "archived session", "archived sessions"))+m.th.faint.Render(" · ")+m.hintSeg(hint{"u", "unarchive"}))
 	}
 	return m.box("Archived sessions", lines, bw, w, h)
+}
+
+// ---- archive a project (W-archive2) ----
+
+// projectArchiveKey is the project a folded project group row names ("" if
+// the row is not one).
+func (m *Model) projectArchiveKey(id string) string {
+	k, ok := groupOfRow(id)
+	if !ok || m.groupMode() != groupProject || k == noGroup || k == pinnedGroup {
+		return ""
+	}
+	return k
+}
+
+// confirmArchiveProject is X on a project (a folded project group in
+// Sessions, or the Projects tab): the confirm counts what happens to its
+// sessions; y archives the ended ones now, schedules the live ones to
+// archive when their current turn ends, then archives the project.
+func (m *Model) confirmArchiveProject(pid string) tea.Cmd {
+	p := m.project(pid)
+	if p == nil {
+		return m.setToast("project not loaded yet", toneMuted)
+	}
+	var live, ended []string
+	for _, s := range m.sessions() {
+		if s.Session.Archived || s.Session.ProjectID == nil || *s.Session.ProjectID != pid {
+			continue
+		}
+		if sessionEnded(s) || runNoHandle(s) {
+			ended = append(ended, s.Session.SessionID)
+		} else {
+			live = append(live, s.Session.SessionID)
+		}
+	}
+	name, version := p.Name, p.Version
+	body := []string{fmt.Sprintf("Archive project %q?", name), ""}
+	if len(live) > 0 {
+		body = append(body, "  "+plural(len(live), "live session", "live sessions")+" will archive when done (stopped gracefully after the current turn)")
+	}
+	if len(ended) > 0 {
+		body = append(body, "  "+plural(len(ended), "ended session", "ended sessions")+" archive now")
+	}
+	if len(live)+len(ended) == 0 {
+		body = append(body, "  no sessions")
+	}
+	body = append(body, "", "The project leaves the Projects list; pyre project archive --unarchive restores it.")
+	api := m.api
+	m.overlay = &confirmOverlay{
+		title: "Archive project",
+		body:  body,
+		yes: func(m *Model) tea.Cmd {
+			yes := true
+			op := func(kind, id string) contracts.Mutation {
+				return contracts.Mutation{OperationID: m.opID("archive-project:" + pid + ":" + kind + ":" + id)}
+			}
+			var reqs []contracts.UpdateSessionRequest
+			for _, id := range append(append([]string{}, ended...), live...) {
+				reqs = append(reqs, contracts.UpdateSessionRequest{Mutation: op("session", id), SessionID: id, Archived: &yes, WhenDone: true})
+			}
+			preq := contracts.UpdateProjectRequest{Mutation: op("project", pid), ProjectID: pid, Version: version, Archived: &yes}
+			return m.do(func(ctx context.Context) (any, error) {
+				for _, r := range reqs {
+					if _, err := api.UpdateSession(ctx, r); err != nil {
+						return nil, err
+					}
+				}
+				return api.UpdateProject(ctx, preq)
+			}, func(m *Model, v any, err error) tea.Cmd {
+				reload := tea.Batch(m.reload("sessions", nil), m.reload("projects", nil))
+				if err != nil {
+					return tea.Batch(m.errToast("archive project failed", err), reload)
+				}
+				for _, r := range reqs {
+					delete(m.opIDs, "archive-project:"+pid+":session:"+r.SessionID)
+				}
+				delete(m.opIDs, "archive-project:"+pid+":project:"+pid)
+				msg := "archived project " + trunc(name, 32)
+				if len(live) > 0 {
+					msg += " · " + plural(len(live), "live session", "live sessions") + " archive when done"
+				}
+				return tea.Batch(m.setToast(msg, toneMuted), reload)
+			})
+		},
+	}
+	return nil
 }

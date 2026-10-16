@@ -214,9 +214,10 @@ func TestGroupStateMigration(t *testing.T) {
 	}
 }
 
-// Project mode: projects by their most recently started session, pins on
-// top, "No project" last; rows by machine inside a project.
-func TestSortProjectsByRecentStart(t *testing.T) {
+// Project groups keep a fixed order (by name, unknown last) and rows keep
+// creation order inside a project: a run start or a rename moves nothing
+// (owner request 2026-10-13).
+func TestSortProjectsStable(t *testing.T) {
 	at := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	mk := func(id, node, prj string, min int, tags ...string) contracts.SessionView {
 		s := sv(id, node, "/src/"+id, tags...)
@@ -232,8 +233,22 @@ func TestSortProjectsByRecentStart(t *testing.T) {
 	}
 	m := &Model{}
 	m.sortGrouped(ss)
-	if got := ids(ss); !reflect.DeepEqual(got, []string{"pin", "b2", "b1", "a2", "a1", "loose"}) {
-		t.Fatalf("project order %v", got)
+	want := []string{"pin", "a1", "a2", "b1", "b2", "loose"}
+	if got := ids(ss); !reflect.DeepEqual(got, want) {
+		t.Fatalf("project order %v, want %v", got, want)
+	}
+	// b2 starts a new run and a1 is renamed: nothing moves.
+	for i := range ss {
+		switch ss[i].Session.SessionID {
+		case "b2":
+			ss[i].Run.StartedAt = at.Add(time.Hour)
+		case "a1":
+			ss[i].Session.Title = "zzz renamed"
+		}
+	}
+	m.sortGrouped(ss)
+	if got := ids(ss); !reflect.DeepEqual(got, want) {
+		t.Fatalf("order changed after a run start / rename: %v, want %v", got, want)
 	}
 	if m.groupLabel(noGroup) != "No project" {
 		t.Fatalf("no-project label %q", m.groupLabel(noGroup))
@@ -272,7 +287,9 @@ func TestAttentionGroupingAndSort(t *testing.T) {
 	m.grouping.mode = groupAttention
 	got := append([]contracts.SessionView(nil), ss...)
 	m.sortGrouped(got)
-	if g := ids(got); !reflect.DeepEqual(g, []string{"c-apr", "e-attn", "f-fail", "b-work", "a-idle", "d-done"}) {
+	// A failed run with nothing open is history, not "needs you" (it reads
+	// ✗ failed in its row).
+	if g := ids(got); !reflect.DeepEqual(g, []string{"c-apr", "e-attn", "b-work", "a-idle", "d-done", "f-fail"}) {
 		t.Fatalf("attention groups %v", g)
 	}
 	if l := m.groupLabel(m.groupKey(ss[4])); l != "Needs you" {
@@ -285,7 +302,7 @@ func TestAttentionGroupingAndSort(t *testing.T) {
 	m.grouping.mode, m.grouping.sort = groupMachine, sortAttention
 	got = append([]contracts.SessionView(nil), ss...)
 	m.sortGrouped(got)
-	if g := ids(got); g[0] != "c-apr" || g[len(g)-1] != "d-done" || g[3] != "b-work" {
+	if g := ids(got); g[0] != "c-apr" || g[len(g)-1] != "f-fail" || g[len(g)-2] != "d-done" || g[2] != "b-work" {
 		t.Fatalf("attention sort %v", g)
 	}
 	var st tuiState

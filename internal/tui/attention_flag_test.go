@@ -77,3 +77,40 @@ func TestFlagCounts(t *testing.T) {
 		t.Fatalf("needs=%d messages=%d, want 1 and 3", needs, msgs)
 	}
 }
+
+// A failure or exhausted-account flag counts while the session is live;
+// once it has ended (or is archived) it is history: shown, not counted.
+func TestNeedsYouIgnoresEndedFailures(t *testing.T) {
+	run := func(st contracts.RunState) *contracts.Run { return &contracts.Run{RunID: "run_synth", State: st} }
+	flag := func(reason string) *contracts.SessionFlag {
+		return &contracts.SessionFlag{Level: contracts.FlagNeedsYou, Reason: reason, Count: 1}
+	}
+	online := &contracts.Node{Connection: contracts.NodeConnection{State: contracts.ConnConnected}}
+	for _, c := range []struct {
+		name string
+		sv   contracts.SessionView
+		want bool
+		row  string
+	}{
+		{"ended launch failure", contracts.SessionView{Run: run(contracts.RunExited), Flag: flag("failed")}, false, "✗ failed"},
+		{"failed run, failure item", contracts.SessionView{Run: run(contracts.RunFailed), Flag: flag("failed")}, false, "✗ failed"},
+		{"failed run, nothing open", contracts.SessionView{Run: run(contracts.RunFailed)}, false, "✗ failed"},
+		{"never ran, failure item", contracts.SessionView{Flag: flag("failed")}, false, "✗ failed"},
+		{"ended, account exhausted", contracts.SessionView{Run: run(contracts.RunExited), Flag: flag("reauth")}, false, "⊘ re-auth"},
+		{"archived with an ask", contracts.SessionView{Session: contracts.Session{Archived: true}, Run: run(contracts.RunExited), Flag: flag("ask")}, false, ""},
+		{"live, failure from an earlier run", contracts.SessionView{Run: run(contracts.RunWaitingInput), Flag: flag("failed")}, true, "! needs you"},
+		{"live, account exhausted", contracts.SessionView{Run: run(contracts.RunRunning), Flag: flag("reauth")}, true, "! needs you"},
+		{"ended, still asking you", contracts.SessionView{Run: run(contracts.RunExited), Flag: flag("asked")}, true, "! needs you"},
+		{"waiting on approval", contracts.SessionView{Run: run(contracts.RunWaitingApproval)}, true, "! approval"},
+	} {
+		if got := needsYou(c.sv, online); got != c.want {
+			t.Errorf("%s: needsYou = %v, want %v", c.name, got, c.want)
+		}
+		if c.row == "" {
+			continue
+		}
+		if st := listStatus(c.sv, online); st.sym+" "+st.label != c.row {
+			t.Errorf("%s: row reads %q, want %q", c.name, st.sym+" "+st.label, c.row)
+		}
+	}
+}

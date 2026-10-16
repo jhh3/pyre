@@ -12,18 +12,31 @@ import (
 	"github.com/jhh3/pyre/internal/audit"
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/persistence"
+	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
 
 // ---- sessions ----
 
-const sesCols = `session_id,harness,title,project_id,created_by,created_at,current_run_id,lineage,tags,archived`
+const sesCols = `session_id,harness,title,project_id,created_by,created_at,current_run_id,lineage,tags,archived,icon,owner_active_at`
+
+// sessionIconMigrations add the session icon column (W-archive2). A
+// separate namespace keeps the core hub migration registry untouched.
+var sessionIconMigrations = []sqlitex.Migration{{Namespace: "hub_session_icon", Version: 1, Name: "session_icon", SQL: `
+ALTER TABLE sessions ADD COLUMN icon TEXT NOT NULL DEFAULT '';
+`}}
+
+// sessionOwnerActiveMigrations add when the owner last messaged or typed
+// into a session (owner_activity.go), in its own namespace like the icon.
+var sessionOwnerActiveMigrations = []sqlitex.Migration{{Namespace: "hub_session_owner_active", Version: 1, Name: "session_owner_active_at", SQL: `
+ALTER TABLE sessions ADD COLUMN owner_active_at TEXT;
+`}}
 
 func scanSession(sc interface{ Scan(...any) error }) (contracts.Session, error) {
 	var s contracts.Session
 	var harness, createdBy, createdAt, lineage, tags string
-	var project, current sql.NullString
+	var project, current, ownerActive sql.NullString
 	var archived int
-	if err := sc.Scan(&s.SessionID, &harness, &s.Title, &project, &createdBy, &createdAt, &current, &lineage, &tags, &archived); err != nil {
+	if err := sc.Scan(&s.SessionID, &harness, &s.Title, &project, &createdBy, &createdAt, &current, &lineage, &tags, &archived, &s.Icon, &ownerActive); err != nil {
 		return s, err
 	}
 	s.Harness = contracts.Harness(harness)
@@ -34,6 +47,7 @@ func scanSession(sc interface{ Scan(...any) error }) (contracts.Session, error) 
 	_ = persistence.FromJSON(lineage, &s.Lineage)
 	_ = persistence.FromJSON(tags, &s.Tags)
 	s.Archived = archived != 0
+	s.OwnerActiveAt = persistence.ParseTimePtr(ownerActive)
 	return s, nil
 }
 
@@ -49,9 +63,9 @@ func (h *Hub) insertSessionTx(ctx context.Context, tx *sql.Tx, s contracts.Sessi
 	if s.Tags == nil {
 		s.Tags = []string{}
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO sessions(session_id,harness,title,project_id,created_by,created_at,current_run_id,lineage,tags,archived,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := tx.ExecContext(ctx, `INSERT INTO sessions(session_id,harness,title,project_id,created_by,created_at,current_run_id,lineage,tags,archived,updated_at,icon) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.SessionID, string(s.Harness), s.Title, persistence.ProjectArg(s.ProjectID), persistence.JSON(s.CreatedBy), persistence.Time(s.CreatedAt),
-		persistence.NullStr(s.CurrentRunID), persistence.JSON(s.Lineage), persistence.JSON(s.Tags), boolInt(s.Archived), persistence.Time(h.now()))
+		persistence.NullStr(s.CurrentRunID), persistence.JSON(s.Lineage), persistence.JSON(s.Tags), boolInt(s.Archived), persistence.Time(h.now()), s.Icon)
 	return err
 }
 
@@ -59,9 +73,12 @@ func (h *Hub) updateSessionTx(ctx context.Context, tx *sql.Tx, s contracts.Sessi
 	if s.Tags == nil {
 		s.Tags = []string{}
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE sessions SET title=?, project_id=?, current_run_id=?, lineage=?, tags=?, archived=?, updated_at=? WHERE session_id=?`,
+	_, err := tx.ExecContext(ctx, `UPDATE sessions SET title=?, project_id=?, current_run_id=?, lineage=?, tags=?, archived=?, updated_at=?, icon=? WHERE session_id=?`,
 		s.Title, persistence.ProjectArg(s.ProjectID), persistence.NullStr(s.CurrentRunID), persistence.JSON(s.Lineage), persistence.JSON(s.Tags),
-		boolInt(s.Archived), persistence.Time(h.now()), s.SessionID)
+		boolInt(s.Archived), persistence.Time(h.now()), s.Icon, s.SessionID)
+	if err == nil && s.Archived {
+		err = h.withdrawSessionAsksTx(ctx, tx, s.SessionID) // W-asks: an archived session's asks are withdrawn
+	}
 	return err
 }
 
@@ -238,6 +255,7 @@ func (h *Hub) observeRunTx(ctx context.Context, tx *sql.Tx, nodeID string, r con
 	if err := h.trackChildTx(ctx, tx, existing.State, r); err != nil { // W-childnotify
 		return err
 	}
+	h.noteRunTransition(existing.State, r) // W-archive2
 	if r.State.Terminal() && (isNew || !existing.State.Terminal()) {
 		if err := h.emitRun(ctx, tx, contracts.EvRunEnded, r, sess.ProjectID, origin, originSeq); err != nil {
 			return err
@@ -341,6 +359,7 @@ func (h *Hub) setRunStateTx(ctx context.Context, tx *sql.Tx, rr runRow, state co
 	if err := h.trackChildTx(ctx, tx, prev, r); err != nil { // W-childnotify
 		return err
 	}
+	h.noteRunTransition(prev, r) // W-archive2
 	if state.Terminal() && !prev.Terminal() {
 		if err := h.emitRun(ctx, tx, contracts.EvRunEnded, r, sess.ProjectID, origin, 0); err != nil {
 			return err
@@ -422,6 +441,24 @@ func (h *Hub) applyLaunchResultTx(ctx context.Context, tx *sql.Tx, nodeID string
 // nodeConnected reports whether the node's control channel is live, plus
 // its last-seen time.
 func (h *Hub) nodeConnected(ctx context.Context, q queryer, nodeID string) (bool, *contracts.Freshness) {
+	m := nodeMemoFrom(ctx)
+	if m == nil {
+		return h.nodeConnectedUncached(ctx, q, nodeID)
+	}
+	m.mu.Lock()
+	nc, ok := m.conn[nodeID]
+	m.mu.Unlock()
+	if !ok {
+		nc.connected, nc.fresh = h.nodeConnectedUncached(ctx, q, nodeID)
+		m.mu.Lock()
+		m.conn[nodeID] = nc
+		m.mu.Unlock()
+	}
+	f := *nc.fresh // callers may modify it
+	return nc.connected, &f
+}
+
+func (h *Hub) nodeConnectedUncached(ctx context.Context, q queryer, nodeID string) (bool, *contracts.Freshness) {
 	var connected int
 	var lastSeen sql.NullString
 	_ = q.QueryRowContext(ctx, `SELECT connected, last_seen_at FROM node_state WHERE node_id=?`, nodeID).Scan(&connected, &lastSeen)
@@ -452,6 +489,10 @@ func (h *Hub) decorateRun(ctx context.Context, q queryer, r *contracts.Run) {
 			r.Freshness.ObservedAt = nf.ObservedAt
 		}
 	}
+	if l, apr, ok := batchFrom(ctx).decorated(r.RunID); ok {
+		r.Lease, r.PendingApprovalIDs = l, apr
+		return
+	}
 	if l, err := h.activeLease(ctx, q, r.RunID); err == nil && l != nil {
 		r.Lease = l
 	}
@@ -461,12 +502,8 @@ func (h *Hub) decorateRun(ctx context.Context, q queryer, r *contracts.Run) {
 // runUsage returns the run's latest process-tree sample from its node's
 // last status report (nil if the node reported none for it).
 func (h *Hub) runUsage(ctx context.Context, q queryer, nodeID, runID string) *contracts.RunUsage {
-	var status sql.NullString
-	if err := q.QueryRowContext(ctx, `SELECT status FROM node_state WHERE node_id=?`, nodeID).Scan(&status); err != nil || !status.Valid {
-		return nil
-	}
-	var st contracts.NodeStatusReport
-	if json.Unmarshal([]byte(status.String), &st) != nil {
+	st := h.nodeStatus(ctx, q, nodeID)
+	if st == nil {
 		return nil
 	}
 	for _, u := range st.Resources.Runs {
@@ -477,9 +514,54 @@ func (h *Hub) runUsage(ctx context.Context, q queryer, nodeID, runID string) *co
 	return nil
 }
 
+// nodeStatus parses the node's last status report, once per list request
+// when the context carries a nodeMemo.
+func (h *Hub) nodeStatus(ctx context.Context, q queryer, nodeID string) *contracts.NodeStatusReport {
+	m := nodeMemoFrom(ctx)
+	if m != nil {
+		m.mu.Lock()
+		st, ok := m.status[nodeID]
+		m.mu.Unlock()
+		if ok {
+			return st
+		}
+	}
+	var out *contracts.NodeStatusReport
+	var status sql.NullString
+	if err := q.QueryRowContext(ctx, `SELECT status FROM node_state WHERE node_id=?`, nodeID).Scan(&status); err == nil && status.Valid {
+		var st contracts.NodeStatusReport
+		if json.Unmarshal([]byte(status.String), &st) == nil {
+			out = &st
+		}
+	}
+	if m != nil {
+		m.mu.Lock()
+		m.status[nodeID] = out
+		m.mu.Unlock()
+	}
+	return out
+}
+
 // nodeName resolves a display name. external permits asking the fleet
 // domain; it must be false inside a write transaction.
 func (h *Hub) nodeName(ctx context.Context, q queryer, nodeID string, external bool) string {
+	if m := nodeMemoFrom(ctx); m != nil && external {
+		m.mu.Lock()
+		n, ok := m.names[nodeID]
+		m.mu.Unlock()
+		if ok {
+			return n
+		}
+		n = h.nodeNameUncached(ctx, q, nodeID, external)
+		m.mu.Lock()
+		m.names[nodeID] = n
+		m.mu.Unlock()
+		return n
+	}
+	return h.nodeNameUncached(ctx, q, nodeID, external)
+}
+
+func (h *Hub) nodeNameUncached(ctx context.Context, q queryer, nodeID string, external bool) string {
 	if external && h.cfg.Fleet != nil {
 		if n, err := h.cfg.Fleet.GetNode(h.systemCtx(ctx), contracts.GetRequest{ID: nodeID}); err == nil && n.Name != "" {
 			return n.Name
@@ -518,7 +600,11 @@ func (h *Hub) withNodeName(ctx context.Context, v *contracts.SessionView) {
 func (h *Hub) sessionView(ctx context.Context, q queryer, s contracts.Session, external bool) (contracts.SessionView, error) {
 	v := contracts.SessionView{Session: s, Freshness: contracts.Freshness{ObservedAt: h.now(), Source: "hub"}}
 	if s.CurrentRunID != "" {
-		r, err := h.getRun(ctx, q, s.CurrentRunID)
+		r, ok := batchFrom(ctx).run(s.CurrentRunID)
+		var err error
+		if !ok {
+			r, err = h.getRun(ctx, q, s.CurrentRunID)
+		}
 		if err != nil && !contracts.IsCode(err, contracts.ErrNotFound) {
 			return v, err
 		}
@@ -537,7 +623,7 @@ func (h *Hub) sessionView(ctx context.Context, q queryer, s contracts.Session, e
 	}
 	if external && h.cfg.Attention != nil {
 		if f, ok := h.cfg.Attention.(sessionFlagger); ok {
-			if n, flag, err := f.SessionAttention(ctx, s.SessionID); err == nil {
+			if n, flag, err := f.SessionAttentionRun(ctx, s.SessionID, v.Run); err == nil {
 				v.Attention = n
 				if flag != nil {
 					flag.Text = sessionflag.ResolveTitle(flag.Text, s.SessionID, s.Title)
@@ -558,9 +644,10 @@ func (h *Hub) sessionView(ctx context.Context, q queryer, s contracts.Session, e
 	return v, nil
 }
 
-// sessionFlagger is implemented by internal/attention.Store (v1.3).
+// sessionFlagger is implemented by internal/attention.Store (v1.3). run is
+// the session's current run (a launch failure does not flag "needs you").
 type sessionFlagger interface {
-	SessionAttention(ctx context.Context, sessionID string) (int, *contracts.SessionFlag, error)
+	SessionAttentionRun(ctx context.Context, sessionID string, run *contracts.Run) (int, *contracts.SessionFlag, error)
 }
 
 // attentionCounter is implemented by internal/attention.Store.

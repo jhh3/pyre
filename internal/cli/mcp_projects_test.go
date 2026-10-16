@@ -96,9 +96,10 @@ func TestMCPCreateProjectAndAssociate(t *testing.T) {
 	}
 }
 
-// Creating projects and re-associating sessions keep Claude's normal
-// permission prompt: neither is pre-approved, and neither is read-only.
-func TestProjectToolsAreNotPreapproved(t *testing.T) {
+// Creating, associating and archiving projects never prompt (owner,
+// W-archive2): all three are pre-approved for Claude runs, and none is
+// read-only.
+func TestProjectToolsArePreapproved(t *testing.T) {
 	byName := map[string]MCPTool{}
 	for _, tl := range MCPTools() {
 		byName[tl.Name] = tl
@@ -107,13 +108,13 @@ func TestProjectToolsAreNotPreapproved(t *testing.T) {
 	for _, name := range claude.PyreMessagingAllowedTools {
 		allowed[name] = true
 	}
-	for _, name := range []string{"create_project", "associate_session_project"} {
+	for _, name := range []string{"create_project", "associate_session_project", "archive_project"} {
 		tl, ok := byName[name]
 		if !ok {
 			t.Fatalf("missing tool %s", name)
 		}
-		if allowed["mcp__pyre__"+name] {
-			t.Errorf("%s must not be pre-approved", name)
+		if !allowed["mcp__pyre__"+name] {
+			t.Errorf("%s must be pre-approved", name)
 		}
 		if tl.Annotations == nil || tl.Annotations.ReadOnlyHint || tl.Annotations.OpenWorldHint {
 			t.Errorf("%s annotations: %+v", name, tl.Annotations)

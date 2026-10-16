@@ -43,6 +43,12 @@ const (
 	// Claude plugin monitor ("doorbell") plus the pyre inbox tool;
 	// acceptance arrives asynchronously as claude.tool.inbox_read.
 	CapInputMonitor = "input.monitor"
+	// CapInputPlugin (W-plugdeliver, additive): queued input reaches Claude
+	// through the per-run plugin's hooks module ($.prompt.submit between
+	// turns), never typed into the TUI, also while a human is attached;
+	// acceptance is claude.plugin.prompt_submit. Per run it applies only once
+	// the module reported it is loaded; paste is the fallback.
+	CapInputPlugin = "input.plugin_prompt"
 	// CapPermissionsBypass: the run executes without approval prompts or
 	// sandbox (pyred/pyre start --permissions bypass); the approval broker
 	// sees no requests.

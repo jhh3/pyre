@@ -6,11 +6,16 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/jhh3/pyre/internal/runtime/claudeplugin"
 )
 
 // mouseHelp is the help screen's note on the mouse and number keys.
 const mouseHelp = "Mouse: click a tab, row or footer key · click the selected row (or double-click) to open · wheel scrolls · " +
 	"drag selects and copies (OSC 52), double-click a word; shift (option in iTerm2) leaves selection to the terminal. 1–4 switch tabs (Sessions, Projects, Machines, Accounts); v cycles the Sessions view (sidenav, table, grid), G toggles the grid; in an answer box 1–9 answer."
+
+// agentCommandsGroup is the help section listing the agent slash commands.
+const agentCommandsGroup = "Agent commands"
 
 // helpGroupOrder puts the everyday groups first.
 var helpGroupOrder = []string{"Move", "Switch", "Session", "Terminal", "Find", "Go to", "Digest", "Act", "Composer", "Pickers",
@@ -112,6 +117,7 @@ func (h *helpOverlay) view(m *Model, w, hh int) []string {
 		cols = 2
 	}
 	lines := packColumns(blocks, total, cols, (inner-3*(cols-1))/cols)
+	lines = append(lines, h.agentCommands(m, inner)...)
 	if len(lines) == 0 {
 		lines = []string{m.th.dim.Render("no keys match " + h.query)}
 	}
@@ -119,6 +125,11 @@ func (h *helpOverlay) view(m *Model, w, hh int) []string {
 		m.th.status(status{"●", "working", toneGood}), m.th.status(status{"○", "idle", toneNone}),
 		m.th.status(status{"!", "approval", toneWarn}), m.th.status(status{"◌", "offline/stale", toneMuted}),
 		m.th.status(status{"✗", "failed", toneBad}), m.th.status(status{"?", "unknown", toneMuted}),
+		// Session rows (tree.go, yours.go): a lead is bold with its
+		// descendant count, a child hangs off a glyph, a single session is
+		// plain; the bar marks sessions you messaged or typed into.
+		m.th.bold.Render("lead") + m.th.faint.Render(" ▾N/+N"), m.th.faint.Render("├ ") + "child", "single (plain)",
+		m.th.accent.Render("▎") + " yours <1h", m.th.faint.Render("▎") + " yours <24h",
 	}
 	search := m.th.key.Render("›") + " " + h.query + m.th.accent.Render("▏")
 	if h.query == "" {
@@ -143,6 +154,35 @@ func (h *helpOverlay) view(m *Model, w, hh int) []string {
 	}
 	out := append(append(head, body...), foot...)
 	return m.box("Keys & help", out, bw, w, hh)
+}
+
+// agentCommands renders the "Agent commands" section full width under the
+// key columns: the slash commands every Pyre Claude session has, read from
+// the embedded skills (the same list as `pyre commands`), wrapped, never cut.
+func (h *helpOverlay) agentCommands(m *Model, inner int) []string {
+	var out []string
+	for _, s := range claudeplugin.Skills() {
+		if h.query != "" && !filterOK(h.query, s.Short, s.Usage, agentCommandsGroup) {
+			continue
+		}
+		if out == nil {
+			out = []string{m.th.heading.Render(agentCommandsGroup)}
+		}
+		const keyW = 13
+		for i, l := range wrap(s.Short, max(16, inner-keyW-2)) {
+			k := ""
+			if i == 0 {
+				k = "/" + s.Name
+			}
+			out = append(out, " "+m.th.key.Render(pad(k, keyW))+" "+m.th.dim.Render(l))
+		}
+	}
+	if out != nil {
+		for _, l := range wrap("Type them in a Claude session Pyre started; `pyre commands <name>` prints the procedure.", max(16, inner-1)) {
+			out = append(out, " "+m.th.faint.Render(l))
+		}
+	}
+	return out
 }
 
 // packColumns flows whole blocks (a heading and its keys) down cols columns

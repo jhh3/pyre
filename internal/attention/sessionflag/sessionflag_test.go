@@ -21,6 +21,7 @@ func TestLevelMapping(t *testing.T) {
 		{contracts.AttnApproval, contracts.FlagNeedsYou, "approval"},
 		{contracts.AttnQuestion, contracts.FlagNeedsYou, "question"},
 		{contracts.AttnFlag, contracts.FlagNeedsYou, "asked"},
+		{contracts.AttnWaiting, contracts.FlagNeedsYou, "waiting"},
 		{contracts.AttnFailure, contracts.FlagNeedsYou, "failed"},
 		{contracts.AttnAccountPool, contracts.FlagNeedsYou, "reauth"},
 		{contracts.AttnIndeterminate, contracts.FlagNeedsYou, "delivery"},
@@ -101,6 +102,21 @@ func TestResolveTitle(t *testing.T) {
 	for _, c := range cases {
 		if got := ResolveTitle(c.title, c.sid, c.st); got != c.want {
 			t.Errorf("ResolveTitle(%q,%q,%q) = %q, want %q", c.title, c.sid, c.st, got, c.want)
+		}
+	}
+}
+
+// A lead waiting on the owner in its chat ranks just below a question or
+// an ask, above its own flag and failures, and keeps flagging while read.
+func TestWaitingRanksBelowAskAboveFlag(t *testing.T) {
+	w := item("att_w", contracts.AttnWaiting, contracts.AttnRead, "Waiting on you: ship it?", 0)
+	if f := Compute([]contracts.AttentionItem{w, item("att_f", contracts.AttnFlag, contracts.AttnOpen, "flag", 0),
+		item("att_x", contracts.AttnFailure, contracts.AttnOpen, "failed", 0)}); f == nil || f.Reason != "waiting" || f.Text != w.Title || f.Count != 3 {
+		t.Fatalf("waiting over flag: %+v", f)
+	}
+	for _, k := range []contracts.AttentionKind{contracts.AttnAsk, contracts.AttnQuestion} {
+		if f := Compute([]contracts.AttentionItem{w, item("att_a", k, contracts.AttnOpen, "x", time.Hour)}); f == nil || f.Kind != string(k) {
+			t.Fatalf("%s should outrank waiting: %+v", k, f)
 		}
 	}
 }

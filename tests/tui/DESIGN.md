@@ -55,6 +55,21 @@ More: [240×65](screens/sessions-240x65-dark.png) ([before](screens/before-clean
   for offline, stale and exited.
   A live shell reads `running` in the plain text colour (no agent is busy),
   so working agents stand out.
+- **Lead signals (owner request 2026-10-14: "I should know when a project
+  lead is worth clicking on").** Every lead (top-level session) carries one
+  chip at the right of its title cell for itself and all its descendants,
+  the highest of: `● asks N` (red; open asks from the subtree; its info
+  names the soonest deadline), `◆ waiting` (amber; anything in the subtree
+  needs you — a waiting-on-you, approval or question flag included), `•
+  new` (accent; the lead, or a descendant, finished a turn — or the lead
+  left you a message — after you last looked), `◌ working` (something in
+  the subtree runs). A chip the row's own status already says (the lead
+  itself works, or itself needs you) is left out; a quiet lead's title is
+  dim; children rows are unchanged. "Last looked" is the latest of the
+  session's OwnerActiveAt, the last time this TUI kept it selected for 2s
+  (remembered per session in `tui-state.json` as `seen`, bounded, archived
+  pruned) and the first launch with lead signals (`seen_since`). Turn end
+  is the run's last report time while idle (`waiting_input`), or its end.
 - **Live by default (owner: "can you clean up all of this cruft").** The
   list shows live sessions only: starting, working, waiting, needs you, and
   offline/stale (the run may still be alive). Ended sessions (exited,
@@ -64,11 +79,11 @@ More: [240×65](screens/sessions-240x65-dark.png) ([before](screens/before-clean
   its health dot: `studio-mac ● · no live sessions`.
 - **Grouping (W-projgroup).** Owner request: "it would be nice to display
   by group / project on the left nav". The list groups by **project** by
-  default: one group per project (`Atlas (demo) 5 · ! 1 needs you · 3
-  working · 1 idle`: faint name, count, a quiet status summary in which only
-  need you (amber) and failed (red) keep colour, then working, idle,
-  offline, stale), ordered by each project's most recently started session
-  (a start, not live state changes, so groups do not jump while you watch);
+  default: one group per project (`Atlas (demo) 5 · ● 2 asks · ◆ 1
+  waiting · • 1 new · ◌ 1 working`: name, faint count, then its leads
+  summed in the lead-signal words below, worst first, only non-zero parts;
+  a project whose leads are all quiet reads faint with no summary), in a fixed order: projects by name, sessions inside a project in
+  creation order (nothing reorders while you watch; a new session appends);
   Pinned stays on top; sessions without a project sit in a final `No
   project` group. A faint MACHINE column names each row's machine (the
   harness column drops first when narrow), and a quiet footer line keeps
@@ -112,6 +127,29 @@ More: [240×65](screens/sessions-240x65-dark.png) ([before](screens/before-clean
   benchmarks on demo-bigbox and encoder spike on demo-studio → tile
   profiler on demo-laptop). Goldens: `sessions-tree-160`,
   `sessions-table-tree-120`.
+- **Row markers: lead, single, recently yours (2026-10-13).** Owner
+  request: "can we indicate in the sidebar if a conversation (the top level
+  parent (if there's a big project)) or single conversation or one I've
+  recently interacted with (i.e. actually sent a message to)". In the
+  sidenav list and the table:
+  - *Lead*: a top-level session with child sessions in its group (and no
+    `↳ parent` elsewhere) has a **bold** title and a faint descendant count
+    after it, `▾12` while open and `+12` folded; a click on either folds /
+    unfolds. The count is what unfolding shows: descendants listed in the
+    group (ended ones count only while `.` shows ended sessions).
+  - *Child*: the tree glyphs above (`├ `, `└ `, `│ ` guides).
+  - *Single* (no parent, no children): plain, no decoration; distinct by
+    absence.
+  - *Recently yours*: when the owner last messaged or typed into the
+    session through Pyre (`session.owner_active_at`), an unselected row
+    draws `▎` in its cursor slot: accent within the hour, faint within 24
+    hours, nothing older (NO_COLOR: bold / faint). The selected row keeps
+    its `›`. Grid captions add a faint `you 5m` (accent within the hour)
+    before the machine; the facts (`i`, finder preview) read `You
+    messaged or typed 12m ago` (omitted when never); `g s` / `:sort yours`
+    lists the sessions you touched most recently first (children stay
+    under their parents).
+  The help overlay's legend names all four. Golden: `sessions-markers-160`.
 - **Views (W-projgroup).** Owner request: Sessions has three views,
   switched inside the Sessions tab (`v` cycles, `G` toggles the grid,
   `:view sidenav|table|grid`, remembered as `sessions_view`): **sidenav**
@@ -292,7 +330,8 @@ small live terminal. [light](screens/grid-240x65-light.png),
 
 ### Attention flags, messages, overlays (W-attn)
 
-- **No Inbox view.** Owner: "I'm really not finding this inbox very useful
+- **No Inbox view** (W-inbox brought back a decisions-first one, and
+  on 2026-10-15 it moved to the web app; see below). Owner: "I'm really not finding this inbox very useful
   at all … sessions should just be able to flag if they need attention".
   Each session carries a flag computed by the hub (`SessionView.Flag`:
   level + reason; `sessionAttention` in `attention_flag.go` is the one
@@ -303,7 +342,8 @@ small live terminal. [light](screens/grid-240x65-light.png),
   `✉ message`. Flags clear at the hub: answering the request, the owner
   engaging with the session (typing into it, messaging it, reading its
   message), the session clearing its own flag, or its run ending.
-- **Counts.** The Sessions tab counts sessions that need you (`S Sessions
+- **Counts.** The Sessions tab counts leads that ask or wait on you (the
+  needs-you rule rolled up to leads; `new` does not count) (`S Sessions
   3`, amber text); the strip under the panes lists them (`Needs you  ! deploy
   prep   ⁇ worker … · ✉ 1 message`) or says `✓ Nothing needs you · ✉ 1
   message   ● 5 working …`. Items that belong to no session (a machine
@@ -325,8 +365,45 @@ small live terminal. [light](screens/grid-240x65-light.png),
   to `esc close`.
 - Help flows into three columns at full screen, never splits a group,
   stays put while you type, and shows `↓ N more lines` when it overflows.
+- Help ends with an "Agent commands" section: the slash commands every
+  Pyre Claude session has (`/kickoff`, `/open-items`, `/ship`, `/brief`,
+  `/deliver`, `/cleanup`, `/pair`), full width and wrapped, read from the
+  embedded skills like `pyre commands`. Typing filters it with the keys.
+  Goldens: `help-agent-commands-{60,100,160}`.
 - Transcript search keeps each line's own styling and shows the current
   match reversed (`n`/`N`); consecutive tool calls read as one block.
+
+### Inbox: in the web app (owner request 2026-10-15)
+
+The TUI has no Inbox view and no inbox side panel any more. The owner:
+"you should remove the inbox view in app and the inbox right sidebar /
+there should still be an indication that there are questions (and maybe a
+link to a filtered view in the web app)". The inbox (asks, threads,
+answering) is the web app (`pyre web serve`, by default
+`https://pyre-example.ngrok.app`); the TUI keeps the signal and links to it:
+
+- **Header.** After the tabs, `● N asks` counts the open asks (amber; red
+  when any is urgent or due within 15 minutes; hidden when none is open or
+  the hub has no asks ops). It is an OSC 8 hyperlink to `<web>/#/inbox`,
+  and a click on it opens that link.
+- **Lead chips and project headers.** A lead's `● asks N` chip links to
+  `<web>/#/inbox?session=<lead id>`, its info line's `● asks you N` too
+  (with `I web inbox`); a project header's `● N asks` links to
+  `<web>/#/inbox?project=<project id>`. Links take no cells, so layout and
+  goldens are unchanged; terminals that support OSC 8 open them on click
+  (usually with ctrl or cmd held while the TUI has the mouse).
+- **`I` / `:inbox`** (aliases `:asks`, `:web`) open the link for the
+  selection: the selected session's lead's asks when that lead has any,
+  else the selected (or shown) project's asks, else the whole inbox. The
+  opener is `open` (macOS) or `xdg-open`; with no display (no `DISPLAY` /
+  `WAYLAND_DISPLAY`, or over ssh: `SSH_CONNECTION` / `SSH_TTY`) or a
+  failing opener the link is copied with OSC 52 and the toast says so
+  (`no display here — copied the web inbox link: …`).
+- **Web URL.** `web_url` in the client config (`client.json`, beside the
+  hub URL), overridden by `PYRE_WEB_URL`; default
+  `https://pyre-example.ngrok.app` (`tui.DefaultWebURL`).
+- The state file's old `inbox_panel_hidden`, `inbox_split` and
+  `inbox_sort` are ignored.
 
 ### Accounts (W-usage)
 
@@ -464,62 +541,94 @@ where it ran and the full snippet.
 [120×34](screens/search-03-results-120x34-dark.png),
 [reader at the match](screens/search-05-reader-200x55-dark.png).
 
-### Quick launch (W-quicklaunch, W-qlpath)
+### New session (W-newsession; replaces the W-quicklaunch/W-qlpath line)
 
-`n` opens the **New session** panel: centered like the switcher, over the
-dimmed view, one input and a live suggestion list (owner: "how do I create
-one in a random directory? I only see repo options" and "improve the new
-session UI"). The input has the grammar of `pyre new`:
-`repo[+repo] | path  [@machine] [claude|codex|shell] first prompt…`.
+`n` opens the **New session** panel: a centered form over the dimmed view
+(owner: "still pretty clunky; scrolling through the list resets machine and
+everything; … you shouldn't have to use shortcuts to toggle machine and
+harness — a different selection mechanism is needed"). Every field is
+labeled and stacked; the focused one is marked `›` and highlighted.
 
-- **Suggestions, grouped.** *Recent* — where sessions ran lately, one row
-  per machine and folder (a repository's main checkout is named after it).
-  *Repos* — the fleet's repo index (loaded once per open, ranked like
-  `repos.list`; one repository on several machines is one row, "machine
-  +N"). *Folders* — a path typed as `/…`, `~/…`, `./…` or `../…` lists the
-  chosen machine's folders that complete it (`dir.list`); a folder that does
-  not exist is offered as **create ~/foo** (made through the machine's
-  `fs.mkdir`, inside its home only, then the session starts there). `~` or
-  `home` alone is the home folder: a projectless scratch session. The empty
-  panel shows Recent, a few repos and *home*, so `n` Enter restarts where
-  you last worked. Rows show name, path (faint), machine and when used.
-- **Target line.** Under the list one line says exactly what Enter does:
-  `Claude on server · ~/code/acme/tundra · main checkout`, `… · fresh worktree
-  on branch pyre/<slug>`, `… · ~/foo · new folder, created on start`, `… ·
-  ~ · home folder · scratch session, no project`.
-- **Chips, not hidden keys.** Harness (`^t`), Machine (`^o`; for a
-  repository, the machines that have it; for a folder, every machine,
-  connected first; `@name` in the line overrides) and Worktree (`^f`, fresh
-  worktree; repositories only; several repositories always get fresh
-  worktrees in `~/pyre-work/<slug>/`). Clicking a chip selects it; clicking
-  a row selects it and a second click starts.
-- **Prompt field.** Tab completes the selected suggestion (a repository
-  name, or the next folder segment `~/scratch/`); when there is nothing to
-  complete it moves to the optional prompt field (Tab again returns).
-  Words after the target in the input are the prompt too ("from the line").
-  Enter starts from either field; esc closes.
-- **Paths with spaces.** The target may be quoted (`"~/My Docs"`,
-  `'~/My Docs'`, `~/"My Docs"/sub`) or backslash-escaped (`~/My\ Docs`, as
-  terminals paste a dragged folder); Tab completes folder names escaped.
-  Only the target is unquoted — words after it (machine, harness, prompt)
-  are taken as typed, so a prompt's apostrophes stay. `^l` switches the
-  input to **path** mode: the whole line is one folder path, spaces and
-  all (a bare name is a folder under `~`), pastes keep their spaces, and
-  the prompt goes in the prompt field; `^l` again returns (the path is
-  carried over, escaped).
-- **Errors inline.** Enter on a problem (no match — with a hint to type it
-  as a path —, offline machine, repositories on different machines, a
-  machine whose pyred cannot create folders yet) says so at the bottom of
-  the panel and starts nothing; one operation id per panel and step means a
-  repeated Enter never creates a folder, a worktree or a session twice.
-- The bottom line reads "type a repo, or a path like ~/scratch · enter
-  starts · ^a step-by-step": `^a` opens the step-by-step launch (machine,
-  harness, directory browser or project, checkout, review).
+```
+╭─ New session ──────────────────────────────────────────────────────────────╮
+│ › Where      orbit▏                                                        │
+│              GitHub                                                        │
+│              › orbit             demo/orbit         not cloned   contributed 5h ago │
+│   Machine    ● synth-linux · will clone   ○ synth-mac · will clone   auto  │
+│   Agent      ● Claude   ○ Codex   ○ Shell   auto                           │
+│   Workspace  ● main checkout   ○ fresh worktree   ○ new branch   auto      │
+│   Account    ● auto   ○ claude-personal-a   ○ claude-work-c                │
+│   Prompt     optional first prompt (shift+enter: new line)                 │
+│   Title      auto (named from the prompt)                                  │
+│ ────────────────────────────────────────────────────────────────────────── │
+│ Claude on synth-linux · demo/orbit (clone first) · main checkout · account auto │
+│ enter: next field · ^s or ^⏎: start · esc: cancel   [ Start ^s ]  [ Cancel ] │
+╰────────────────────────────────────────────────────────────────────────────╯
+```
 
-Goldens: `quicklaunch-open-120` (empty), `quicklaunch-120` (typed repo),
-`quicklaunch-fresh-120` (codex, other machine, fresh worktree),
-`quicklaunch-path-120` (folder completion). The screenshots below predate
-the panel (one-line bar) and need regenerating with `screenshot.py`.
+- **Where** is a type-to-filter list (fuzzy) over the global repo catalog
+  (`repos.catalog`: every machine's index plus your GitHub repositories,
+  deduplicated by remote), grouped *Recent* (where sessions ran lately) ·
+  *On <machine>* (the panel's machine) · *Other machines* · *GitHub* (not
+  cloned anywhere) · *Folders* (`home`). A new filter highlights the best
+  match wherever its group is. ↑/↓ (and the wheel, anywhere over the panel)
+  move the highlight and **never change another field**: each field keeps
+  its own state, and the highlight is kept by identity across refreshes.
+  `owner/name` that the catalog lacks is offered as a GitHub clone. A path
+  (`/…`, `~/…`, `./…`, `../…`) lists the machine's folders (`dir.list`; Tab
+  or → completes the next segment; spaces need no quoting, a pasted escaped
+  path is unescaped); a missing folder is offered as **create** (`fs.mkdir`).
+  `+` adds the highlighted repository and starts a new filter: several
+  repositories get fresh worktrees in `~/pyre-work/<slug>/`.
+- **Browse folders (W-browse).** "📁 Browse folders…" is pinned as the last
+  row of the Where list, also while filtering (and highlighted when a
+  non-path filter matches nothing); a faint hint under an empty or short
+  Where reads "type a repo name, or a path like ~/scratch · ↓ Browse
+  folders". Enter or a click opens an inline browser in the list's place on
+  the chosen machine, at ~ or the typed path (`dir.list`): ↑/↓ move, → or
+  Enter opens a folder, ← or Backspace goes up (the folder you came from
+  stays highlighted), typing filters the listing, "✓ Use this folder"
+  (Enter, or ^s anywhere) chooses, "＋ New folder…" takes a name inline and
+  creates it (`fs.mkdir`, one operation id per path) then opens it, Esc
+  returns to the list. Choosing sets Where to the folder and fixes Machine
+  to the browsed one; agent, workspace and the rest are untouched. Golden:
+  `newsession-browse-120`. Recent folders (non-repository working
+  directories) show under Recent by folder name, path dim.
+- **Machine, Agent, Workspace, Account** are segmented pickers: every
+  option visible, ←/→ (space) or a click changes them; `^o`/`^t` remain
+  optional accelerators. Machine options say whether the chosen repository
+  is there (`· has it`, `· will clone`, `· offline`; `· has all` / `· clones
+  N` for several). A field you have not set shows its automatic value,
+  marked `auto`: the Recent row's machine, else the machine last used with
+  that repository from this panel, else the panel's machine when it has
+  the repository, else the best machine that has it, else the panel's
+  machine (which clones). Agent and Workspace default to what was last used
+  with the repository (remembered per repository in the TUI state file).
+  Workspace: main checkout / fresh worktree / new branch (type the name);
+  not shown for folders. Account: auto (eligible) or a specific account of
+  the agent's provider.
+- **Prompt** is multi-line (shift+enter, alt+enter or ctrl+j for a new
+  line); **Title** is optional (auto from the prompt).
+- **Keys:** Tab/Shift-Tab move between fields (↑/↓ too outside the list);
+  Enter moves on and on Title starts; `^s` or `^⏎` starts from anywhere;
+  Esc cancels; `^a` opens the step-by-step launch. Mouse: click a field,
+  an option, a row, `[ Start ^s ]` or `[ Cancel ]`.
+- **Summary and validation:** one line says exactly what starts ("Claude on
+  server · acme/atlas · fresh worktree pyre/fix-cache · account auto");
+  problems show inline (`!` by the field, the reason at the bottom) and
+  starting is refused: no match, offline machine, a repository without a
+  remote that the machine lacks, an empty or invalid branch name.
+- **Starting** runs the steps in the panel with progress ("◌ cloning
+  demo/orbit on synth-linux (not there yet)… 12s", then the worktree, then
+  the session); each step has its own operation id, so a retry after an
+  unknown outcome never clones, creates or starts twice. A clone never
+  overwrites a directory (`repo.clone`).
+
+Goldens: `newsession-open-120` (empty: Recent first), `newsession-120`
+(typed repo), `newsession-fields-120` (Codex, fresh worktree, multi-line
+prompt, title), `newsession-clone-120` (GitHub-only repo: will clone),
+`newsession-path-120` (folder completion). The screenshots below predate
+the form and need regenerating with `screenshot.py`.
 
 | | |
 |---|---|
@@ -624,11 +733,71 @@ them; rebind the Pyre actions in keys.toml (for example `"sessions.next" =
   don't understand how to start sessions from within pyre"), and an empty
   Sessions view says `No sessions yet — press n to start one (or ␣n
   anywhere)`.
+- **The bottom belongs to the terminal (W-browse).** Owner: give the bottom
+  of the screen back. In the Sessions sidenav (100+ columns, no panel open)
+  there is no full-width bottom row: the Needs-you / fleet summary ("✓
+  Nothing needs you · ● 9 working · ○ 5 idle", or "Needs you ! deploy prep
+  ⁇ worker …"), the toast or status (filter input, key focus note, an
+  unfinished key sequence) and the key hints form the sidebar's footer
+  block (see "Sidebar footer" below), so the embedded terminal pane
+  reaches the screen's last row. The
+  Sessions table and the grid keep one slim bottom line: hints on the left
+  (or the filter input), a toast or the compact summary ("! 3 need you",
+  "✓ ● 9 working …") on the right. Other screens, open panels and narrow
+  layouts keep the status line and the hint line. Goldens: `sessions-160`,
+  `sessions-100`, `sessions-table-120`.
+
+```
+  ! needs you  scratch (standalone)            synth-mac   claude   30s  │
+                                                                         │
+  machines  synth-linux ● 4 · synth-mac ● 5                              │
+  1 ended — . show                                                       │
+  …                                                                      │
+ ──────────────────────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)            │
+ n new session      enter type         F full-screen                     │
+ m message          i info             / filter                          │
+ ␣␣ find            ? keys                                               │
+```
+
+  **Sidebar footer (W-archive2).** The owner: the key hints "wrap to
+  multiple lines in a weird way". The footer is a fixed block that never
+  wraps mid-item: a faint rule, the Needs-you / fleet summary (one line),
+  the toast or status (one line, truncated with …; a click on a toast
+  shows its full text, up to four lines, and keeps it until a second click
+  dismisses it), then the key hints as an aligned grid of `key label`
+  cells: up to three equal columns (compact: at most the widest cell + 4)
+  and three rows sized to the sidebar width. Lower-priority hints drop when
+  they do not fit; `? keys` always stays, in the last cell. Golden:
+  `sidebar-foot` at sidebar widths 56, 64, 72 and 80.
+- **Session icons (W-archive2).** Owner: "make it so chats can set an
+  emoji in their title". A session may carry one emoji (`Session.icon`;
+  one grapheme, at most two cells), drawn before its title wherever titles
+  show: sidenav and table rows, grid tiles, the switcher, the detail and
+  terminal headers, the reader, project lists. Width math counts a wide
+  emoji as two cells, so columns stay aligned. `:icon 🚀` sets the
+  selected session's icon, `:icon` clears it; agents use MCP
+  `set_session_icon` (pre-approved) or `rename_session` with `icon`, the
+  CLI `pyre sessions icon <s> [emoji]`. Automatic titling never changes
+  it. Goldens: `sessions-icon-100`, `sessions-icon-table-100`.
+- **Reparenting (W-reparent).** Owner: "ability to reparent" sessions (a
+  coordinator's agents handed to two leads). `>` on a session opens a
+  switcher-style picker titled "Move <title> under…": every listed session
+  except the session and its descendants, marked `· current parent`, plus
+  "top level (no parent)" when it has one; `enter` moves it. `:parent
+  <session>` / `:parent none` do the same without the picker. The tree
+  re-lays at once (the hub's answer patches the cache). A reparented
+  session's detail reads "Reports to <lead> (reparented from
+  <coordinator>)" instead of "Started by". The hub retargets pending
+  automatic reports and tells both sides with a Pyre message; agents use
+  MCP `reparent_session` (pre-approved), the CLI `pyre sessions reparent
+  <session>... --to <parent|none>`.
 - Header: tabs carry their keys, `Pyre  S Sessions v sidenav · P Projects ·
   M Machines · A Accounts    ● live`; `1`–`4` follow the
   tabs (Sessions, Projects, Machines, Accounts); in an answer box `1`–`9`
   answer. Owner request (W-projgroup): the Grid is a view of
-  Sessions, not a tab; Accounts and Machines are tabs; there is no Inbox (attention flags show on the sessions — W-attn; the
+  Sessions, not a tab; Accounts and Machines are tabs; there is no Inbox tab (attention flags show on the sessions — W-attn; the
+  inbox is the web app, and `● N asks` after the tabs links to it; the
   digest is `␣w`). `v sidenav` beside the active Sessions tab names
   the Sessions view and a click cycles it. `M` and `A` open Machines and Accounts everywhere (full-screen attach moved
   to `F`, message history to `H`); `4` /
@@ -789,18 +958,19 @@ and ignored; a syntax error falls back to the defaults.
 | `!` | `sessions.interrupt` | interrupt (confirms) |
 | `x` | `sessions.stop` | stop (confirms) |
 | `W` | `sessions.worktrees` | review / remove the worktrees the session just archived created: archiving says so in a toast; the panel never pops up on its own, so no dialog appears after an archive was confirmed |
-| `X` | `sessions.archive` | archive (ended: at once; live: stop + archive, confirms); on a machine row: all its ended sessions (confirms). `:archived` lists archived sessions, `u` restores |
+| `X` | `sessions.archive` | archive (ended: at once; live: stop + archive, confirms; a run Pyre cannot stop (launch interrupted before a handle, or stop unavailable): "archive anyway — it may keep running", confirms; never a silent no-op); on a machine row: all its ended sessions (confirms); on a folded project group row: the project (as `projects.archive`). `:archived` lists archived sessions, `u` restores |
 | `.` | `sessions.toggle_ended` | show / hide ended (exited, failed) sessions; remembered |
 | `u` | `sessions.usage` | show / hide the MEM CPU column: each live session's process tree (pane process and descendants: harness, node, MCP servers, tools) summed RSS and CPU % of one core, sampled by pyred every heartbeat (~30 s). The session info overlay (`i`) shows the same plus the process count and the largest process |
 | `r` | `sessions.read` | read the transcript full-screen (`/` search, `n`/`N`) |
 | `y` | `sessions.yank` | copy the session ID (OSC 52) |
-| `R` | `sessions.rename` | rename: a one-line editor prefilled with the title (`enter` saves, `esc` cancels); also `:rename <title>` and a click on the title in the pane header. A person's name stays: automatic naming stops for that session |
+| `R` | `sessions.rename` | rename: a one-line editor prefilled with the title (`enter` saves, `esc` cancels); also `:rename <title>` and a click on the title in the pane header. A person's name stays: automatic naming stops for that session. On a session whose launch never started (pyred restarted before the harness started; failed, nothing ran) `R` relaunches it instead (confirms; same harness, directory, prompt, account policy, title, parent) |
 | `p` | `sessions.project` | open or associate a project |
 | `*` | `sessions.pin` | pin / unpin the session (also `:pin`). Pinned sessions sit in a "Pinned" group on top in every grouping, ordered by pin time, and lead the Grid. Stored as the reserved session tags `pinned` + `pinned_at:<unix>` via sessions.update, so pins sync to every TUI and the phone. (In Sessions `*` pins; `2` / `␣p` open Projects) |
-| `n` | `sessions.new` | launch a new session (when no filter is active): the New session panel (a repo, or a path like ~/scratch); `^a` in it opens the step-by-step launch |
+| `n` | `sessions.new` | launch a new session (when no filter is active): the New session form (Where, Machine, Agent, Workspace, Account, Prompt, Title; `^s` starts); `^a` in it opens the step-by-step launch |
 | `g b` | `sessions.group` | group the Sessions list by project (default) → attention (Needs you / Message for you / Working / Idle / Ended) → machine → repo → none (a flat list: needs you, then recent activity); also `:group <mode>`; an explicit choice is remembered in tui-state.json (`group_version` 2). Repo comes from the run's directory: worktrees (`<repo>/.claude/worktrees/x`, `<repo>/.worktrees/x`, `<repo>-worktrees/x`) map to their repo. Headers are quiet: faint name, count, a status summary (project) or health dot (machine), an amber `•` when the group needs you |
-| `g s` | `sessions.sort` | sort inside groups: name (machine, then title; default) → attention (needs you, then message for you, then the rest) → activity (most recent first); also `:sort <mode>`; remembered as `sort` in tui-state.json. The flat list (`none`) sorts by attention, then activity, unless a sort is chosen |
+| `g s` | `sessions.sort` | sort inside groups: name (machine, then title; default) → attention (needs you, then message for you, then the rest) → activity (most recent first) → yours (you messaged or typed most recently first; never: last); also `:sort <mode>`; remembered as `sort` in tui-state.json. The flat list (`none`) sorts by attention, then activity, unless a sort is chosen |
 | `v` | `sessions.view` | Sessions view: sidenav (list + terminal, default) → table → grid; also `:view <mode>`; remembered as `sessions_view` in tui-state.json |
+| `>` | `sessions.reparent` | move the session under another parent session: a picker of the possible parents (not itself or its descendants; "top level" when it has a parent); its automatic reports go to the new parent. Also `:parent <session\|none>` |
 | `z a` | `sessions.fold` | collapse / expand the selected row's group; a folded group is one row (`enter` or a click expands; a click on any header folds). On a session with child sessions it folds / unfolds its children instead (`+N`; a click on a child's tree glyph or on `+N` does the same). Folds are remembered; a filter shows every match |
 | `␣␣` / `ctrl+p` | `global.finder` | find anything: sessions, attention items, projects, docs, artifacts, machines, commands |
 | `:` / `ctrl+k` | `global.cmdline` | command line (`:attach`, `:send`, `:approve`, `:stop`, `:archive`, `:archived`, `:ended`, `:project`, `:new`, `:machines` …) |
@@ -816,6 +986,7 @@ and ignored; a syntax error falls back to the defaults.
 | `␣c` | `global.connections` | Connections |
 | `␣e` | `global.environments` | Environments & updates |
 | `␣l` | `global.activity` | Activity: the audit log, newest first (also `:activity`, `:audit`) |
+| `I` | `global.inbox` | open the web inbox in the browser (also `:inbox`), filtered to the selected lead's or project's asks when it has any; copies the link (OSC 52) when there is no display (ssh) |
 | `␣w` | `global.digest` | While you were away: the digest since you last looked (also `:digest`, `:away`) |
 | `␣n` | `global.new` | launch a new session |
 | `ctrl+r` / `␣r` | `global.refresh` | refresh now |
@@ -825,6 +996,7 @@ and ignored; a syntax error falls back to the defaults.
 | `r` | `digest.transcript` | in the digest: open the transcript at that moment |
 | `enter` | `projects.open` | open project home |
 | `n` | `projects.new` | launch a new session |
+| `X` | `projects.archive` | archive the project (confirms with counts: N live sessions archive when done — stopped gracefully after the current turn — M ended sessions archive now) |
 | `right` / `]` | `project.next_section` | next section |
 | `left` / `[` | `project.prev_section` | previous section |
 | `enter` | `project.open` | open / read the selected item |

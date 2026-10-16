@@ -52,6 +52,41 @@ outfit exec workspace-me -- gmail users messages list --params '{"userId":"me","
 
 The pinned GWS source includes a large skill corpus. `outfit` verifies the immutable archive digest, validates every declared `SKILL.md`, and installs only paths whose required services are selected. A Gmail-only connection gets shared and Gmail skills in Codex and Claude, never Drive/Admin/Chat skills. Google Drive, Docs, Sheets, Slides, and Calendar links resolve only when their service capability is selected.
 
+## Discord
+
+Recommended: the Discord v10 REST API with an `outfit`-managed **bot** token owned by the server owner. User tokens (self-bots) violate Discord's Terms of Service and are not supported. In the Developer Portal open your application → Bot → Reset Token, enable the Message Content Intent (and Server Members Intent for `members`/`search_members`), and invite the bot with View Channels and Read Message History, plus Send Messages, Send Messages in Threads, Create Public Threads, Add Reactions, and Pin Messages if it should answer.
+
+```bash
+outfit connector add discord --name vortex-discord   # prompts for the token, or reads DISCORD_BOT_TOKEN
+outfit vortex-discord guilds
+outfit vortex-discord activity --guild 123456789012345678
+outfit vortex-discord messages --channel 234567890123456789 --after 345678901234567890 --limit 100
+outfit vortex-discord reply --channel 234567890123456789 --message 345678901234567890 \
+  --nonce r345678901234567890 --content 'Thanks! (automated helper) The developer has been notified.' --write
+```
+
+Every request carries `Authorization: Bot …` and the required `User-Agent: DiscordBot (…)`. `activity` returns every channel and active thread with `last_message_id` in one call so a monitor fetches `messages --after <cursor>` only where something changed. Only message types 0 (default) and 19 (reply) are user posts; joins (7), pins (6), thread notices (18, 21), and poll results (46) are system notices. Writes need `--write`; `allowed_mentions` defaults to pinging nobody (`reply` notifies only the replied-to author), and `nonce` makes a retried send return the earlier message instead of posting twice. 429 responses are retried after Discord's `retry_after` (bounded). There is no gateway connection: monitoring is polling, and slash commands can be registered but not answered. discord.com message and channel links resolve through `outfit get`.
+
+Polls, moderation, server management, and the escape hatch (connector 1.1.0):
+
+```bash
+outfit vortex-discord create-poll --channel 234567890123456789 --question 'Which day works?' \
+  --answers '["Friday","Saturday"]' --duration 48 --write
+outfit vortex-discord message --channel 234567890123456789 --message <poll message id>   # poll.results.answer_counts
+outfit vortex-discord poll-voters --channel 234567890123456789 --message <id> --answer 1
+outfit vortex-discord end-poll --channel 234567890123456789 --message <id> --write
+outfit vortex-discord timeout-member --guild 123456789012345678 --user 456789012345678901 --until 60 \
+  --reason 'Spam (automated helper, per owner policy)' --write          # --until 0 clears
+outfit vortex-discord api-get --path /guilds/123456789012345678/emojis --query '{"limit":10}'
+outfit vortex-discord api-call --method PATCH --path /guilds/123456789012345678/members/@me \
+  --body '{"nick":"Helper"}' --reason 'Owner request' --write
+```
+
+- Polls: `create_poll` (answers as plain strings or poll answer objects; duration in hours, 1–768), `poll_voters`, `end_poll`; `message`/`messages` return the full `poll` object including `results`. `send_message` and `execute_webhook` also accept a raw `poll` object.
+- Moderation (pass `reason`; it is URL-encoded into `X-Audit-Log-Reason`): `timeout_member`, `kick_member`, `ban_member`, `unban_member`, `bans`, `add_member_role`, `remove_member_role`, `audit_log`, `bulk_delete`, plus `reason` on `delete_message`, `update_thread`, `pin`, `unpin`.
+- Server management: `create_channel`, `edit_channel` (including forum `available_tags`), `delete_channel`, `scheduled_events`, `create_scheduled_event`, `invites`, `create_invite`, `webhooks`, `execute_webhook`, `commands`, `register_command`, `delete_command` (`application` = the bot user ID from `me`).
+- Escape hatch: `api_get` (read, GET only) and `api_call` (destructive class, `--write`; POST/PUT/PATCH/DELETE) take a path relative to `/api/v10` plus separate `query`/`body`. Paths with a scheme, host, `//`, `..`, `?`, `#`, backslashes, or encoded separators are rejected before any request; the origin, token, User-Agent, and 429 handling are fixed. `api_call` acts with the bot's full permissions (Administrator if granted), so the `--write` gate and the owner's own policy are the only limits.
+
 ## Portable backup and fresh-machine restore
 
 ```bash

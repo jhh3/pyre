@@ -112,7 +112,7 @@ func (m *Model) viewReader(w, h int) []string {
 		margin = 1
 	}
 	stt := sessionStatus(s, m.nodeOf(s))
-	head := m.th.title.Render(s.Session.Title) + m.th.dim.Render("  ·  ") + m.th.status(stt) + m.th.dim.Render(" · "+titleCase(string(s.Session.Harness))+" on "+s.NodeName)
+	head := m.th.title.Render(iconTitle(s)) + m.th.dim.Render("  ·  ") + m.th.status(stt) + m.th.dim.Render(" · "+titleCase(string(s.Session.Harness))+" on "+s.NodeName)
 	lines := m.readerLines(tw)
 	m.applyReaderJump(lines, h)
 	m.reader.matches = m.readerMatches(lines)

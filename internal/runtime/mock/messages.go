@@ -180,7 +180,8 @@ func (b *Backend) sendLocked(p c.Principal, req c.SendMessageRequest, reissues s
 	}
 	if rcpt.Kind == c.AddrSession && p.Kind == c.PrincipalOwner {
 		// The owner messaging a session engages with it.
-		b.engageLocked(rcpt.ID, "Replied.", c.AttnMessage, c.AttnFlag)
+		b.engageLocked(rcpt.ID, "Replied.", c.AttnMessage, c.AttnFlag, c.AttnWaiting)
+		b.ownerActiveLocked(p, rcpt.ID)
 	}
 	if rcpt.Kind == c.AddrOwner {
 		sid := ""
@@ -252,7 +253,7 @@ func (b *Backend) GetMessage(ctx context.Context, req c.GetRequest) (c.MessageVi
 		}
 		if p.Kind == c.PrincipalOwner && m.Envelope.Recipient.Kind == c.AddrOwner && m.Envelope.Sender.Kind == c.PrincipalSession {
 			// The owner viewed a session's message to them.
-			b.engageLocked(m.Envelope.Sender.ID, "Read.", c.AttnMessage)
+			b.engageLocked(m.Envelope.Sender.ID, "Read.", c.AttnMessage, c.AttnWaiting)
 		}
 		return *m, nil
 	})

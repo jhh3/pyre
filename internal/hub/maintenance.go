@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
-	"github.com/jhh3/pyre/internal/persistence"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
 
@@ -39,6 +38,18 @@ func (h *Hub) RunMaintenance(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	if _, _, err := h.FoldTokenAccounts(ctx); err != nil { // accounts_merge.go
+		errs = append(errs, err)
+	}
+	if err := h.notifyStuckMail(ctx); err != nil { // stuckmail.go (W-stuckmail)
+		errs = append(errs, err)
+	}
+	if err := h.resolveAsks(ctx); err != nil { // asks.go: deadlines, unsent ask mail (W-asks)
+		errs = append(errs, err)
+	}
+	if err := h.sweepAttention(ctx); err != nil { // attention_sweep.go: stale failure/account items
+		errs = append(errs, err)
+	}
+	if err := h.backfillMessageSummaries(ctx); err != nil { // attention_sweep.go: once per process
 		errs = append(errs, err)
 	}
 	rows, err := h.db.QueryContext(ctx, `SELECT DISTINCT node_id FROM commands WHERE state=?`, cmdQueued)
@@ -79,14 +90,12 @@ func (h *Hub) PendingCommands(ctx context.Context, nodeID string) ([]contracts.N
 	return out, rows.Err()
 }
 
-// pruneBatch bounds one DELETE so a large backlog (first run after an
-// upgrade) never holds the write lock for long.
-const pruneBatch = 5000
-
 // pruneHistory deletes operational records past their retention: finished
-// node commands (Options.CommandRetention after completion) and operation
-// idempotency records (Options.OperationRetention). Unfinished commands
-// are never touched. It runs at most once per Options.PruneInterval.
+// node commands (Options.CommandRetention after completion; their large
+// payloads and results are dropped after Options.CommandCompactAfter) and
+// operation idempotency records (Options.OperationRetention). Unfinished
+// commands are never touched. It runs at most once per
+// Options.PruneInterval, in short batched transactions (retention.go).
 func (h *Hub) pruneHistory(ctx context.Context) error {
 	now := h.clock.Now()
 	h.pruneMu.Lock()
@@ -96,19 +105,14 @@ func (h *Hub) pruneHistory(ctx context.Context) error {
 	}
 	h.lastPrune = now
 	h.pruneMu.Unlock()
-	cmdCut := persistence.Time(now.Add(-h.opt.CommandRetention))
-	for i := 0; i < 100; i++ {
-		res, err := h.db.ExecContext(ctx, `DELETE FROM commands WHERE rowid IN (SELECT rowid FROM commands WHERE state IN (?,?,?)
-			AND COALESCE(NULLIF(completed_at,''), issued_at) < ? LIMIT ?)`, cmdDone, cmdExpired, cmdCancelled, cmdCut, pruneBatch)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n < pruneBatch {
-			break
-		}
+	if _, err := h.pruneCommands(ctx, now.Add(-h.opt.CommandRetention)); err != nil {
+		return err
+	}
+	if _, err := h.compactCommands(ctx, now.Add(-h.opt.CommandCompactAfter)); err != nil {
+		return err
 	}
 	// Idempotency records are stamped with the wall clock (sqlitex).
-	if _, err := sqlitex.PruneOperations(ctx, h.db, time.Now().Add(-h.opt.OperationRetention), pruneBatch); err != nil {
+	if _, err := sqlitex.PruneOperations(ctx, h.db, time.Now().Add(-h.opt.OperationRetention), sqlitex.PruneBatch); err != nil {
 		return err
 	}
 	return h.pruneAudit(ctx) // W-audit
@@ -122,12 +126,18 @@ const reportDedupWindow = 100000
 // (node_id, origin_seq) primary key. The previous single statement with a
 // correlated subquery scanned every node_reports row on each maintenance
 // pass (11 ms at 48k rows in the A20 soak, linear in history).
-const pruneReportDedupQuery = `DELETE FROM node_reports WHERE node_id=? AND origin_seq < ?`
+// It deletes at most a batch (sqlitex.Batched) per transaction.
+const pruneReportDedupQuery = `DELETE FROM node_reports WHERE node_id=? AND origin_seq IN (SELECT origin_seq FROM node_reports WHERE node_id=? AND origin_seq < ? ORDER BY origin_seq LIMIT ?)`
 
 func (h *Hub) pruneReportDedup(ctx context.Context) error {
+	_, err := h.pruneReportDedupN(ctx)
+	return err
+}
+
+func (h *Hub) pruneReportDedupN(ctx context.Context) (int64, error) {
 	rows, err := h.db.QueryContext(ctx, `SELECT node_id, committed_report_seq FROM node_state WHERE committed_report_seq > ?`, reportDedupWindow)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	type cut struct {
 		node string
@@ -138,18 +148,27 @@ func (h *Hub) pruneReportDedup(ctx context.Context) error {
 		var c cut
 		if err := rows.Scan(&c.node, &c.seq); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		cuts = append(cuts, c)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
+	var total int64
 	for _, c := range cuts {
-		if _, err := h.db.ExecContext(ctx, pruneReportDedupQuery, c.node, c.seq-reportDedupWindow); err != nil {
-			return err
+		n, err := sqlitex.Batched(ctx, h.db, sqlitex.PruneBatch, 0, func(tx *sql.Tx, limit int) (int64, error) {
+			res, err := tx.ExecContext(ctx, pruneReportDedupQuery, c.node, c.node, c.seq-reportDedupWindow, limit)
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		})
+		total += n
+		if err != nil {
+			return total, err
 		}
 	}
-	return nil
+	return total, nil
 }

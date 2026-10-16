@@ -522,6 +522,46 @@ func getFallback(ctx context.Context, q querier, fromRunID string) (*contracts.F
 	return &p, nil
 }
 
+// countSwitches counts automatic account switches (fallback plans that
+// started a successor) planned at or after since, for one session or (""
+// sessionID) the whole node, and returns the latest one's time.
+func countSwitches(ctx context.Context, q querier, sessionID string, since time.Time) (int, time.Time, error) {
+	query := `SELECT COUNT(*), COALESCE(MAX(planned_at),'') FROM accounts_fallback
+		WHERE planned_at >= ? AND json_extract(body,'$.outcome') IN (?,?)`
+	args := []any{ft(since), string(contracts.FallbackNativeResume), string(contracts.FallbackHandoff)}
+	if sessionID != "" {
+		query += ` AND session_id=?`
+		args = append(args, sessionID)
+	}
+	var n int
+	var last string
+	if err := q.QueryRowContext(ctx, query, args...).Scan(&n, &last); err != nil {
+		return 0, time.Time{}, err
+	}
+	return n, pt(last), nil
+}
+
+// switchedFromAccounts returns the accounts automatic switches moved
+// sessions away from since the given time.
+func switchedFromAccounts(ctx context.Context, q querier, since time.Time) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT DISTINCT COALESCE(json_extract(body,'$.from_account_id'),'') FROM accounts_fallback
+		WHERE planned_at >= ? AND json_extract(body,'$.outcome') IN (?,?)`,
+		ft(since), string(contracts.FallbackNativeResume), string(contracts.FallbackHandoff))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 func putFallback(ctx context.Context, q querier, p contracts.FallbackPlan) error {
 	b, _ := json.Marshal(p)
 	_, err := q.ExecContext(ctx, `INSERT INTO accounts_fallback(from_run_id,session_id,planned_at,body) VALUES(?,?,?,?)

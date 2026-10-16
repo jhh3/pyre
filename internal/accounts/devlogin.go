@@ -13,11 +13,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/devlogin"
+	"github.com/jhh3/pyre/internal/fileperm"
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // Remote device login (account.device_login*): the node runs `codex login
@@ -150,7 +151,7 @@ func (d *deviceLogins) Start(ctx context.Context, p devlogin.Params) (devlogin.V
 		d.mu.Unlock()
 		return devlogin.View{}, contracts.Errorf(contracts.ErrInternal, "temporary home: %v", err)
 	}
-	_ = os.Chmod(tmp, 0o700)
+	_ = fileperm.Restrict(tmp, 0o700)
 	jctx, cancel := context.WithTimeout(context.Background(), timeout)
 	j := &dlJob{changed: make(chan struct{}), cancel: cancel, view: devlogin.View{
 		LoginID: contracts.NewID("dlogin"), Provider: p.Provider, NodeID: d.s.cfg.NodeID, State: devlogin.StateStarting, StartedAt: d.s.now(), Version: 1,
@@ -284,10 +285,10 @@ func (d *deviceLogins) run(ctx context.Context, cancel context.CancelFunc, id, b
 	cmd := exec.CommandContext(ctx, bin, "login", "--device-auth")
 	cmd.Env = append(envWithout(os.Environ(), "CODEX_HOME", "NO_COLOR"), "CODEX_HOME="+tmp, "NO_COLOR=1")
 	cmd.Dir = tmp
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	osutil.NewProcessGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_ = osutil.KillGroup(cmd.Process.Pid, false)
 		}
 		return nil
 	}
@@ -332,7 +333,7 @@ func (d *deviceLogins) run(ctx context.Context, cancel context.CancelFunc, id, b
 	<-done
 	if werr == nil {
 		// Belt and braces: kill anything left in the group.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = osutil.KillGroup(cmd.Process.Pid, true)
 	}
 
 	d.mu.Lock()
@@ -408,7 +409,7 @@ func (s *Service) saveDeviceLogin(authPath, home string) (savedLogin, error) {
 	if err := os.MkdirAll(dest, 0o700); err != nil {
 		return out, fmt.Errorf("creating %s: %v", dest, err)
 	}
-	_ = os.Chmod(dest, 0o700)
+	_ = fileperm.Restrict(dest, 0o700)
 	target := filepath.Join(dest, "auth.json")
 	if _, err := os.Stat(target); err == nil {
 		bak := target + ".replaced-" + s.now().Format("20060102150405")

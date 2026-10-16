@@ -126,6 +126,7 @@ func (m *Model) patchSessionTags(sid string, tags []string) {
 		}
 	}
 	st.val = out
+	st.rev++
 	m.syncSessions() // the Grid re-sorts on its next frame
 }
 

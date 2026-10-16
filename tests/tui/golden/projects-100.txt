@@ -27,4 +27,4 @@
                                                    │
                                                    │
 
- enter open   / filter   n new session   ␣␣ find                                             ? help
+ enter open   / filter   n new session   X archive   ␣␣ find                                 ? help

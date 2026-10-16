@@ -178,10 +178,14 @@ func TestDeriveTable(t *testing.T) {
 		{"fallback native resume is not attention", mkEvent(contracts.EvFallbackPlanned, contracts.ObjectRef{}, "ses_synth-a",
 			contracts.FallbackPlan{SessionID: "ses_synth-a", Outcome: contracts.FallbackNativeResume}), nil},
 		{"run failed", mkEvent(contracts.EvRunEnded, contracts.ObjectRef{Kind: contracts.KindRun, ID: "run_synth-f"}, "ses_synth-a", failed),
-			[]want{{op: opWithdraw, group: "flag:session:ses_synth-a"}, {opRaise, contracts.AttnFailure, "failure:ses_synth-a", "normal", contracts.KindSession}}},
-		// Any run end withdraws the session's own flag; only failure raises.
-		{"run unknown is not failure", mkEvent(contracts.EvRunEnded, contracts.ObjectRef{}, "ses_synth-a", unknown), []want{{op: opWithdraw, group: "flag:session:ses_synth-a"}}},
-		{"run exited is not failure", mkEvent(contracts.EvRunEnded, contracts.ObjectRef{}, "ses_synth-a", exited), []want{{op: opWithdraw, group: "flag:session:ses_synth-a"}}},
+			[]want{{op: opWithdraw, group: "flag:session:ses_synth-a"}, {op: opWithdraw, group: ""}, {op: opWithdraw, group: "waiting:ses_synth-a"}, {opRaise, contracts.AttnFailure, "failure:ses_synth-a", "normal", contracts.KindSession}}},
+		// Any run end withdraws the session's own flag, the account limits
+		// it hit (group "" = by session and kind) and its "waiting on you";
+		// only failure raises.
+		{"run unknown is not failure", mkEvent(contracts.EvRunEnded, contracts.ObjectRef{}, "ses_synth-a", unknown),
+			[]want{{op: opWithdraw, group: "flag:session:ses_synth-a"}, {op: opWithdraw, group: ""}, {op: opWithdraw, group: "waiting:ses_synth-a"}}},
+		{"run exited is not failure", mkEvent(contracts.EvRunEnded, contracts.ObjectRef{}, "ses_synth-a", exited),
+			[]want{{op: opWithdraw, group: "flag:session:ses_synth-a"}, {op: opWithdraw, group: ""}, {op: opWithdraw, group: "waiting:ses_synth-a"}}},
 		{"artifact review requested", mkEvent(contracts.EvArtifactPublished, contracts.ObjectRef{Kind: contracts.KindArtifactVersion, ID: "ver_synth-2"}, "", pub),
 			[]want{{opRaise, contracts.AttnReviewReady, "review:art_synth-r", "normal", contracts.KindArtifactVersion}}},
 		{"artifact without review request", mkEvent(contracts.EvArtifactPublished, contracts.ObjectRef{}, "", pubNoReview), nil},
@@ -221,7 +225,9 @@ func TestDeriveTable(t *testing.T) {
 						t.Errorf("change %d: got kind=%s sev=%s obj=%+v title=%q", i, g.kind, g.severity, g.object, g.title)
 					}
 				}
-				if strings.Contains(g.title, secret) || strings.Contains(g.summary, secret) {
+				// A message item's summary is the message excerpt (owner
+				// request 2026-10-12); nothing else copies body text.
+				if strings.Contains(g.title, secret) || (strings.Contains(g.summary, secret) && g.kind != contracts.AttnMessage) {
 					t.Errorf("change %d leaks body text: %q / %q", i, g.title, g.summary)
 				}
 			}
@@ -284,12 +290,43 @@ func TestDeriveRunFailedReasonAndResolve(t *testing.T) {
 		StateReason: "launch failed: no eligible openai subscription on this node: acct_synth-1: verified at checkout: availability unknown: account/rateLimits/read failed: wham/usage failed: 401 Unauthorized"}
 	got := derive(context.Background(), mkEvent(contracts.EvRunEnded, contracts.ObjectRef{Kind: contracts.KindRun, ID: r.RunID}, r.SessionID, r), labelLookup{})
 	want := "Couldn't start: work-max's Codex login on synth-mac needs re-auth (401). Fix: pyre accounts login --node synth-mac"
-	if len(got) != 2 || got[1].summary != want {
+	if len(got) != 4 || got[3].summary != want {
 		t.Fatalf("summary: %+v", got)
 	}
+	// A retry that is only starting resolves nothing (it may fail again);
+	// one that reaches a live state resolves the session's failure and
+	// account items and its place in grouped items.
 	started := contracts.Run{RunID: "run_synth-g", SessionID: "ses_synth-a", State: contracts.RunStarting}
-	got = derive(context.Background(), mkEvent(contracts.EvRunStarted, contracts.ObjectRef{Kind: contracts.KindRun, ID: started.RunID}, "ses_synth-a", started), labelLookup{})
-	if len(got) != 1 || got[0].op != opWithdraw || got[0].groupKey != "failure:ses_synth-a" {
-		t.Fatalf("run.started: %+v", got)
+	if got = derive(context.Background(), mkEvent(contracts.EvRunStarted, contracts.ObjectRef{Kind: contracts.KindRun, ID: started.RunID}, "ses_synth-a", started), labelLookup{}); len(got) != 0 {
+		t.Fatalf("run.started (starting): %+v", got)
+	}
+	started.State = contracts.RunWaitingInput
+	got = derive(context.Background(), mkEvent(contracts.EvRunObserved, contracts.ObjectRef{Kind: contracts.KindRun, ID: started.RunID}, "ses_synth-a", started), labelLookup{})
+	if len(got) != 2 || got[0].op != opWithdraw || got[0].sessionID != "ses_synth-a" || len(got[0].kinds) != 2 ||
+		got[0].kinds[0] != contracts.AttnFailure || got[0].kinds[1] != contracts.AttnAccountPool || got[1].op != opLeave || got[1].sessionID != "ses_synth-a" {
+		t.Fatalf("run.observed live: %+v", got)
+	}
+}
+
+type sessionLookup struct{ labelLookup }
+
+func (sessionLookup) SessionTitle(_ context.Context, id string) (string, error) {
+	return "synth perf", nil
+}
+
+// The switch circuit breaker's plan reads as its own needs-you item.
+func TestDeriveSwitchPaused(t *testing.T) {
+	plan := contracts.FallbackPlan{SessionID: "ses_synth-a", FromRunID: "run_synth-2", FromAccountID: "acct_synth-2",
+		Outcome: contracts.FallbackIntervention, Provider: contracts.ProviderAnthropic,
+		Reason: "account switching paused: repeated limits within 30m (last automatic switch 14:05Z)"}
+	ev := mkEvent(contracts.EvFallbackPlanned, contracts.ObjectRef{Kind: contracts.KindSession, ID: "ses_synth-a"}, "ses_synth-a", plan)
+	got := derive(context.Background(), ev, sessionLookup{})
+	if len(got) != 1 || got[0].title != "Account switching paused for 'synth perf': repeated limits within 30m" ||
+		got[0].kind != contracts.AttnAccountPool || got[0].severity != "urgent" || got[0].sessionID != "ses_synth-a" {
+		t.Fatalf("paused: %+v", got)
+	}
+	got = derive(context.Background(), ev, fakeLookup{})
+	if len(got) != 1 || got[0].title != "Account switching paused for this session: repeated limits within 30m" {
+		t.Fatalf("paused without titles: %+v", got)
 	}
 }

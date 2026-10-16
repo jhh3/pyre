@@ -1,6 +1,10 @@
 package runfail
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/jhh3/pyre/internal/contracts"
+)
 
 func TestPlain(t *testing.T) {
 	names := Names{Account: func(id string) string {
@@ -41,5 +45,27 @@ func TestSummaryNeverCopiesUnknownText(t *testing.T) {
 	if got := Summary("launch failed: no eligible openai subscription on this node: acct_01SYNTHX: wham/usage failed: 401 Unauthorized", false, Names{Node: "node-a"}); got !=
 		"Couldn't start: acct_01SYNTHX's Codex login on node-a needs re-auth (401). Fix: pyre accounts login --node node-a" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// Capacity singles out "every account is limited; wait for the reset"
+// (grouped per provider in the inbox), never a rejected login.
+func TestCapacity(t *testing.T) {
+	cases := []struct {
+		reason string
+		prov   contracts.Provider
+		ok     bool
+	}{
+		{"launch failed: no eligible openai subscription on this node: acct_01SYNTHX: cooldown until 2026-10-12T20:00:00Z", contracts.ProviderOpenAI, true},
+		{"launch failed: no eligible anthropic subscription on this node: acct_01SYNTHX: usage limit reached", contracts.ProviderAnthropic, true},
+		{"launch failed: no eligible subscription: all exhausted", "", true},
+		{"launch failed: no eligible openai subscription on this node: acct_01SYNTHX: 401 Unauthorized (cooldown)", "", false},
+		{"launch failed: checkout missing", "", false},
+		{"claude exited with an API error", "", false},
+	}
+	for _, c := range cases {
+		if prov, ok := Capacity(c.reason); prov != c.prov || ok != c.ok {
+			t.Errorf("Capacity(%q) = %q %v, want %q %v", c.reason, prov, ok, c.prov, c.ok)
+		}
 	}
 }

@@ -128,6 +128,34 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // Step performs one poll: expire snoozes, fetch events after the persisted
 // cursor, and apply them. It returns the number of events received.
 func (d *Deriver) Step(ctx context.Context) (int, error) {
+	return d.step(ctx, d.opts.WaitSeconds)
+}
+
+// StepNow is Step without the long-poll wait: it applies what is already
+// committed and returns at once (read-your-writes catch-ups; a long poll
+// there waited the full WaitSeconds whenever only events the deriver does
+// not consume were pending).
+func (d *Deriver) StepNow(ctx context.Context) (int, error) {
+	return d.step(ctx, 0)
+}
+
+// WaitPending long-polls (read only, up to WaitSeconds) until an event the
+// deriver consumes is committed after its persisted cursor. Callers that
+// serialize steps with a lock wait here without holding it.
+func (d *Deriver) WaitPending(ctx context.Context) error {
+	ctx = contracts.WithPrincipal(ctx, SystemPrincipal)
+	cur, err := d.store.Cursor(ctx, d.opts.Consumer)
+	if err != nil {
+		return err
+	}
+	_, err = d.events.ListEvents(ctx, contracts.ListEventsRequest{AfterCursor: cur, Limit: 1, Kinds: derivedKinds, WaitSeconds: d.opts.WaitSeconds})
+	if contracts.IsCode(err, contracts.ErrResetRequired) {
+		return nil // the next step resynchronizes
+	}
+	return err
+}
+
+func (d *Deriver) step(ctx context.Context, wait int) (int, error) {
 	ctx = contracts.WithPrincipal(ctx, SystemPrincipal)
 	if _, err := d.store.ExpireSnoozes(ctx); err != nil {
 		return 0, err
@@ -140,7 +168,7 @@ func (d *Deriver) Step(ctx context.Context) (int, error) {
 		AfterCursor: cur,
 		Limit:       d.opts.BatchLimit,
 		Kinds:       derivedKinds,
-		WaitSeconds: d.opts.WaitSeconds,
+		WaitSeconds: wait,
 	})
 	if contracts.IsCode(err, contracts.ErrResetRequired) {
 		return 0, d.resync(ctx, cur, contracts.AsError(err))
@@ -450,6 +478,43 @@ func (l *APILookup) AccountProvider(ctx context.Context, accountID string) (cont
 func (l *APILookup) AccountLabel(ctx context.Context, accountID string) (string, error) {
 	a, err := l.account(ctx, accountID)
 	return a.Label, err
+}
+
+// sessionRecorder is implemented by the hub: the stored session record,
+// without the presentation view. GetSession builds a view that reads the
+// attention store (flags), which waits for the deriver: called from a
+// deriver step it would wait on itself.
+type sessionRecorder interface {
+	SessionRecord(ctx context.Context, sessionID string) (contracts.Session, error)
+}
+
+// session returns a session record when Fleet also serves sessions.
+func (l *APILookup) session(ctx context.Context, sessionID string) (contracts.Session, error) {
+	ctx = contracts.WithPrincipal(ctx, SystemPrincipal)
+	if sr, ok := l.Fleet.(sessionRecorder); ok {
+		return sr.SessionRecord(ctx, sessionID)
+	}
+	sg, ok := l.Fleet.(interface {
+		GetSession(ctx context.Context, req contracts.GetRequest) (contracts.SessionView, error)
+	})
+	if !ok {
+		return contracts.Session{}, contracts.Errorf(contracts.ErrUnavailable, "no session API")
+	}
+	v, err := sg.GetSession(ctx, contracts.GetRequest{ID: sessionID})
+	return v.Session, err
+}
+
+// SessionTitle returns a session's title when Fleet also serves sessions.
+func (l *APILookup) SessionTitle(ctx context.Context, sessionID string) (string, error) {
+	s, err := l.session(ctx, sessionID)
+	return s.Title, err
+}
+
+// SessionParent returns the session a session sits under ("" at the top
+// level) when Fleet also serves sessions.
+func (l *APILookup) SessionParent(ctx context.Context, sessionID string) (string, error) {
+	s, err := l.session(ctx, sessionID)
+	return s.Parent(), err
 }
 
 // NodeName returns the display name of nodeID.

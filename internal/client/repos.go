@@ -32,3 +32,12 @@ func (cl *Client) SessionWorktrees(ctx context.Context, req c.SessionWorktreesRe
 	err := cl.read(ctx, c.OpSessionWorktrees, req, &out)
 	return out, reposUnsupported(c.OpSessionWorktrees, err)
 }
+
+var _ c.RepoCatalogAPI = (*Client)(nil)
+
+// RepoCatalog calls repos.catalog (W-newsession).
+func (cl *Client) RepoCatalog(ctx context.Context, req c.RepoCatalogRequest) (c.RepoCatalog, error) {
+	var out c.RepoCatalog
+	err := cl.read(ctx, c.OpRepoCatalog, req, &out)
+	return out, reposUnsupported(c.OpRepoCatalog, err)
+}

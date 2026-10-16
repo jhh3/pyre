@@ -32,7 +32,7 @@ outfit connector adopt-mcp IMPORT_ID --name linear
 
 Restart affected Claude Code or Codex sessions after a successful transfer; an already-running session may keep its existing MCP transport open until exit.
 
-Built-in connector fields also declare familiar environment sources such as `GH_TOKEN`, `INTERCOM_ACCESS_TOKEN`, `SENTRY_ACCESS_TOKEN`, and `STRIPE_API_KEY`. The setup form preloads matching values behind a password mask, and the CLI reports only the variable name. You still choose the mode and explicitly connect before `outfit` stores or uses anything.
+Built-in connector fields also declare familiar environment sources such as `GH_TOKEN`, `DISCORD_BOT_TOKEN`, `INTERCOM_ACCESS_TOKEN`, `SENTRY_ACCESS_TOKEN`, and `STRIPE_API_KEY`. The setup form preloads matching values behind a password mask, and the CLI reports only the variable name. You still choose the mode and explicitly connect before `outfit` stores or uses anything.
 
 Stripe and Google Workspace are the complete managed references:
 

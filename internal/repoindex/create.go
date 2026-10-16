@@ -101,6 +101,9 @@ func branchExists(ctx context.Context, repo, branch string) bool {
 	return err == nil
 }
 
+// ValidBranch reports whether b is a branch name Pyre accepts.
+func ValidBranch(b string) bool { return validBranch(b) }
+
 // validBranch rejects names git or a shell could misread.
 func validBranch(b string) bool {
 	if b == "" || strings.HasPrefix(b, "-") || strings.HasPrefix(b, "/") || strings.HasSuffix(b, "/") || strings.Contains(b, "..") || strings.HasSuffix(b, ".lock") {

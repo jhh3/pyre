@@ -9,6 +9,8 @@ sealed interface Screen {
     val key: String
 
     data object Sessions : Screen { override val key = "sessions" }
+    /** The owner inbox; [openAskId] opens that ask's sheet (pyre://ask/<id>). */
+    data class Inbox(val openAskId: String = "") : Screen { override val key = "inbox" }
     data object Projects : Screen { override val key = "projects" }
     data object Machines : Screen { override val key = "machines" }
     data object Accounts : Screen { override val key = "accounts" }
@@ -27,11 +29,11 @@ sealed interface Screen {
     data class HtmlPreview(val versionId: String) : Screen { override val key = "preview/$versionId" }
     data class Node(val nodeId: String) : Screen { override val key = "node/$nodeId" }
     data class Comment(val commentId: String) : Screen { override val key = "comment/$commentId" }
-    /** An old inbox link (pyre://attention/<id>): resolves to the item's session, then replaces itself. */
+    /** An attention link (pyre://attention/<id>): resolves to the ask's sheet or the item's session, then replaces itself. */
     data class AttentionLink(val attentionId: String) : Screen { override val key = "attention/$attentionId" }
 
-    /** The bottom-bar destinations: Sessions · Projects · Machines · Accounts. */
-    val isRoot: Boolean get() = this == Sessions || this == Projects || this == Machines || this == Accounts
+    /** The bottom-bar destinations: Sessions · Inbox · Projects · Machines · Accounts. */
+    val isRoot: Boolean get() = this == Sessions || this is Inbox || this == Projects || this == Machines || this == Accounts
 }
 
 object DeepLinks {
@@ -62,9 +64,10 @@ object DeepLinks {
             "artifact_version" -> Screen.Artifact(versionId = id)
             "node" -> Screen.Node(id)
             "comment" -> Screen.Comment(id)
-            // There is no Inbox: an attention link opens the session it is about.
-            "attention" -> if (id == "inbox") Screen.Sessions else Screen.AttentionLink(id)
-            "inbox" -> Screen.Sessions
+            // An attention item opens its ask (in the inbox) or the session it is about.
+            "attention" -> if (id == "inbox") Screen.Inbox() else Screen.AttentionLink(id)
+            "inbox" -> Screen.Inbox()
+            "ask" -> Screen.Inbox(openAskId = id)
             else -> null
         }
     }

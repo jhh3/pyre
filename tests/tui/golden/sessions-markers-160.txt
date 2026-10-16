@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                               anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  STATUS       SESSION                         MACHINE     HARNESS  AGE  │ scratch (standalone) · ○ idle · Claude on synth-mac                         needs you
+  Synthetic Outfit 1                                                     │ read-only snapshot · MOCK backend: there is no live terminal; showing transcript/scr…
+  ● working    outfit API client ↳ coordinator synth-linux claude   30s  │
+                                                                         │ [mock screen] scratch (standalone) — waiting_input
+  No project 8 · ◆ 3 waiting · ◌ 1 working                               │ Working on it (synthetic).
+  ◔ starting   api work (handoff successor)    synth-linux codex    30s  │ >
+  ● working    coordinator ▾3        ◆ waiting synth-mac   claude   30s  │
+  ! needs you  ├ worker                        synth-linux claude   30s  │
+  ◌ stale      │ └ long refactor               synth-linux claude    7m  │
+▎ ● working    └ migration work                synth-mac   claude   30s  │
+▎ ! approval   deploy prep                     synth-mac   claude   30s  │
+  ○ idle       pairing session                 synth-mac   claude   30s  │
+› ! needs you  scratch (standalone)            synth-mac   claude   30s  │
+                                                                         │
+  machines  synth-linux ● 4 · synth-mac ● 5                              │
+  1 ended — . show                                                       │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+ ──────────────────────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)            │
+ n new session      enter type         F full-screen                     │
+ m message          i info             / filter                          │
+ ␣␣ find            ? keys                                               │

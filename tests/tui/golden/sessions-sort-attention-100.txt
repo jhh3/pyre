@@ -1,10 +1,10 @@
  Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────
   STATUS       SESSION                 MACHINE      AGE  │ outfit API client · ● working · Claude
-  Synthetic Outfit 1 · 1 working                         │ read-only snapshot · MOCK backend: there…
+  Synthetic Outfit 1 · ◌ 1 working                       │ read-only snapshot · MOCK backend: there…
 › ● working    outfit API client       synth-linux  30s  │
                                                          │ [mock screen] outfit API client — running
-  No project 8 · ! 3 need you · 3 working · 1 idle       │ Working on it (synthetic).
+  No project 8 · ◆ 3 waiting · ◌ 3 working               │ Working on it (synthetic).
   ! needs you  worker                  synth-linux  30s  │ >
   ! approval   deploy prep             synth-mac    30s  │
   ! needs you  scratch (standalone)    synth-mac    30s  │
@@ -22,9 +22,9 @@
                                                          │
                                                          │
                                                          │
-                                                         │
-                                                         │
-
- Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)
- needs you first, then messages
- n new session   enter type   F full-screen   m message   i info   / filter   ␣␣ find        ? help
+ ──────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ⁇ worker   +1 more           │
+ needs you first, then messages                          │
+ n new session     enter type        F full-screen       │
+ m message         i info            / filter            │
+ ␣␣ find           ? keys                                │

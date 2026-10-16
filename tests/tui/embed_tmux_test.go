@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -55,7 +56,12 @@ func TestEmbeddedTerminalRealTmux(t *testing.T) {
 	if err != nil {
 		t.Skip("tmux not installed")
 	}
-	home := t.TempDir()
+	// Not t.TempDir: the pane's shell can still write into its HOME while
+	// tmux tears it down, which made TempDir's cleanup fail intermittently.
+	home, err := os.MkdirTemp("", "pyre-wembed-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := &tmuxAPI{bin: bin, sock: fmt.Sprintf("pyre-wembed-test-%d", os.Getpid())}
 	t.Cleanup(func() {
 		path := a.tmux(t, "display", "-p", "#{socket_path}")
@@ -63,6 +69,10 @@ func TestEmbeddedTerminalRealTmux(t *testing.T) {
 		if strings.HasPrefix(path, "/") {
 			_ = os.Remove(path)
 		}
+		for i := 0; i < 20 && os.RemoveAll(home) != nil; i++ {
+			time.Sleep(50 * time.Millisecond)
+		}
+		_ = os.RemoveAll(home)
 	})
 	shell := "env -i HOME=" + home + " PATH=/usr/bin:/bin PS1='$ ' /bin/sh"
 	if out, err := exec.Command(bin, "-L", a.sock, "-f", "/dev/null", "new-session", "-d", "-s", "embed", "-x", "50", "-y", "10", shell).CombinedOutput(); err != nil {

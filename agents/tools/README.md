@@ -91,7 +91,20 @@ older). It deliberately does not offer 2026-07-28: Claude Code does not
 register a channel server on that revision, and a stdio client probing it
 (`server/discover`, e.g. Claude Code with `MCP_PROTOCOL_NEGOTIATION=auto`)
 gets -32601 and falls back to the legacy handshake. Every tool has a
-title, explicit readOnly/destructive/idempotent/openWorld hints, and an
-`outputSchema` derived from its contract result type; successful results
-carry conforming `structuredContent`. `internal/cli/mcp_conformance_test.go`
-checks this with the official MCP Go SDK client.
+title and explicit readOnly/destructive/idempotent/openWorld hints. Tools
+that act have an `outputSchema` derived from their contract result type;
+successful results carry conforming `structuredContent`.
+`internal/cli/mcp_conformance_test.go` checks this with the official MCP Go
+SDK client.
+
+Read tools that agents call often (`inbox`, `get_message`, `list_sessions`,
+`get_session`, `read_session`, `list_nodes`, `list_approvals`,
+`list_projects`, `search`, `get_digest`) answer in compact text by default:
+one line per item with the ids a follow-up call needs (`[pyre-msg:<id>]`
+per message, session ids, `next_cursor`), no receipts or freshness records.
+Listings shorten long message bodies but keep paths and links whole;
+`get_message` shows the full body. `format: "json"` returns the full
+contract result with `structuredContent`. These tools declare no
+`outputSchema`, because their default result is text. The MCP `inbox`
+lists unacked mail unless `unacked: false` (or a thread, outbox or all) is
+requested.

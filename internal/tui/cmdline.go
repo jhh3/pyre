@@ -67,6 +67,8 @@ func (m *Model) commands() []command {
 		{name: "archive", arg: "session", args: "[session]", desc: "archive a session (live: stop + archive, confirms)",
 			run: sess(func(m *Model, s contracts.SessionView) tea.Cmd { return m.archiveSession(s) })},
 		m.renameCommand(),
+		m.iconCommand(),                                                    // W-archive2
+		m.reparentCommand(),                                                // W-reparent
 		m.pinCommand(), m.groupCommand(), m.sortCommand(), m.viewCommand(), // pinning.go, grouping.go, sessions_modes.go
 		{name: "archived", desc: "list archived sessions (u restores)", run: func(m *Model, args string) tea.Cmd { return m.openArchived() }},
 		{name: "ended", desc: "show / hide ended sessions in the list", run: func(m *Model, args string) tea.Cmd { return m.toggleEnded() }},
@@ -114,6 +116,7 @@ func (m *Model) commands() []command {
 		{name: "sessions", desc: "go to Sessions", run: nav("global.sessions")},
 		{name: "projects", desc: "go to Projects", run: nav("global.projects")},
 		{name: "grid", desc: "toggle the Grid inside Sessions: every live session as a live tile", run: nav("global.grid")},
+		{name: "inbox", aliases: []string{"asks", "web"}, desc: "open the web inbox for the selection (its lead's or project's asks); copies the link over ssh", run: nav("global.inbox")},
 		{name: "digest", aliases: []string{"away"}, desc: "while you were away: what each agent did since you last looked", run: nav("global.digest")},
 		{name: "machines", aliases: []string{"nodes"}, desc: "connection, versions, resources, harnesses", run: nav("global.machines")},
 		{name: "accounts", desc: "eligibility, usage windows, assignments", run: nav("global.accounts")},

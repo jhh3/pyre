@@ -1198,7 +1198,7 @@ func (l *NodeLink) recoverCommands(ctx context.Context) error {
 
 // commandPruneInterval is how often a running link prunes finished command
 // records (besides at startup).
-const commandPruneInterval = time.Hour
+const commandPruneInterval = 10 * time.Minute
 
 // pruneFinishedCommands deletes finished command records older than
 // CommandRetention whose results the hub acknowledged.
@@ -1209,8 +1209,22 @@ func (l *NodeLink) pruneFinishedCommands(ctx context.Context) error {
 	l.pruneMu.Unlock()
 	cutoff := sqlitex.FormatTime(now.Add(-l.cfg.CommandRetention))
 	_, err := l.cfg.DB.ExecContext(ctx, `DELETE FROM nodelink_commands WHERE state=? AND finished_at < ? AND result_seq <= (SELECT value FROM nodelink_state WHERE key='acked_seq')`, cmdDone, cutoff)
+	if err != nil {
+		return err
+	}
+	// Read-only commands carry large results (transcript pages) and need no
+	// long dedup: re-executing a read is harmless and the hub never resends
+	// a command its LastCommandSeq covers. On server 40k read_transcript rows
+	// (739 MB of results) made pyred.db 800 MB (W-resilience).
+	roCutoff := sqlitex.FormatTime(now.Add(-readOnlyCommandRetention))
+	_, err = l.cfg.DB.ExecContext(ctx, `DELETE FROM nodelink_commands WHERE state=? AND kind=? AND finished_at < ? AND result_seq <= (SELECT value FROM nodelink_state WHERE key='acked_seq')`,
+		cmdDone, string(contracts.CmdReadTranscript), roCutoff)
 	return err
 }
+
+// readOnlyCommandRetention keeps finished read-only command records (and
+// their results) for duplicate suppression of near-term resends only.
+const readOnlyCommandRetention = 10 * time.Minute
 
 // maybePruneCommands prunes at most once per commandPruneInterval. Before
 // the A20 soak, finished records were pruned only at startup, so a

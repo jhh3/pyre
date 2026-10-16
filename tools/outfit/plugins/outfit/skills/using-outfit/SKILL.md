@@ -1,6 +1,6 @@
 ---
 name: using-outfit
-description: Use locally configured outfit connectors and tools when a task needs GitHub, Slack, Linear, Sentry, Intercom, Notion, or another installed connector. Do not use when ordinary repository files or built-in tools already answer the request.
+description: Use locally configured outfit connectors and tools when a task needs GitHub, Slack, Discord, Linear, Sentry, Intercom, Notion, or another installed connector. Do not use when ordinary repository files or built-in tools already answer the request.
 ---
 
 # Using outfit

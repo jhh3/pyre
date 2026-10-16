@@ -60,9 +60,28 @@ func TestWebTerminalAttachAndBackend(t *testing.T) {
 	if d.Mechanism != contracts.AttachWebTerminal || d.URL != contracts.PathTerminal || d.Ticket != "synthetic-relay-ticket" || d.Command != nil || d.ReadOnly || d.RunID != runID {
 		t.Fatalf("web descriptor = %+v", d)
 	}
+	// The relay's ticket needs no node round trip (terminal_open asks the
+	// node when the client dials).
+	if n := len(x.ch.sentKinds(nodeMac, contracts.CmdAttach)); n != 0 {
+		t.Fatalf("web attach of a native-terminal run sent %d attach commands to the node", n)
+	}
+	// A run without a native terminal: the node is asked for its local
+	// descriptor only (client = run's node, local_tmux).
+	if _, err := x.db.Exec(`UPDATE runs SET run=json_set(run, '$.capabilities', json('["transcript.read","attach.web_terminal"]')) WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if d, err = attach(owner, false, contracts.AttachWebTerminal, contracts.AttachSSHTmux); err != nil || d.Mechanism != contracts.AttachWebTerminal {
+		t.Fatalf("web attach via the node = %+v %v", d, err)
+	}
 	if la := last(); la.ClientNodeID != "node_synth-mac" || len(la.Preferred) != 1 || la.Preferred[0] != contracts.AttachLocalTmux {
 		t.Fatalf("relay must ask the node for its local descriptor only (client = run's node, local_tmux): %+v", la)
 	}
+	if _, err := x.db.Exec(`UPDATE runs SET run=json_set(run, '$.capabilities', json(?)) WHERE run_id=?`, string(mustMarshal(claudeCaps)), runID); err != nil {
+		t.Fatal(err)
+	}
+	relay.mu.Lock()
+	relay.grants = relay.grants[:1]
+	relay.mu.Unlock()
 	// A client preferring a native terminal keeps the node's descriptor.
 	d, err = attach(owner, false, contracts.AttachLocalTmux, contracts.AttachWebTerminal)
 	if err != nil || d.Mechanism != contracts.AttachLocalTmux || d.Ticket != "" || last().ClientNodeID != "node_synth-phone" {
@@ -159,4 +178,12 @@ func TestPrefersWebTerminal(t *testing.T) {
 			t.Errorf("prefersWebTerminal(%v) = %v", c.pref, got)
 		}
 	}
+}
+
+func mustMarshal(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

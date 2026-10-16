@@ -13,6 +13,8 @@ var (
 	fieldPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,63}$`)
 	namePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{1,63}$`)
 	idPattern    = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+	// headerNamePattern is the RFC 9110 token grammar for field names.
+	headerNamePattern = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 )
 
 var segmentKinds = map[string]bool{
@@ -190,6 +192,18 @@ func validateMode(connector string, mode Mode, methods map[string]CredentialMeth
 			issues = append(issues, prefix+": secrets may not enter process argv")
 		}
 	}
+	if len(mode.Executor.Headers) > 0 && mode.Executor.Kind != "http" {
+		issues = append(issues, prefix+": executor headers are supported only for http modes")
+	}
+	for name, value := range mode.Executor.Headers {
+		if !headerNamePattern.MatchString(name) || strings.Contains(value, "{{") || strings.ContainsAny(value, "\r\n") {
+			issues = append(issues, prefix+": executor header "+name+" needs a token name and a fixed single-line value")
+		}
+		switch strings.ToLower(name) {
+		case "authorization", "host", "content-length", "cookie", "proxy-authorization":
+			issues = append(issues, prefix+": executor header "+name+" is reserved; use a credential binding")
+		}
+	}
 	if len(mode.CredentialMethods) == 0 {
 		issues = append(issues, prefix+": at least one credential method is required")
 	}
@@ -244,17 +258,30 @@ func validateMode(connector string, mode Mode, methods map[string]CredentialMeth
 		if operation.MCPTool != "" {
 			configured++
 		}
+		if len(operation.Compose) > 0 {
+			configured++
+			issues = append(issues, validateCompose(prefix+"/"+operation.Name, mode, operation)...)
+		}
 		if configured != 1 {
 			issues = append(issues, prefix+"/"+operation.Name+": exactly one operation executor is required")
 		}
-		if mode.Executor.Kind == "http" && operation.HTTP == nil {
+		composite := len(operation.Compose) > 0
+		if mode.Executor.Kind == "http" && operation.HTTP == nil && !composite {
 			issues = append(issues, prefix+"/"+operation.Name+": HTTP mode needs an HTTP operation")
 		}
-		if mode.Executor.Kind == "cli" && operation.CLI == nil {
+		if mode.Executor.Kind == "cli" && operation.CLI == nil && !composite {
 			issues = append(issues, prefix+"/"+operation.Name+": CLI mode needs a CLI operation")
 		}
-		if mode.Executor.Kind == "mcp" && operation.MCPTool == "" {
+		if mode.Executor.Kind == "mcp" && operation.MCPTool == "" && !composite {
 			issues = append(issues, prefix+"/"+operation.Name+": MCP mode needs mcpTool")
+		}
+		if operation.HTTP != nil {
+			for name, value := range operation.HTTP.QueryValues {
+				if strings.TrimSpace(name) == "" || strings.Contains(value, "{{") {
+					issues = append(issues, prefix+"/"+operation.Name+": queryValues need a name and a fixed value")
+				}
+			}
+			issues = append(issues, validateHTTPArguments(prefix+"/"+operation.Name, operation)...)
 		}
 		if operation.CLI != nil {
 			optionalArguments := map[string]bool{}
@@ -293,6 +320,119 @@ func validateMode(connector string, mode Mode, methods map[string]CredentialMeth
 		operation, ok := findOperation(mode, mode.Verify)
 		if !ok || operation.Class != "read" {
 			issues = append(issues, prefix+": verify must cite a read operation")
+		}
+	}
+	return issues
+}
+
+var reservedHeaders = map[string]bool{"authorization": true, "host": true, "content-length": true, "cookie": true, "proxy-authorization": true, "content-type": true}
+
+// validateHTTPArguments keeps argument-driven request parts honest: a read
+// can never choose a mutating method, header arguments cannot replace
+// credentials, and a raw path or method is always a required argument.
+func validateHTTPArguments(prefix string, operation Operation) []string {
+	var issues []string
+	contract := operation.HTTP
+	properties, _ := EffectiveInput(operation)["properties"].(map[string]any)
+	for _, header := range contract.ArgumentHeaders {
+		if !headerNamePattern.MatchString(header.Name) || reservedHeaders[strings.ToLower(header.Name)] {
+			issues = append(issues, prefix+": argument header "+header.Name+" needs a token name that is not reserved")
+		}
+		if !namePattern.MatchString(header.Argument) || (header.Encoding != "" && header.Encoding != "url") {
+			issues = append(issues, prefix+": argument header "+header.Name+" needs a lowercase argument and encoding url or none")
+		}
+	}
+	for name := range contract.ItemTemplates {
+		if _, ok := properties[name]; !ok {
+			issues = append(issues, prefix+": itemTemplates cite undeclared argument "+name)
+		}
+	}
+	for _, name := range contract.RelativeTimeArguments {
+		if _, ok := properties[name]; !ok {
+			issues = append(issues, prefix+": relativeTimeArguments cite undeclared argument "+name)
+		}
+	}
+	if contract.BodyArgument != "" && (len(contract.Body) > 0 || len(contract.BodyValues) > 0) {
+		issues = append(issues, prefix+": bodyArgument cannot be combined with body or bodyValues")
+	}
+	if contract.PathArgument != "" && strings.ContainsAny(contract.Path, "?#") {
+		issues = append(issues, prefix+": a raw-path operation needs a plain path prefix")
+	}
+	methods := []string{strings.ToUpper(contract.Method)}
+	if contract.MethodArgument != "" {
+		methods = nil
+		for _, method := range contract.Methods {
+			methods = append(methods, strings.ToUpper(method))
+		}
+		if len(methods) == 0 {
+			issues = append(issues, prefix+": methodArgument needs a non-empty methods list")
+		}
+	} else if len(contract.Methods) > 0 {
+		issues = append(issues, prefix+": methods need a methodArgument")
+	}
+	for _, method := range methods {
+		if !contains([]string{"GET", "POST", "PUT", "PATCH", "DELETE"}, method) {
+			issues = append(issues, prefix+": unsupported HTTP method "+method)
+		}
+		if operation.Class == "read" && method != "GET" && (contract.PathArgument != "" || contract.MethodArgument != "") {
+			issues = append(issues, prefix+": a read operation with an argument-chosen path or method must use GET")
+		}
+	}
+	return issues
+}
+
+// validateCompose keeps composite reads read-only, flat, bounded, and fully
+// satisfiable from the composite's own declared arguments.
+func validateCompose(prefix string, mode Mode, operation Operation) []string {
+	var issues []string
+	if operation.Class != "read" {
+		issues = append(issues, prefix+": composite operations must be read class")
+	}
+	if len(operation.Compose) > 8 {
+		issues = append(issues, prefix+": composite operations support at most 8 steps")
+	}
+	if operation.Pagination != nil {
+		issues = append(issues, prefix+": composite operations cannot paginate")
+	}
+	properties, _ := EffectiveInput(operation)["properties"].(map[string]any)
+	seen := map[string]bool{}
+	for _, step := range operation.Compose {
+		if !namePattern.MatchString(step.As) || seen[step.As] {
+			issues = append(issues, prefix+": compose step needs a unique lowercase as name")
+		}
+		seen[step.As] = true
+		target, ok := findOperation(mode, step.Operation)
+		if !ok {
+			issues = append(issues, prefix+": compose step cites unknown operation "+step.Operation)
+			continue
+		}
+		if target.Class != "read" || len(target.Compose) > 0 {
+			issues = append(issues, prefix+": compose step "+step.Operation+" must be a non-composite read")
+		}
+		targetSchema := EffectiveInput(target)
+		targetProperties, _ := targetSchema["properties"].(map[string]any)
+		for argument := range step.Arguments {
+			if _, ok := targetProperties[argument]; !ok {
+				issues = append(issues, prefix+": compose step "+step.Operation+" maps undeclared argument "+argument)
+			}
+		}
+		for argument := range requiredSet(targetSchema["required"]) {
+			if source, mapped := step.Arguments[argument]; mapped {
+				if !strings.HasPrefix(source, "=") {
+					if _, ok := properties[source]; !ok {
+						issues = append(issues, prefix+": compose step "+step.Operation+" maps "+argument+" from undeclared "+source)
+					}
+				}
+				continue
+			}
+			if _, ok := properties[argument]; !ok {
+				issues = append(issues, prefix+": compose step "+step.Operation+" requires "+argument+", which the composite does not declare")
+			}
+		}
+		for _, field := range step.Fields {
+			if strings.TrimSpace(field) == "" || strings.Contains(field, ".") {
+				issues = append(issues, prefix+": compose step fields must be top-level item keys")
+			}
 		}
 	}
 	return issues

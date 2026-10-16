@@ -16,17 +16,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/header"
+	"github.com/jhh3/pyre/internal/osutil"
+	"github.com/jhh3/pyre/internal/runtime/hostsel"
+	"github.com/jhh3/pyre/internal/runtime/sessionhost"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // AdapterName is the RunHandle.Adapter value.
@@ -85,11 +90,13 @@ type Options struct {
 // Adapter implements contracts.RuntimeAdapter for Codex.
 type Adapter struct {
 	o   Options
-	srv *tmux.Server
+	srv sessionhost.Host
 
 	mu    sync.Mutex
 	homes map[string]*homeServer
 	runs  map[string]*runRef
+
+	turnsPage int // thread/turns/list page size for sessions.read (0: 50; tests)
 }
 
 var _ contracts.RuntimeAdapter = (*Adapter)(nil)
@@ -107,6 +114,13 @@ type runRef struct {
 	tuiEnv map[string]string
 	// trustWatch is set while a watchTrust goroutine runs for this run.
 	trustWatch atomic.Bool
+	// trustChecked is the last recheckTrust time (unix nanos).
+	trustChecked atomic.Int64
+	// retrying is set while a capacity retry turn is being started.
+	retrying atomic.Bool
+	// readMu serializes sessions.read; turns are its kept settled pages.
+	readMu sync.Mutex
+	turns  *turnCache
 }
 
 // runMeta is <state>/run.json.
@@ -131,11 +145,8 @@ func New(o Options) (*Adapter, error) {
 	if o.TmuxSocket == "" || o.StateRoot == "" {
 		return nil, errors.New("codex: TmuxSocket and StateRoot are required")
 	}
-	srv, err := tmux.NewServer(o.TmuxBin, o.TmuxSocket)
+	srv, err := hostsel.New(o.TmuxBin, o.TmuxSocket)
 	if err != nil {
-		return nil, err
-	}
-	if err := srv.WriteConfig(); err != nil {
 		return nil, err
 	}
 	if err := tmux.PrepareDir(o.StateRoot); err != nil {
@@ -159,11 +170,13 @@ func New(o Options) (*Adapter, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Adapter{o: o, srv: srv, homes: map[string]*homeServer{}, runs: map[string]*runRef{}}, nil
+	a := &Adapter{o: o, srv: srv, homes: map[string]*homeServer{}, runs: map[string]*runRef{}}
+	go a.sweepLoop(context.Background()) // unload threads no live run owns (unload.go)
+	return a, nil
 }
 
-// Server exposes the tmux server (for daemon housekeeping).
-func (a *Adapter) Server() *tmux.Server { return a.srv }
+// Server exposes the session host (for daemon housekeeping).
+func (a *Adapter) Server() sessionhost.Host { return a.srv }
 
 func (a *Adapter) Name() string               { return AdapterName }
 func (a *Adapter) Harness() contracts.Harness { return contracts.HarnessCodex }
@@ -187,6 +200,13 @@ func (a *Adapter) codexBin() string {
 		return a.o.CodexBin
 	}
 	if p, err := exec.LookPath("codex"); err == nil {
+		if runtime.GOOS == "windows" {
+			// npm installs codex.cmd (cmd.exe + node wrapper); run the
+			// native codex.exe it wraps when present.
+			if n := winenv.Default().NativeCodex(p); n != "" {
+				return n
+			}
+		}
 		return p
 	}
 	return "codex"
@@ -196,8 +216,8 @@ var versionRe = regexp.MustCompile(`(\d+\.\d+\.\d+)`)
 
 func (a *Adapter) Probe(ctx context.Context) (contracts.ProbeResult, error) {
 	pr := contracts.ProbeResult{Harness: contracts.HarnessCodex, Adapter: AdapterName, Executable: a.codexBin(), Capabilities: a.Capabilities()}
-	if v, err := a.srv.Version(ctx); err != nil || !v.AtLeast(3, 2) {
-		pr.Reason = fmt.Sprintf("tmux >= 3.2 required (%v %v)", v.Raw, err)
+	if _, err := a.srv.Check(ctx); err != nil {
+		pr.Reason = err.Error()
 		return pr, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -344,7 +364,7 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 
 	h := contracts.RunHandle{
 		RunID: l.RunID, SessionID: l.SessionID, Adapter: AdapterName, Harness: contracts.HarnessCodex,
-		TmuxSocket: a.o.TmuxSocket, TmuxTarget: l.RunID, StateDir: l.StateDir,
+		TmuxSocket: a.srv.SocketPath(), TmuxTarget: l.RunID, StateDir: l.StateDir,
 		NativeRef: &contracts.NativeRef{Kind: "codex_thread", ID: r.Thread.ID},
 		Data:      map[string]string{"codex_thread_id": r.Thread.ID, "home_key": hs.key, "app_server_socket": hs.sock},
 	}
@@ -542,6 +562,7 @@ func (a *Adapter) tuiArgv(rr *runRef) []string {
 // ~/.codex/config.toml is never written by Pyre (I22); an ambient run's TUI
 // gets the prompt answered instead (watchTrust).
 func (a *Adapter) ensureTrust(ctx context.Context, c *rpcClient, rr *runRef) {
+	a.ensureTUIPermissions(ctx, c, rr)
 	if skipProfileTrust || a.o.TrustWorkspace == nil || rr.meta.Home == "" || !a.o.TrustWorkspace(rr.meta.Cwd) {
 		return
 	}
@@ -549,6 +570,25 @@ func (a *Adapter) ensureTrust(ctx context.Context, c *rpcClient, rr *runRef) {
 	defer cancel()
 	_ = c.call(cctx, "config/value/write", configValueWriteParams{KeyPath: "projects", MergeStrategy: "upsert",
 		Value: map[string]any{rr.meta.Cwd: map[string]string{"trust_level": "trusted"}}}, nil)
+}
+
+// ensureTUIPermissions makes the native TUI's own turns use the run's
+// permissions. The remote TUI sends each turn with the sandbox and approval
+// policy from its home's config.toml (it does not inherit the thread's), and
+// `resume --remote` refuses permission flags, so a bypass run's turns typed
+// in the TUI ran in Codex's default workspace-write sandbox (Doppler could
+// not reach the keyring, server 2026-10-09). For a Pyre account profile home
+// (never the owner's own ~/.codex, I22) write the run's values.
+func (a *Adapter) ensureTUIPermissions(ctx context.Context, c *rpcClient, rr *runRef) {
+	if skipProfileTrust || rr.meta.Home == "" || rr.meta.Sandbox == "" {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_ = c.call(cctx, "config/value/write", configValueWriteParams{KeyPath: "sandbox_mode", MergeStrategy: "replace", Value: rr.meta.Sandbox}, nil)
+	if rr.meta.ApprovalPolicy != "" {
+		_ = c.call(cctx, "config/value/write", configValueWriteParams{KeyPath: "approval_policy", MergeStrategy: "replace", Value: rr.meta.ApprovalPolicy}, nil)
+	}
 }
 
 // skipProfileTrust (tests) leaves the profile config alone so the watcher
@@ -766,9 +806,11 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 		obs.State, obs.StateReason = contracts.RunUnknown, "codex app-server unreachable: "+err.Error()
 		return obs, nil
 	}
+	a.recheckTrust(rr, now)
 	ts := rr.ts
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	a.maybeRetry(h, rr, now)
 	obs.NativeRef = &contracts.NativeRef{Kind: "codex_thread", ID: ts.threadID}
 	obs.Activity = ts.activity
 	obs.Doing = ts.doingNow() // the daemon keeps it only while the run is running
@@ -801,7 +843,14 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 			}
 		}
 	case "systemError":
-		obs.State, obs.StateReason = contracts.RunUnknown, "thread systemError"
+		// The last turn failed; the thread is idle and takes input.
+		obs.State, obs.StateReason = contracts.RunWaitingInput, "last turn failed"
+		if e := ts.lastErr; e != nil {
+			obs.StateReason = "last turn failed: " + oneLine(e.Message, 160)
+		}
+		if !ts.retryAt.IsZero() {
+			obs.StateReason += fmt.Sprintf(" · retry %d/%d at %s", ts.capRetries+1, len(capBackoff), ts.retryAt.Local().Format("15:04"))
+		}
 	default:
 		obs.State, obs.StateReason = contracts.RunUnknown, "thread status not yet known"
 	}
@@ -846,11 +895,10 @@ func (a *Adapter) evidenceOf(rr *runRef, msgID string) (evidence, bool) {
 }
 
 func renderInput(in contracts.DeliveryInput) string {
-	marker := contracts.MessageMarker(in.MessageID)
-	if strings.Contains(in.Text, marker) {
+	if header.HasMarker(in.Text, in.MessageID) {
 		return in.Text
 	}
-	return marker + " " + in.Text
+	return contracts.MessageMarker(in.MessageID) + " " + in.Text
 }
 
 var safeIDRe = regexp.MustCompile(`^[A-Za-z0-9_.:\-]{1,200}$`)
@@ -1022,7 +1070,7 @@ func (a *Adapter) Attach(ctx context.Context, h contracts.RunHandle, req contrac
 			return contracts.AttachDescriptor{}, contracts.Errorf(contracts.ErrUnavailable, "respawn TUI: %v", err)
 		}
 	}
-	d, err := tmux.BuildAttach(tmux.AttachConfig{NodeID: a.o.NodeID, SSHAlias: a.o.SSHAlias, TmuxBin: a.srv.Bin, Socket: a.o.TmuxSocket},
+	d, err := a.srv.AttachDescriptor(sessionhost.AttachConfig{NodeID: a.o.NodeID, SSHAlias: a.o.SSHAlias},
 		h.RunID, h.RunID, req, a.o.Now())
 	if err == nil {
 		d.Notes = "Codex TUI on the Pyre app-server (codex resume --remote); quitting it or detaching (Ctrl-b d) leaves the thread running"
@@ -1078,7 +1126,8 @@ func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.Co
 	if err != nil {
 		return a.receipt(contracts.OutcomeFailed, false, err.Error()), nil
 	}
-	if c, err := a.client(ctx, rr, false); err == nil {
+	c, cerr := a.client(ctx, rr, false)
+	if cerr == nil {
 		rr.ts.mu.Lock()
 		active := rr.ts.activeTurn
 		rr.ts.mu.Unlock()
@@ -1090,6 +1139,11 @@ func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.Co
 		cancel()
 	}
 	_ = a.srv.TerminateSession(ctx, h.RunID, 3*time.Second)
+	if cerr == nil {
+		// Unsubscribing leaves the thread loaded with its MCP servers and
+		// background terminals; with the TUI gone, unload it (unload.go).
+		_ = unloadThread(ctx, c, rr.meta.ThreadID)
+	}
 	b, _ := json.Marshal(map[string]any{"at": a.o.Now().UTC(), "thread_id": rr.meta.ThreadID})
 	_ = writeFileAtomic(filepath.Join(h.StateDir, "stopped.json"), b)
 	_ = os.Remove(filepath.Join(h.StateDir, threadConfigFile)) // the run's session token is no longer needed
@@ -1186,28 +1240,147 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 		resp.Freshness.Stale, resp.Freshness.Reason = true, err.Error()
 		return resp, nil
 	}
-	var turns []turn
-	cursor := ""
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	var start int64
+	fmt.Sscanf(req.Cursor, "%d", &start)
+	rr.readMu.Lock()
+	sel, gap, stale := a.readTurns(ctx, c, rr, h.RunID, start, limit, req.Tail)
+	rr.readMu.Unlock()
+	resp.Entries, resp.Gap = sel, gap
+	if stale != nil {
+		resp.Freshness.Stale, resp.Freshness.Reason = true, stale.Error()
+	}
+	resp.NextCursor = req.Cursor
+	if len(sel) > 0 {
+		resp.NextCursor = fmt.Sprintf("%d", sel[len(sel)-1].Seq)
+	}
+	if !a.o.DisableTUI {
+		if s, err := a.srv.CapturePane(ctx, h.RunID, tmux.CaptureOptions{Join: true}); err == nil {
+			resp.Screen = strings.TrimRight(s, "\n")
+		}
+	}
+	return resp, nil
+}
+
+// Settled turn pages for sessions.read. The thread's turns are listed
+// oldest first in pages of turnsPage; entries are numbered from the first
+// turn (Seq counts items), so a read used to fetch every page (up to 20,
+// full items) each time. A page whose turns have all finished does not
+// change, and the app-server's cursor is anchored to a turn, so the read
+// keeps the cursor after the last such page, the item count before it and
+// the newest tailWindow entries before it, and fetches only the pages
+// after. The kept state belongs to one app-server connection and is
+// dropped when a fetch from its cursor fails.
+const tailWindow = 500 // newest settled entries kept per run: the largest page sessions.read serves
+
+type turnCache struct {
+	client *rpcClient
+	thread string
+	cursor string                      // after the last settled page
+	seq    int64                       // items before cursor
+	win    []contracts.TranscriptEntry // newest entries before cursor, ascending Seq
+	floor  int64                       // every entry with Seq <= seq and > floor is in win
+}
+
+func (a *Adapter) pageSize() int {
+	if a.turnsPage > 0 {
+		return a.turnsPage
+	}
+	return 50
+}
+
+// readTurns returns the entries with Seq > start (the newest limit when
+// tail, else the oldest limit), whether pages were left unread, and the
+// error that cut the listing short. Callers hold rr.readMu.
+func (a *Adapter) readTurns(ctx context.Context, c *rpcClient, rr *runRef, runID string, start int64, limit int, tail bool) ([]contracts.TranscriptEntry, bool, error) {
+	tc := rr.turns
+	if tc != nil && (tc.client != c || tc.thread != rr.meta.ThreadID) {
+		tc, rr.turns = nil, nil
+	}
+	// The kept entries answer when they hold everything after start, or
+	// (tail) at least limit entries newer than start.
+	if tc != nil && start < tc.floor && (!tail || len(tc.win) < limit) {
+		tc = nil
+	}
+	next := &turnCache{client: c, thread: rr.meta.ThreadID}
+	var all []contracts.TranscriptEntry
+	if tc != nil {
+		*next = *tc
+		all = append(all, tc.win...)
+	}
+	cursor, seq := next.cursor, next.seq
+	settled := true // every page so far was full and finished
+	var stale error
+	gap := false
 	for i := 0; i < 20; i++ {
 		var r turnsListResponse
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := c.call(cctx, "thread/turns/list", turnsListParams{ThreadID: rr.meta.ThreadID, Cursor: cursor, Limit: 50, ItemsView: "full", SortDirection: "asc"}, &r)
+		err := c.call(cctx, "thread/turns/list", turnsListParams{ThreadID: rr.meta.ThreadID, Cursor: cursor, Limit: a.pageSize(), ItemsView: "full", SortDirection: "asc"}, &r)
 		cancel()
 		if err != nil {
-			resp.Freshness.Stale, resp.Freshness.Reason = true, err.Error()
+			if tc != nil && i == 0 {
+				// The kept cursor may no longer exist: list from the start.
+				rr.turns = nil
+				return a.readTurns(ctx, c, rr, runID, start, limit, tail)
+			}
+			stale = err
 			break
 		}
-		turns = append(turns, r.Data...)
+		page := a.turnEntries(runID, r.Data, &seq)
+		all = append(all, page...)
+		if settled && r.NextCursor != "" && len(r.Data) > 0 && allSettled(r.Data) {
+			next.cursor, next.seq = r.NextCursor, seq
+			next.win = append(next.win, page...)
+			if n := len(next.win); n > tailWindow {
+				next.floor = next.win[n-tailWindow-1].Seq
+				next.win = append([]contracts.TranscriptEntry(nil), next.win[n-tailWindow:]...)
+			}
+		} else {
+			settled = false
+		}
 		if r.NextCursor == "" || len(r.Data) == 0 {
 			break
 		}
 		if i == 19 {
-			resp.Gap = true
+			gap = true
 		}
 		cursor = r.NextCursor
 	}
-	var all []contracts.TranscriptEntry
-	var seq int64
+	if next.cursor != "" {
+		rr.turns = next
+	}
+	var sel []contracts.TranscriptEntry
+	for _, e := range all {
+		if e.Seq > start {
+			sel = append(sel, e)
+		}
+	}
+	if tail && len(sel) > limit {
+		sel = sel[len(sel)-limit:]
+	} else if len(sel) > limit {
+		sel = sel[:limit]
+	}
+	return sel, gap, stale
+}
+
+func allSettled(ts []turn) bool {
+	for _, t := range ts {
+		if t.Status == "" || t.Status == "inProgress" {
+			return false
+		}
+	}
+	return true
+}
+
+// turnEntries converts a page of turns; seq counts every decodable item.
+func (a *Adapter) turnEntries(runID string, turns []turn, seq *int64) []contracts.TranscriptEntry {
+	var out []contracts.TranscriptEntry
 	for _, t := range turns {
 		// Entries are stamped with their turn's start (items have no time
 		// of their own), not with the read time.
@@ -1220,12 +1393,12 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 			if json.Unmarshal(raw, &it) != nil {
 				continue
 			}
-			seq++
-			e := contracts.TranscriptEntry{Seq: seq, RunID: h.RunID, At: at}
+			*seq++
+			e := contracts.TranscriptEntry{Seq: *seq, RunID: runID, At: at}
 			switch it.Type {
 			case "userMessage":
 				e.Kind, e.Text = "user", it.userText()
-				if strings.HasPrefix(e.Text, "[pyre-msg:") || it.ClientID != "" && safeIDRe.MatchString(it.ClientID) && strings.Contains(e.Text, contracts.MessageMarker(it.ClientID)) {
+				if strings.HasPrefix(e.Text, "[pyre-msg:") || it.ClientID != "" && safeIDRe.MatchString(it.ClientID) && header.HasMarker(e.Text, it.ClientID) {
 					e.Kind, e.MessageID = "pyre_message", it.ClientID
 				}
 			case "agentMessage":
@@ -1254,40 +1427,10 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 			if len(e.Text) > 2000 {
 				e.Text, e.Truncated = oneLine(e.Text, 2000), true
 			}
-			all = append(all, e)
+			out = append(out, e)
 		}
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 500 {
-		limit = 500
-	}
-	var start int64
-	fmt.Sscanf(req.Cursor, "%d", &start)
-	var sel []contracts.TranscriptEntry
-	for _, e := range all {
-		if e.Seq > start {
-			sel = append(sel, e)
-		}
-	}
-	if req.Tail && len(sel) > limit {
-		sel = sel[len(sel)-limit:]
-	} else if len(sel) > limit {
-		sel = sel[:limit]
-	}
-	resp.Entries = sel
-	resp.NextCursor = req.Cursor
-	if len(sel) > 0 {
-		resp.NextCursor = fmt.Sprintf("%d", sel[len(sel)-1].Seq)
-	}
-	if !a.o.DisableTUI {
-		if s, err := a.srv.CapturePane(ctx, h.RunID, tmux.CaptureOptions{Join: true}); err == nil {
-			resp.Screen = strings.TrimRight(s, "\n")
-		}
-	}
-	return resp, nil
+	return out
 }
 
 // ResumeSpec: thread ids are stable across app-server restarts, so the same
@@ -1427,15 +1570,18 @@ type journalRec struct {
 func (a *Adapter) journal(h contracts.RunHandle, r journalRec) error {
 	r.At, r.RunID = a.o.Now().UTC(), h.RunID
 	b, _ := json.Marshal(r)
-	f, err := os.OpenFile(filepath.Join(h.StateDir, "deliveries.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// O_RDWR, not O_WRONLY: Go opens an O_APPEND file on Windows with
+	// append-only access, and LockFileEx then fails (access denied), so the
+	// lock below never succeeded and nothing was written (GCP Windows node).
+	f, err := os.OpenFile(filepath.Join(h.StateDir, "deliveries.jsonl"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := osutil.Lock(f); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer osutil.Unlock(f)
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return err
 	}

@@ -325,6 +325,26 @@ func TestHelpIsSearchable(t *testing.T) {
 	}
 }
 
+// TestHelpListsAgentCommands: the help overlay has an "Agent commands"
+// section with the slash commands every Pyre Claude session has.
+func TestHelpListsAgentCommands(t *testing.T) {
+	h, _ := start(t, 160, 40, nil, nil)
+	h.Key("?")
+	h.Type("agent commands")
+	v := h.View()
+	for _, want := range []string{"Agent commands", "/kickoff", "/open-items", "/ship", "/brief", "/deliver", "/cleanup", "/pair", "pyre commands"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("help lacks %q:\n%s", want, v)
+		}
+	}
+	h.Key("esc")
+	h.Key("?")
+	h.Type("merged and deployed")
+	if v := h.View(); !strings.Contains(v, "/ship") || strings.Contains(v, "/pair") {
+		t.Fatalf("help search should find /ship by its description:\n%s", v)
+	}
+}
+
 func TestKeysFileOverridesInTheUI(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "keys.toml")

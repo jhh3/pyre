@@ -58,10 +58,14 @@ const (
 	AuditSessionResumed          = "session.resumed" // To: "native resume" | "handoff"
 	AuditSessionArchived         = "session.archived"
 	AuditSessionUnarchived       = "session.unarchived"
-	AuditSessionRenamed          = "session.renamed"     // From -> To
-	AuditSessionAutoTitled       = "session.auto_titled" // From -> To
+	AuditSessionArchiveScheduled = "session.archive_scheduled" // archive when the current turn ends (W-archive2)
+	AuditSessionArchiveCanceled  = "session.archive_canceled"  // a scheduled archive was withdrawn (W-archive2)
+	AuditSessionRenamed          = "session.renamed"           // From -> To
+	AuditSessionIconSet          = "session.icon_set"          // From -> To (emoji; "" cleared) (W-archive2)
+	AuditSessionAutoTitled       = "session.auto_titled"       // From -> To
 	AuditSessionLeaseTakenOver   = "session.lease_taken_over"
 	AuditSessionReportedToParent = "session.reported_to_parent"
+	AuditSessionReparented       = "session.reparented" // From -> To parent session ("" = top level) (W-reparent)
 )
 
 // Audit actions. Fleet:
@@ -74,6 +78,7 @@ const (
 	AuditNodeUpdateFailed  = "node.update_failed"  // an update failed, was refused or rolled back
 	AuditHubUpgraded       = "hub.upgraded"        // pyre-hub version changed (From -> To)
 	AuditNodeTrustAccepted = "node.trust_accepted" // a harness's folder-trust prompt answered for an owner-trusted dir
+	AuditNodeCapacityRetry = "node.capacity_retry" // a Codex turn that failed at model capacity was continued after backoff
 	AuditNodeExitConfirmed = "node.exit_confirmed" // Claude's "background work is running" exit dialog confirmed on stop
 )
 
@@ -151,6 +156,7 @@ const EvNodeAutomation EventKind = "node.automation"
 const (
 	AutomationTrustAccepted = "trust_accepted" // folder-trust prompt answered for an owner-trusted directory
 	AutomationExitConfirmed = "exit_confirmed" // Claude's exit dialog confirmed ("Exit and stop tasks") on stop
+	AutomationCapacityRetry = "capacity_retry" // a turn that failed at provider capacity was continued after backoff
 )
 
 // NodeAutomation is the payload of node.automation. Detail is a short

@@ -73,6 +73,9 @@ func wireIntegrations(ctx context.Context, cfg *daemon.Config, o runOpts, built 
 		log.Warn("accounts integration unavailable; runs use the ambient login", "err", err)
 	} else {
 		in.acct = svc
+		// Every Claude profile shares one conversation store, so a session
+		// resumes natively under another account (W-xacct; idempotent).
+		svc.MigrateSharedStores(ctx)
 		cfg.Accounts = accountsResolver{svc}
 		// The machine's own login: identity in the harness inventory, usage
 		// from the rate limits Pyre's own runs on it receive (no probes).
@@ -380,9 +383,9 @@ func (c *runController) StartContinuation(ctx context.Context, k accounts.Contin
 	if err != nil {
 		return accounts.ContinuationResult{}, err
 	}
-	id, err := d.StartContinuation(ctx, daemon.ContinuationRequest{SessionID: k.SessionID, PreviousRunID: k.PreviousRunID,
-		AccountID: k.AccountID, Kind: k.Kind, Reason: k.Reason})
-	return accounts.ContinuationResult{NewRunID: id}, err
+	id, kind, err := d.StartContinuation(ctx, daemon.ContinuationRequest{SessionID: k.SessionID, PreviousRunID: k.PreviousRunID,
+		AccountID: k.AccountID, Kind: k.Kind, Reason: k.Reason, Prompt: k.Prompt})
+	return accounts.ContinuationResult{NewRunID: id, Kind: kind}, err
 }
 
 // ---- WP12 grant checker ----

@@ -1,4 +1,4 @@
- Pyre  S Sessions · P Projects · M Machines · A Accounts › While you were away                                                                            anthropic 0 ready   openai 0 ready   ○ synced
+ Pyre  S Sessions 1 · P Projects · M Machines · A Accounts › While you were away                                                                          anthropic 0 ready   openai 0 ready   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  While you were away · since 02:00 (3h ago) · 5 agents, 2 need you                                                                                                                        esc mark seen
 › ! synth-api-refactor  Approve: go test -bench ./...                                                                                                  Claude on synth-mac                           5m

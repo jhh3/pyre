@@ -4,7 +4,7 @@
 // reviewed and screenshotted:
 //
 //	go build -o /tmp/pyre-digest-demo ./internal/tui/digestdemo
-//	python tests/tui/screenshot.py --cmd /tmp/pyre-digest-demo --out /tmp/shots "inbox@2=I"
+//	python tests/tui/screenshot.py --cmd /tmp/pyre-digest-demo --out /tmp/shots "digest@2="
 //
 // Nothing outside a temporary directory is read or written.
 package main

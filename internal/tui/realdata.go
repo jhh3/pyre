@@ -169,7 +169,9 @@ func (m *Model) whoFull(p contracts.Principal) string {
 	return s
 }
 
-var pyreMsgRe = regexp.MustCompile(`^\[pyre-msg:([^\]]+)\] from (\w+):(\S+)`)
+// The marker may carry the send time ("[pyre-msg:<id> · sent …]") and the
+// sender its title instead of its id ("from session:<title>").
+var pyreMsgRe = regexp.MustCompile(`^\[pyre-msg:([^\]\s]+)[^\]]*\] from (\w+):(.+?)(?: \(|:\n|:$|$)`)
 
 // pyreMessage is a delivered message as it appears in a harness transcript
 // ("[pyre-msg:<id>] from <kind>:<id> (<name>) (reply to …):\n<body>").

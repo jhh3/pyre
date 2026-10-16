@@ -38,6 +38,8 @@ type gridState struct {
 	settling bool // a settle tick is pending (activity indicators stop)
 	probing  bool // a window-size re-read tick is pending
 
+	relayWaiting bool // a relay retry tick is pending (relay.go)
+
 	zoomed string // session zoomed into the Sessions view ("" when none)
 
 	seen   map[string]string    // last observed state per session (recency)
@@ -159,12 +161,11 @@ func (m *Model) gridBody() (w, h int) {
 
 // ---- membership ----
 
-// gridNeedsYou: waiting on approval or a question, a blocking attention
-// flag, or failed (offline and stale do not count: nothing to answer there;
-// a message for you is informational and does not count either).
+// gridNeedsYou: waiting on approval, or an actionable blocking flag
+// (needsYou: a failed run or an ended session's failure shows red in its
+// tile but needs nothing; a message for you is informational).
 func gridNeedsYou(s contracts.SessionView, node *contracts.Node) bool {
-	st := listStatus(s, node)
-	return st.tone == toneWarn || st.tone == toneBad
+	return needsYou(s, node)
 }
 
 // gridSessions are the sessions the Grid shows: not archived, live unless
@@ -360,6 +361,8 @@ func (m *Model) onGridMsg(msg tea.Msg) tea.Cmd {
 		g.pulseOn = !g.pulseOn
 	case gridAttachMsg:
 		return m.onGridAttach(msg)
+	case gridRelayRetryMsg:
+		g.relayWaiting = false // gridAfter re-requests the waiting tiles
 	case gridProbeTickMsg:
 		g.probing = false
 		if m.view == viewGrid {
@@ -656,7 +659,7 @@ func (m *Model) gridCaption(s contracts.SessionView, sel bool, w int) string {
 		where += "@" + s.NodeName
 	}
 	sep := m.th.faint.Render(" · ")
-	title := s.Session.Title
+	title := iconTitle(s)
 	mark := ""
 	if sel && m.th.plain {
 		mark = "› "
@@ -667,11 +670,15 @@ func (m *Model) gridCaption(s contracts.SessionView, sel bool, w int) string {
 		}
 		return t
 	}
-	for _, segs := range [][]string{
+	forms := [][]string{
 		{style(title), state + " " + word, m.th.dim.Render(where)},
 		{style(title), state + " " + word},
 		{style(title), state},
-	} {
+	}
+	if you := m.yoursCaption(s); you != "" { // "you 5m" goes before the machine
+		forms = append([][]string{{style(title), state + " " + word, you, m.th.dim.Render(where)}, {style(title), state + " " + word, you}}, forms[1:]...)
+	}
+	for _, segs := range forms {
 		c := " " + mark + strings.Join(segs, sep) + " "
 		if width(c) <= w {
 			return c

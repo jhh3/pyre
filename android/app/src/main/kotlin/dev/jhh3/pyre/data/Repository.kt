@@ -186,6 +186,36 @@ class Repository(
     suspend fun accounts(): Load<List<AccountView>> =
         cachedFetch("accounts", ListSerializer(AccountView.serializer())) { allPages { listAccounts(ListAccountsRequest(cursor = it, limit = 200)) } }
 
+    @Volatile private var features: Set<String>? = null
+
+    /**
+     * The hub's Hello features, fetched once per pairing (null when the hub
+     * could not be reached; asked again next time).
+     */
+    suspend fun hubFeatures(): Set<String>? {
+        features?.let { return it }
+        return try {
+            call { hello() }.features.toSet().also { features = it }
+        } catch (e: PyreApiException) {
+            null
+        }
+    }
+
+    /** Whether the hub offers asks (Hello feature "asks"); false when unknown. */
+    suspend fun asksSupported(): Boolean = hubFeatures()?.contains(AsksOps.FEATURE) == true
+
+    /** Owner inbox items in [states] (attention.list), all kinds. */
+    suspend fun inboxItems(key: String, states: List<String>, maxPages: Int = 5): Load<List<AttentionItem>> =
+        cachedFetch("inbox_$key", ListSerializer(AttentionItem.serializer())) {
+            allPages(maxPages) { listAttention(ListAttentionRequest(cursor = it, limit = 200, states = states)) }
+        }
+
+    /** Asks in [states] (asks.list); [since] limits decided ones (RFC 3339). */
+    suspend fun asks(key: String, states: List<String>, since: String? = null): Load<List<Ask>> =
+        cachedFetch("asks_$key", ListSerializer(Ask.serializer())) {
+            allPages(2) { listAsks(ListAsksRequest(cursor = it, limit = 200, states = states, since = since)) }
+        }
+
     fun clearLocal() {
         cache.clear()
         outbox.clear()

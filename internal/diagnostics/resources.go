@@ -11,9 +11,35 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/jhh3/pyre/internal/sysstats"
 )
+
+// nativeRows is the Windows process table as ps rows (pid 0 = all). CPU is
+// cumulative kernel+user time of the process itself (Windows keeps no
+// reaped-children total).
+func nativeRows(pid int) ([]psRow, error) {
+	if pid > 0 {
+		p, err := sysstats.NativeProcess(pid)
+		if err != nil {
+			return nil, fmt.Errorf("diagnostics: %w", err)
+		}
+		return []psRow{{pid: pid, rss: p.RSSBytes, cpu: p.CPU}}, nil
+	}
+	t, err := sysstats.NativeProcTable()
+	if err != nil {
+		return nil, fmt.Errorf("diagnostics: %w", err)
+	}
+	rows := make([]psRow, 0, len(t))
+	for _, p := range t {
+		if parent, ok := t[p.PPID]; ok && !sysstats.ParentLink(parent, p) {
+			p.PPID = -1 // stale parent PID now used by a newer process
+		}
+		rows = append(rows, psRow{pid: p.PID, ppid: p.PPID, rss: p.RSSBytes, cpu: p.CPU})
+	}
+	return rows, nil
+}
 
 // ProcSample is one resource observation of a process (or the sum over a
 // process tree). CPU is cumulative user+system time; compare two samples
@@ -40,14 +66,21 @@ func CPUPercent(a, b ProcSample) float64 {
 }
 
 // SampleSelf samples the current process: CPU from getrusage (exact), RSS
-// from /proc on Linux or ps elsewhere.
+// from /proc on Linux or ps elsewhere; on Windows both from
+// GetProcessTimes/GetProcessMemoryInfo.
 func SampleSelf() (ProcSample, error) {
 	now := time.Now()
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+	if runtime.GOOS == "windows" {
+		cpu, rss, err := sysstats.NativeSelf()
+		if err != nil {
+			return ProcSample{}, err
+		}
+		return ProcSample{PID: os.Getpid(), Procs: 1, CPU: cpu, RSSBytes: rss, At: now}, nil
+	}
+	cpu, err := selfCPU()
+	if err != nil {
 		return ProcSample{}, err
 	}
-	cpu := time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
 	s := ProcSample{PID: os.Getpid(), Procs: 1, CPU: cpu, At: now}
 	if rss, err := linuxRSS(os.Getpid()); err == nil {
 		s.RSSBytes = rss
@@ -124,7 +157,11 @@ type psRow struct {
 }
 
 // psTable runs ps (portable across macOS and Linux procps). pid 0 = all.
+// Windows has no ps: the Win32 process table (sysstats) is used instead.
 func psTable(ctx context.Context, pid int) ([]psRow, error) {
+	if runtime.GOOS == "windows" {
+		return nativeRows(pid)
+	}
 	args := []string{"-o", "pid=,ppid=,rss=,time="}
 	if pid > 0 {
 		args = append(args, "-p", strconv.Itoa(pid))
@@ -268,6 +305,10 @@ func SampleHost() HostResources {
 					h.MemAvailMB = kb / 1024
 				}
 			}
+		}
+	case "windows": // no load average on Windows
+		if total, avail, err := sysstats.NativeMemory(); err == nil {
+			h.MemTotalMB, h.MemAvailMB = int64(total>>20), int64(avail>>20)
 		}
 	case "darwin":
 		if out, err := run("sysctl", "-n", "vm.loadavg"); err == nil {

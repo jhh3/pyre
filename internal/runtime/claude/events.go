@@ -9,8 +9,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"syscall"
 	"time"
+
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // Files inside a run's private state dir (0700).
@@ -70,7 +71,8 @@ func str(m map[string]any, k string) string {
 	return s
 }
 
-var markerRe = regexp.MustCompile(`\[pyre-msg:([A-Za-z0-9_.:\-]{1,200})\]`)
+// markerRe matches "[pyre-msg:<id>]" and the dated header "[pyre-msg:<id> · sent …]".
+var markerRe = regexp.MustCompile(`\[pyre-msg:([A-Za-z0-9_.:\-]{1,200})(?:\]| · [^\]\n]{0,80}\])`)
 
 // findMarkers returns the Pyre message ids whose markers appear in s.
 func findMarkers(s string) []string {
@@ -96,15 +98,18 @@ func appendJSONL(path string, v any) error {
 		return err
 	}
 	b = append(b, '\n')
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// O_RDWR, not O_WRONLY: Go opens an O_APPEND file on Windows with
+	// append-only access, and LockFileEx then fails (access denied), so the
+	// lock below never succeeded and nothing was written (GCP Windows node).
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := osutil.Lock(f); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer osutil.Unlock(f)
 	if _, err := f.Write(b); err != nil {
 		return err
 	}

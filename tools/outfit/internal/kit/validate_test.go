@@ -31,6 +31,31 @@ func validPackage() Package {
 	}
 }
 
+func TestValidateComposeAndExecutorHeaders(t *testing.T) {
+	pkg := validPackage()
+	mode := &pkg.Modes[0]
+	mode.Operations[0].HTTP.Path = "/widgets/:id"
+	mode.Operations[0] = NormalizeOperation(mode.Operations[0])
+	mode.Operations = append(mode.Operations,
+		NormalizeOperation(Operation{Name: "delete_widget", Description: "Delete", Class: "destructive", HTTP: &HTTPOperation{Method: "DELETE", Path: "/widgets/:id"}}),
+		NormalizeOperation(Operation{Name: "snapshot", Description: "Snapshot", Class: "read", Compose: []ComposeStep{{As: "widget", Operation: "get_widget"}}}),
+	)
+	mode.Executor.Headers = map[string]string{"User-Agent": "AcmeBot (https://example.com, 1)"}
+	if issues := Validate(pkg); len(issues) == 0 || !strings.Contains(strings.Join(issues, "\n"), "requires id, which the composite does not declare") {
+		t.Fatalf("composite without its step's required argument was accepted: %#v", issues)
+	}
+	mode.Operations[2] = NormalizeOperation(Operation{Name: "snapshot", Description: "Snapshot", Class: "read", Input: map[string]any{"properties": map[string]any{"id": map[string]any{"type": "string", "description": "Widget.", "examples": []any{"1"}}}}, Compose: []ComposeStep{{As: "widget", Operation: "get_widget"}}})
+	if issues := Validate(pkg); len(issues) != 0 {
+		t.Fatalf("valid composite rejected: %#v", issues)
+	}
+	mode.Operations[2].Compose = append(mode.Operations[2].Compose, ComposeStep{As: "gone", Operation: "delete_widget"})
+	mode.Executor.Headers["Authorization"] = "Bearer static"
+	joined := strings.Join(Validate(pkg), "\n")
+	if !strings.Contains(joined, "must be a non-composite read") || !strings.Contains(joined, "is reserved") {
+		t.Fatalf("unsafe composite or header accepted: %s", joined)
+	}
+}
+
 func TestValidateRejectsSecretInProcessArgv(t *testing.T) {
 	pkg := validPackage()
 	pkg.Modes[0].Executor = Executor{Kind: "cli", Binary: "example"}
@@ -152,5 +177,25 @@ func TestValidateBrowserContinuationContract(t *testing.T) {
 		if !strings.Contains(issues, want) {
 			t.Fatalf("missing %q in validation issues: %s", want, issues)
 		}
+	}
+}
+
+func TestValidateArgumentDrivenHTTPStaysHonest(t *testing.T) {
+	pkg := validPackage()
+	mode := &pkg.Modes[0]
+	mode.Operations = append(mode.Operations,
+		NormalizeOperation(Operation{Name: "api_get", Description: "Any GET", Class: "read", HTTP: &HTTPOperation{Method: "GET", Path: "/", PathArgument: "path"}}),
+		NormalizeOperation(Operation{Name: "api_call", Description: "Any call", Class: "destructive", HTTP: &HTTPOperation{Path: "/", MethodArgument: "method", Methods: []string{"POST", "DELETE"}, PathArgument: "path", BodyArgument: "body", ArgumentHeaders: []ArgumentHeader{{Name: "X-Audit-Log-Reason", Argument: "reason", Encoding: "url"}}}}),
+	)
+	if issues := Validate(pkg); len(issues) != 0 {
+		t.Fatalf("valid raw-path operations rejected: %#v", issues)
+	}
+	mode.Operations = append(mode.Operations,
+		NormalizeOperation(Operation{Name: "sneaky_read", Description: "Read that posts", Class: "read", HTTP: &HTTPOperation{Path: "/", MethodArgument: "method", Methods: []string{"GET", "POST"}, PathArgument: "path"}}),
+		NormalizeOperation(Operation{Name: "header_swap", Description: "Credential header", Class: "write", HTTP: &HTTPOperation{Method: "POST", Path: "/x", ArgumentHeaders: []ArgumentHeader{{Name: "Authorization", Argument: "token"}}}}),
+	)
+	joined := strings.Join(Validate(pkg), "\n")
+	if !strings.Contains(joined, "must use GET") || !strings.Contains(joined, "Authorization needs a token name that is not reserved") {
+		t.Fatalf("dishonest argument-driven HTTP accepted: %s", joined)
 	}
 }

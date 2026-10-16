@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ╭─ Keys & help ──────────────────────────────────────────────────────────────────────────────────╮
+ │                                                                                                │
+ │ › agent commands▏                                                                     leader ␣ │
+ │ ────────────────────────────────────────────────────────────────────────────────────────────── │
+ │ Agent commands                                                                                 │
+ │  /brief        Executive status of this session and its child sessions against the project's   │
+ │                goals, verdict first.                                                           │
+ │  /cleanup      Remove finished worktrees, archive idle finished children, prune caches this    │
+ │                work created, and report disk, swap, memory and orphaned processes.             │
+ │  /deliver      Copy finished outputs to ~/Downloads/<project>/ (or the NAS when named), open   │
+ │                them, and say what is where in one table.                                       │
+ │  /kickoff      Start a piece of work as a Pyre project, run Claude and Codex children in       │
+ │                parallel, and finish with a merge-ready PR and an HTML summary.                 │
+ │ ↓ 6 more lines · j/k or ctrl+d scroll                                                          │
+ │ ────────────────────────────────────────────────────────────────────────────────────────────── │
+ │ ● working  ○ idle  ! approval  ◌ offline/stale  ✗ failed  ? unknown  lead ▾N/+N  ├ child       │
+ │ single (plain)  ▎ yours <1h  ▎ yours <24h                                                      │
+ │ Mouse: click a tab, row or footer key · click the selected row (or double-click) to open ·     │
+ │ wheel scrolls · drag selects and copies (OSC 52), double-click a word; shift (option in        │
+ │ iTerm2) leaves selection to the terminal. 1–4 switch tabs (Sessions, Projects, Machines,       │
+ │ Accounts); v cycles the Sessions view (sidenav, table, grid), G toggles the grid; in an answer │
+ │ box 1–9 answer.                                                                                │
+ │                                                                                                │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+ type search   ↑↓ scroll   esc close

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/buildinfo"
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/header"
 )
 
 // AdapterCaps are the capabilities the mock adapter advertises.
@@ -204,7 +205,7 @@ func (a *Adapter) Deliver(ctx context.Context, h c.RunHandle, in c.DeliveryInput
 	}
 	now := a.opts.Clock.Now()
 	text := in.Text
-	if !strings.Contains(text, c.MessageMarker(in.MessageID)) {
+	if !header.HasMarker(text, in.MessageID) {
 		text = c.MessageMarker(in.MessageID) + " " + text
 	}
 	r.submitted[in.MessageID] = true

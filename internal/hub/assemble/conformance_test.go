@@ -60,6 +60,8 @@ type simNode struct {
 	pending   []pendingDelivery
 	lastCmd   int64
 	onAction  func(c.NodeActionRequest) (any, error) // optional node action handler
+	failStart func(c.StartRunCommand) *c.Error       // optional: a non-nil error fails the launch
+	lastText  func(sessionID string) string          // optional: the run's last assistant message (transcript reads)
 	stop      bool
 	done      chan struct{}
 }
@@ -165,6 +167,17 @@ func (n *simNode) handle(cmd c.NodeCommand) {
 	case c.CmdStartRun, c.CmdResume:
 		var sr c.StartRunCommand
 		json.Unmarshal(cmd.Payload, &sr)
+		n.mu.Lock()
+		fail := n.failStart
+		n.mu.Unlock()
+		if fail != nil {
+			if e := fail(sr); e != nil {
+				if err := n.report(c.ReportCommandResult, c.CommandResult{CommandID: cmd.CommandID, Kind: cmd.Kind, Outcome: c.OutcomeFailed, Error: e, At: n.clock.Now()}); err != nil {
+					n.t.Errorf("sim result: %v", err)
+				}
+				return
+			}
+		}
 		run := c.Run{RunID: sr.RunID, SessionID: sr.Session.SessionID, NodeID: n.nodeID, Adapter: "mock", Harness: sr.Session.Harness, Cwd: sr.Cwd,
 			State: c.RunWaitingInput, StartedAt: n.clock.Now(), Capabilities: mockCaps}
 		if sr.PreviousRun != nil {
@@ -199,7 +212,18 @@ func (n *simNode) handle(cmd c.NodeCommand) {
 		n.mu.Unlock()
 		n.result(cmd, c.OutcomeSucceeded, nil)
 	case c.CmdReadTranscript:
-		n.result(cmd, c.OutcomeSucceeded, c.ReadSessionResponse{Entries: []c.TranscriptEntry{}})
+		var rr c.ReadSessionRequest
+		json.Unmarshal(cmd.Payload, &rr)
+		n.mu.Lock()
+		last := n.lastText
+		n.mu.Unlock()
+		entries := []c.TranscriptEntry{}
+		if last != nil {
+			if text := last(rr.SessionID); text != "" {
+				entries = append(entries, c.TranscriptEntry{Seq: 1, RunID: rr.RunID, At: n.clock.Now(), Kind: "assistant", Text: text})
+			}
+		}
+		n.result(cmd, c.OutcomeSucceeded, c.ReadSessionResponse{Entries: entries})
 	case c.CmdAttach:
 		n.result(cmd, c.OutcomeSucceeded, c.AttachDescriptor{Mechanism: c.AttachReadOnly, ReadOnly: true, ExpiresAt: n.clock.Now().Add(time.Minute)})
 	case c.CmdAction:

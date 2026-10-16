@@ -41,11 +41,18 @@ func (m *Model) viewSessionTerm(w, h int) []string {
 	}
 	tm := m.terms()
 	tm.paneW, tm.paneH = w, th
+	tm.shown.Store(s.Session.SessionID) // this terminal's output schedules frames (termPoke)
 	tv := tm.views[s.Session.SessionID]
 	if tv != nil && s.Run != nil && tv.runID == s.Run.RunID {
 		if st, _, drawn := tv.status(); drawn && st != termUnavailable {
-			rows := tv.render(w, th, focused, m.th.plain)
+			// No stream (being reopened, or closed): the last screen at
+			// once, dimmed until the live one draws over it.
+			live, _ := tv.live()
+			rows := tv.render(w, th, focused && live, m.th.plain || !live)
 			for i, r := range rows {
+				if !live {
+					r = m.th.dim.Render(r)
+				}
 				rows[i] = m.mark(zoneDef{kind: zoneTerm, idx: i}, r) // mouse input goes to the terminal
 			}
 			return append(out, rows...)
@@ -86,7 +93,7 @@ func (m *Model) termHeader(s contracts.SessionView, w int, focused bool) string 
 	}
 	// The title keeps priority: facts drop from the right (account, then
 	// the machine) before the title is shortened. bypass is never dropped.
-	title := m.markTitle(m.th.title.Render(trunc(s.Session.Title, 40))) // click: rename
+	title := m.markTitle(m.th.title.Render(trunc(iconTitle(s), 40))) // click: rename
 	doing := m.doingStatus(s, stt)
 	var left string
 	for _, segs := range [][]string{
@@ -145,6 +152,8 @@ func (m *Model) termHint(s contracts.SessionView) string {
 		return "starting…"
 	case drawn && (st == termEnded || st == termIdle):
 		return "disconnected · last screen"
+	case drawn && st == termConnecting:
+		return "last screen · connecting…"
 	}
 	return ""
 }
@@ -248,11 +257,26 @@ func (m *Model) snapshotLoading(s contracts.SessionView, w int) []string {
 		}
 		return append(out, m.th.dim.Render(trunc("Navigation and other sessions are unaffected.", w)))
 	case st == nil || !st.have && (st.inflight || st.err == nil):
+		if !m.showLoading(s, st) {
+			return nil // a local capture is coming, or the read just started
+		}
 		return []string{"", m.th.dim.Render("loading preview…")}
 	case !st.have:
 		return []string{"", m.th.tone(toneBad, trunc("✗ preview unavailable: "+errText(st.err), w))}
 	}
 	return nil
+}
+
+// showLoading reports whether a preview still loading says so: never
+// for a session on this machine (its local capture paints instead), and
+// only once the read has run loadingAfter with nothing to show.
+func (m *Model) showLoading(s contracts.SessionView, st *loadState) bool {
+	if emb, _ := m.embeddable(s); emb {
+		if _, ok := m.localFor(s); ok {
+			return false
+		}
+	}
+	return st != nil && st.inflight && time.Since(st.started) >= loadingAfter
 }
 
 // ---- info overlay (i) ----
@@ -306,7 +330,7 @@ func (o *infoOverlay) view(m *Model, w, h int) []string {
 	add("Terminal", m.termFacts(s))
 	add("Messages", m.deliveryFacts(s))
 	lines = append(lines, m.worktreeInfoLines(s, inner)...) // W-quicklaunch
-	return m.box(s.Session.Title, lines, bw, w, h)
+	return m.box(iconTitle(s), lines, bw, w, h)
 }
 
 // termFacts says how the pane reaches the terminal right now.

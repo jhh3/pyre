@@ -37,6 +37,24 @@ func (s screenInfo) InputEmpty() bool {
 	return true
 }
 
+// Working reports Claude's busy indicator ("esc to interrupt", shown with
+// the spinner while a turn or tool runs) near the bottom of the screen.
+func (s screenInfo) Working() bool {
+	start := len(s.Lines) - 12
+	if start < 0 {
+		start = 0
+	}
+	for _, l := range s.Lines[start:] {
+		if strings.Contains(strings.ToLower(l), "esc to interrupt") {
+			return true
+		}
+	}
+	return false
+}
+
+// Clear reports a screen with the input box and no dialog over it.
+func (s screenInfo) Clear() bool { return s.HasInputBox && s.Dialog == "" }
+
 // InputText joins the box lines.
 func (s screenInfo) InputText() string { return strings.Join(s.InputLines, "\n") }
 
@@ -59,6 +77,33 @@ func isRule(l string) bool {
 
 const promptGlyph = "❯"
 
+// altPromptGlyph is the ASCII marker Claude Code draws on Windows (2.1.296
+// on a GCP Windows node) where macOS/Linux show promptGlyph.
+const altPromptGlyph = ">"
+
+// glyphPrefix reports whether s starts with either prompt marker and returns
+// the marker's byte length.
+func glyphPrefix(s string) (int, bool) {
+	if strings.HasPrefix(s, promptGlyph) {
+		return len(promptGlyph), true
+	}
+	if strings.HasPrefix(s, altPromptGlyph) {
+		return len(altPromptGlyph), true
+	}
+	return 0, false
+}
+
+// glyphIndex is strings.Index for either prompt marker (the first found).
+func glyphIndex(s string) (int, int) {
+	if i := strings.Index(s, promptGlyph); i >= 0 {
+		return i, len(promptGlyph)
+	}
+	if i := strings.Index(s, altPromptGlyph); i >= 0 {
+		return i, len(altPromptGlyph)
+	}
+	return -1, 0
+}
+
 // parseScreen parses a plain capture (-p -J) and, optionally, the same
 // capture with escapes (-e) for placeholder detection.
 func parseScreen(plain, escaped string) screenInfo {
@@ -68,7 +113,7 @@ func parseScreen(plain, escaped string) screenInfo {
 	// closing rule below.
 	box := -1
 	for i := len(lines) - 1; i > 0; i-- {
-		if strings.HasPrefix(strings.TrimLeft(lines[i], " "), promptGlyph) && isRule(lines[i-1]) {
+		if _, ok := glyphPrefix(strings.TrimLeft(lines[i], " ")); ok && isRule(lines[i-1]) {
 			box = i
 			break
 		}
@@ -88,7 +133,9 @@ func parseScreen(plain, escaped string) screenInfo {
 				l := lines[j]
 				if j == box {
 					l = strings.TrimLeft(l, " ")
-					l = strings.TrimPrefix(l, promptGlyph)
+					if n, ok := glyphPrefix(l); ok {
+						l = l[n:]
+					}
 					l = strings.TrimPrefix(l, " ")
 				} else {
 					l = strings.TrimPrefix(l, "  ")
@@ -105,7 +152,10 @@ func parseScreen(plain, escaped string) screenInfo {
 		si.DialogKind, si.Dialog = "trust", "workspace trust"
 		for _, l := range lines {
 			t := strings.TrimSpace(l)
-			if strings.HasPrefix(t, promptGlyph) && strings.Contains(t, "Yes") {
+			// Claude on Windows marks the selected option with ">" instead
+			// of "❯" (2.1.296 on a GCP Windows node); without this the
+			// automation pressed Down forever between the two options.
+			if _, ok := glyphPrefix(t); ok && strings.Contains(t, "Yes") {
 				si.TrustYes = true
 			}
 		}
@@ -123,7 +173,7 @@ func parseScreen(plain, escaped string) screenInfo {
 // optionRe matches a selected numbered dialog option ("❯ 1. Yes"). Past
 // prompts in the scrollback also start with "❯ ", so unnumbered lines never
 // count as dialog options.
-var optionRe = regexp.MustCompile(`^\s*` + promptGlyph + `\s*\d+\.\s`)
+var optionRe = regexp.MustCompile(`^\s*(?:` + promptGlyph + `|` + altPromptGlyph + `)\s*\d+\.\s`)
 
 func looksLikeDialog(lines []string) bool {
 	all := strings.Join(lines, "\n")
@@ -159,14 +209,14 @@ func placeholder(box []string, escaped string) bool {
 	if escaped != "" {
 		el := strings.Split(strings.TrimRight(escaped, "\n"), "\n")
 		for i := len(el) - 1; i >= 0; i-- {
-			idx := strings.Index(el[i], promptGlyph)
+			idx, glen := glyphIndex(el[i])
 			if idx < 0 {
 				continue
 			}
 			if i == 0 || !isRule(stripANSI(el[i-1])) {
 				continue
 			}
-			rest := el[i][idx+len(promptGlyph):]
+			rest := el[i][idx+glen:]
 			// skip spaces and non-dim SGR sequences before the first glyph
 			for {
 				rest = strings.TrimLeft(rest, "  ")

@@ -26,7 +26,7 @@ python3 scripts/eval-agent-routing.py matrix --host codex \
   --outfit /tmp/outfit-candidate --output /tmp/outfit-mode-matrix.jsonl
 ```
 
-`evals/mode-matrix.jsonl` covers all 15 blessed GitHub, Google Workspace, Intercom, Linear, Notion, Sentry, Slack, and Stripe link-capable modes. `scripts/eval-state` builds the isolated package/connection/tool surface used by the matrix; it never copies credentials.
+`evals/mode-matrix.jsonl` covers all 16 blessed Discord, GitHub, Google Workspace, Intercom, Linear, Notion, Sentry, Slack, and Stripe link-capable modes. `scripts/eval-state` builds the isolated package/connection/tool surface used by the matrix; it never copies credentials.
 
 Exercise agent recovery choices for expired OAuth, missing scopes, ambiguous links, disabled enrichment, missing pinned CLIs, and provider throttling:
 
@@ -61,13 +61,13 @@ renderer used by the CLI and host hooks. Provider-shaped fixtures are local so a
 release gate never depends on mutable third-party accounts or network state.
 
 ```sh
-go test ./internal/linkcontext -run 'TestBlessedExecutionEval|TestEveryBuiltinLinkPattern|TestMultipleAccounts|TestLinkFailureDiagnostics|TestFailureEval'
+go test ./internal/linkcontext -run 'TestBlessedExecutionEval|TestEveryBuiltinLinkPattern|TestMultipleAccounts|TestLinkFailureDiagnostics|TestFailureEval|TestDiscord'
 ```
 
-This suite executes every declared blessed resource resolver: 22 resource types
+This suite executes every declared blessed resource resolver: 24 resource types
 across Slack, Notion, Sentry, all five GitHub resources, Linear, Intercom, all
-seven Stripe resources, and all five Google Workspace resources through the
-pinned CLI boundary. A mechanical coverage assertion fails whenever a resolver
+seven Stripe resources, both Discord resources, and all five Google Workspace
+resources through the pinned CLI boundary. A mechanical coverage assertion fails whenever a resolver
 is added without provider-shaped execution evidence. It also covers pagination,
 heavy-read recursion, every URL pattern, multi-account ambiguity, and
 disconnected/unhealthy/expired/unsupported recovery. It complements live

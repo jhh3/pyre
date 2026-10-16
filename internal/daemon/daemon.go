@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jhh3/pyre/internal/runtime/hostsel"
 	"math"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/buildinfo"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/messaging/delivery"
 	"github.com/jhh3/pyre/internal/messaging/inbox"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
@@ -68,12 +70,19 @@ type Daemon struct {
 	wg         sync.WaitGroup
 	asyncWG    sync.WaitGroup // launches and async actions (finish even on shutdown)
 	cancel     context.CancelFunc
+	// In-flight launches (record committed, handle not yet recorded and not
+	// failed) and the shutdown drain flag (W-resilience).
+	launchMu   sync.Mutex
+	inflight   int
+	draining   bool
+	repoChecks wtCheckCache // shared worktree dirty/merged/pushed results (W-resilience)
 
 	cacheWrites atomic.Uint64 // read cache inserts (prune cadence)
 	cache       cacheWriter   // background read cache writer
 	hubLinkDown atomic.Bool   // hub link known down: proxied calls do not retry
 	search      *searchState  // transcript search index (search.go); nil if disabled
 	repos       *repoState    // repo index and session worktrees (repos.go)
+	inboxWait   inboxWaiters  // local doorbell waits (inboxwait.go, W-localwait)
 }
 
 // liveRun is the in-memory state of a run the daemon supervises.
@@ -113,7 +122,7 @@ func New(cfg Config) (*Daemon, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(cfg.StateDir, 0o700)
+	_ = fileperm.Restrict(cfg.StateDir, 0o700)
 	d := &Daemon{cfg: cfg, start: cfg.Clock.Now(), live: map[string]*liveRun{}, actions: map[string]actionEntry{},
 		adapters: map[string]contracts.RuntimeAdapter{}, byHarness: map[contracts.Harness]contracts.RuntimeAdapter{},
 		upstreams: map[string]contracts.API{}, hostStats: sysstats.NewSampler(sysstats.DefaultPaths(cfg.StateDir)...), runStats: sysstats.NewRunSampler(), actSem: make(chan struct{}, cfg.MaxActions), pollSem: make(chan struct{}, cfg.Poll.MaxConcurrent), pollKick: make(chan struct{}, 1), outboxKick: make(chan struct{}, 1)}
@@ -126,7 +135,7 @@ func New(cfg Config) (*Daemon, error) {
 		}
 		d.ownDB = true
 		for _, p := range []string{path, path + "-wal", path + "-shm"} {
-			_ = os.Chmod(p, 0o600)
+			_ = fileperm.Restrict(p, 0o600)
 		}
 	}
 	d.db = db
@@ -157,7 +166,7 @@ func New(cfg Config) (*Daemon, error) {
 		d.rep = nopReporter{}
 	}
 	d.engine = delivery.New(delivery.Config{NodeID: d.nodeID, Inbox: ib, Runs: (*deliveryRuns)(d), Reporter: d.rep,
-		Clock: cfg.Clock, HubClock: hubClock{d}, Logger: cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
+		Clock: cfg.Clock, HubClock: hubClock{d}, Facts: hubFacts{d}, Logger: cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
 	d.registerBuiltinActions()
 	d.initSearch()
 	return d, nil
@@ -208,7 +217,7 @@ func (d *Daemon) SetReporter(r Reporter) {
 	}
 	d.rep = r
 	d.engine = delivery.New(delivery.Config{NodeID: d.nodeID, Inbox: d.inbox, Runs: (*deliveryRuns)(d), Reporter: r,
-		Clock: d.cfg.Clock, HubClock: hubClock{d}, Logger: d.cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
+		Clock: d.cfg.Clock, HubClock: hubClock{d}, Facts: hubFacts{d}, Logger: d.cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
 }
 
 // SocketPath returns the local API socket path.
@@ -265,7 +274,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return err
 	}
 	d.refreshProbes(ctx)
-	loops := []func(context.Context){d.engine.Run, d.pollLoop, d.heartbeatLoop, d.outboxLoop, d.maintenanceLoop, d.searchLoop, d.repoLoop}
+	loops := []func(context.Context){d.engine.Run, d.pollLoop, d.heartbeatLoop, d.outboxLoop, d.maintenanceLoop, d.searchLoop, d.repoLoop, d.githubLoop}
 	for _, p := range d.cfg.Periodic {
 		p := p
 		loops = append(loops, func(ctx context.Context) { d.periodicLoop(ctx, p) })
@@ -279,12 +288,36 @@ func (d *Daemon) Start(ctx context.Context) error {
 }
 
 // Close stops background loops and closes local state. Runs keep running.
+// New launches are refused at once; in-flight launches get up to
+// Config.ShutdownGrace to record their handle (or fail) before Close gives
+// up on them (they are reconciled on the next start: never-started ones
+// fail, live ones are adopted, never relaunched).
+//
+// Deliveries drain too (W-delivery): no new attempt starts, and a paste in
+// flight gets up to deliveryDrain to finish instead of having its context
+// cancelled mid-way; one cut anyway is reconciled by the engine.
 func (d *Daemon) Close() error {
+	left := d.Drain(d.cfg.ShutdownGrace)
+	if d.engine != nil {
+		if n := d.engine.Drain(min(deliveryDrain, d.cfg.ShutdownGrace)); n > 0 {
+			d.cfg.Logger.Warn("shutdown: deliveries still in flight after the drain; they are reconciled as cut by pyred shutdown", "deliveries", n)
+		}
+	}
 	if d.cancel != nil {
 		d.cancel()
 	}
 	d.wg.Wait()
-	d.asyncWG.Wait()
+	if left > 0 {
+		// A launch is stuck past the grace period: do not block shutdown on
+		// it (systemd would SIGKILL us anyway) and keep the database open
+		// for it until the process exits.
+		d.cfg.Logger.Warn("shutdown: launches still in flight after grace period; they are reconciled on next start", "launches", left, "grace", d.cfg.ShutdownGrace)
+		return nil
+	}
+	if !waitTimeout(&d.asyncWG, d.cfg.ShutdownGrace) {
+		d.cfg.Logger.Warn("shutdown: async actions still running after grace period", "grace", d.cfg.ShutdownGrace)
+		return nil
+	}
 	d.cache.mu.Lock()
 	d.cache.closed = true // a late read cannot start a writer after Wait
 	d.cache.mu.Unlock()
@@ -293,21 +326,24 @@ func (d *Daemon) Close() error {
 	return nil
 }
 
+// deliveryDrain bounds how long Close lets an in-flight paste finish.
+const deliveryDrain = 10 * time.Second
+
 // recoverRuns reloads supervised runs. Live runs are re-attached through
-// adapter.Recover (never Launch); runs interrupted mid-launch become
-// orphaned/unknown and are never relaunched.
+// adapter.Recover (never Launch); runs interrupted mid-launch are adopted
+// when their process exists, failed when provably never started, otherwise
+// orphaned/unknown (launchrecover.go). None is ever relaunched.
 func (d *Daemon) recoverRuns(ctx context.Context) error {
-	recs, err := d.st.runs(ctx, `phase IN (?,?)`, phaseLive, phaseLaunching)
+	// Orphaned records (an earlier start could not prove the outcome) are
+	// re-examined every start: their process may have appeared, or the
+	// never-started proof may now hold (records from older pyred builds).
+	recs, err := d.st.runs(ctx, `phase IN (?,?,?)`, phaseLive, phaseLaunching, phaseOrphaned)
 	if err != nil {
 		return err
 	}
 	for _, rec := range recs {
-		if rec.Phase == phaseLaunching || rec.Handle == nil {
-			rec.Phase = phaseOrphaned
-			rec.Run.State = contracts.RunUnknown
-			rec.Run.StateReason = "pyred stopped during launch before a run handle was recorded; the process may exist under " + d.runDir(rec.Run.RunID) + " and is not relaunched"
-			rec.Run.Freshness = d.freshness(true, "launch outcome unknown")
-			if err := d.persistAndReport(ctx, rec); err != nil {
+		if rec.Phase == phaseLaunching || rec.Phase == phaseOrphaned || rec.Handle == nil {
+			if err := d.reconcileInterruptedLaunch(ctx, rec); err != nil {
 				return err
 			}
 			continue
@@ -529,6 +565,9 @@ func (d *Daemon) capabilities() []string {
 	if d.cfg.SSHAlias != "" {
 		caps = append(caps, "attach.ssh_tmux")
 	}
+	if d.cfg.Terminal != nil {
+		caps = append(caps, contracts.TerminalFit) // relayed streams can be fitted to the window
+	}
 	return caps
 }
 
@@ -563,7 +602,11 @@ func (d *Daemon) runRoots(ctx context.Context) []sysstats.RunRoot {
 		}
 		pid := rec.Handle.PID
 		if pid <= 0 && rec.Handle.TmuxSocket != "" && rec.Handle.TmuxTarget != "" {
-			if p, err := (supervisor.Tmux{Socket: rec.Handle.TmuxSocket, Timeout: 3 * time.Second}).Pane(ctx, rec.Handle.TmuxTarget); err == nil && !p.Dead {
+			if host := termhostFor(*rec.Handle); host != nil {
+				if p, err := host.Pane(ctx, rec.Handle.TmuxTarget); err == nil && !p.Dead {
+					pid = p.PID
+				}
+			} else if p, err := (supervisor.Tmux{Socket: rec.Handle.TmuxSocket, Timeout: 3 * time.Second}).Pane(ctx, rec.Handle.TmuxTarget); err == nil && !p.Dead {
 				pid = p.PID
 			}
 		}
@@ -592,10 +635,17 @@ func (d *Daemon) activeRuns() int {
 // `ps` snapshot; each server is asked for its PID once).
 func (d *Daemon) agentUsage(ctx context.Context) AgentUsage {
 	var roots []int
+	if hostsel.Kind() == hostsel.KindTermhost {
+		// The termhost has no tmux-style server PID to root the tree at:
+		// sum each live run's own process tree instead.
+		for _, r := range d.runRoots(ctx) {
+			roots = append(roots, r.PID)
+		}
+	}
 	seen := map[string]bool{}
 	for _, lr := range d.liveRuns() {
 		rec, _ := lr.snapshot()
-		if rec.Handle == nil || rec.Handle.TmuxSocket == "" || seen[rec.Handle.TmuxSocket] {
+		if rec.Handle == nil || rec.Handle.TmuxSocket == "" || seen[rec.Handle.TmuxSocket] || termhostFor(*rec.Handle) != nil {
 			continue
 		}
 		seen[rec.Handle.TmuxSocket] = true

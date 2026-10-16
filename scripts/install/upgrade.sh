@@ -200,6 +200,7 @@ switch_to() { # VERSION
   if [ "$DRY" = 0 ] && [ -n "$from" ] && [ "$from" != "$1" ]; then echo "$from" >"$(r "$PREFIX/.previous")"; fi
   swap_symlink "$1" "$(r "$PREFIX/current")"
   note "current -> $1 (was ${from:-unset})"
+  [ "$HOST_OS" != darwin ] || sync_app
 }
 
 # ---- rollback mode ----

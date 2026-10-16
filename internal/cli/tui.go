@@ -7,10 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/jhh3/pyre/internal/clientconn"
+	"github.com/jhh3/pyre/internal/cloud"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/terminal"
 	"github.com/jhh3/pyre/internal/tui"
 )
 
@@ -21,11 +25,32 @@ type TUIOptions struct {
 	Stderr io.Writer
 	// Self is the calling agent session, if `pyre` runs inside one.
 	Self Identity
+	// Relay: the API is the hub itself, whose terminal relay streams the
+	// previews and Grid tiles of other machines' sessions (no ssh).
+	Relay bool
 }
 
 // streamWatcher is implemented by *client.Client (event-stream WebSocket).
 type streamWatcher interface {
 	WatchEvents(ctx context.Context, afterCursor int64, fn func(contracts.Event) error) error
+}
+
+// terminalDialer is implemented by *client.Client (the hub's terminal
+// relay): the TUI watches sessions on other machines through it instead
+// of over ssh.
+type terminalDialer interface {
+	DialTerminal(ctx context.Context, d contracts.AttachDescriptor, cols, rows int, fit bool) (*terminal.ClientConn, error)
+}
+
+// relayDialer adapts a terminalDialer to tui.RelayDialer.
+func relayDialer(td terminalDialer) tui.RelayDialer {
+	return func(ctx context.Context, d contracts.AttachDescriptor, cols, rows int, fit bool) (tui.TermConn, error) {
+		c, err := td.DialTerminal(ctx, d, cols, rows, fit)
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
 }
 
 // RunTUI launches the interactive terminal UI (internal/tui). Attach runs
@@ -41,18 +66,74 @@ var RunTUI = func(ctx context.Context, api contracts.API, opts TUIOptions) error
 		Attach:       tuiAttach(ctx, api, opts),
 		Edit:         tui.DefaultEdit,
 		ClientNodeID: opts.Self.NodeID,
+		// Sessions on this machine are watched straight from pyred's tmux
+		// server, without the hub (tui/localterm.go).
+		LocalTmuxSocket: localTmuxSocket(os.Getenv, opts.Self.NodeID),
 		// Beside the client config, so an isolated PYRE_CONFIG stays isolated.
 		StateFile: filepath.Join(filepath.Dir(clientconn.DefaultConfigPath(os.Getenv)), "tui-state.json"),
+		// W-gcp: cloud facts from the snapshot the cloud commands write.
+		CloudInfo: cloud.CacheReader(filepath.Join(filepath.Dir(clientconn.DefaultConfigPath(os.Getenv)), cloud.CacheFileName)),
+		// The web app that owns the inbox: the ask signals link to it.
+		WebURL: tuiWebURL(os.Getenv, clientconn.DefaultConfigPath(os.Getenv)),
 	}
 	if w, ok := api.(streamWatcher); ok {
 		o.Watch = w.WatchEvents
 	} else {
 		o.Watch = tui.PollWatcher(api)
 	}
+	if td, ok := api.(terminalDialer); ok && opts.Relay {
+		o.DialRelay = relayDialer(td)
+	}
+	// PYRE_TUI_PREVIEW=ssh: previews and Grid tiles of other machines'
+	// sessions run the ssh attach again (multiplexed) instead of the relay.
+	o.SSHPreviews = strings.EqualFold(os.Getenv("PYRE_TUI_PREVIEW"), "ssh")
 	if opts.Stdout != nil {
 		o.Output = opts.Stdout
 	}
 	return tui.Run(ctx, api, o)
+}
+
+// tuiWebURL is the web app the TUI links its ask signals to:
+// $PYRE_WEB_URL, else the client config's web_url, else "" (the TUI's
+// default, tui.DefaultWebURL). An unreadable config falls through.
+func tuiWebURL(getenv func(string) string, configPath string) string {
+	if u := strings.TrimSpace(getenv(clientconn.EnvWebURL)); u != "" {
+		return u
+	}
+	if cfg, err := clientconn.LoadConfig(configPath); err == nil {
+		return strings.TrimSpace(cfg.WebURL)
+	}
+	return ""
+}
+
+// localTmuxSocket is the tmux socket of this machine's pyred
+// (<state>/tmux/pyre.sock, the state dirs discoverLocalNode tries), or ""
+// when the client has no node here or no such socket exists. The TUI
+// still checks each run's tmux session there before using it.
+func localTmuxSocket(getenv func(string) string, nodeID string) string {
+	if nodeID == "" || runtime.GOOS == "windows" {
+		return ""
+	}
+	var dirs []string
+	if d := getenv("PYRE_STATE_DIR"); d != "" {
+		dirs = append(dirs, d)
+	}
+	if home := getenv("HOME"); home != "" {
+		if runtime.GOOS == "darwin" {
+			dirs = append(dirs, filepath.Join(home, "Library", "Application Support", "pyre"))
+		} else if x := getenv("XDG_STATE_HOME"); x != "" {
+			dirs = append(dirs, filepath.Join(x, "pyre"))
+		} else {
+			dirs = append(dirs, filepath.Join(home, ".local", "state", "pyre"))
+		}
+	}
+	for _, d := range dirs {
+		p := filepath.Join(d, "tmux", "pyre.sock")
+		if fi, err := os.Stat(p); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			return p
+		}
+	}
+	return ""
 }
 
 // ttyStream reports whether s (or def when s is nil) is a terminal file.

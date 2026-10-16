@@ -17,6 +17,8 @@ dist/release/
   pyre-<V>-linux-amd64.tar.gz
   pyre-<V>-linux-arm64.tar.gz
   pyre-tools-<V>-<os>-<arch>.tar.gz        optional bundled tools, one per platform (--no-tools omits)
+  pyre-<V>-windows-amd64.zip               Windows node + CLI (--no-windows omits)
+  pyre-<V>-windows-arm64.zip
 
 pyre-<V>-<os>-<arch>/                      single top-level directory per tarball
   bin/pyre  bin/pyred  bin/pyre-hub        static, CGO_ENABLED=0, -trimpath, version stamped
@@ -26,7 +28,21 @@ pyre-<V>-<os>-<arch>/                      single top-level directory per tarbal
   packaging/launchd/*.plist.in  packaging/systemd/*.service.in
   README.md  VERSION  BUILDINFO  NOTICE  LICENSE
   SHA256SUMS                               sha256 of every other file in the directory
+
+pyre-<V>-windows-<arch>/                   single top-level directory per zip
+  bin/pyre.exe  bin/pyred.exe              CGO_ENABLED=0 GOOS=windows, -trimpath, version stamped (no pyre-hub)
+  sbom/{pyre,pyred}.cdx.json
+  scripts/install/{install,uninstall}.ps1
+  README.md (from README.release-windows.md)  VERSION  BUILDINFO  NOTICE  LICENSE
+  SHA256SUMS
 ```
+
+`make dist` covers darwin/linux; release.sh builds the Windows binaries itself
+with the same flags unless `dist/pyre-<V>-windows-<arch>/` already holds them.
+The zips are deterministic like the tarballs: file entries only, sorted, DOS
+mtime = commit time in UTC, `zip -X` (no extra fields), so release.sh needs
+Info-ZIP `zip` unless `--no-windows`. Adding them changes only the release
+`SHA256SUMS`; the darwin/linux tarballs are byte-identical to before.
 
 Use `--strict` for real releases: it fails unless both the signing key and
 the SBOM tool are available. Without it, a build that lacks either says so
@@ -116,6 +132,13 @@ Verification:
   and key, or `--allow-unsigned` where it accepted an unsigned or unpinned
   release), so staging re-checks exactly what upgrade.sh verified.
 
+- **`scripts/install/install.ps1 -Zip`** (Windows) applies the same rules and
+  exit codes, with the pin in `%APPDATA%\Pyre\release-allowed-signers`. It
+  verifies with `ssh-keygen -Y verify` (Windows OpenSSH 8.1+), else with the
+  already installed `pyred.exe verify-release` (the Go verifier of
+  `internal/updates`), never with a binary from the candidate zip. With
+  neither available it refuses unless `-AllowUnsigned`.
+
 Key rotation: generate a new key, replace `packaging/release-allowed-signers`,
 and replace the pinned file on each host deliberately. upgrade.sh never
 replaces a pin on its own.
@@ -166,6 +189,9 @@ dropped when the installer sets `R_DROP_tag=1`. Every rendered file carries
 the `pyre-managed` marker; the installer never overwrites or removes a unit
 file without it. No template contains a secret: the daemon and hub read their
 credentials from 0600 files in their own state directories.
+
+Windows has no template: `pyred service install` registers the per-user
+logon task itself (see docs/operations.md, "Windows nodes").
 
 Linux runs live outside `pyred.service`: pyred starts its tmux server with
 `systemd-run --user --scope --slice=pyre-runs.slice` (internal/supervisor

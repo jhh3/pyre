@@ -153,20 +153,31 @@ machine that runs agents. One machine runs both the hub and a node. Each step is
 
 ## Adding repos and folders
 
-Pyre finds your git repos by itself — no registration step.
+Pyre finds your git repos by itself — no registration step — and any repo works on any machine.
 
 - **Where it looks:** each machine scans `~/code`, `~/src`, `~/Documents/code` and `~/projects` (4 levels deep,
   metadata only, 20 seconds after the node starts and then every 10 minutes). Clone a repo into one of those
   and it shows up in the new-session panel and `pyre repos` after the next scan — or right away with
   `pyre repos --rescan` (every connected machine; `--node <machine>` for one). A path works right away too.
+- **Your GitHub repos:** a machine where the `gh` CLI is logged in lists your GitHub repositories (yours,
+  collaborator and organization ones, plus repos you recently committed or opened PRs to) every hour and
+  reports them to the hub. Pyre uses gh's own login and stores no token; `pyred run --no-github-catalog` turns
+  it off. The new-session panel ranks: used in Pyre recently, then contributed to on GitHub recently, then
+  checked out on a machine, then the rest — one entry per repository, however many machines have it.
+- **Any repo on any machine:** pick a machine that does not have the repo and it is cloned there first, with
+  that machine's own git credentials (ssh key, credential helper or gh), into its repo root laid out like the
+  repos already there (`~/code/<name>` or `~/code/<owner>/<name>`). An existing directory is never overwritten;
+  a different repo at that path is refused with a message. From a shell: `pyre new acme/atlas @laptop` (a line
+  on stderr says it clones; `--no-clone` refuses instead).
 - **Use other folders:** start the node with `pyred run --repo-roots ~/work,~/oss` (or set
   `PYRE_REPO_ROOTS=~/work,~/oss`); `--no-repo-index` turns scanning off.
-- **Start in a repo:** press `n` and type part of its name (`atlas`), optionally `@machine`, `codex`, and a
-  prompt. `ctrl+f` gives the session a fresh git worktree; `repo1+repo2` puts several repos in one workspace.
-  From a shell: `pyre new atlas @desktop codex "fix the flaky test"`.
+- **Start in a repo:** press `n`, type part of its name (`atlas`) or `owner/name`, and adjust the fields below
+  it — Machine, Agent (Claude/Codex/Shell), Workspace (main checkout, fresh worktree or a new branch), Account,
+  Prompt, Title — with ←/→ or a click; `ctrl+s` (or `ctrl+enter`) starts. `+` adds another repo to the same
+  workspace. Machine, agent and workspace are remembered per repo. From a shell:
+  `pyre new atlas @desktop codex "fix the flaky test"`.
 - **Start anywhere else:** type a path instead of a repo — `~/scratch`, `/tmp/experiment` — and Tab completes
-  folder names on the chosen machine; a missing folder is offered as "create". A path with spaces can be quoted
-  (`"~/My Docs"`) or escaped (`~/My\ Docs`), or press `ctrl+l` to make the whole line one path. `pyre new ~/scratch --mkdir`
+  folder names on the chosen machine; a missing folder is offered as "create". `pyre new ~/scratch --mkdir`
   does the same from a shell, and `~` alone starts a scratch session in your home folder.
 - **Group work (optional):** `pyre project new <name> --repo id=url` gives related sessions a shared brief and
   documents; agents can create projects and move themselves into them too.

@@ -28,16 +28,22 @@ const slowAfter = 3 * time.Second
 // (viewSessionTerm), as wide as the list allows; the one-line Needs-you
 // strip sits under both panes at every width.
 func (m *Model) viewSessions(w, h int) []string {
-	strip := m.needsYouStrip(w, h)
+	var strip []string
+	if m.footMode == footFull {
+		strip = m.needsYouStrip(w, h)
+	}
 	bh := h - len(strip)
+	term := m.viewSessionTerm
 	var body []string
 	switch {
 	case m.tableShown(): // sessions_modes.go: the full-width table
 		body = m.viewSessionTable(w, bh)
-	case w >= wideMin:
-		body = m.listDetailW(w, bh, m.sessionListWidth(w), m.viewSessionList, m.viewSessionTerm)
+	case m.footMode == footSidebar:
+		// The sidebar carries the status summary, toasts and key hints at
+		// its bottom, so the terminal pane reaches the last row (footer.go).
+		body = m.listDetailW(w, bh, m.sessionListWidth(w), m.sidebarList, term)
 	case w >= splitMin:
-		body = m.listDetailW(w, bh, m.sessionListWidth(w), m.viewSessionList, m.viewSessionTerm)
+		body = m.listDetailW(w, bh, m.sessionListWidth(w), m.viewSessionList, term)
 	default:
 		body = m.listDetail(w, bh, m.viewSessionList, m.viewSessionTerm)
 	}
@@ -141,7 +147,7 @@ func (m *Model) viewSessionList(w, h int) []string {
 	now := m.now()
 	return m.groupedSessionRows(vs, w, h, hdr, func(s contracts.SessionView, sel bool) string {
 		stt := listStatus(s, m.nodeOf(s))
-		row := m.cursor(sel) + m.statusCell(stt, 10) + " " + m.treeTitle(sel, s, c.titleW)
+		row := m.sessionCursor(sel, s) + m.statusCell(stt, 10) + " " + m.treeTitle(sel, s, c.titleW)
 		if c.machW > 0 {
 			row += " " + m.th.faint.Render(pad(trunc(orDash(s.NodeName), c.machW), c.machW))
 		}
@@ -332,7 +338,10 @@ func listStatus(s contracts.SessionView, node *contracts.Node) status {
 	if st.tone == toneWarn || st.tone == toneBad || st.label == "offline" || st.label == "stale" {
 		return st
 	}
-	level, _ := sessionAttention(s)
+	level, reason := sessionAttention(s)
+	if level == contracts.FlagNeedsYou && !sessionNeedsYou(s) {
+		return reasonStatus(reason) // an ended session's failure: shown, not counted
+	}
 	if fs, ok := flagStatus(level); ok {
 		return fs
 	}
@@ -522,7 +531,7 @@ func (m *Model) machineRowDetail(name string, w int) []string {
 			break
 		}
 		st := sessionStatus(s, m.nodeOf(s))
-		out = append(out, trunc(m.th.tone(st.tone, st.sym)+" "+s.Session.Title, w))
+		out = append(out, trunc(m.th.tone(st.tone, st.sym)+" "+iconTitle(s), w))
 	}
 	return append(out, "", trunc(m.th.key.Render("X")+" "+m.th.dim.Render("archives them all (confirms) · ")+m.th.key.Render(".")+" "+m.th.dim.Render("hides ended sessions"), w))
 }
@@ -565,7 +574,7 @@ func (m *Model) sessionFacts(s contracts.SessionView, w int) []string {
 	stt := sessionStatus(s, node)
 	lw := 12 // the longest label ("Permissions", "Unavailable") plus a gap
 	vw := w - lw
-	out := []string{m.th.title.Render(trunc(s.Session.Title, w))}
+	out := []string{m.th.title.Render(trunc(iconTitle(s), w))}
 	if s.Run != nil && s.Run.State == contracts.RunFailed {
 		// A failed session leads with why, in plain words.
 		for _, l := range wrap(m.failureLine(s.Run, now), min(w, textMax)) {
@@ -578,6 +587,9 @@ func (m *Model) sessionFacts(s contracts.SessionView, w int) []string {
 	}
 	head += m.th.dim.Render(" · " + ago(now, observedAt(s)))
 	out = append(out, trunc(head, w))
+	if g, ok := m.leadSignal(s.Session.SessionID); ok && g.kind != leadQuiet { // leads.go
+		out = append(out, trunc(m.leadWords(s.Session.SessionID, g), w))
+	}
 	if s.Run != nil && (stt.label == "offline" || stt.label == "stale") {
 		// One honest line: what is known, when, and that the run may live on.
 		last := lastObserved(s)
@@ -614,12 +626,29 @@ func (m *Model) sessionFacts(s contracts.SessionView, w int) []string {
 		proj += m.th.dim.Render(d)
 	}
 	out = append(out, m.kvFit("Project", proj, lw, w)...)
-	if parent := s.Session.Lineage.ParentSessionID; parent != "" { // W-childnotify
+	if lin := s.Session.Lineage; lin.ReparentedAt != nil { // W-reparent
+		from := "the top level"
+		if lin.ReparentedFrom != "" {
+			from = m.sessionTitle(lin.ReparentedFrom)
+		}
+		if lin.ParentSessionID != "" {
+			by := m.sessionTitle(lin.ParentSessionID)
+			if !slices.Contains(s.Session.Tags, contracts.TagReportParent) {
+				by += m.th.dim.Render(" · reports off")
+			}
+			out = append(out, m.kvFit("Reports to", by+m.th.dim.Render(" (reparented from "+from+")"), lw, w)...)
+		} else {
+			out = append(out, m.kvFit("Reports to", m.th.dim.Render("no parent (moved from "+from+")"), lw, w)...)
+		}
+	} else if parent := lin.ParentSessionID; parent != "" { // W-childnotify
 		by := m.sessionTitle(parent)
 		if slices.Contains(s.Session.Tags, contracts.TagReportParent) {
 			by += m.th.dim.Render(" · reports to parent")
 		}
 		out = append(out, m.kvFit("Started by", by, lw, w)...)
+	}
+	if at := ownerActive(s); !at.IsZero() { // recently yours (yours.go)
+		out = append(out, m.kvFit("You", "messaged or typed "+ago(now, at), lw, w)...)
 	}
 	if s.Run != nil {
 		out = append(out, m.kvFit("Directory", tildePath(s.Run.Cwd), lw, w)...)
@@ -673,7 +702,7 @@ func (m *Model) sessionFacts(s contracts.SessionView, w int) []string {
 	}
 	if a, ok := m.pendingRequest(s.Session.SessionID); ok {
 		out = append(out, "", m.th.tone(toneWarn, "! "+trunc(m.humanIDs(a.Title), vw))+m.th.dim.Render(" — a answers"))
-	} else if sessionNeedsYou(s) {
+	} else if sessionFlagged(s) {
 		text := "needs you"
 		if s.Flag != nil && s.Flag.Text != "" {
 			text = m.humanIDs(s.Flag.Text)
@@ -702,6 +731,10 @@ func (m *Model) activityLines(s contracts.SessionView, w, h int) []string {
 		return []string{m.sectionTitle("Activity", w), m.th.dim.Render("Transcript unavailable: the adapter offers neither transcript nor screen reads.")}
 	}
 	resp, st := get[contracts.ReadSessionResponse](m, "preview:"+s.Session.SessionID)
+	if (st == nil || !st.have) && m.localCapture(s.Session.SessionID) != "" {
+		// On this machine: its screen now; the transcript follows.
+		resp, st = contracts.ReadSessionResponse{Screen: m.localCapture(s.Session.SessionID)}, &loadState{have: true, at: m.now()}
+	}
 	offline := false
 	if n := m.nodeOf(s); n != nil && n.Connection.State != contracts.ConnConnected {
 		offline = true
@@ -718,6 +751,9 @@ func (m *Model) activityLines(s contracts.SessionView, w, h int) []string {
 		}
 		return append(out, m.th.dim.Render(trunc("Navigation and other sessions are unaffected.", w)))
 	case st == nil || (!st.have && st.inflight) || (!st.have && st.err == nil):
+		if !m.showLoading(s, st) {
+			return []string{m.sectionTitle("Activity", w)}
+		}
 		return []string{m.sectionTitle("Activity", w), m.th.dim.Render("loading preview…")}
 	case !st.have:
 		return []string{m.sectionTitle("Activity", w), m.th.tone(toneBad, trunc("✗ preview unavailable: "+errText(st.err), w))}
@@ -879,7 +915,7 @@ func (m *Model) needsYouStrip(w, h int) []string {
 		for i, s := range items {
 			_, reason := sessionAttention(s)
 			st := reasonStatus(reason)
-			seg := m.th.tone(st.tone, st.sym) + " " + trunc(s.Session.Title, 28)
+			seg := m.th.tone(st.tone, st.sym) + " " + trunc(iconTitle(s), 28)
 			rest := len(items) - i - 1
 			tail := ""
 			if rest > 0 {

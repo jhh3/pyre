@@ -88,7 +88,8 @@ func buildAdapters(o runOpts, nodeID string, log *slog.Logger) (builtAdapters, e
 	}
 	cl, err := claude.New(claude.Options{NodeID: nodeID, TmuxSocket: sock, SSHAlias: o.sshAlias,
 		HookCommand: []string{exe, "hook", "claude"}, ProfileAsConfigDir: true, TrustWorkspace: trustFunc(o.trustDirs),
-		PermissionMode: "default", ApprovalWait: 120 * time.Second, DoorbellCommand: b.doorbell, OnAutomation: b.auto.call})
+		TranscriptHomes: claudeTranscriptHomes(profileRoot(o.state, os.Getenv, userHome())),
+		PermissionMode:  "default", ApprovalWait: 120 * time.Second, DoorbellCommand: b.doorbell, OnAutomation: b.auto.call})
 	if err != nil {
 		log.Warn("claude adapter unavailable", "err", err)
 	} else {
@@ -170,5 +171,15 @@ func (r *autoRelay) set(f func(contracts.NodeAutomation)) { r.f.Store(f) }
 func (r *autoRelay) call(a contracts.NodeAutomation) {
 	if f, ok := r.f.Load().(func(contracts.NodeAutomation)); ok && f != nil {
 		f(a)
+	}
+}
+
+// claudeTranscriptHomes are the Claude config homes a resume searches for a
+// conversation besides the default login: the accounts' shared store and
+// every account profile (one not yet linked to the store keeps its own).
+func claudeTranscriptHomes(profiles string) []string {
+	return []string{
+		filepath.Join(filepath.Dir(filepath.Clean(profiles)), "shared", "claude"),
+		filepath.Join(profiles, "*", "claude*"),
 	}
 }

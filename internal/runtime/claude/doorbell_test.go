@@ -59,7 +59,7 @@ func TestDoorbellPyreSide(t *testing.T) {
 	}()
 	select {
 	case l := <-lines:
-		if !strings.Contains(l, "msg_d1 from ses_peer") || strings.Contains(l, "synthetic message one") {
+		if !strings.Contains(l, "msg_d1 from session:ses_peer, sent ") || strings.Contains(l, "synthetic message one") {
 			t.Fatalf("line %q", l)
 		}
 	case <-time.After(10 * time.Second):
@@ -142,6 +142,13 @@ func TestDoorbellFoldAndReceipts(t *testing.T) {
 	if len(ids) != 1 || ids[0] != "msg_x" {
 		t.Fatalf("ids %v (in_reply_to must not count)", ids)
 	}
+	// Compact text (W-compact): the [pyre-msg:<id>] marker per message; a
+	// "re <id>" reference must not count.
+	compactResp := `{"content":[{"type":"text","text":"[pyre-msg:msg_c1] from synthetic child · 3m ago · done\n[pyre-msg:msg_c2] from owner · 1m ago · re msg_old · ok\n2 unacked messages"}]}`
+	craw := []byte(`{"hook_event_name":"PostToolUse","tool_name":"mcp__pyre__inbox","tool_response":` + compactResp + `}`)
+	if got := pyreToolMessageIDs(toolPyreInbox, nil, craw); len(got) != 2 || got[0] != "msg_c1" || got[1] != "msg_c2" {
+		t.Fatalf("compact ids %v", got)
+	}
 	rs := newRunState()
 	t0 := time.Now()
 	rs.applyHook(hookRecord{Event: "SessionStart", At: t0})
@@ -187,8 +194,8 @@ func TestDoorbellPerRunCapability(t *testing.T) {
 	if got := contracts.WithoutCaps(f.a.Capabilities(), off.Data[contracts.HandleCapsUnavailable]); contracts.HasCap(got, contracts.CapInputMonitor) || len(got) != len(f.a.Capabilities())-1 {
 		t.Fatalf("WithoutCaps = %v", got)
 	}
-	if _, err := os.Stat(filepath.Join(off.StateDir, "pyre-plugin")); err == nil {
-		t.Fatal("blocked run got a doorbell plugin")
+	if _, err := os.Stat(filepath.Join(off.StateDir, "pyre-plugin", "monitors")); err == nil {
+		t.Fatal("blocked run got a doorbell monitor")
 	}
 }
 

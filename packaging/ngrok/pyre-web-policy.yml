@@ -1,0 +1,32 @@
+# ngrok traffic policy for the Pyre web inbox (docs/web.md).
+# Used by packaging/systemd/pyre-web-tunnel.service:
+#   ngrok http 127.0.0.1:7390 --url https://pyre-example.ngrok.app \
+#     --traffic-policy-file ~/.config/pyre/ngrok/pyre-web-policy.yml
+#
+# 1. Drop any X-Pyre-Email the client sent: only this policy may set it.
+# 2. Google sign-in (ngrok-managed OAuth app).
+# 3. Deny (403) unless the signed-in email ends with @example.org.
+# 4. Tell pyre web serve who signed in: X-Pyre-Email: <email>.
+# pyre web serve rejects requests without the header (or with another
+# domain), so a request that skipped this policy gets nothing.
+on_http_request:
+  - actions:
+      - type: remove-headers
+        config:
+          headers:
+            - X-Pyre-Email
+  - actions:
+      - type: oauth
+        config:
+          provider: google
+  - expressions:
+      - "!actions.ngrok.oauth.identity.email.endsWith('@example.org')"
+    actions:
+      - type: deny
+        config:
+          status_code: 403
+  - actions:
+      - type: add-headers
+        config:
+          headers:
+            X-Pyre-Email: "${actions.ngrok.oauth.identity.email}"

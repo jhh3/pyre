@@ -37,6 +37,15 @@ type MCPTool struct {
 	Annotations  *ToolAnnotations `json:"annotations,omitempty"`
 
 	run func(ctx context.Context, ops *Ops, args json.RawMessage) (any, error)
+	// note optionally returns a short line sent as an extra text block
+	// after a successful result (e.g. send_message's delivery status).
+	note func(result any) string
+}
+
+// withNote attaches a result note to a tool.
+func withNote(t MCPTool, note func(result any) string) MCPTool {
+	t.note = note
+	return t
 }
 
 // behaviour classes. Pyre tools act only on the owner's own fleet, hub and
@@ -123,27 +132,27 @@ func MCPTools() []MCPTool {
 		tool("whoami", "Who am I", "Show the identity Pyre authenticates you as (an agent session or the owner).", obj(props{}),
 			hints("Who am I", readOnly, true),
 			func(ctx context.Context, o *Ops, _ emptyParams) (c.Principal, error) { return o.API.WhoAmI(ctx) }),
-		tool("list_nodes", "List machines", "List machines with connectivity, harnesses and load. Offline does not mean idle.",
+		compactly(tool("list_nodes", "List machines", "List machines with connectivity, harnesses and load. Offline does not mean idle.",
 			obj(props{"include_revoked": boo("include revoked nodes")}), hints("List machines", readOnly, true),
 			func(ctx context.Context, o *Ops, p struct {
 				IncludeRevoked bool `json:"include_revoked"`
 			}) (c.Page[c.Node], error) {
 				return o.ListNodes(ctx, p.IncludeRevoked)
-			}),
-		tool("list_sessions", "List sessions", "List sessions across the fleet with run state, node, project and freshness.",
+			}), renderNodes),
+		compactly(tool("list_sessions", "List sessions", "List sessions across the fleet: one line each with id, title, run state, machine (\"this machine\" shares your filesystem), age and project.",
 			obj(props{"node": node, "project": str("project ID/name, or \"none\" for standalone sessions"), "harness": str("claude, codex or shell"),
 				"query": str("text search"), "states": strs("run states, e.g. running, waiting_input"), "include_archived": boo("include archived")}),
 			hints("List sessions", readOnly, true),
 			func(ctx context.Context, o *Ops, p SessionFilter) (c.Page[c.SessionView], error) {
 				return o.ListSessions(ctx, p)
-			}),
-		tool("get_session", "Show session", "Get one session with its current run, capabilities, lease and pending approvals.",
+			}), renderSessions),
+		compactly(tool("get_session", "Show session", "Get one session with its current run, capabilities, lease and pending approvals.",
 			obj(props{"session": sess}, "session"), hints("Show session", readOnly, true),
 			func(ctx context.Context, o *Ops, p struct {
 				Session string `json:"session"`
 			}) (c.SessionView, error) {
 				return o.ResolveSession(ctx, p.Session)
-			}),
+			}), renderSession),
 		tool("start_session", "Start session", "Start a peer session on a machine (no project needed; launch is asynchronous). It messages you automatically when it finishes a turn (with its last message), needs input, or exits; no need to ask it to.",
 			obj(props{"node": node, "harness": str("claude, codex or shell"), "cwd": str("absolute working directory on the node"),
 				"project": project, "worktree": str("branch for an isolated git worktree"), "repo": str("with project: project repo ID (its recorded checkout, or the worktree source); without project: a repository name from the repo index, fuzzy-matched (the machine defaults to where it exists, the harness to claude, the directory to its main checkout)"),
@@ -158,7 +167,7 @@ func MCPTools() []MCPTool {
 			func(ctx context.Context, o *Ops, p StartParams) (c.StartSessionResponse, error) {
 				return o.StartSession(ctx, p)
 			}),
-		tool("read_session", "Read transcript", "Read a session's bounded, redacted transcript. Use next_cursor to continue.",
+		compactly(tool("read_session", "Read transcript", "Read a session's bounded, redacted transcript. Use next_cursor to continue.",
 			obj(props{"session": sess, "run": str("run ID (default current)"), "tail": num("latest N entries"),
 				"cursor": str("continue after a previous next_cursor"), "limit": num("max entries")}, "session"),
 			hints("Read transcript", readOnly, true),
@@ -167,7 +176,7 @@ func MCPTools() []MCPTool {
 					p.Tail = 40
 				}
 				return o.ReadSession(ctx, p)
-			}),
+			}), renderTranscript),
 		tool("interrupt_session", "Interrupt session", "Interrupt a session's current turn. The receipt reports acceptance; the outcome is observed separately.",
 			obj(props{"session": sess, "reason": str("reason"), "operation_id": opIDProp}, "session"),
 			hints("Interrupt session", destructive, false),
@@ -180,7 +189,7 @@ func MCPTools() []MCPTool {
 			func(ctx context.Context, o *Ops, p SessionCmdParams) (c.CommandReceipt, error) {
 				return receiptResult(o.Stop(ctx, p))
 			}),
-		tool("send_message", "Send message", "Send a durable message to a session, \"owner\", channel:<name> or project. With reply_to and no to, replies to the original sender. Status keeps stored / runtime-accepted / acknowledged separate.",
+		withNote(tool("send_message", "Send message", "Send a durable message to a session, \"owner\", channel:<name> or project. With reply_to and no to, replies to the original sender. delivery_status.summary says whether it is getting through (e.g. recipient ended or its machine is offline).",
 			obj(props{"to": str("session ID/title, \"owner\", channel:<name>, or project:<id>"), "text": str("message text"),
 				"thread": str("thread ID"), "reply_to": str("message ID this replies to"), "steer": boo("explicit immediate steering, where supported"),
 				"info": boo("store only; never inject into a runtime"), "attach": strs("published IDs: ver_..., rev_..., note_... (not file paths)"),
@@ -188,26 +197,28 @@ func MCPTools() []MCPTool {
 				"message_id": str("stable message ID for retries"), "operation_id": opIDProp}, "text"),
 			hints("Send message", additive, false),
 			func(ctx context.Context, o *Ops, p SendParams) (c.MessageView, error) { return o.Send(ctx, p) }),
-		tool("inbox", "Inbox", "List messages addressed to this session (or a given mailbox). wait_seconds long-polls for new mail.",
+			sendNote),
+		compactly(tool("inbox", "Inbox", "List unacked messages addressed to this session (or a given mailbox), one line each; get_message <id> shows a full body. wait_seconds long-polls for new mail.",
 			obj(props{"session": str("mailbox: session ref or \"owner\" (default: this session)"), "box": str("inbox (default), outbox or all"),
-				"thread": str("list a whole thread instead"), "unacked": boo("only messages without ack/reply"),
+				"thread": str("list a whole thread instead"), "unacked": boo("only messages without ack/reply (default true for an inbox; false lists handled mail too)"),
 				"states": strs("runtime delivery states, e.g. indeterminate"), "wait_seconds": num("long-poll up to N seconds (max 60)"),
 				"after_cursor": num("only messages after this inbox cursor"), "limit": num("max messages")}),
 			hints("Inbox", readOnly, true),
-			func(ctx context.Context, o *Ops, p InboxParams) (c.Page[c.MessageView], error) {
+			func(ctx context.Context, o *Ops, mp mcpInboxParams) (c.Page[c.MessageView], error) {
+				p := mp.effective()
 				p.WaitSeconds = min(p.WaitSeconds, 60)
 				return o.Inbox(ctx, p)
-			}),
-		tool("wait_reply", "Wait for reply", "Wait for a reply to a message you sent. Times out with an error carrying the latest delivery state.",
+			}), renderInbox),
+		tool("wait_reply", "Wait for reply", "Wait for a reply to a message you sent. Times out with an error saying whether your message is still queued and why; returns at once if the recipient ended or was archived.",
 			obj(props{"message_id": str("message ID"), "timeout_seconds": num("default 60, max 300")}, "message_id"),
 			hints("Wait for reply", readOnly, true),
 			func(ctx context.Context, o *Ops, p WaitReplyParams) (WaitReplyResult, error) {
 				p.TimeoutSeconds = min(p.TimeoutSeconds, 300)
 				return o.WaitReply(ctx, p)
 			}),
-		tool("get_message", "Show message", "Get a message with every delivery fact and receipt. Indeterminate means unknown, not failed.",
+		compactly(tool("get_message", "Show message", "Show a message: sender, thread, state and full body (format json adds every delivery fact and receipt). Indeterminate means unknown, not failed.",
 			obj(props{"message_id": str("message ID")}, "message_id"), hints("Show message", readOnly, true),
-			func(ctx context.Context, o *Ops, p MessageRef) (c.MessageView, error) { return o.GetMessage(ctx, p) }),
+			func(ctx context.Context, o *Ops, p MessageRef) (c.MessageView, error) { return o.GetMessage(ctx, p) }), renderMessage),
 		tool("ack_message", "Acknowledge message", "Acknowledge a message without replying.",
 			obj(props{"message_id": str("message ID"), "note": str("optional note"), "operation_id": opIDProp}, "message_id"),
 			hints("Acknowledge message", idempotent, true),
@@ -223,16 +234,16 @@ func MCPTools() []MCPTool {
 			func(ctx context.Context, o *Ops, p ResolveDeliveryParams) (c.MessageView, error) {
 				return o.ResolveDelivery(ctx, p)
 			}),
-		tool("list_approvals", "List approvals", "List pending approvals/questions (all states with all=true).",
+		compactly(tool("list_approvals", "List approvals", "List pending approvals/questions (all states with all=true).",
 			obj(props{"session": sess, "all": boo("include resolved/expired/withdrawn")}), hints("List approvals", readOnly, true),
 			func(ctx context.Context, o *Ops, p ApprovalFilter) (c.Page[c.Approval], error) {
 				return o.ListApprovals(ctx, p)
-			}),
+			}), renderApprovals),
 		tool("answer_approval", "Answer approval", "Answer an approval by ID; the answer is bound to the approval's own run and refused if stale.",
 			obj(props{"approval_id": str("approval ID"), "option": str("option ID"), "text": str("free-text answer where allowed"), "operation_id": opIDProp}, "approval_id"),
 			hints("Answer approval", destructive, true),
 			func(ctx context.Context, o *Ops, p ApproveParams) (c.Approval, error) { return o.Approve(ctx, p) }),
-		tool("list_projects", "List projects", "List projects (optional shared workspaces).",
+		compactly(tool("list_projects", "List projects", "List projects (optional shared workspaces).",
 			obj(props{"query": str("text search"), "include_archived": boo("include archived")}), hints("List projects", readOnly, true),
 			func(ctx context.Context, o *Ops, p struct {
 				Query           string `json:"query"`
@@ -241,7 +252,7 @@ func MCPTools() []MCPTool {
 				return listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.Project], error) {
 					return o.API.ListProjects(ctx, c.ListProjectsRequest{PageRequest: c.PageRequest{Cursor: cur}, Query: p.Query, IncludeArchived: p.IncludeArchived})
 				})
-			}),
+			}), renderProjects),
 		tool("create_project", "Create project", "Create a project (an optional shared workspace). Only name is required; repos and checkouts are optional.",
 			obj(props{"name": str("project name"), "description": str("short description"), "brief": str("brief text; becomes the brief document"),
 				"repos": strs("repo bindings as id=url"), "links": strs("links as title=url"),
@@ -251,11 +262,22 @@ func MCPTools() []MCPTool {
 			func(ctx context.Context, o *Ops, p CreateProjectParams) (c.Project, error) {
 				return o.CreateProject(ctx, p)
 			}),
-		tool("archive_session", "Archive session", "Archive an ended session: it leaves session listings (nothing is stopped). A live session is refused; stop it first. Agents may archive their own session and sessions they started.",
-			obj(props{"session": sess, "operation_id": opIDProp}, "session"),
+		tool("archive_session", "Archive session", "When your work is finished and reported, archive yourself with archive_session (no arguments). A live session (yours or one you started) archives when its turn ends; an ended one at once.",
+			obj(props{"session": str("session ID or exact title (default: yourself)"), "operation_id": opIDProp}),
 			hints("Archive session", idempotent, true),
-			func(ctx context.Context, o *Ops, p ArchiveParams) (c.SessionView, error) {
-				return o.Archive(ctx, p)
+			func(ctx context.Context, o *Ops, p ArchiveParams) (ArchiveResult, error) {
+				p.WhenDone = true
+				sv, err := o.Archive(ctx, p)
+				if err != nil {
+					return ArchiveResult{}, err
+				}
+				return archiveResult(sv, sv.Session.SessionID == o.Self.SessionID), nil
+			}),
+		tool("archive_project", "Archive project", "Archive a project. Live sessions in it refuse unless with_sessions: true, which archives its ended sessions now and its live ones when their turns end.",
+			obj(props{"project": project, "with_sessions": boo("also archive the project's sessions (live ones when their turns end)"), "operation_id": opIDProp}, "project"),
+			hints("Archive project", idempotent, true),
+			func(ctx context.Context, o *Ops, p ArchiveProjectParams) (ArchiveProjectResult, error) {
+				return o.ArchiveProject(ctx, p)
 			}),
 		tool("associate_session_project", "Associate session with project", "Attach an existing session to a project, or detach it with none=true.",
 			obj(props{"session": sess, "project": project, "none": boo("detach from any project (standalone)"), "operation_id": opIDProp}, "session"),

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -558,8 +559,13 @@ func TestCodexTUITrust(t *testing.T) {
 	})
 	e2.launch(e2.a, "run_tr2", e2.home, nil, map[string]string{"PYRE_TEST_ROLE": "faketui"})
 	b, _ = os.ReadFile(filepath.Join(e2.o.StateRoot, "codex", homeKey(e2.home), "fake-config.log"))
-	if strings.Contains(string(b), "config/value/write") {
+	if strings.Contains(string(b), `"keyPath":"projects"`) {
 		t.Fatal("untrusted cwd written as trusted")
+	}
+	// The TUI's own turns get the run's permissions (it does not inherit
+	// the thread's): sandbox_mode is written for the profile home.
+	if !strings.Contains(string(b), `"keyPath":"sandbox_mode"`) {
+		t.Fatalf("run permissions not written for the TUI: %q", string(b))
 	}
 }
 
@@ -709,5 +715,82 @@ func TestClassifyTrustScreen(t *testing.T) {
 	}
 	if classifyTrustScreen(">_ OpenAI Codex (v0.160.1)\n› Ask Codex to do anything\n") != trustNone {
 		t.Fatal("conversation")
+	}
+}
+
+// TestCodexReadKeepsSettledPages: sessions.read lists only the turn pages
+// after the last page whose turns all finished, and answers exactly what a
+// listing from the first turn answers.
+func TestCodexReadKeepsSettledPages(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, nil)
+	e.a.turnsPage = 2
+	h := e.launch(e.a, "run_pages", e.home, nil, nil)
+	e.wait(e.a, h, 5*time.Second, idle)
+	for i := 0; i < 7; i++ {
+		dlv(t, e.a, h, fmt.Sprintf("msg_p%d", i), fmt.Sprintf("synthetic turn %d", i), contracts.ModeQueue)
+		e.wait(e.a, h, 5*time.Second, idle)
+	}
+	rr, err := e.a.run(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	logPath := filepath.Join(e.home, "fake-turns-list.log")
+	calls := func() []string {
+		b, _ := os.ReadFile(logPath)
+		_ = os.Remove(logPath)
+		return strings.Split(strings.TrimSpace(string(b)), "\n")
+	}
+	// reference: a listing from the first turn, nothing kept.
+	ref := func(req contracts.ReadSessionRequest) []contracts.TranscriptEntry {
+		rr.readMu.Lock()
+		rr.turns = nil
+		rr.readMu.Unlock()
+		resp, err := e.a.ReadTranscript(ctx, h, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Entries
+	}
+	read := func(req contracts.ReadSessionRequest) []contracts.TranscriptEntry {
+		resp, err := e.a.ReadTranscript(ctx, h, req)
+		if err != nil || resp.Freshness.Stale {
+			t.Fatalf("read: %v %+v", err, resp.Freshness)
+		}
+		return resp.Entries
+	}
+	reqs := []contracts.ReadSessionRequest{{Limit: 500}, {Tail: true, Limit: 3}, {Cursor: "4", Limit: 3}, {Cursor: "2", Tail: true, Limit: 500}}
+	for _, req := range reqs {
+		want := ref(req)
+		if len(want) == 0 {
+			t.Fatalf("%+v: no entries", req)
+		}
+		calls()
+		read(req) // keeps the settled pages
+		calls()
+		if got := read(req); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%+v: kept pages answer %+v, want %+v", req, got, want)
+		}
+		// 7 turns in pages of 2: the first three pages are full and
+		// finished; only the last one is listed again.
+		if c := calls(); len(c) != 1 || !strings.HasPrefix(c[0], "c6 ") {
+			t.Fatalf("%+v: listed %v, want only the page after the kept ones", req, c)
+		}
+	}
+	// A new turn is picked up.
+	dlv(t, e.a, h, "msg_p7", "synthetic turn 7", contracts.ModeQueue)
+	e.wait(e.a, h, 5*time.Second, idle)
+	got := read(contracts.ReadSessionRequest{Limit: 500})
+	if want := ref(contracts.ReadSessionRequest{Limit: 500}); !reflect.DeepEqual(got, want) || got[len(got)-1].Seq <= 7 {
+		t.Fatalf("after a new turn: %+v, want %+v", got, want)
+	}
+	// A kept cursor the app-server no longer knows: listed from the start.
+	read(contracts.ReadSessionRequest{Limit: 500})
+	rr.readMu.Lock()
+	rr.turns.cursor = "c99"
+	rr.readMu.Unlock()
+	if got2 := read(contracts.ReadSessionRequest{Limit: 500}); !reflect.DeepEqual(got2, got) {
+		t.Fatalf("after an unknown cursor: %+v, want %+v", got2, got)
 	}
 }

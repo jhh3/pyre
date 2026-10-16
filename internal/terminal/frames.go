@@ -15,8 +15,20 @@
 //	 4. The node's NodeBridge starts the run's own attach argv (the isolated
 //	    tmux socket of that run; -r when read-only) in a PTY and dials
 //	    PathNodeTerminal?stream=<id> with its node bearer token.
+//	    A run on a Pyre terminal host (Windows; runtime/termhost) has no
+//	    attach process: the bridge recognises its attach argv and connects
+//	    to the host directly (termhost.DialAttach), fitted streams following
+//	    the host's size events instead of polling tmux.
 //	 5. The relay pairs the two sockets: binary frames carry raw terminal
 //	    bytes both ways; client resize text frames are forwarded to the node.
+//
+// A read-only stream may ask for "fit": true in its auth frame (TUI
+// previews/Grid tiles; contracts.TerminalFit). The node then sizes the PTY
+// to the tmux window and attaches with -f ignore-size, so watching never
+// resizes the window; it reports that size as a {"type":"resize"} text
+// frame before any terminal bytes and whenever the window changes, the
+// relay forwards those frames to the client, and client resize frames are
+// ignored.
 //
 // Closing either side closes the other. The node kills only its `tmux
 // attach` client process, never the tmux server or the harness, so a
@@ -57,6 +69,7 @@ type Frame struct {
 	Ticket string           `json:"ticket,omitempty"` // auth only; never log
 	Cols   int              `json:"cols,omitempty"`
 	Rows   int              `json:"rows,omitempty"`
+	Fit    bool             `json:"fit,omitempty"` // auth only: size a read-only stream to the window
 	Error  *contracts.Error `json:"error,omitempty"`
 }
 

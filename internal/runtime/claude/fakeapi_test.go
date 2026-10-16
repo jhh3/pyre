@@ -189,7 +189,7 @@ func inboxWatchMain(args []string) int {
 		fmt.Fprintln(logf, "resolve:", err)
 		return 1
 	}
-	err = claudeplugin.Watch(context.Background(), claudeplugin.APISource{API: conn.Client, Session: os.Getenv("PYRE_SESSION_ID")},
+	err = claudeplugin.Watch(context.Background(), &claudeplugin.APISource{API: conn.Client, Session: os.Getenv("PYRE_SESSION_ID")},
 		claudeplugin.WatchOptions{Out: io.MultiWriter(os.Stdout, &stampWriter{w: lines}), Log: logf,
 			StateFile: runDir + "/doorbell.json", RunDir: runDir, MinInterval: interval})
 	fmt.Fprintln(logf, "exit:", err)

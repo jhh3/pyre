@@ -1,7 +1,7 @@
 apiVersion: outfit.jhh3.dev/connector/v1alpha2
 key: sentry
 display: Sentry
-version: 1.0.0
+version: 1.1.0
 description: Errors, events, projects, and releases.
 category: Engineering
 credentialMethods:
@@ -45,6 +45,13 @@ modes:
       - {name: organizations, description: List accessible organizations., class: read, http: {method: GET, path: /organizations/}}
       - {name: issue, description: Read an issue., class: read, http: {method: GET, path: '/issues/:issue/'}}
       - {name: issue_events, description: Read recent events for an issue., class: read, http: {method: GET, path: '/issues/:issue/events/'}}
+      - {name: projects, description: List an organization's projects., class: read, http: {method: GET, path: '/organizations/:org/projects/'}}
+      - {name: search_issues, description: "Search an organization's issues (query uses Sentry search syntax, e.g. 'is:unresolved level:error'; statsPeriod like 24h or 14d; project is a numeric project id; sort is date|new|freq|user).", class: read, http: {method: GET, path: '/organizations/:org/issues/', query: [query, project, environment, statsPeriod, sort, limit, cursor]}}
+      - {name: issue_latest_event, description: Read the latest event of an issue (stack trace, tags, context)., class: read, http: {method: GET, path: '/issues/:issue/events/latest/'}}
+      - {name: issue_tags, description: Read tag breakdowns for an issue (release, browser, os, user...)., class: read, http: {method: GET, path: '/issues/:issue/tags/'}}
+      - {name: event, description: Read one event by id in a project., class: read, http: {method: GET, path: '/projects/:org/:project/events/:event/'}}
+      - {name: releases, description: List an organization's releases (newest first)., class: read, http: {method: GET, path: '/organizations/:org/releases/', query: [project, query, per_page, cursor]}}
+      - {name: release, description: Read one release by version., class: read, http: {method: GET, path: '/organizations/:org/releases/:version/'}}
   - id: hosted_mcp
     label: Sentry hosted MCP
     description: Sentry's hosted MCP tool surface, using an OAuth grant transferred from Claude or Codex.

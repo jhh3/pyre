@@ -48,24 +48,28 @@ func (m *Model) openAttnKinds() map[string]map[contracts.AttentionKind]bool {
 }
 
 // attentionClass classifies s; kinds is openAttnKinds (nil: computed).
+// Needs you is the shared rule (needsYou), so this group, the strip and
+// the header always agree; open items decide only for a hub without flags.
 func (m *Model) attentionClass(s contracts.SessionView, kinds map[string]map[contracts.AttentionKind]bool) attnClass {
 	if kinds == nil {
 		kinds = m.openAttnKinds()
 	}
-	if sessionEnded(s) && (s.Run == nil || s.Run.State != contracts.RunFailed) {
-		return attnEnded
+	if needsYou(s, m.nodeOf(s)) {
+		return attnNeeds
 	}
-	st := sessionStatus(s, m.nodeOf(s))
-	if st.tone == toneWarn || st.tone == toneBad {
-		return attnNeeds // approval, question, failed
+	if sessionEnded(s) {
+		return attnEnded // a failure alone needs nothing once ended
 	}
-	if k := kinds[s.Session.SessionID]; len(k) > 0 || s.Attention > 0 {
-		if len(k) > 0 && onlyMessages(k) {
+	if level, _ := sessionAttention(s); level == contracts.FlagMessage {
+		return attnMessage
+	}
+	if k := kinds[s.Session.SessionID]; s.Flag == nil && len(k) > 0 {
+		if onlyMessages(k) {
 			return attnMessage
 		}
 		return attnNeeds
 	}
-	switch st.label {
+	switch sessionStatus(s, m.nodeOf(s)).label {
 	case "working", "running", "starting", "background", "exiting":
 		return attnWorking
 	}
@@ -89,9 +93,10 @@ const (
 	sortName      sortMode = "name"      // machine, then title (default)
 	sortAttention sortMode = "attention" // needs you, message, then name
 	sortActivity  sortMode = "activity"  // most recent activity first
+	sortYours     sortMode = "yours"     // most recently messaged or typed into by the owner first
 )
 
-var sortModes = []sortMode{sortName, sortAttention, sortActivity}
+var sortModes = []sortMode{sortName, sortAttention, sortActivity, sortYours}
 
 func parseSortMode(s string) (sortMode, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -101,6 +106,8 @@ func parseSortMode(s string) (sortMode, bool) {
 		return sortAttention, true
 	case "activity", "recent", "time":
 		return sortActivity, true
+	case "yours", "mine", "you", "recently-yours":
+		return sortYours, true
 	}
 	return "", false
 }
@@ -112,14 +119,14 @@ func (m *Model) sortMode() sortMode {
 	return m.grouping.sort
 }
 
-// SortMode is the Sessions list sort ("name", "attention", "activity").
+// SortMode is the Sessions list sort ("name", "attention", "activity", "yours").
 func (m *Model) SortMode() string { return string(m.sortMode()) }
 
 // setSortMode switches the sort inside groups and remembers it.
 func (m *Model) setSortMode(s sortMode) tea.Cmd {
 	m.grouping.sort = s
 	m.syncSessions()
-	label := map[sortMode]string{sortName: "sorted by machine, then title", sortAttention: "needs you first, then messages", sortActivity: "most recent activity first"}[s]
+	label := map[sortMode]string{sortName: "sorted by machine, then title", sortAttention: "needs you first, then messages", sortActivity: "most recent activity first", sortYours: "recently yours first (you messaged or typed)"}[s]
 	return tea.Batch(m.saveState(), m.setToast(label, toneMuted), m.schedulePreview())
 }
 
@@ -134,16 +141,16 @@ func (m *Model) cycleSortMode() tea.Cmd {
 	return m.setSortMode(sortName)
 }
 
-// sortCommand is :sort [name|attention|activity]; no argument cycles.
+// sortCommand is :sort [name|attention|activity|yours]; no argument cycles.
 func (m *Model) sortCommand() command {
-	return command{name: "sort", args: "[mode]", desc: "order sessions inside their groups by name, attention (needs you first) or activity (no mode: next)",
+	return command{name: "sort", args: "[mode]", desc: "order sessions inside their groups by name, attention (needs you first), activity or yours (you messaged or typed most recently; no mode: next)",
 		run: func(m *Model, args string) tea.Cmd {
 			if strings.TrimSpace(args) == "" {
 				return m.cycleSortMode()
 			}
 			s, ok := parseSortMode(args)
 			if !ok {
-				return m.setToast("sort by name, attention or activity", toneWarn)
+				return m.setToast("sort by name, attention, activity or yours", toneWarn)
 			}
 			return m.setSortMode(s)
 		}}

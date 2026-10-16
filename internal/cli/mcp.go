@@ -235,20 +235,37 @@ func (s *MCPServer) call(ctx context.Context, t MCPTool, args json.RawMessage) m
 		b, _ := json.MarshalIndent(te, "", "  ")
 		return mcpCallResult{Content: []mcpContent{{Type: "text", Text: string(b)}}, IsError: true}
 	}
-	b, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return mcpCallResult{Content: []mcpContent{{Type: "text", Text: "encode result: " + err.Error()}}, IsError: true}
+	var res mcpCallResult
+	var b []byte
+	full, isFull := out.(fullResult)
+	if ct, ok := out.(compactText); ok {
+		// A read tool's compact text (W-compact): no structuredContent.
+		res = mcpCallResult{Content: []mcpContent{{Type: "text", Text: string(ct)}}}
+	} else {
+		if isFull {
+			b, err = json.Marshal(full) // format: "json" on a compact tool
+		} else {
+			b, err = json.MarshalIndent(out, "", "  ")
+		}
+		if err != nil {
+			return mcpCallResult{Content: []mcpContent{{Type: "text", Text: "encode result: " + err.Error()}}, IsError: true}
+		}
+		// The text block carries the same JSON for clients that ignore
+		// structuredContent (spec: SHOULD also return serialized JSON as text).
+		res = mcpCallResult{Content: []mcpContent{{Type: "text", Text: string(b)}}}
 	}
-	// The text block carries the same JSON for clients that ignore
-	// structuredContent (spec: SHOULD also return serialized JSON as text).
-	res := mcpCallResult{Content: []mcpContent{{Type: "text", Text: string(b)}}}
+	if t.note != nil {
+		if n := t.note(out); n != "" {
+			res.Content = append(res.Content, mcpContent{Type: "text", Text: n})
+		}
+	}
 	if cached != nil {
 		// The result came from a node's read cache during a hub outage:
 		// say so next to it (structuredContent stays the plain result).
 		res.Content = append(res.Content, mcpContent{Type: "text", Text: "note: the hub is unavailable; this is the copy cached on node " +
 			strings.TrimPrefix(cached.Source, "node-cache:") + ", last confirmed with the hub at " + cached.ObservedAt.UTC().Format(time.RFC3339)})
 	}
-	if t.OutputSchema != nil && bytes.HasPrefix(bytes.TrimSpace(b), []byte("{")) {
+	if (t.OutputSchema != nil || isFull) && bytes.HasPrefix(bytes.TrimSpace(b), []byte("{")) {
 		res.StructuredContent = json.RawMessage(b)
 	}
 	return res

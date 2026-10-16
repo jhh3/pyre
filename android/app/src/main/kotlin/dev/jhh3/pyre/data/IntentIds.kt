@@ -2,6 +2,7 @@ package dev.jhh3.pyre.data
 
 import dev.jhh3.pyre.core.Ids
 import dev.jhh3.pyre.core.PyreJson
+import dev.jhh3.pyre.model.AnswerAskItem
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 
@@ -47,5 +48,8 @@ class IntentIds(private val store: BlobStore, private val maxEntries: Int = 500)
         fun reissue(messageId: String) = "reissue:$messageId"
         fun resolve(messageId: String, resolution: String) = "resolve:$messageId:$resolution"
         fun attention(attentionId: String, state: String) = "attention:$attentionId:$state"
+        /** One batch of ask answers (order-independent), e.g. a notification action and the in-app button for the same choice. */
+        fun asksAnswer(items: List<AnswerAskItem>) =
+            "asks:" + items.sortedBy { it.askId }.joinToString(",") { "${it.askId}=${it.optionId}:${it.text.hashCode()}" }
     }
 }

@@ -235,6 +235,53 @@ func TestConfigureSelectsOneModeAndRemovesSupersededSecret(t *testing.T) {
 	}
 }
 
+func TestRemovedConnectionNameCanBeReused(t *testing.T) {
+	t.Setenv("OUTFIT_VAULT_BACKEND", "file")
+	ctx := context.Background()
+	root := t.TempDir()
+	paths := state.Paths{Root: root, Database: root + "/outfit.db", Packages: root + "/packages", Skills: root + "/skills", Locks: root + "/locks", Vault: root + "/vault"}
+	store, err := state.Open(ctx, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	loaded := kit.Loaded{Package: kit.Package{
+		Key: "sample-api", Version: "1",
+		CredentialMethods: []kit.CredentialMethod{{ID: "managed-token", Label: "Managed token", Description: "Test token", Recommended: true, Custody: "outfit", Fields: []kit.CredentialField{{Key: "TOKEN", Label: "Token", Secret: true}}}},
+		Modes:             []kit.Mode{{ID: "rest", CredentialMethods: []string{"managed-token"}, DefaultCredentialMethod: "managed-token"}, {ID: "other", CredentialMethods: []string{"managed-token"}, DefaultCredentialMethod: "managed-token"}},
+	}}
+	loaded.Raw, _ = json.Marshal(loaded.Package)
+	if err := store.InstallPackage(ctx, loaded, "trusted"); err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := vault.Open(paths)
+	service := Service{State: store, Vault: secret, Executor: cwruntime.Executor{}}
+	if _, err := service.Configure(ctx, "work", "sample-api", "other", map[string]string{"TOKEN": "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Remove(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	// Adding the removed name again (in another mode) makes a fresh connection.
+	again, err := service.Configure(ctx, "work", "sample-api", "rest", map[string]string{"TOKEN": "second"})
+	if err != nil {
+		t.Fatalf("re-adding a removed name: %v", err)
+	}
+	if again.Status != "active" || again.SelectedMode != "rest" {
+		t.Fatalf("re-added connection: %#v", again)
+	}
+	// Removing an already-removed name frees it instead of failing.
+	if err := service.Remove(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Remove(ctx, "work"); err != nil {
+		t.Fatalf("removing an already-removed name: %v", err)
+	}
+	if _, err := store.Connection(ctx, "work"); !state.IsNotFound(err) {
+		t.Fatalf("removed name still held: %v", err)
+	}
+}
+
 func TestReusedCredentialSurvivesUntilItsLastConnectionIsRemoved(t *testing.T) {
 	t.Setenv("OUTFIT_VAULT_BACKEND", "file")
 	ctx := context.Background()

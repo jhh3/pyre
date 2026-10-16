@@ -46,7 +46,7 @@ func FindRepo(dir string) (main string, ok bool) {
 	for {
 		st, err := os.Lstat(filepath.Join(d, ".git"))
 		if err == nil {
-			if st.IsDir() {
+			if st.IsDir() && hasHead(d) {
 				return d, true
 			}
 			if adm, ok := adminDir(d); ok {
@@ -54,7 +54,9 @@ func FindRepo(dir string) (main string, ok bool) {
 					return m, true
 				}
 			}
-			return "", false // submodule or broken link
+			if !st.IsDir() {
+				return "", false // submodule or broken link
+			}
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
@@ -62,6 +64,14 @@ func FindRepo(dir string) (main string, ok bool) {
 		}
 		d = parent
 	}
+}
+
+// hasHead reports whether d/.git is a repository: like git, a .git
+// directory without HEAD is not one (seen live: a stray empty /tmp/.git
+// made everything under /tmp look like one repository).
+func hasHead(d string) bool {
+	_, err := os.Stat(filepath.Join(d, ".git", "HEAD"))
+	return err == nil
 }
 
 // adminDir reads a linked worktree's .git file ("gitdir: <admin>").

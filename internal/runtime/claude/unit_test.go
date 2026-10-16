@@ -397,3 +397,95 @@ func TestChangeStampFollowsEventsAndTranscript(t *testing.T) {
 		t.Fatal("stamp ignores a transcript append (turn_duration after an interrupt)")
 	}
 }
+
+// A permission request is judged against the screen of every observation:
+// a dialog keeps it waiting, a dialog that closed while the turn works (or,
+// after expiry, any screen without a dialog) means it was answered in the
+// terminal, and a fresh request whose dialog was never seen gets a grace.
+func TestObserveApprovalsScreen(t *testing.T) {
+	a := &Adapter{o: Options{Now: time.Now}}
+	dir := t.TempDir()
+	h := contracts.RunHandle{RunID: "run_s", SessionID: "ses_s", StateDir: dir}
+	rule := strings.Repeat("─", 40)
+	dialog := parseScreen(rule+"\n Bash command\n   rm -rf build\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel\n", "")
+	working := parseScreen("● Deleting build…\n✻ Deleting… (esc to interrupt)\n"+rule+"\n❯ \n"+rule+"\n  ? for shortcuts\n", "")
+	idle := parseScreen(rule+"\n❯ \n"+rule+"\n  ? for shortcuts\n", "")
+	if dialog.DialogKind != "permission" || !working.Clear() || !working.Working() || !idle.Clear() || idle.Working() {
+		t.Fatalf("screens: %+v / %+v / %+v", dialog, working, idle)
+	}
+	now := time.Now()
+	t0 := now.Add(-5 * time.Minute)
+	mk := func(created time.Time, timedOut bool) *runState {
+		rs := newRunState()
+		rs.applyHook(hookRecord{Event: "SessionStart", At: t0})
+		rs.applyHook(hookRecord{Event: "UserPromptSubmit", At: t0})
+		rs.applyHook(hookRecord{Event: "PreToolUse", At: created, ToolUseID: "tu1", ToolName: "Bash"})
+		rs.applyHook(hookRecord{Event: "PermissionRequest", At: created, RequestID: "r1", ToolUseID: "tu1", ToolName: "Bash", HookPID: os.Getpid()})
+		if timedOut {
+			rs.applyHook(hookRecord{Event: evApprovalTimeout, At: created.Add(2 * time.Minute), RequestID: "r1"})
+		}
+		return rs
+	}
+	obs := func(rs *runState, si screenInfo, at time.Time) (contracts.ApprovalState, contracts.RunState, string) {
+		s, r := rs.derive()
+		aps, s, r := a.observeApprovals(h, rs, s, r, &si, at)
+		return aps[0].State, s, r
+	}
+
+	// Expired with the dialog still up: still flagged, every observation.
+	rs := mk(t0, true)
+	for i := 0; i < 2; i++ {
+		if st, s, r := obs(rs, dialog, now); st != contracts.ApprovalExpired || s != contracts.RunWaitingApproval || !strings.Contains(r, "needs human") {
+			t.Fatalf("real dialog must flag: %s %s %q", st, s, r)
+		}
+	}
+	// Expired and no dialog on screen (even idle-looking): resolved.
+	if st, s, _ := obs(rs, idle, now); st != contracts.ApprovalResolved || s == contracts.RunWaitingApproval {
+		t.Fatalf("expired without dialog: %s %s", st, s)
+	}
+	// It stays resolved when a later screen shows another dialog.
+	if st, _, _ := obs(rs, dialog, now); st != contracts.ApprovalResolved {
+		t.Fatalf("answered mark lost: %s", st)
+	}
+
+	// Pending (hook still waiting, as after a TUI "Yes"), dialog seen, then
+	// gone while the tool runs: resolved and running in one observation.
+	rs = mk(now.Add(-time.Second), false)
+	if st, s, _ := obs(rs, dialog, now); st != contracts.ApprovalPending || s != contracts.RunWaitingApproval {
+		t.Fatalf("pending: %s %s", st, s)
+	}
+	st, s, r := obs(rs, working, now.Add(500*time.Millisecond))
+	if st != contracts.ApprovalResolved || s != contracts.RunRunning || !strings.Contains(r, "terminal") {
+		t.Fatalf("answered in TUI: %s %s %q", st, s, r)
+	}
+	aps := a.evalApprovals(h, rs, s)
+	if aps[0].Resolution == nil || aps[0].Resolution.Source != "native" {
+		t.Fatalf("resolution %+v", aps[0].Resolution)
+	}
+	if d, _ := rs.derive(); d != contracts.RunRunning {
+		t.Fatalf("hook state not updated: %s", d)
+	}
+
+	// A fresh request whose dialog was never seen is not judged yet.
+	rs = mk(now, false)
+	if st, s, _ := obs(rs, working, now.Add(time.Second)); st != contracts.ApprovalPending || s != contracts.RunWaitingApproval {
+		t.Fatalf("grace: %s %s", st, s)
+	}
+	// Past the grace with no dialog and the turn working: answered.
+	if st, s, _ := obs(rs, working, now.Add(4*time.Second)); st != contracts.ApprovalResolved || s != contracts.RunRunning {
+		t.Fatalf("after grace: %s %s", st, s)
+	}
+
+	// Without the broker: a permission_prompt notification is waiting only
+	// while a dialog is on screen.
+	rs = newRunState()
+	rs.applyHook(hookRecord{Event: "SessionStart", At: t0})
+	rs.applyHook(hookRecord{Event: "Notification", At: t0, Payload: json.RawMessage(`{"notification_type":"permission_prompt"}`)})
+	sr, rr := rs.derive()
+	if _, s, _ := a.observeApprovals(h, rs, sr, rr, &dialog, now); s != contracts.RunWaitingApproval {
+		t.Fatalf("notification with dialog: %s", s)
+	}
+	if _, s, _ := a.observeApprovals(h, rs, sr, rr, &working, now); s != contracts.RunRunning {
+		t.Fatalf("notification, dialog gone: %s", s)
+	}
+}

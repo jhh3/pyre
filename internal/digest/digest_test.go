@@ -433,3 +433,22 @@ func TestWriteText(t *testing.T) {
 		t.Error("sections out of order")
 	}
 }
+
+// A failed run of a session started by another session is the parent's
+// business (decision I32): it does not make the digest say "needs you".
+func TestBuildChildFailureIsNotNeedsYou(t *testing.T) {
+	in := SyntheticInput()
+	for i := range in.Sessions {
+		if in.Sessions[i].Session.SessionID == "ses_synthB" {
+			in.Sessions[i].Session.Lineage.ParentSessionID = "ses_synthA"
+		}
+	}
+	d := Build(in)
+	a, ok := agentByID(d, "ses_synthB")
+	if ok && a.Rank == RankNeedsYou {
+		t.Fatalf("child failure ranked needs_you: %+v", a)
+	}
+	if d.Count(RankNeedsYou) != 1 {
+		t.Fatalf("needs-you count = %d, want 1 (only the approval)", d.Count(RankNeedsYou))
+	}
+}

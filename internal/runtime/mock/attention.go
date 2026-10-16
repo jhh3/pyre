@@ -66,6 +66,49 @@ func (b *Backend) engageLocked(sessionID, summary string, kinds ...c.AttentionKi
 	}
 }
 
+// waitingGroup is a session's "waiting on you" item group (the hub's
+// attention.WaitingGroup).
+func waitingGroup(sessionID string) string { return "waiting:" + sessionID }
+
+// RaiseWaiting simulates the hub's turn-end detection: the session ended
+// its turn with question for the owner in its chat (contracts.AttnWaiting).
+// One item per session; a repeat updates it. The next turn starting, an
+// ask, the run ending, archiving and the owner engaging resolve it, as on
+// the hub.
+func (b *Backend) RaiseWaiting(sessionID, question, summary string) (c.AttentionItem, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, ok := b.sessions[sessionID]
+	if !ok {
+		return c.AttentionItem{}, notFound(c.KindSession, sessionID)
+	}
+	q := truncate(firstLineOf(question), 100)
+	if q == "" {
+		q = "a question in its chat"
+	}
+	title, sum := "Waiting on you: "+q, truncate(strings.TrimSpace(summary), 300)
+	group := waitingGroup(sessionID)
+	var latest *c.AttentionItem
+	for _, a := range b.attention {
+		if a.GroupKey != group {
+			continue
+		}
+		if a.State == c.AttnOpen || a.State == c.AttnRead || a.State == c.AttnSnoozed {
+			latest = nil
+			break
+		}
+		if latest == nil || a.UpdatedAt.After(latest.UpdatedAt) {
+			latest = a
+		}
+	}
+	if latest != nil { // reopen the session's one item
+		latest.State, latest.Count, latest.UpdatedAt, latest.Title, latest.Summary = c.AttnOpen, latest.Count+1, b.now(), title, sum
+		b.emit(c.EvAttentionChanged, ref(c.KindAttention, latest.AttentionID), sessionID, latest.ProjectID, latest)
+		return *latest, nil
+	}
+	return *b.raiseAttentionLocked(c.AttnWaiting, "normal", group, ref(c.KindSession, sessionID), sessionID, s.ProjectID, title, sum), nil
+}
+
 // FlagAttention raises or clears a session's own flag (v1.3).
 func (b *Backend) FlagAttention(ctx context.Context, req c.FlagAttentionRequest) (c.AttentionItem, error) {
 	return mutate(b, ctx, c.OpFlagAttention, req.Mutation, req, func(p c.Principal) (c.AttentionItem, error) {

@@ -29,6 +29,8 @@ const (
 	zoneGroup                    // a Sessions group header: fold / unfold (name: group key)
 	zoneOverlay                  // a control inside a panel (name: passed to the overlay's click)
 	zoneTree                     // a session tree glyph or "+N": fold / unfold (name: parent session id)
+	zoneToast                    // the sidebar's toast: expand to the full text / dismiss (W-archive2)
+	zoneLink                     // a link to the web app (name: the URL; weblink.go)
 )
 
 type zoneDef struct {
@@ -168,6 +170,14 @@ func (m *Model) onMouseClick(ms tea.Mouse) tea.Cmd {
 	if z.kind == zoneHint {
 		return m.clickHint(z.name)
 	}
+	if z.kind == zoneToast && m.toast != nil {
+		if m.toast.open {
+			m.toast = nil // a second click dismisses it
+		} else {
+			m.toast.open = true
+		}
+		return nil
+	}
 	if z.kind == zoneOverlay {
 		if c, ok := m.overlay.(interface{ click(*Model, string) tea.Cmd }); ok {
 			return c.click(m, z.name)
@@ -196,6 +206,8 @@ func (m *Model) onMouseClick(ms tea.Mouse) tea.Cmd {
 			return m.goTop(m.sessionsView()) // in its current view (sessions_modes.go)
 		}
 		return m.goTop(z.view)
+	case zoneLink:
+		return m.openWebURL(z.name, "web inbox")
 	case zoneTipsHide:
 		return m.dismissTips()
 	case zoneSection:
@@ -280,6 +292,9 @@ func (m *Model) onMouseWheel(ms tea.Mouse) tea.Cmd {
 		return nil
 	}
 	if m.overlay != nil {
+		if wo, ok := m.overlay.(interface{ wheel(*Model, string) tea.Cmd }); ok {
+			return wo.wheel(m, dir)
+		}
 		return m.overlay.update(m, keyFor(dir))
 	}
 	if m.filtering {

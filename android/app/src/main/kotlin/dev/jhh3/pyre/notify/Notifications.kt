@@ -98,9 +98,10 @@ object Notifications {
                 .setContentIntent(openIntent(ctx, spec.deepLink, spec.attentionId.hashCode()))
             spec.actions.forEachIndexed { i, a ->
                 val intent = Intent(ctx, NotificationActionReceiver::class.java)
-                    .setAction(NotificationActionReceiver.ACTION_ANSWER)
+                    .setAction(if (a.askId.isNotEmpty()) NotificationActionReceiver.ACTION_ANSWER_ASK else NotificationActionReceiver.ACTION_ANSWER)
                     .putExtra(NotificationActionReceiver.EXTRA_ATTENTION, spec.attentionId)
                     .putExtra(NotificationActionReceiver.EXTRA_APPROVAL, a.approvalId)
+                    .putExtra(NotificationActionReceiver.EXTRA_ASK, a.askId)
                     .putExtra(NotificationActionReceiver.EXTRA_RUN, a.runId)
                     .putExtra(NotificationActionReceiver.EXTRA_OPTION, a.option.id)
                     .putExtra(NotificationActionReceiver.EXTRA_LABEL, a.option.label)

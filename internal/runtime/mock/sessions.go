@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -40,7 +41,7 @@ func (b *Backend) viewLocked(s *c.Session) c.SessionView {
 		}
 		mine = append(mine, *a)
 	}
-	v.Flag = sessionflag.WithRun(sessionflag.Compute(mine), v.Run)
+	v.Flag = sessionflag.WithRun(sessionflag.ComputeRun(mine, v.Run), v.Run)
 	return v
 }
 
@@ -681,6 +682,14 @@ func (b *Backend) UpdateSession(ctx context.Context, req c.UpdateSessionRequest)
 		if req.Archived != nil && p.Kind == c.PrincipalSession && p.ID != s.SessionID && !s.StartedBy(p.ID) { // W-childnotify
 			return c.SessionView{}, c.Errorf(c.ErrForbidden, "an agent may archive only its own session and the sessions it started")
 		}
+		var icon *string
+		if req.Icon != nil { // W-archive2
+			v, err := autotitle.ValidIcon(*req.Icon)
+			if err != nil {
+				return c.SessionView{}, err
+			}
+			icon = &v
+		}
 		if req.Tags != nil {
 			s.Tags = append([]string(nil), (*req.Tags)...)
 		}
@@ -688,12 +697,66 @@ func (b *Backend) UpdateSession(ctx context.Context, req c.UpdateSessionRequest)
 			s.Title = *req.Title
 			s.Tags = autotitle.RenameTags(p, s.Tags)
 		}
-		if req.Archived != nil {
+		if icon != nil {
+			s.Icon = *icon
+		}
+		if req.Parent != nil { // W-reparent (the hub also checks permissions and sends notices)
+			to := strings.TrimSpace(*req.Parent)
+			if strings.EqualFold(to, "none") {
+				to = ""
+			}
+			if to != "" {
+				ps, ok := b.sessions[to]
+				switch {
+				case to == s.SessionID:
+					return c.SessionView{}, c.Errorf(c.ErrInvalid, "a session cannot be its own parent")
+				case !ok:
+					return c.SessionView{}, c.Errorf(c.ErrInvalid, "parent session %s not found", to)
+				case ps.Archived:
+					return c.SessionView{}, c.Errorf(c.ErrInvalid, "parent session %s is archived", to)
+				}
+				for a, n := ps.Parent(), 0; a != "" && n < 256; n++ {
+					if a == s.SessionID {
+						return c.SessionView{}, c.Errorf(c.ErrInvalid, "that would make a cycle")
+					}
+					up, ok := b.sessions[a]
+					if !ok {
+						break
+					}
+					a = up.Parent()
+				}
+			}
+			if from := s.Parent(); from != to {
+				now := b.now()
+				s.Lineage.ParentSessionID, s.Lineage.ReparentedFrom, s.Lineage.ReparentedAt = to, from, &now
+				if to != "" && !slices.Contains(s.Tags, c.TagReportNone) && !slices.Contains(s.Tags, c.TagReportParent) {
+					s.Tags = append(slices.Clone(s.Tags), c.TagReportParent)
+				}
+			}
+		}
+		switch {
+		case req.Archived != nil && *req.Archived && req.WhenDone && b.runLiveLocked(s):
+			// W-archive2: the hub archives after the turn; the mock records
+			// the pending archive only.
+			if !slices.Contains(s.Tags, c.TagArchiveWhenDone) {
+				s.Tags = append(slices.Clone(s.Tags), c.TagArchiveWhenDone)
+			}
+		case req.Archived != nil:
 			s.Archived = *req.Archived
+			if s.Archived {
+				b.withdrawAttentionLocked(waitingGroup(s.SessionID), c.AttnWithdrawn)
+			}
+			s.Tags = slices.DeleteFunc(slices.Clone(s.Tags), func(t string) bool { return t == c.TagArchiveWhenDone })
 		}
 		b.emit(c.EvSessionUpdated, ref(c.KindSession, s.SessionID), s.SessionID, s.ProjectID, s)
 		return b.viewLocked(s), nil
 	})
+}
+
+// runLiveLocked: the session's current run may still be executing.
+func (b *Backend) runLiveLocked(s *c.Session) bool {
+	r, ok := b.runs[s.CurrentRunID]
+	return ok && !r.State.Terminal()
 }
 
 func (b *Backend) ListRuns(ctx context.Context, req c.ListRunsRequest) (c.Page[c.Run], error) {
@@ -741,6 +804,9 @@ func (b *Backend) setRunStateLocked(r *c.Run, st c.RunState, reason, origin stri
 		delete(b.busy, r.RunID)
 		b.withdrawRunApprovalsLocked(r, "run ended")
 		b.withdrawAttentionLocked("flag:session:"+r.SessionID, c.AttnWithdrawn) // the run that asked is gone
+		b.withdrawAttentionLocked(waitingGroup(r.SessionID), c.AttnWithdrawn)
+	} else if st == c.RunRunning {
+		b.withdrawAttentionLocked(waitingGroup(r.SessionID), c.AttnWithdrawn) // its next turn started
 		b.releaseAssignmentsLocked(r.RunID)
 	}
 	var pid *string

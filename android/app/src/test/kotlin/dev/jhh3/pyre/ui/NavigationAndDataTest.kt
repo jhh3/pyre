@@ -41,9 +41,10 @@ class NavigationAndDataTest {
         assertTrue(DeepLinks.parse("pyre://pair?hub=x&id=y&code=z") is Screen.Pairing)
         assertNull(DeepLinks.parse("https://evil.example/approval/apr_1"))
         assertNull(DeepLinks.parse("pyre://approval/../../x"))
-        // There is no Inbox: old inbox links open the session (resolved) or Sessions.
+        // Inbox links open the inbox; an item link resolves (ask sheet or session); an ask link opens its sheet.
         assertEquals(Screen.AttentionLink("att_1"), DeepLinks.parse("pyre://attention/att_1"))
-        assertEquals(Screen.Sessions, DeepLinks.parse("pyre://attention/inbox"))
+        assertEquals(Screen.Inbox(), DeepLinks.parse("pyre://attention/inbox"))
+        assertEquals(Screen.Inbox(openAskId = "ask_1"), DeepLinks.parse("pyre://ask/ask_1"))
         // Every deep link in the fixtures resolves.
         Fixtures.files().forEach { f ->
             Fixtures.bundle(f.name.take(2)).attention.forEach { assertNotNull(it.deepLink, DeepLinks.parse(it.deepLink)) }

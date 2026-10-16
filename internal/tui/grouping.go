@@ -12,8 +12,7 @@ import (
 )
 
 // Session grouping. The Sessions list groups rows by project (the default:
-// projects ordered by their most recently started session, "No project"
-// last), by machine, by repository (derived from the run's directory) or not
+// projects by name, sessions in creation order inside, "No project" last), by machine, by repository (derived from the run's directory) or not
 // at all (a flat list ordered by what needs you, then recent activity). gb
 // cycles the mode, :group sets it; an explicit choice is remembered in the
 // state file. Group headers are quiet: a faint name, a count, a status
@@ -59,7 +58,7 @@ type groupingState struct {
 	collapsed map[string]bool                             // mode + ":" + key
 	counts    map[string]int                              // sessions per group (last sync)
 	needs     map[string]bool                             // groups with a session that needs you
-	stCounts  map[string]map[string]int                   // group → status label → sessions
+	leads     map[string][]string                         // group → its top-level rows (lead signals, leads.go)
 	sort      sortMode                                    // order inside groups ("" = name; sort.go)
 	kinds     map[string]map[contracts.AttentionKind]bool // open attention per session (last sort)
 	trees     map[string]bool                             // parents whose children are folded (tree.go)
@@ -204,9 +203,11 @@ func (m *Model) groupLabel(key string) string {
 // ---- ordering ----
 
 // sortGrouped orders sessions for the list: Pinned first (by pin time),
-// then the mode's groups — projects by their most recently started session,
-// machines and repos by name — with unknowns last; inside a group rows list
-// by machine, then title; the flat list by needs-you then recent activity.
+// then the mode's groups — projects, machines and repos by name — with
+// unknowns last; inside a project rows list in creation order (owner
+// request 2026-10-13: nothing reorders while you watch — a new session
+// appends, a rename or a run start moves nothing); inside other groups by
+// machine, then title; the flat list by needs-you then recent activity.
 func (m *Model) sortGrouped(ss []contracts.SessionView) {
 	sortSessionsByMachine(ss)
 	mode := m.groupMode()
@@ -216,23 +217,13 @@ func (m *Model) sortGrouped(ss []contracts.SessionView) {
 		srt = sortAttention // the flat list: needs you, then recent activity
 	}
 	type keyed struct {
-		pin    bool
-		at     int64
-		recent time.Time // project mode: the group's latest session start
-		group  string
-		class  attnClass // attention sort
-		needs  bool
-		act    time.Time
-	}
-	recent := map[string]time.Time{}
-	if mode == groupProject {
-		// A start time, not live state changes: a group does not jump while
-		// you watch its sessions work.
-		for _, s := range ss {
-			if g := m.groupKey(s); !m.pinned(s) && sessionStarted(s).After(recent[g]) {
-				recent[g] = sessionStarted(s)
-			}
-		}
+		pin     bool
+		at      int64
+		created string // project mode, name sort: creation order (time-sortable session ID)
+		group   string
+		class   attnClass // attention sort
+		needs   bool
+		act     time.Time
 	}
 	ks := make(map[string]keyed, len(ss))
 	for _, s := range ss {
@@ -242,8 +233,8 @@ func (m *Model) sortGrouped(ss []contracts.SessionView) {
 			k.group = strings.ToLower(m.groupLabel(m.groupKey(s))) + "\x00" + m.groupKey(s)
 			if g := m.groupKey(s); g == noGroup || (mode == groupMachine && g == "") {
 				k.group = "￿" // unknown groups last
-			} else if mode == groupProject {
-				k.recent = recent[g]
+			} else if mode == groupProject && (srt == "" || srt == sortName) {
+				k.created = s.Session.SessionID
 			}
 			if mode == groupAttention {
 				k.group = m.groupKey(s) // the classes in their fixed order
@@ -257,6 +248,8 @@ func (m *Model) sortGrouped(ss []contracts.SessionView) {
 				}
 			case sortActivity:
 				k.act = m.lastActivity(s)
+			case sortYours:
+				k.act = ownerActive(s) // never: last, by machine and title
 			}
 		}
 		ks[s.Session.SessionID] = k
@@ -272,11 +265,11 @@ func (m *Model) sortGrouped(ss []contracts.SessionView) {
 			}
 			return a.at < b.at
 		}
-		if !a.recent.Equal(b.recent) {
-			return a.recent.After(b.recent) // unknown groups have none: last
-		}
 		if a.group != b.group {
 			return a.group < b.group
+		}
+		if a.created != b.created {
+			return a.created < b.created
 		}
 		if a.class != b.class {
 			return a.class < b.class
@@ -293,14 +286,6 @@ func (m *Model) sortGrouped(ss []contracts.SessionView) {
 	}
 	ordered, _ := treeLayout(ss, groups)
 	copy(ss, ordered)
-}
-
-// sessionStarted is when s's current run started, else when s was created.
-func sessionStarted(s contracts.SessionView) time.Time {
-	if s.Run != nil && s.Run.StartedAt.After(s.Session.CreatedAt) {
-		return s.Run.StartedAt
-	}
-	return s.Session.CreatedAt
 }
 
 // lastActivity is the latest known activity of s: a state change the Grid
@@ -328,7 +313,7 @@ func (m *Model) groupCollapsed(key string) bool {
 func (m *Model) groupedIDs(vs []contracts.SessionView) []string {
 	g := &m.grouping
 	g.counts, g.needs = map[string]int{}, map[string]bool{}
-	g.stCounts = map[string]map[string]int{}
+	g.leads = map[string][]string{}
 	keys := make([]string, len(vs))
 	for i, s := range vs {
 		k := m.sessionGroup(s)
@@ -337,12 +322,13 @@ func (m *Model) groupedIDs(vs []contracts.SessionView) []string {
 		if gridNeedsYou(s, m.nodeOf(s)) {
 			g.needs[k] = true
 		}
-		if g.stCounts[k] == nil {
-			g.stCounts[k] = map[string]int{}
-		}
-		g.stCounts[k][listStatus(s, m.nodeOf(s)).label]++
 	}
 	m.layoutTrees(vs, keys) // tree.go
+	for i, s := range vs {
+		if r := m.tree.rows[s.Session.SessionID]; r.depth == 0 && r.hint == "" {
+			g.leads[keys[i]] = append(g.leads[keys[i]], s.Session.SessionID)
+		}
+	}
 	ids := make([]string, 0, len(vs))
 	for i, s := range vs {
 		k := keys[i]
@@ -376,13 +362,19 @@ func (m *Model) rowGroup(id string, byID map[string]contracts.SessionView) strin
 }
 
 // groupHeaderText is a header's content in w columns: the faint name, the
-// count, then the project's status summary or the machine's health, and an
+// count, then the project's lead summary or the machine's health, and an
 // amber dot when the group needs you (outside project mode, where the
-// summary leads with what needs you).
+// summary leads with what needs you). A project whose leads are all quiet
+// reads faint.
 func (m *Model) groupHeaderText(key string, w int) string {
 	h := m.th.dim.Render(m.groupLabel(key)) + " " + m.th.faint.Render(itoa(m.grouping.counts[key]))
 	if m.groupMode() == groupProject && key != pinnedGroup {
-		for _, seg := range m.groupStatusSummary(key) {
+		segs, quiet := m.projectLeadSummary(key, m.grouping.leads[key]) // leads.go
+		if quiet {
+			return m.th.faint.Render(m.groupLabel(key) + " " + itoa(m.grouping.counts[key]))
+		}
+		h = m.groupLabel(key) + " " + m.th.faint.Render(itoa(m.grouping.counts[key]))
+		for _, seg := range segs {
 			if width(h)+width(seg) > w {
 				break
 			}
@@ -407,60 +399,6 @@ func (m *Model) groupHeaderText(key string, w int) string {
 		h += " " + m.th.tone(toneWarn, "•")
 	}
 	return h
-}
-
-// summaryBuckets fold status words into a project header's few counts.
-var summaryBuckets = []struct {
-	name   string
-	labels []string
-}{
-	{"need you", []string{"approval", "question", "needs you"}},
-	{"failed", []string{"failed"}},
-	{"working", []string{"working", "running", "starting"}},
-	{"idle", []string{"idle", "background"}},
-	{"offline", []string{"offline"}},
-	{"stale", []string{"stale"}},
-}
-
-// groupStatusSummary is a project header's quiet status summary, one
-// segment each, the most urgent first (" · ! 2 need you · 3 working · 1
-// idle"); only need you (amber) and failed (red) keep their colour.
-func (m *Model) groupStatusSummary(key string) []string {
-	counts := map[string]int{}
-	for k, n := range m.grouping.stCounts[key] {
-		counts[k] = n
-	}
-	sep := m.th.faint.Render(" · ")
-	var out []string
-	for _, b := range summaryBuckets {
-		n := 0
-		for _, l := range b.labels {
-			n += counts[l]
-			delete(counts, l)
-		}
-		switch {
-		case n == 0:
-		case b.name == "need you":
-			word := "need you"
-			if n == 1 {
-				word = "needs you"
-			}
-			out = append(out, sep+m.th.tone(toneWarn, "! "+itoa(n)+" "+word))
-		case b.name == "failed":
-			out = append(out, sep+m.th.tone(toneBad, "✗ "+itoa(n)+" failed"))
-		default:
-			out = append(out, sep+m.th.faint.Render(itoa(n)+" "+b.name))
-		}
-	}
-	rest := make([]string, 0, len(counts))
-	for k := range counts {
-		rest = append(rest, k)
-	}
-	sort.Strings(rest)
-	for _, k := range rest { // any other status word (exited, …), quietly
-		out = append(out, sep+m.th.faint.Render(itoa(counts[k])+" "+k))
-	}
-	return out
 }
 
 // groupHeader is an (expanded) group's header line; a click folds it.
@@ -598,6 +536,9 @@ func (m *Model) groupRowHints() ([]hint, bool) {
 	if _, ok := groupOfRow(m.sessList.sel); !ok {
 		return nil, false
 	}
+	if m.projectArchiveKey(m.sessList.sel) != "" { // W-archive2
+		return []hint{{"enter", "expand"}, {"X", "archive project"}, {"n", "new session"}, {"gb", "group by"}, {"/", "filter"}, {"␣␣", "find"}}, true
+	}
 	return []hint{{"n", "new session"}, {"enter", "expand"}, {"gb", "group by"}, {"/", "filter"}, {"␣␣", "find"}}, true
 }
 
@@ -686,7 +627,7 @@ func (m *Model) groupRowDetail(key string, w int) []string {
 			break
 		}
 		st := listStatus(s, m.nodeOf(s))
-		out = append(out, trunc(m.th.tone(st.tone, st.sym)+" "+s.Session.Title+m.th.faint.Render("  "+st.label), w))
+		out = append(out, trunc(m.th.tone(st.tone, st.sym)+" "+iconTitle(s)+m.th.faint.Render("  "+st.label), w))
 	}
 	return append(out, "", trunc(m.th.key.Render("enter")+" "+m.th.dim.Render("or a click expands · ")+m.th.key.Render("gb")+" "+m.th.dim.Render("changes the grouping"), w))
 }

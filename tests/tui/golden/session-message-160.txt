@@ -1,10 +1,10 @@
  Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                 anthropic 1 ready · 1 at limit   openai 0 ready   ● live
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   STATUS       SESSION                         MACHINE     HARNESS  AGE  │ pairing session · ○ idle · Claude on synth-mac  typing elsewhere · enter to take over
-  Synthetic Outfit 1 · 1 working                                         │ ✉ message for you: Synthetic: the build is green, ready when y… — m reply · d dismiss
+  Synthetic Outfit 1 · ◌ 1 working                                       │ ✉ message for you: Synthetic: the build is green, ready when y… — m reply · d dismiss
   ● working    outfit API client               synth-linux claude   30s  │ read-only snapshot · MOCK backend: there is no live terminal; showing transcript/scr…
                                                                          │
-  No project 8 · ! 3 need you · 3 working · 1 stale · 1 message          │ [mock screen] pairing session — waiting_input
+  No project 8 · ◆ 3 waiting · ◌ 3 working                               │ [mock screen] pairing session — waiting_input
   ◔ starting   api work (handoff successor)    synth-linux codex    30s  │ Working on it (synthetic).
   ◌ stale      long refactor                   synth-linux claude    7m  │ >
   ! needs you  worker                          synth-linux claude   30s  │
@@ -27,8 +27,8 @@
                                                                          │
                                                                          │
                                                                          │
-                                                                         │
-
- Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone) · ✉ 1 message
-
- n new session   enter type   F full-screen   m message   i info   / filter   ␣␣ find                                                                    ? help
+ ──────────────────────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ⁇ worker   +1 more · ✉ 1 message             │
+ n new session      enter type         F full-screen                     │
+ m message          i info             / filter                          │
+ ␣␣ find            ? keys                                               │

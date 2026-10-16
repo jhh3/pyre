@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package stack brings up a real local Pyre stack for resilience, security
 // and budget tests: the pyre-hub and pyred binaries built from this module,
 // run as separate processes in an isolated directory on a loopback port, so

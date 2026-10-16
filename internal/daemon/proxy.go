@@ -67,8 +67,15 @@ func fwd0[Resp any](p proxy, ctx context.Context, f func(c.API, context.Context)
 }
 
 // SetHubLink records whether the node's hub link is connected (pyred calls
-// it on every link state change).
-func (d *Daemon) SetHubLink(connected bool) { d.hubLinkDown.Store(!connected) }
+// it on every link state change). A (re)connection wakes every local
+// doorbell wait (W-localwait): deliver commands may have been missed while
+// the link was down, so each watcher re-reads its inbox from the hub.
+func (d *Daemon) SetHubLink(connected bool) {
+	d.hubLinkDown.Store(!connected)
+	if connected {
+		d.inboxWait.signalAll()
+	}
+}
 
 // hubUnreachable reports whether proxied calls cannot reach a hub right
 // now: no hub is configured, or the hub link is down.

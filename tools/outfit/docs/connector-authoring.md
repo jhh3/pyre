@@ -50,6 +50,37 @@ That one declaration produces `outfit acme tickets-list --status open --all` and
 
 Pagination is opt-in at CLI invocation with `--all` or through compact MCP dispatch with `all`, and is always bounded. Declare exact JSON paths when known. Outfit can also infer conventional `cursor`, `after`, `page_token`, GraphQL `pageInfo`, MCP `_meta.nextCursor`, and Stripe `starting_after` shapes. Provider pages remain individually visible in the result envelope.
 
+HTTP modes may declare fixed, non-secret `executor.headers` sent on every request (for example Discord requires `User-Agent: DiscordBot (url, version)`); credentials always go through bindings, and `Authorization`, `Host`, `Cookie`, and `Content-Length` are reserved. An operation can add fixed `queryValues` (such as `with_counts: 'true'`). Body arguments are JSON-coerced by default (`[1,2]`, `true`, and numbers become JSON; large integers keep every digit); list free text and snowflake-style IDs in `stringArguments` so `"42"` or `"true"` stays a string. Values in `bodyValues` act as defaults that a same-named `body` argument overrides, which is how Discord's `allowed_mentions: {parse: []}` stays the default unless a caller passes its own.
+
+Argument-driven request parts are declared, never free-form:
+
+- `argumentHeaders: [{name: X-Audit-Log-Reason, argument: reason, encoding: url}]` sends an optional argument as a header only when given (`url` percent-encodes it; otherwise control characters are rejected). Credential and framing headers (`Authorization`, `Cookie`, `Host`, `Content-Type`, `Content-Length`) cannot be argument headers.
+- `itemTemplates: {answers: {poll_media: {text: '{{item}}'}}}` turns plain-string items of a JSON-array argument into objects; object items pass through.
+- `relativeTimeArguments: [until]` accepts minutes (`60`), durations (`90m`, `12h`, `7d`), or an RFC 3339 time and sends RFC 3339 UTC; `0`/`none` sends JSON `null`.
+- A generic escape hatch opts in with `pathArgument` (plus optional `queryArgument`, `bodyArgument`, and `methodArgument` with a `methods` allow-list). The path must start with `/` and is rejected if it contains a scheme, host, `//`, `?`, `#`, a backslash, whitespace, an empty/`.`/`..` segment, an encoded separator, or the base path itself; each segment is percent-encoded and appended below the fixed `baseUrl`, so the origin, credential, executor headers, and 429 handling never change. A `read` operation using these must be `GET`-only; a method-choosing operation should be `destructive` when its allow-list includes `DELETE`.
+
+```yaml
+- {name: api_get, class: read, http: {method: GET, path: /, pathArgument: path, queryArgument: query}}
+- name: api_call
+  class: destructive
+  http: {path: /, methodArgument: method, methods: [POST, PUT, PATCH, DELETE], pathArgument: path, queryArgument: query, bodyArgument: body}
+```
+
+Every HTTP call honours `429 Too Many Requests`: Outfit waits the provider's JSON `retry_after`, `Retry-After`, or `X-RateLimit-Reset-After` and retries up to three times. A requested wait above 30 seconds is not slept; the error reports it. A 429 means the provider did not execute the request, so the bounded retry also applies to writes.
+
+A composite read combines several read operations of the same mode into one call without provider-specific code:
+
+```yaml
+- name: activity
+  class: read
+  input: {type: object, properties: {guild: {type: string, description: Guild ID., examples: ['123']}}, required: [guild]}
+  compose:
+    - {as: channels, operation: channels, fields: [id, name, last_message_id]}
+    - {as: threads, operation: active_threads, itemsPath: $.threads, fields: [id, parent_id, last_message_id]}
+```
+
+Steps run sequentially through the selected credential and return one object keyed by `as`. Composite arguments a step declares pass through unchanged; `arguments` can map a step argument to another composite argument or to an `=literal`. `fields` projects each item at `itemsPath` (default: the whole result) to compact top-level keys. Steps must be non-composite reads, there are at most eight, and any failing step fails the whole read.
+
 A resolver can provide one lookup per selectable mode. This keeps one URL/resource definition while letting the runtime use the executor the person actually connected—such as a local REST operation or an imported hosted-MCP tool:
 
 ```yaml

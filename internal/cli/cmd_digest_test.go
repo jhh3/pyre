@@ -109,7 +109,7 @@ func TestMCPGetDigestReadOnly(t *testing.T) {
 	t.Cleanup(func() { mcpDigestStatePath = old })
 	cl := startMCP(t, &Ops{API: &digest.FixtureAPI{API: b, In: digest.SyntheticInput()}, PollInterval: 10 * time.Millisecond})
 	cl.call("initialize", map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "test", "version": "0"}})
-	out, isErr := cl.tool("get_digest", map[string]any{"since": "2026-10-05T09:00:00Z"})
+	out, isErr := cl.tool("get_digest", map[string]any{"since": "2026-10-05T09:00:00Z", "format": "json"})
 	var d digest.Digest
 	if isErr || json.Unmarshal(out, &d) != nil || len(d.Agents) != 5 || d.Agents[0].Link != "pyre://approval/apr_synthA" {
 		t.Fatalf("get_digest: %s", out)

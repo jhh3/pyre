@@ -64,7 +64,8 @@ func Mutate(ctx context.Context, db *sql.DB, m contracts.Mutation, op string, re
 	if err != nil {
 		return err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, end, err := sqlitex.Begin(ctx, db)
+	defer end()
 	if err != nil {
 		return err
 	}

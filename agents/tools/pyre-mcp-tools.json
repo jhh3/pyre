@@ -81,393 +81,19 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "include_revoked": {
           "description": "include revoked nodes",
           "type": "boolean"
         }
       },
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "DiskUsage": {
-          "properties": {
-            "free_mb": {
-              "type": "integer"
-            },
-            "path": {
-              "type": "string"
-            },
-            "roles": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "total_mb": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "path",
-            "roles",
-            "total_mb",
-            "free_mb"
-          ],
-          "type": "object"
-        },
-        "HarnessInfo": {
-          "properties": {
-            "available": {
-              "type": "boolean"
-            },
-            "capabilities": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "executable": {
-              "type": "string"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "login": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/HarnessLogin"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "probed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "version": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "harness",
-            "version",
-            "available",
-            "capabilities",
-            "probed_at"
-          ],
-          "type": "object"
-        },
-        "HarnessLogin": {
-          "properties": {
-            "email": {
-              "type": "string"
-            },
-            "plan": {
-              "type": "string"
-            },
-            "provider_ref": {
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        "Node": {
-          "properties": {
-            "arch": {
-              "type": "string"
-            },
-            "capabilities": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "connection": {
-              "$ref": "#/$defs/NodeConnection"
-            },
-            "enrolled_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "harnesses": {
-              "items": {
-                "$ref": "#/$defs/HarnessInfo"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "hostname": {
-              "type": "string"
-            },
-            "labels": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": [
-                "object",
-                "null"
-              ]
-            },
-            "name": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "platform": {
-              "type": "string"
-            },
-            "resources": {
-              "$ref": "#/$defs/NodeResources"
-            },
-            "ssh_alias": {
-              "type": "string"
-            },
-            "versions": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": [
-                "object",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "node_id",
-            "name",
-            "platform",
-            "arch",
-            "harnesses",
-            "versions",
-            "capabilities",
-            "connection",
-            "resources",
-            "enrolled_at"
-          ],
-          "type": "object"
-        },
-        "NodeConnection": {
-          "properties": {
-            "connected_since": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "last_seen_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "protocol": {
-              "type": "integer"
-            },
-            "remote_addr": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "state"
-          ],
-          "type": "object"
-        },
-        "NodeResources": {
-          "properties": {
-            "active_runs": {
-              "type": "integer"
-            },
-            "agent_cpu_pct": {
-              "type": "number"
-            },
-            "agent_rss_mb": {
-              "type": "number"
-            },
-            "cpu_count": {
-              "type": "integer"
-            },
-            "cpu_pct": {
-              "type": "number"
-            },
-            "disks": {
-              "items": {
-                "$ref": "#/$defs/DiskUsage"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "load1": {
-              "type": "number"
-            },
-            "load15": {
-              "type": "number"
-            },
-            "load5": {
-              "type": "number"
-            },
-            "max_runs": {
-              "type": "integer"
-            },
-            "mem_avail_mb": {
-              "type": "integer"
-            },
-            "mem_pressure": {
-              "type": "string"
-            },
-            "mem_pressure_some10": {
-              "type": "number"
-            },
-            "mem_total_mb": {
-              "type": "integer"
-            },
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "pyre_cpu_pct": {
-              "type": "number"
-            },
-            "pyre_rss_mb": {
-              "type": "number"
-            },
-            "runs": {
-              "items": {
-                "$ref": "#/$defs/RunUsage"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "swap_total_mb": {
-              "type": "integer"
-            },
-            "swap_used_mb": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "cpu_count",
-            "load1",
-            "mem_total_mb",
-            "mem_avail_mb",
-            "active_runs",
-            "max_runs",
-            "pyre_rss_mb",
-            "pyre_cpu_pct",
-            "agent_rss_mb",
-            "agent_cpu_pct",
-            "observed_at"
-          ],
-          "type": "object"
-        },
-        "ProcUsage": {
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "pid": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            }
-          },
-          "required": [
-            "pid",
-            "name",
-            "rss_mb"
-          ],
-          "type": "object"
-        },
-        "RunUsage": {
-          "properties": {
-            "cpu_pct": {
-              "type": "number"
-            },
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "procs": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "top": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ProcUsage"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id",
-            "procs",
-            "rss_mb",
-            "observed_at"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "items": {
-          "items": {
-            "$ref": "#/$defs/Node"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "next_cursor": {
-          "type": "string"
-        },
-        "snapshot_at": {
-          "format": "date-time",
-          "type": "string"
-        }
-      },
-      "required": [
-        "items",
-        "snapshot_at"
-      ],
       "type": "object"
     },
     "annotations": {
@@ -481,10 +107,18 @@
   {
     "name": "list_sessions",
     "title": "List sessions",
-    "description": "List sessions across the fleet with run state, node, project and freshness.",
+    "description": "List sessions across the fleet: one line each with id, title, run state, machine (\"this machine\" shares your filesystem), age and project.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "harness": {
           "description": "claude, codex or shell",
           "type": "string"
@@ -515,613 +149,6 @@
       },
       "type": "object"
     },
-    "outputSchema": {
-      "$defs": {
-        "CheckoutBinding": {
-          "properties": {
-            "branch": {
-              "type": "string"
-            },
-            "mode": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            },
-            "repo_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "node_id",
-            "path",
-            "mode"
-          ],
-          "type": "object"
-        },
-        "Freshness": {
-          "properties": {
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "source": {
-              "type": "string"
-            },
-            "stale": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "observed_at",
-            "source",
-            "stale"
-          ],
-          "type": "object"
-        },
-        "InputLease": {
-          "properties": {
-            "acquired_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "expires_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "holder": {
-              "$ref": "#/$defs/Principal"
-            },
-            "lease_id": {
-              "type": "string"
-            },
-            "released_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "renewed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "takeover_of": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "lease_id",
-            "run_id",
-            "holder",
-            "acquired_at",
-            "renewed_at",
-            "expires_at"
-          ],
-          "type": "object"
-        },
-        "Lineage": {
-          "properties": {
-            "forked_from": {
-              "type": "string"
-            },
-            "handoff_note_id": {
-              "type": "string"
-            },
-            "parent_session_id": {
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        "NativeRef": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Principal": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "on_behalf_of": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Principal"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "ProcUsage": {
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "pid": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            }
-          },
-          "required": [
-            "pid",
-            "name",
-            "rss_mb"
-          ],
-          "type": "object"
-        },
-        "Run": {
-          "properties": {
-            "account_id": {
-              "type": "string"
-            },
-            "activity": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RunActivity"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "adapter": {
-              "type": "string"
-            },
-            "adapter_data": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": [
-                "object",
-                "null"
-              ]
-            },
-            "assignment_id": {
-              "type": "string"
-            },
-            "capabilities": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "checkout": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CheckoutBinding"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "continuation_kind": {
-              "type": "string"
-            },
-            "cwd": {
-              "type": "string"
-            },
-            "ended_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "env_generation_id": {
-              "type": "string"
-            },
-            "exit_code": {
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "freshness": {
-              "$ref": "#/$defs/Freshness"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "lease": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/InputLease"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "native_ref": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/NativeRef"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "pending_approval_ids": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "previous_run_id": {
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "runtime": {
-              "$ref": "#/$defs/RuntimeVersion"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "started_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            },
-            "state_reason": {
-              "type": "string"
-            },
-            "subagents": {
-              "items": {
-                "$ref": "#/$defs/SubagentObservation"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "usage": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RunUsage"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id",
-            "session_id",
-            "node_id",
-            "adapter",
-            "harness",
-            "cwd",
-            "runtime",
-            "state",
-            "freshness",
-            "started_at",
-            "capabilities"
-          ],
-          "type": "object"
-        },
-        "RunActivity": {
-          "properties": {
-            "since": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "text",
-            "since"
-          ],
-          "type": "object"
-        },
-        "RunUsage": {
-          "properties": {
-            "cpu_pct": {
-              "type": "number"
-            },
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "procs": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "top": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ProcUsage"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id",
-            "procs",
-            "rss_mb",
-            "observed_at"
-          ],
-          "type": "object"
-        },
-        "RuntimeVersion": {
-          "properties": {
-            "digest": {
-              "type": "string"
-            },
-            "executable": {
-              "type": "string"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "version": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "harness",
-            "version"
-          ],
-          "type": "object"
-        },
-        "Session": {
-          "properties": {
-            "archived": {
-              "type": "boolean"
-            },
-            "created_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "created_by": {
-              "$ref": "#/$defs/Principal"
-            },
-            "current_run_id": {
-              "type": "string"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "lineage": {
-              "$ref": "#/$defs/Lineage"
-            },
-            "project_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "tags": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "title": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "session_id",
-            "harness",
-            "title",
-            "project_id",
-            "created_by",
-            "created_at",
-            "lineage",
-            "archived"
-          ],
-          "type": "object"
-        },
-        "SessionFlag": {
-          "properties": {
-            "attention_id": {
-              "type": "string"
-            },
-            "count": {
-              "type": "integer"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "level": {
-              "type": "string"
-            },
-            "messages": {
-              "type": "integer"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "since": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "level",
-            "reason",
-            "count",
-            "messages",
-            "since"
-          ],
-          "type": "object"
-        },
-        "SessionView": {
-          "properties": {
-            "attention": {
-              "type": "integer"
-            },
-            "flag": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/SessionFlag"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "freshness": {
-              "$ref": "#/$defs/Freshness"
-            },
-            "node_name": {
-              "type": "string"
-            },
-            "run": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Run"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "session": {
-              "$ref": "#/$defs/Session"
-            }
-          },
-          "required": [
-            "session",
-            "attention",
-            "freshness"
-          ],
-          "type": "object"
-        },
-        "SubagentObservation": {
-          "properties": {
-            "ended_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "started_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "state": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "state"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "items": {
-          "items": {
-            "$ref": "#/$defs/SessionView"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "next_cursor": {
-          "type": "string"
-        },
-        "snapshot_at": {
-          "format": "date-time",
-          "type": "string"
-        }
-      },
-      "required": [
-        "items",
-        "snapshot_at"
-      ],
-      "type": "object"
-    },
     "annotations": {
       "title": "List sessions",
       "readOnlyHint": true,
@@ -1137,6 +164,14 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "session": {
           "description": "session ID (ses_...), exact title, or \"self\"",
           "type": "string"
@@ -1144,588 +179,6 @@
       },
       "required": [
         "session"
-      ],
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "CheckoutBinding": {
-          "properties": {
-            "branch": {
-              "type": "string"
-            },
-            "mode": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            },
-            "repo_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "node_id",
-            "path",
-            "mode"
-          ],
-          "type": "object"
-        },
-        "Freshness": {
-          "properties": {
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "source": {
-              "type": "string"
-            },
-            "stale": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "observed_at",
-            "source",
-            "stale"
-          ],
-          "type": "object"
-        },
-        "InputLease": {
-          "properties": {
-            "acquired_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "expires_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "holder": {
-              "$ref": "#/$defs/Principal"
-            },
-            "lease_id": {
-              "type": "string"
-            },
-            "released_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "renewed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "takeover_of": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "lease_id",
-            "run_id",
-            "holder",
-            "acquired_at",
-            "renewed_at",
-            "expires_at"
-          ],
-          "type": "object"
-        },
-        "Lineage": {
-          "properties": {
-            "forked_from": {
-              "type": "string"
-            },
-            "handoff_note_id": {
-              "type": "string"
-            },
-            "parent_session_id": {
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        "NativeRef": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Principal": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "on_behalf_of": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Principal"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "ProcUsage": {
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "pid": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            }
-          },
-          "required": [
-            "pid",
-            "name",
-            "rss_mb"
-          ],
-          "type": "object"
-        },
-        "Run": {
-          "properties": {
-            "account_id": {
-              "type": "string"
-            },
-            "activity": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RunActivity"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "adapter": {
-              "type": "string"
-            },
-            "adapter_data": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": [
-                "object",
-                "null"
-              ]
-            },
-            "assignment_id": {
-              "type": "string"
-            },
-            "capabilities": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "checkout": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CheckoutBinding"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "continuation_kind": {
-              "type": "string"
-            },
-            "cwd": {
-              "type": "string"
-            },
-            "ended_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "env_generation_id": {
-              "type": "string"
-            },
-            "exit_code": {
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "freshness": {
-              "$ref": "#/$defs/Freshness"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "lease": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/InputLease"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "native_ref": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/NativeRef"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "pending_approval_ids": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "previous_run_id": {
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "runtime": {
-              "$ref": "#/$defs/RuntimeVersion"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "started_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            },
-            "state_reason": {
-              "type": "string"
-            },
-            "subagents": {
-              "items": {
-                "$ref": "#/$defs/SubagentObservation"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "usage": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RunUsage"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id",
-            "session_id",
-            "node_id",
-            "adapter",
-            "harness",
-            "cwd",
-            "runtime",
-            "state",
-            "freshness",
-            "started_at",
-            "capabilities"
-          ],
-          "type": "object"
-        },
-        "RunActivity": {
-          "properties": {
-            "since": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "text",
-            "since"
-          ],
-          "type": "object"
-        },
-        "RunUsage": {
-          "properties": {
-            "cpu_pct": {
-              "type": "number"
-            },
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "procs": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "top": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ProcUsage"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id",
-            "procs",
-            "rss_mb",
-            "observed_at"
-          ],
-          "type": "object"
-        },
-        "RuntimeVersion": {
-          "properties": {
-            "digest": {
-              "type": "string"
-            },
-            "executable": {
-              "type": "string"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "version": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "harness",
-            "version"
-          ],
-          "type": "object"
-        },
-        "Session": {
-          "properties": {
-            "archived": {
-              "type": "boolean"
-            },
-            "created_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "created_by": {
-              "$ref": "#/$defs/Principal"
-            },
-            "current_run_id": {
-              "type": "string"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "lineage": {
-              "$ref": "#/$defs/Lineage"
-            },
-            "project_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "tags": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "title": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "session_id",
-            "harness",
-            "title",
-            "project_id",
-            "created_by",
-            "created_at",
-            "lineage",
-            "archived"
-          ],
-          "type": "object"
-        },
-        "SessionFlag": {
-          "properties": {
-            "attention_id": {
-              "type": "string"
-            },
-            "count": {
-              "type": "integer"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "level": {
-              "type": "string"
-            },
-            "messages": {
-              "type": "integer"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "since": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "level",
-            "reason",
-            "count",
-            "messages",
-            "since"
-          ],
-          "type": "object"
-        },
-        "SubagentObservation": {
-          "properties": {
-            "ended_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "started_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "state": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "state"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "attention": {
-          "type": "integer"
-        },
-        "flag": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SessionFlag"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "freshness": {
-          "$ref": "#/$defs/Freshness"
-        },
-        "node_name": {
-          "type": "string"
-        },
-        "run": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Run"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "session": {
-          "$ref": "#/$defs/Session"
-        }
-      },
-      "required": [
-        "session",
-        "attention",
-        "freshness"
       ],
       "type": "object"
     },
@@ -1932,6 +385,16 @@
             },
             "parent_session_id": {
               "type": "string"
+            },
+            "reparented_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reparented_from": {
+              "type": "string"
             }
           },
           "type": "object"
@@ -2259,8 +722,18 @@
             "harness": {
               "type": "string"
             },
+            "icon": {
+              "type": "string"
+            },
             "lineage": {
               "$ref": "#/$defs/Lineage"
+            },
+            "owner_active_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "project_id": {
               "type": [
@@ -2443,6 +916,14 @@
           "description": "continue after a previous next_cursor",
           "type": "string"
         },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "limit": {
           "description": "max entries",
           "type": "integer"
@@ -2462,96 +943,6 @@
       },
       "required": [
         "session"
-      ],
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "Freshness": {
-          "properties": {
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "source": {
-              "type": "string"
-            },
-            "stale": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "observed_at",
-            "source",
-            "stale"
-          ],
-          "type": "object"
-        },
-        "TranscriptEntry": {
-          "properties": {
-            "at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "message_id": {
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "seq": {
-              "type": "integer"
-            },
-            "text": {
-              "type": "string"
-            },
-            "truncated": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "seq",
-            "run_id",
-            "at",
-            "kind",
-            "text"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "entries": {
-          "items": {
-            "$ref": "#/$defs/TranscriptEntry"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "freshness": {
-          "$ref": "#/$defs/Freshness"
-        },
-        "gap": {
-          "type": "boolean"
-        },
-        "next_cursor": {
-          "type": "string"
-        },
-        "screen": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "entries",
-        "gap",
-        "freshness"
       ],
       "type": "object"
     },
@@ -2686,7 +1077,7 @@
   {
     "name": "send_message",
     "title": "Send message",
-    "description": "Send a durable message to a session, \"owner\", channel:\u003cname\u003e or project. With reply_to and no to, replies to the original sender. Status keeps stored / runtime-accepted / acknowledged separate.",
+    "description": "Send a durable message to a session, \"owner\", channel:\u003cname\u003e or project. With reply_to and no to, replies to the original sender. delivery_status.summary says whether it is getting through (e.g. recipient ended or its machine is offline).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2896,6 +1287,34 @@
           ],
           "type": "object"
         },
+        "DeliverySummary": {
+          "properties": {
+            "cause": {
+              "type": "string"
+            },
+            "final": {
+              "type": "boolean"
+            },
+            "since": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "summary"
+          ],
+          "type": "object"
+        },
         "MessageBody": {
           "properties": {
             "text": {
@@ -3030,6 +1449,16 @@
         "cursor": {
           "type": "integer"
         },
+        "delivery_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliverySummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "envelope": {
           "$ref": "#/$defs/MessageEnvelope"
         },
@@ -3055,7 +1484,7 @@
   {
     "name": "inbox",
     "title": "Inbox",
-    "description": "List messages addressed to this session (or a given mailbox). wait_seconds long-polls for new mail.",
+    "description": "List unacked messages addressed to this session (or a given mailbox), one line each; get_message \u003cid\u003e shows a full body. wait_seconds long-polls for new mail.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3065,6 +1494,14 @@
         },
         "box": {
           "description": "inbox (default), outbox or all",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
           "type": "string"
         },
         "limit": {
@@ -3087,7 +1524,7 @@
           "type": "string"
         },
         "unacked": {
-          "description": "only messages without ack/reply",
+          "description": "only messages without ack/reply (default true for an inbox; false lists handled mail too)",
           "type": "boolean"
         },
         "wait_seconds": {
@@ -3095,328 +1532,6 @@
           "type": "integer"
         }
       },
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "Address": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Attachment": {
-          "properties": {
-            "artifact_version_id": {
-              "type": "string"
-            },
-            "document_revision_id": {
-              "type": "string"
-            },
-            "note_id": {
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        "DeliveryReceipt": {
-          "properties": {
-            "attempt_id": {
-              "type": "string"
-            },
-            "consumed": {
-              "type": "boolean"
-            },
-            "detail": {
-              "type": "string"
-            },
-            "evidence": {
-              "type": "string"
-            },
-            "evidence_ref": {
-              "type": "string"
-            },
-            "message_id": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "origin_seq": {
-              "type": "integer"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "message_id",
-            "attempt_id",
-            "session_id",
-            "run_id",
-            "node_id",
-            "state",
-            "evidence",
-            "observed_at"
-          ],
-          "type": "object"
-        },
-        "DeliveryStatus": {
-          "properties": {
-            "ack": {
-              "type": "string"
-            },
-            "ack_ref": {
-              "type": "string"
-            },
-            "bound_run_id": {
-              "type": "string"
-            },
-            "consumed_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "outcome_ref": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ObjectRef"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "receipts": {
-              "items": {
-                "$ref": "#/$defs/DeliveryReceipt"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "runtime": {
-              "type": "string"
-            },
-            "runtime_reason": {
-              "type": "string"
-            },
-            "storage": {
-              "type": "string"
-            },
-            "stored_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "updated_at": {
-              "format": "date-time",
-              "type": "string"
-            }
-          },
-          "required": [
-            "storage",
-            "runtime",
-            "ack",
-            "updated_at"
-          ],
-          "type": "object"
-        },
-        "MessageBody": {
-          "properties": {
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "text"
-          ],
-          "type": "object"
-        },
-        "MessageEnvelope": {
-          "properties": {
-            "attachments": {
-              "items": {
-                "$ref": "#/$defs/Attachment"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "body": {
-              "$ref": "#/$defs/MessageBody"
-            },
-            "created_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "expires_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "in_reply_to": {
-              "type": "string"
-            },
-            "message_id": {
-              "type": "string"
-            },
-            "mode": {
-              "type": "string"
-            },
-            "operation_id": {
-              "type": "string"
-            },
-            "project_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "recipient": {
-              "$ref": "#/$defs/Address"
-            },
-            "reissues": {
-              "type": "string"
-            },
-            "request_ack": {
-              "type": "boolean"
-            },
-            "schema_version": {
-              "type": "integer"
-            },
-            "sender": {
-              "$ref": "#/$defs/Principal"
-            },
-            "thread_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "schema_version",
-            "message_id",
-            "operation_id",
-            "sender",
-            "recipient",
-            "project_id",
-            "mode",
-            "body",
-            "created_at"
-          ],
-          "type": "object"
-        },
-        "MessageView": {
-          "properties": {
-            "cursor": {
-              "type": "integer"
-            },
-            "envelope": {
-              "$ref": "#/$defs/MessageEnvelope"
-            },
-            "status": {
-              "$ref": "#/$defs/DeliveryStatus"
-            }
-          },
-          "required": [
-            "envelope",
-            "status",
-            "cursor"
-          ],
-          "type": "object"
-        },
-        "ObjectRef": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Principal": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "on_behalf_of": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Principal"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "items": {
-          "items": {
-            "$ref": "#/$defs/MessageView"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "next_cursor": {
-          "type": "string"
-        },
-        "snapshot_at": {
-          "format": "date-time",
-          "type": "string"
-        }
-      },
-      "required": [
-        "items",
-        "snapshot_at"
-      ],
       "type": "object"
     },
     "annotations": {
@@ -3430,7 +1545,7 @@
   {
     "name": "wait_reply",
     "title": "Wait for reply",
-    "description": "Wait for a reply to a message you sent. Times out with an error carrying the latest delivery state.",
+    "description": "Wait for a reply to a message you sent. Times out with an error saying whether your message is still queued and why; returns at once if the recipient ended or was archived.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3597,6 +1712,34 @@
           ],
           "type": "object"
         },
+        "DeliverySummary": {
+          "properties": {
+            "cause": {
+              "type": "string"
+            },
+            "final": {
+              "type": "boolean"
+            },
+            "since": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "summary"
+          ],
+          "type": "object"
+        },
         "MessageBody": {
           "properties": {
             "text": {
@@ -3688,6 +1831,16 @@
             "cursor": {
               "type": "integer"
             },
+            "delivery_status": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliverySummary"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "envelope": {
               "$ref": "#/$defs/MessageEnvelope"
             },
@@ -3747,6 +1900,9 @@
         }
       },
       "properties": {
+        "delivery": {
+          "type": "string"
+        },
         "message": {
           "$ref": "#/$defs/MessageView"
         },
@@ -3777,10 +1933,18 @@
   {
     "name": "get_message",
     "title": "Show message",
-    "description": "Get a message with every delivery fact and receipt. Indeterminate means unknown, not failed.",
+    "description": "Show a message: sender, thread, state and full body (format json adds every delivery fact and receipt). Indeterminate means unknown, not failed.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "message_id": {
           "description": "message ID",
           "type": "string"
@@ -3788,303 +1952,6 @@
       },
       "required": [
         "message_id"
-      ],
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "Address": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Attachment": {
-          "properties": {
-            "artifact_version_id": {
-              "type": "string"
-            },
-            "document_revision_id": {
-              "type": "string"
-            },
-            "note_id": {
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        "DeliveryReceipt": {
-          "properties": {
-            "attempt_id": {
-              "type": "string"
-            },
-            "consumed": {
-              "type": "boolean"
-            },
-            "detail": {
-              "type": "string"
-            },
-            "evidence": {
-              "type": "string"
-            },
-            "evidence_ref": {
-              "type": "string"
-            },
-            "message_id": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "origin_seq": {
-              "type": "integer"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "message_id",
-            "attempt_id",
-            "session_id",
-            "run_id",
-            "node_id",
-            "state",
-            "evidence",
-            "observed_at"
-          ],
-          "type": "object"
-        },
-        "DeliveryStatus": {
-          "properties": {
-            "ack": {
-              "type": "string"
-            },
-            "ack_ref": {
-              "type": "string"
-            },
-            "bound_run_id": {
-              "type": "string"
-            },
-            "consumed_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "outcome_ref": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ObjectRef"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "receipts": {
-              "items": {
-                "$ref": "#/$defs/DeliveryReceipt"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "runtime": {
-              "type": "string"
-            },
-            "runtime_reason": {
-              "type": "string"
-            },
-            "storage": {
-              "type": "string"
-            },
-            "stored_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "updated_at": {
-              "format": "date-time",
-              "type": "string"
-            }
-          },
-          "required": [
-            "storage",
-            "runtime",
-            "ack",
-            "updated_at"
-          ],
-          "type": "object"
-        },
-        "MessageBody": {
-          "properties": {
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "text"
-          ],
-          "type": "object"
-        },
-        "MessageEnvelope": {
-          "properties": {
-            "attachments": {
-              "items": {
-                "$ref": "#/$defs/Attachment"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "body": {
-              "$ref": "#/$defs/MessageBody"
-            },
-            "created_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "expires_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "in_reply_to": {
-              "type": "string"
-            },
-            "message_id": {
-              "type": "string"
-            },
-            "mode": {
-              "type": "string"
-            },
-            "operation_id": {
-              "type": "string"
-            },
-            "project_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "recipient": {
-              "$ref": "#/$defs/Address"
-            },
-            "reissues": {
-              "type": "string"
-            },
-            "request_ack": {
-              "type": "boolean"
-            },
-            "schema_version": {
-              "type": "integer"
-            },
-            "sender": {
-              "$ref": "#/$defs/Principal"
-            },
-            "thread_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "schema_version",
-            "message_id",
-            "operation_id",
-            "sender",
-            "recipient",
-            "project_id",
-            "mode",
-            "body",
-            "created_at"
-          ],
-          "type": "object"
-        },
-        "ObjectRef": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Principal": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "on_behalf_of": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Principal"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "cursor": {
-          "type": "integer"
-        },
-        "envelope": {
-          "$ref": "#/$defs/MessageEnvelope"
-        },
-        "status": {
-          "$ref": "#/$defs/DeliveryStatus"
-        }
-      },
-      "required": [
-        "envelope",
-        "status",
-        "cursor"
       ],
       "type": "object"
     },
@@ -4270,6 +2137,34 @@
           ],
           "type": "object"
         },
+        "DeliverySummary": {
+          "properties": {
+            "cause": {
+              "type": "string"
+            },
+            "final": {
+              "type": "boolean"
+            },
+            "since": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "summary"
+          ],
+          "type": "object"
+        },
         "MessageBody": {
           "properties": {
             "text": {
@@ -4403,6 +2298,16 @@
       "properties": {
         "cursor": {
           "type": "integer"
+        },
+        "delivery_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliverySummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "envelope": {
           "$ref": "#/$defs/MessageEnvelope"
@@ -4605,6 +2510,34 @@
           ],
           "type": "object"
         },
+        "DeliverySummary": {
+          "properties": {
+            "cause": {
+              "type": "string"
+            },
+            "final": {
+              "type": "boolean"
+            },
+            "since": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "summary"
+          ],
+          "type": "object"
+        },
         "MessageBody": {
           "properties": {
             "text": {
@@ -4738,6 +2671,16 @@
       "properties": {
         "cursor": {
           "type": "integer"
+        },
+        "delivery_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliverySummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "envelope": {
           "$ref": "#/$defs/MessageEnvelope"
@@ -4940,6 +2883,34 @@
           ],
           "type": "object"
         },
+        "DeliverySummary": {
+          "properties": {
+            "cause": {
+              "type": "string"
+            },
+            "final": {
+              "type": "boolean"
+            },
+            "since": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "summary"
+          ],
+          "type": "object"
+        },
         "MessageBody": {
           "properties": {
             "text": {
@@ -5074,6 +3045,16 @@
         "cursor": {
           "type": "integer"
         },
+        "delivery_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliverySummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "envelope": {
           "$ref": "#/$defs/MessageEnvelope"
         },
@@ -5107,189 +3088,19 @@
           "description": "include resolved/expired/withdrawn",
           "type": "boolean"
         },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "session": {
           "description": "session ID (ses_...), exact title, or \"self\"",
           "type": "string"
         }
       },
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "Approval": {
-          "properties": {
-            "allow_text": {
-              "type": "boolean"
-            },
-            "approval_id": {
-              "type": "string"
-            },
-            "body": {
-              "type": "string"
-            },
-            "created_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "expires_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string"
-            },
-            "options": {
-              "items": {
-                "$ref": "#/$defs/ApprovalOption"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "request_id": {
-              "type": "string"
-            },
-            "resolution": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ApprovalResolution"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            },
-            "title": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "approval_id",
-            "session_id",
-            "run_id",
-            "request_id",
-            "kind",
-            "title",
-            "allow_text",
-            "created_at",
-            "state"
-          ],
-          "type": "object"
-        },
-        "ApprovalOption": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "label": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "label"
-          ],
-          "type": "object"
-        },
-        "ApprovalResolution": {
-          "properties": {
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "effect": {
-              "type": "string"
-            },
-            "option_id": {
-              "type": "string"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "resolved_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "source": {
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "actor",
-            "resolved_at",
-            "source"
-          ],
-          "type": "object"
-        },
-        "Principal": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "on_behalf_of": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Principal"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "items": {
-          "items": {
-            "$ref": "#/$defs/Approval"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "next_cursor": {
-          "type": "string"
-        },
-        "snapshot_at": {
-          "format": "date-time",
-          "type": "string"
-        }
-      },
-      "required": [
-        "items",
-        "snapshot_at"
-      ],
       "type": "object"
     },
     "annotations": {
@@ -5497,6 +3308,14 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "include_archived": {
           "description": "include archived",
           "type": "boolean"
@@ -5506,203 +3325,6 @@
           "type": "string"
         }
       },
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "CheckoutBinding": {
-          "properties": {
-            "branch": {
-              "type": "string"
-            },
-            "mode": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            },
-            "repo_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "node_id",
-            "path",
-            "mode"
-          ],
-          "type": "object"
-        },
-        "Link": {
-          "properties": {
-            "title": {
-              "type": "string"
-            },
-            "url": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "title",
-            "url"
-          ],
-          "type": "object"
-        },
-        "Principal": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "on_behalf_of": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Principal"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Project": {
-          "properties": {
-            "archived": {
-              "type": "boolean"
-            },
-            "brief_document_id": {
-              "type": "string"
-            },
-            "checkouts": {
-              "items": {
-                "$ref": "#/$defs/CheckoutBinding"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "connections": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "created_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "created_by": {
-              "$ref": "#/$defs/Principal"
-            },
-            "description": {
-              "type": "string"
-            },
-            "env_profile": {
-              "type": "string"
-            },
-            "links": {
-              "items": {
-                "$ref": "#/$defs/Link"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "name": {
-              "type": "string"
-            },
-            "project_id": {
-              "type": "string"
-            },
-            "repos": {
-              "items": {
-                "$ref": "#/$defs/RepoBinding"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "updated_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "version": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "project_id",
-            "name",
-            "repos",
-            "checkouts",
-            "archived",
-            "version",
-            "created_by",
-            "created_at",
-            "updated_at"
-          ],
-          "type": "object"
-        },
-        "RepoBinding": {
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "repo_id": {
-              "type": "string"
-            },
-            "url": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "repo_id",
-            "name"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "items": {
-          "items": {
-            "$ref": "#/$defs/Project"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "next_cursor": {
-          "type": "string"
-        },
-        "snapshot_at": {
-          "format": "date-time",
-          "type": "string"
-        }
-      },
-      "required": [
-        "items",
-        "snapshot_at"
-      ],
       "type": "object"
     },
     "annotations": {
@@ -5946,7 +3568,7 @@
   {
     "name": "archive_session",
     "title": "Archive session",
-    "description": "Archive an ended session: it leaves session listings (nothing is stopped). A live session is refused; stop it first. Agents may archive their own session and sessions they started.",
+    "description": "When your work is finished and reported, archive yourself with archive_session (no arguments). A live session (yours or one you started) archives when its turn ends; an ended one at once.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -5955,466 +3577,78 @@
           "type": "string"
         },
         "session": {
-          "description": "session ID (ses_...), exact title, or \"self\"",
+          "description": "session ID or exact title (default: yourself)",
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "when_done": {
+          "type": "boolean"
+        }
+      },
       "required": [
-        "session"
+        "session_id",
+        "title",
+        "archived",
+        "when_done",
+        "note"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Archive session",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "archive_project",
+    "title": "Archive project",
+    "description": "Archive a project. Live sessions in it refuse unless with_sessions: true, which archives its ended sessions now and its live ones when their turns end.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "project": {
+          "description": "project ID (prj_...) or name",
+          "type": "string"
+        },
+        "with_sessions": {
+          "description": "also archive the project's sessions (live ones when their turns end)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project"
       ],
       "type": "object"
     },
     "outputSchema": {
       "$defs": {
-        "CheckoutBinding": {
+        "ArchivedSessionRef": {
           "properties": {
-            "branch": {
-              "type": "string"
-            },
-            "mode": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            },
-            "repo_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "node_id",
-            "path",
-            "mode"
-          ],
-          "type": "object"
-        },
-        "Freshness": {
-          "properties": {
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "source": {
-              "type": "string"
-            },
-            "stale": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "observed_at",
-            "source",
-            "stale"
-          ],
-          "type": "object"
-        },
-        "InputLease": {
-          "properties": {
-            "acquired_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "expires_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "holder": {
-              "$ref": "#/$defs/Principal"
-            },
-            "lease_id": {
-              "type": "string"
-            },
-            "released_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "renewed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "takeover_of": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "lease_id",
-            "run_id",
-            "holder",
-            "acquired_at",
-            "renewed_at",
-            "expires_at"
-          ],
-          "type": "object"
-        },
-        "Lineage": {
-          "properties": {
-            "forked_from": {
-              "type": "string"
-            },
-            "handoff_note_id": {
-              "type": "string"
-            },
-            "parent_session_id": {
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        "NativeRef": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "Principal": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "on_behalf_of": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Principal"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
-        },
-        "ProcUsage": {
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "pid": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            }
-          },
-          "required": [
-            "pid",
-            "name",
-            "rss_mb"
-          ],
-          "type": "object"
-        },
-        "Run": {
-          "properties": {
-            "account_id": {
-              "type": "string"
-            },
-            "activity": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RunActivity"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "adapter": {
-              "type": "string"
-            },
-            "adapter_data": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": [
-                "object",
-                "null"
-              ]
-            },
-            "assignment_id": {
-              "type": "string"
-            },
-            "capabilities": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "checkout": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CheckoutBinding"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "continuation_kind": {
-              "type": "string"
-            },
-            "cwd": {
-              "type": "string"
-            },
-            "ended_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "env_generation_id": {
-              "type": "string"
-            },
-            "exit_code": {
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "freshness": {
-              "$ref": "#/$defs/Freshness"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "lease": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/InputLease"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "native_ref": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/NativeRef"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "pending_approval_ids": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "previous_run_id": {
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "runtime": {
-              "$ref": "#/$defs/RuntimeVersion"
-            },
             "session_id": {
               "type": "string"
-            },
-            "started_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            },
-            "state_reason": {
-              "type": "string"
-            },
-            "subagents": {
-              "items": {
-                "$ref": "#/$defs/SubagentObservation"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "usage": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RunUsage"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id",
-            "session_id",
-            "node_id",
-            "adapter",
-            "harness",
-            "cwd",
-            "runtime",
-            "state",
-            "freshness",
-            "started_at",
-            "capabilities"
-          ],
-          "type": "object"
-        },
-        "RunActivity": {
-          "properties": {
-            "since": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "text",
-            "since"
-          ],
-          "type": "object"
-        },
-        "RunUsage": {
-          "properties": {
-            "cpu_pct": {
-              "type": "number"
-            },
-            "observed_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "procs": {
-              "type": "integer"
-            },
-            "rss_mb": {
-              "type": "number"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "top": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ProcUsage"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id",
-            "procs",
-            "rss_mb",
-            "observed_at"
-          ],
-          "type": "object"
-        },
-        "RuntimeVersion": {
-          "properties": {
-            "digest": {
-              "type": "string"
-            },
-            "executable": {
-              "type": "string"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "version": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "harness",
-            "version"
-          ],
-          "type": "object"
-        },
-        "Session": {
-          "properties": {
-            "archived": {
-              "type": "boolean"
-            },
-            "created_at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "created_by": {
-              "$ref": "#/$defs/Principal"
-            },
-            "current_run_id": {
-              "type": "string"
-            },
-            "harness": {
-              "type": "string"
-            },
-            "lineage": {
-              "$ref": "#/$defs/Lineage"
-            },
-            "project_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "tags": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
             },
             "title": {
               "type": "string"
@@ -6422,132 +3656,65 @@
           },
           "required": [
             "session_id",
-            "harness",
-            "title",
-            "project_id",
-            "created_by",
-            "created_at",
-            "lineage",
-            "archived"
-          ],
-          "type": "object"
-        },
-        "SessionFlag": {
-          "properties": {
-            "attention_id": {
-              "type": "string"
-            },
-            "count": {
-              "type": "integer"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "level": {
-              "type": "string"
-            },
-            "messages": {
-              "type": "integer"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "since": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "level",
-            "reason",
-            "count",
-            "messages",
-            "since"
-          ],
-          "type": "object"
-        },
-        "SubagentObservation": {
-          "properties": {
-            "ended_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "started_at": {
-              "format": "date-time",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "state": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "state"
+            "title"
           ],
           "type": "object"
         }
       },
       "properties": {
-        "attention": {
-          "type": "integer"
+        "archived": {
+          "type": "boolean"
         },
-        "flag": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SessionFlag"
-            },
-            {
-              "type": "null"
-            }
+        "archived_sessions": {
+          "items": {
+            "$ref": "#/$defs/ArchivedSessionRef"
+          },
+          "type": [
+            "array",
+            "null"
           ]
         },
-        "freshness": {
-          "$ref": "#/$defs/Freshness"
+        "ended_sessions_left": {
+          "items": {
+            "$ref": "#/$defs/ArchivedSessionRef"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
-        "node_name": {
+        "name": {
           "type": "string"
         },
-        "run": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Run"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "note": {
+          "type": "string"
         },
-        "session": {
-          "$ref": "#/$defs/Session"
+        "project_id": {
+          "type": "string"
+        },
+        "when_done_sessions": {
+          "items": {
+            "$ref": "#/$defs/ArchivedSessionRef"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
-        "session",
-        "attention",
-        "freshness"
+        "project_id",
+        "name",
+        "archived",
+        "archived_sessions",
+        "when_done_sessions",
+        "ended_sessions_left",
+        "note"
       ],
       "type": "object"
     },
     "annotations": {
-      "title": "Archive session",
+      "title": "Archive project",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,
@@ -6687,6 +3854,16 @@
             },
             "parent_session_id": {
               "type": "string"
+            },
+            "reparented_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reparented_from": {
+              "type": "string"
             }
           },
           "type": "object"
@@ -7014,8 +4191,18 @@
             "harness": {
               "type": "string"
             },
+            "icon": {
+              "type": "string"
+            },
             "lineage": {
               "$ref": "#/$defs/Lineage"
+            },
+            "owner_active_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "project_id": {
               "type": [
@@ -9196,6 +6383,14 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
         "no_transcripts": {
           "description": "skip transcript reads (faster; less detail)",
           "type": "boolean"
@@ -9205,241 +6400,6 @@
           "type": "string"
         }
       },
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "Agent": {
-          "properties": {
-            "archived": {
-              "type": "boolean"
-            },
-            "artifacts": {
-              "items": {
-                "$ref": "#/$defs/Ref"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "blocked": {
-              "type": "string"
-            },
-            "docs": {
-              "items": {
-                "$ref": "#/$defs/Ref"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "events": {
-              "type": "integer"
-            },
-            "files": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "harness": {
-              "type": "string"
-            },
-            "last_activity": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "link": {
-              "type": "string"
-            },
-            "messages": {
-              "items": {
-                "$ref": "#/$defs/Ref"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "needs_you": {
-              "items": {
-                "$ref": "#/$defs/Ref"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "node": {
-              "type": "string"
-            },
-            "notes": {
-              "items": {
-                "$ref": "#/$defs/Ref"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "partial": {
-              "type": "boolean"
-            },
-            "project_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "rank": {
-              "type": "string"
-            },
-            "replies": {
-              "type": "integer"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "seq": {
-              "type": "integer"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            },
-            "summary_source": {
-              "type": "string"
-            },
-            "title": {
-              "type": "string"
-            },
-            "tools": {
-              "type": "integer"
-            },
-            "turns": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "session_id",
-            "title",
-            "rank",
-            "summary",
-            "summary_source",
-            "link",
-            "turns",
-            "replies",
-            "tools",
-            "events",
-            "last_activity"
-          ],
-          "type": "object"
-        },
-        "Ref": {
-          "properties": {
-            "at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "direction": {
-              "type": "string"
-            },
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "link": {
-              "type": "string"
-            },
-            "title": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id",
-            "title",
-            "link",
-            "at"
-          ],
-          "type": "object"
-        }
-      },
-      "properties": {
-        "agents": {
-          "items": {
-            "$ref": "#/$defs/Agent"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "generated_at": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "head_cursor": {
-          "type": "integer"
-        },
-        "other": {
-          "items": {
-            "$ref": "#/$defs/Ref"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "quiet": {
-          "type": "integer"
-        },
-        "since": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "since_cursor": {
-          "type": "integer"
-        },
-        "since_label": {
-          "type": "string"
-        },
-        "summary": {
-          "type": "string"
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "warnings": {
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "since",
-        "since_cursor",
-        "head_cursor",
-        "generated_at",
-        "agents",
-        "quiet"
-      ],
       "type": "object"
     },
     "annotations": {
@@ -9460,6 +6420,14 @@
         "archived": {
           "description": "include archived sessions",
           "type": "boolean"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
         },
         "limit": {
           "description": "max results (default 40)",
@@ -9490,143 +6458,200 @@
       ],
       "type": "object"
     },
-    "outputSchema": {
-      "$defs": {
-        "SearchHit": {
-          "properties": {
-            "archived": {
-              "type": "boolean"
-            },
-            "at": {
-              "format": "date-time",
-              "type": "string"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "project_id": {
-              "type": "string"
-            },
-            "provenance": {
-              "type": "string"
-            },
-            "ref": {
-              "type": "string"
-            },
-            "run_id": {
-              "type": "string"
-            },
-            "score": {
-              "type": "number"
-            },
-            "seq": {
-              "type": "integer"
-            },
-            "session_id": {
-              "type": "string"
-            },
-            "snippet": {
-              "type": "string"
-            },
-            "source": {
-              "type": "string"
-            },
-            "title": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "source",
-            "title",
-            "at",
-            "snippet",
-            "score"
-          ],
-          "type": "object"
-        },
-        "SearchNodeStatus": {
-          "properties": {
-            "detail": {
-              "type": "string"
-            },
-            "hits": {
-              "type": "integer"
-            },
-            "name": {
-              "type": "string"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "partial": {
-              "type": "boolean"
-            },
-            "state": {
-              "type": "string"
-            },
-            "took_ms": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "node_id",
-            "name",
-            "state",
-            "hits",
-            "took_ms"
-          ],
-          "type": "object"
-        }
-      },
+    "annotations": {
+      "title": "Search everything",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "ask_owner",
+    "title": "Ask the owner",
+    "description": "Ask the owner to decide (top-level sessions only). find_asks first. Plenty of context (the owner decides from it alone), 2–4 options each with a detail, a default you will take (none if irreversible); keep working. Same topic_key merges.",
+    "inputSchema": {
+      "additionalProperties": false,
       "properties": {
-        "hits": {
-          "items": {
-            "$ref": "#/$defs/SearchHit"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
+        "confirm_new": {
+          "description": "create it even though a similar open ask exists under another topic",
+          "type": "boolean"
         },
-        "nodes": {
-          "items": {
-            "$ref": "#/$defs/SearchNodeStatus"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "query": {
+        "context": {
+          "description": "markdown, at least 300 characters: what is being decided and why now; what is known or was tried (links, paths); what each option leads to; what happens by default if nobody answers",
           "type": "string"
         },
-        "snapshot_at": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "took_ms": {
+        "deadline_minutes": {
+          "description": "default 60; a deadline at night moves to the owner's morning unless urgent",
           "type": "integer"
         },
-        "truncated": {
+        "default": {
+          "description": "option id (or label) applied at the deadline if the owner does not answer; omit for irreversible actions",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "options": {
+          "description": "2–4 options",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "description": "required, one line: what happens if chosen",
+                "type": "string"
+              },
+              "id": {
+                "description": "short stable id (default a, b, c, d)",
+                "type": "string"
+              },
+              "label": {
+                "description": "the choice, a few words",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "detail"
+            ],
+            "type": "object"
+          },
+          "maxItems": 4,
+          "minItems": 2,
+          "type": "array"
+        },
+        "project": {
+          "description": "project ID or name (default: this session's project)",
+          "type": "string"
+        },
+        "reopen": {
+          "description": "ask again on a decided topic because something changed (say what in context)",
+          "type": "boolean"
+        },
+        "title": {
+          "description": "the question in one line",
+          "type": "string"
+        },
+        "topic_key": {
+          "description": "short stable slug for the decision, e.g. \"auth-token-storage\"; the same key merges into the open ask instead of new mail, and a decided topic returns its answer",
+          "type": "string"
+        },
+        "urgent": {
+          "description": "needs an answer even at night (keeps the deadline)",
           "type": "boolean"
         }
       },
       "required": [
-        "query",
-        "hits",
-        "nodes",
-        "truncated",
-        "took_ms",
-        "snapshot_at"
+        "topic_key",
+        "title",
+        "context",
+        "options"
       ],
       "type": "object"
     },
     "annotations": {
-      "title": "Search everything",
+      "title": "Ask the owner",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "find_asks",
+    "title": "Find asks",
+    "description": "Find open asks and those decided in the last 7 days by topic key or text, before asking or messaging the owner. A decided topic is final: act on its answer instead of asking again.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "include_decided": {
+          "description": "include asks decided in the last 7 days (default true)",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "max asks (default 50)",
+          "type": "integer"
+        },
+        "project": {
+          "description": "project ID or name",
+          "type": "string"
+        },
+        "query": {
+          "description": "text over title, context and options",
+          "type": "string"
+        },
+        "topic_key": {
+          "description": "exact topic key",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Find asks",
       "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "withdraw_ask",
+    "title": "Withdraw ask",
+    "description": "Take back your open ask (no longer needed), or mark it superseded by another ask. To correct or add to an ask, call ask_owner again with the same topic_key instead.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "ask_id": {
+          "description": "ask ID (ask_...)",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "reason": {
+          "description": "one line the owner sees",
+          "type": "string"
+        },
+        "superseded_by": {
+          "description": "the ask that replaces it (ask_...)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ask_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Withdraw ask",
+      "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
@@ -9934,12 +6959,95 @@
     }
   },
   {
+    "name": "update_project_page",
+    "title": "Update project page",
+    "description": "Replace your project's page, the owner's main view of it in the web app (leads only). Short, current markdown: goal, status, results with links, open decisions, next. Create it early; update at milestones.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "base_revision_id": {
+          "description": "revision you edited (get_project_page); a newer page then fails instead of being replaced",
+          "type": "string"
+        },
+        "content": {
+          "description": "the whole page in markdown (replaces the previous version)",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "project": {
+          "description": "project ID or name (default: this session's project)",
+          "type": "string"
+        },
+        "summary": {
+          "description": "one line: what changed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Update project page",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_project_page",
+    "title": "Show project page",
+    "description": "Read your project's page (the owner's view of the project in the web app), with its revision ID for update_project_page.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "project": {
+          "description": "project ID or name (default: this session's project)",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Show project page",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "rename_session",
     "title": "Rename session",
     "description": "Rename any session (default your own) so the owner can tell the work apart, e.g. your own or sessions you started (\"Fix stripe webhook retries\"). Short, specific, at most ~6 words. A title the owner chose is kept.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "icon": {
+          "description": "optional: also set the session's emoji (one emoji; \"\" clears)",
+          "type": "string"
+        },
         "operation_id": {
           "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
           "type": "string"
@@ -10061,6 +7169,16 @@
               "type": "string"
             },
             "parent_session_id": {
+              "type": "string"
+            },
+            "reparented_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reparented_from": {
               "type": "string"
             }
           },
@@ -10389,8 +7507,18 @@
             "harness": {
               "type": "string"
             },
+            "icon": {
+              "type": "string"
+            },
             "lineage": {
               "$ref": "#/$defs/Lineage"
+            },
+            "owner_active_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "project_id": {
               "type": [
@@ -10542,6 +7670,727 @@
     },
     "annotations": {
       "title": "Rename session",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_session_icon",
+    "title": "Set session icon",
+    "description": "Give a session (default your own) an emoji shown before its title that reflects its work, e.g. 🐛 for a bug fix, 🚀 for a release. One emoji; \"\" clears it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "icon": {
+          "description": "one emoji, or \"\" to clear",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "session": {
+          "description": "session ID or exact title; \"self\" (default) is your own session",
+          "type": "string"
+        }
+      },
+      "required": [
+        "icon"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "CheckoutBinding": {
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "node_id",
+            "path",
+            "mode"
+          ],
+          "type": "object"
+        },
+        "Freshness": {
+          "properties": {
+            "observed_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "stale": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "observed_at",
+            "source",
+            "stale"
+          ],
+          "type": "object"
+        },
+        "InputLease": {
+          "properties": {
+            "acquired_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "expires_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "holder": {
+              "$ref": "#/$defs/Principal"
+            },
+            "lease_id": {
+              "type": "string"
+            },
+            "released_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "renewed_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "takeover_of": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "lease_id",
+            "run_id",
+            "holder",
+            "acquired_at",
+            "renewed_at",
+            "expires_at"
+          ],
+          "type": "object"
+        },
+        "Lineage": {
+          "properties": {
+            "forked_from": {
+              "type": "string"
+            },
+            "handoff_note_id": {
+              "type": "string"
+            },
+            "parent_session_id": {
+              "type": "string"
+            },
+            "reparented_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reparented_from": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "NativeRef": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        },
+        "Principal": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "on_behalf_of": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Principal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        },
+        "ProcUsage": {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "pid": {
+              "type": "integer"
+            },
+            "rss_mb": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "pid",
+            "name",
+            "rss_mb"
+          ],
+          "type": "object"
+        },
+        "Run": {
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "activity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunActivity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "adapter": {
+              "type": "string"
+            },
+            "adapter_data": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "assignment_id": {
+              "type": "string"
+            },
+            "capabilities": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "checkout": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckoutBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "continuation_kind": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "ended_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "env_generation_id": {
+              "type": "string"
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "freshness": {
+              "$ref": "#/$defs/Freshness"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "lease": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InputLease"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "native_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NativeRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "pending_approval_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "previous_run_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "runtime": {
+              "$ref": "#/$defs/RuntimeVersion"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "started_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "state_reason": {
+              "type": "string"
+            },
+            "subagents": {
+              "items": {
+                "$ref": "#/$defs/SubagentObservation"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunUsage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "run_id",
+            "session_id",
+            "node_id",
+            "adapter",
+            "harness",
+            "cwd",
+            "runtime",
+            "state",
+            "freshness",
+            "started_at",
+            "capabilities"
+          ],
+          "type": "object"
+        },
+        "RunActivity": {
+          "properties": {
+            "since": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "since"
+          ],
+          "type": "object"
+        },
+        "RunUsage": {
+          "properties": {
+            "cpu_pct": {
+              "type": "number"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "procs": {
+              "type": "integer"
+            },
+            "rss_mb": {
+              "type": "number"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "top": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProcUsage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "run_id",
+            "procs",
+            "rss_mb",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        "RuntimeVersion": {
+          "properties": {
+            "digest": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "harness",
+            "version"
+          ],
+          "type": "object"
+        },
+        "Session": {
+          "properties": {
+            "archived": {
+              "type": "boolean"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "created_by": {
+              "$ref": "#/$defs/Principal"
+            },
+            "current_run_id": {
+              "type": "string"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "icon": {
+              "type": "string"
+            },
+            "lineage": {
+              "$ref": "#/$defs/Lineage"
+            },
+            "owner_active_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "harness",
+            "title",
+            "project_id",
+            "created_by",
+            "created_at",
+            "lineage",
+            "archived"
+          ],
+          "type": "object"
+        },
+        "SessionFlag": {
+          "properties": {
+            "attention_id": {
+              "type": "string"
+            },
+            "count": {
+              "type": "integer"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "level": {
+              "type": "string"
+            },
+            "messages": {
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "since": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "level",
+            "reason",
+            "count",
+            "messages",
+            "since"
+          ],
+          "type": "object"
+        },
+        "SubagentObservation": {
+          "properties": {
+            "ended_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "started_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "state"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "attention": {
+          "type": "integer"
+        },
+        "flag": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionFlag"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "node_name": {
+          "type": "string"
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Run"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "$ref": "#/$defs/Session"
+        }
+      },
+      "required": [
+        "session",
+        "attention",
+        "freshness"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Set session icon",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "reparent_session",
+    "title": "Reparent session",
+    "description": "Move sessions under another parent: their end-of-turn reports go there from now on; both sides get a Pyre message. A coordinator can hand its agents to leads; a lead can adopt agents in its project.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "parent": {
+          "description": "new parent: session ID, exact title, or \"self\"; \"\" or \"none\" = top level",
+          "type": "string"
+        },
+        "session": {
+          "description": "session to move: ID, exact title, or \"self\" (default: your own session)",
+          "type": "string"
+        },
+        "sessions": {
+          "description": "several sessions to move to the same parent (IDs or exact titles)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "parent"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "ReparentItem": {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": "string"
+            },
+            "parent_title": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "note": {
+          "type": "string"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/ReparentItem"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sessions",
+        "note"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Reparent session",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,

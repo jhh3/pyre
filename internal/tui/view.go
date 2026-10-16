@@ -59,7 +59,8 @@ func (m *Model) render() string {
 		return "Pyre: terminal too small"
 	}
 	rule := h >= 16
-	bodyH := h - 3
+	m.footMode = m.chooseFoot(w, h)
+	bodyH := h - 1 - footRows[m.footMode]
 	if rule {
 		bodyH--
 	}
@@ -94,8 +95,13 @@ func (m *Model) render() string {
 	if tips {
 		lines = append(lines, pad(m.viewTips(w), w))
 	}
-	lines = append(lines, pad(m.viewStatus(w), w))
-	lines = append(lines, pad(m.viewHints(w), w))
+	switch m.footMode {
+	case footFull:
+		lines = append(lines, pad(m.viewStatus(w), w))
+		lines = append(lines, pad(m.viewHints(w), w))
+	case footSlim:
+		lines = append(lines, pad(m.slimFooter(w), w))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -174,9 +180,10 @@ func (m *Model) tab(v viewID, key, label string, count int, on bool) string {
 }
 
 // headerTabs are the header's tabs in order; 1–4 follow the same order.
-// The grid and table are views inside Sessions (sessions_modes.go), and
-// the Inbox is no longer a tab (attention lives on the sessions; I still
-// opens it).
+// The grid and table are views inside Sessions (sessions_modes.go). The
+// Sessions count is leads that ask or wait on you (leads.go). After the
+// tabs, "● N asks" counts open asks and links to the web inbox
+// (weblink.go), which replaced the Inbox tab.
 var headerTabs = []struct {
 	v          viewID
 	key, label string
@@ -208,7 +215,7 @@ func (m *Model) viewHeader(w int) string {
 			}
 			n := 0
 			if t.v == viewSessions {
-				n = m.headerNeedsYou()
+				n = m.headerLeads() // leads that ask or wait on you (leads.go)
 			}
 			s := m.tab(t.v, t.key, label, n, on)
 			if t.v == viewSessions && toggle && on && (m.view == viewSessions || m.view == viewGrid) {
@@ -219,6 +226,9 @@ func (m *Model) viewHeader(w int) string {
 		gap := gap2
 		if w < 64 {
 			gap = gap1
+		}
+		if a := m.asksHeader(compact); a != "" {
+			tabs = append(tabs, a)
 		}
 		return brand + gap + strings.Join(tabs, sep)
 	}
@@ -297,10 +307,14 @@ func (m *Model) freshnessLabel() (full, short string) {
 	// Fixed width while fresh, so the header never reflows on ticks; the
 	// age shows only once the data is older than staleAfter.
 	dot, label := m.th.dim.Render("○"), "synced"
+	limit := staleAfter
 	if m.ev.connected {
 		dot, label = m.th.tone(toneGood, "●"), "live"
+		// Events patch the rows in place; the full re-list is a safety net
+		// on a longer period (sessions_patch.go).
+		limit += m.sessionsSafetyNet()
 	}
-	if now.Sub(st.at) > staleAfter {
+	if now.Sub(st.at) > limit {
 		return dot + " " + m.th.tone(toneWarn, label+" · stale "+age(now, st.at)), dot + " " + m.th.tone(toneWarn, age(now, st.at))
 	}
 	return dot + " " + m.th.dim.Render(label), dot + " " + m.th.dim.Render(label)
@@ -351,7 +365,12 @@ func (m *Model) hintSeg(h hint) string {
 // viewHints renders view-specific hints on the left and the global ones on
 // the right, dropping globals before view hints when space is short.
 func (m *Model) viewHints(w int) string {
-	var hs, global []hint
+	hs, global := m.footerHints()
+	return m.joinHints(hs, global, w)
+}
+
+// footerHints are the footer's view hints and global hints.
+func (m *Model) footerHints() (hs, global []hint) {
 	switch {
 	case m.overlay != nil:
 		if ho, ok := m.overlay.(interface{ hintsFor(*Model) []hint }); ok {
@@ -378,6 +397,12 @@ func (m *Model) viewHints(w int) string {
 			global = nil // every key but the escape chord goes to the session
 		}
 	}
+	return hs, global
+}
+
+// joinHints lays hints out on one line of width w: the view's on the
+// left, the global ones on the right.
+func (m *Model) joinHints(hs, global []hint, w int) string {
 	join := func(hs []hint, limit int) (string, int) {
 		var b strings.Builder
 		used := 0
@@ -417,7 +442,7 @@ func (m *Model) viewHintsFor() []hint {
 	case viewSessions:
 		return m.sessionHints()
 	case viewProjects:
-		return []hint{{"enter", "open"}, {"/", "filter"}, {"n", "new session"}, {"␣␣", "find"}}
+		return []hint{{"enter", "open"}, {"/", "filter"}, {"n", "new session"}, {"X", "archive"}, {"␣␣", "find"}}
 	case viewDigest:
 		return m.digestHints()
 	case viewProject:

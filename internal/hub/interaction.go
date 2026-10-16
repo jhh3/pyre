@@ -132,7 +132,11 @@ func (h *Hub) AcquireLease(ctx context.Context, req contracts.LeaseRequest) (con
 	if err == nil {
 		// The owner taking (or keeping) input is the owner typing into the
 		// session: its messages and own flag are answered.
-		h.ownerEngaged(p, h.runSession(ctx, out.RunID), "You typed into the session.", engageKinds...)
+		if p.Kind == contracts.PrincipalOwner {
+			sid := h.runSession(ctx, out.RunID)
+			h.ownerEngaged(p, sid, "You typed into the session.", engageKinds...)
+			h.ownerActive(p, sid)
+		}
 	}
 	return out, err
 }

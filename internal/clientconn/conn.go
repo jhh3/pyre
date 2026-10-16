@@ -16,13 +16,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jhh3/pyre/internal/buildinfo"
 	"github.com/jhh3/pyre/internal/client"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/transport"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // Environment variables understood by Pyre clients.
@@ -37,6 +38,7 @@ const (
 	EnvSessionID    = "PYRE_SESSION_ID"    // set inside agent sessions
 	EnvRunID        = "PYRE_RUN_ID"
 	EnvNodeID       = "PYRE_NODE_ID"
+	EnvWebURL       = "PYRE_WEB_URL" // the web app the TUI links to (overrides web_url)
 )
 
 // ConfigVersion is stamped into client.json.
@@ -52,6 +54,9 @@ type ClientConfig struct {
 	ClientID      string    `json:"client_id,omitempty"`
 	Token         string    `json:"token"`
 	PairedAt      time.Time `json:"paired_at,omitempty"`
+	// WebURL is the web app (`pyre web serve`, the inbox) the TUI links
+	// to; empty: the TUI's default. PYRE_WEB_URL overrides it.
+	WebURL string `json:"web_url,omitempty"`
 }
 
 // DefaultConfigPath returns $PYRE_CONFIG, else $XDG_CONFIG_HOME/pyre/client.json,
@@ -62,6 +67,9 @@ func DefaultConfigPath(getenv func(string) string) string {
 	}
 	if x := getenv("XDG_CONFIG_HOME"); x != "" {
 		return filepath.Join(x, "pyre", "client.json")
+	}
+	if d := winenv.ConfigDir(getenv); d != "" {
+		return filepath.Join(d, "client.json") // %APPDATA%\Pyre
 	}
 	home := getenv("HOME")
 	if home == "" {
@@ -79,6 +87,9 @@ func DefaultStateDir(getenv func(string) string) string {
 	if x := getenv("XDG_STATE_HOME"); x != "" {
 		return filepath.Join(x, "pyre")
 	}
+	if d := winenv.StateDir(getenv); d != "" {
+		return d // %LOCALAPPDATA%\Pyre
+	}
 	home := getenv("HOME")
 	if home == "" {
 		home, _ = os.UserHomeDir()
@@ -93,7 +104,7 @@ var ErrNoConfig = errors.New("no client config")
 // files readable by group/others, and files owned by another user.
 func LoadConfig(path string) (ClientConfig, error) {
 	var cfg ClientConfig
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := fileperm.OpenNoFollow(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return cfg, fmt.Errorf("%w at %s", ErrNoConfig, path)
@@ -108,11 +119,11 @@ func LoadConfig(path string) (ClientConfig, error) {
 	if !st.Mode().IsRegular() {
 		return cfg, contracts.Errorf(contracts.ErrInvalid, "client config %s is not a regular file", path)
 	}
-	if perm := st.Mode().Perm(); perm&0o077 != 0 {
-		return cfg, contracts.Errorf(contracts.ErrInvalid, "refusing client config %s with mode %04o: it holds a credential; run `chmod 600 %s`", path, perm, path)
+	if desc, bad := fileperm.Exposed(path, st); bad {
+		return cfg, contracts.Errorf(contracts.ErrInvalid, "refusing client config %s with %s: it holds a credential; %s", path, desc, fileperm.FixHint(path, false))
 	}
-	if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Getuid() {
-		return cfg, contracts.Errorf(contracts.ErrInvalid, "client config %s is owned by uid %d, not the current user", path, sys.Uid)
+	if owner, bad := fileperm.ForeignOwner(path, st); bad {
+		return cfg, contracts.Errorf(contracts.ErrInvalid, "client config %s is owned by %s, not the current user", path, owner)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {
@@ -132,7 +143,7 @@ func SaveConfig(path string, cfg ClientConfig) error {
 	if cfg.Version == 0 {
 		cfg.Version = ConfigVersion
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := fileperm.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	b, err := json.MarshalIndent(cfg, "", "  ")

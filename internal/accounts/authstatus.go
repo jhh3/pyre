@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // claudeAuthStatus is the subset of `claude auth status --json` Pyre uses
@@ -37,6 +38,7 @@ func (s *Service) probeClaudeAuth(ctx context.Context, profileDir string) (claud
 	cmd := execCommand(ctx, s.cfg.ClaudeBin, "auth", "status", "--json")
 	s.refreshComposition(profileDir, contracts.HarnessClaude) // a Claude process in the profile: copies, never owner links
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "USER=" + os.Getenv("USER"), "CLAUDE_CONFIG_DIR=" + profileDir, "DISABLE_AUTOUPDATER=1"}
+	cmd.Env = append(cmd.Env, winenv.SystemEnv()...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	_ = cmd.Run()

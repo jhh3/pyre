@@ -18,9 +18,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/jhh3/pyre/internal/fileperm"
+	"github.com/jhh3/pyre/internal/osutil"
+	"github.com/jhh3/pyre/internal/runtime/sessionhost"
 	"github.com/jhh3/pyre/internal/supervisor"
 )
 
@@ -29,17 +31,42 @@ import (
 const MaxSocketPath = 100
 
 // MaxCaptureBytes bounds capture-pane output returned to callers.
-const MaxCaptureBytes = 256 << 10
+const MaxCaptureBytes = sessionhost.MaxCaptureBytes
 
 // DefaultCommandTimeout bounds a single tmux client invocation.
 const DefaultCommandTimeout = 10 * time.Second
 
 var (
 	// ErrNoServer means no tmux server is listening on the socket.
-	ErrNoServer = errors.New("tmux: no server running on socket")
+	ErrNoServer = sessionhost.ErrNoServer
 	// ErrNoSession means the target session/pane does not exist.
-	ErrNoSession = errors.New("tmux: session not found")
+	ErrNoSession = sessionhost.ErrNoSession
 )
+
+// The shared session-host types (package sessionhost), re-exported so
+// existing callers keep using tmux.SessionSpec etc.
+type (
+	SessionSpec    = sessionhost.SessionSpec
+	CaptureOptions = sessionhost.CaptureOptions
+	Key            = sessionhost.Key
+	Client         = sessionhost.Client
+	PaneInfo       = sessionhost.PaneInfo
+)
+
+const (
+	KeyEnter     = sessionhost.KeyEnter
+	KeyEscape    = sessionhost.KeyEscape
+	KeyCtrlU     = sessionhost.KeyCtrlU
+	KeyCtrlC     = sessionhost.KeyCtrlC
+	KeyCtrlD     = sessionhost.KeyCtrlD
+	KeyBackspace = sessionhost.KeyBackspace
+	KeyUp        = sessionhost.KeyUp
+	KeyDown      = sessionhost.KeyDown
+	KeyTab       = sessionhost.KeyTab
+	KeyEnd       = sessionhost.KeyEnd
+)
+
+var _ sessionhost.Host = (*Server)(nil)
 
 // Server addresses one isolated tmux server by socket path.
 type Server struct {
@@ -96,7 +123,7 @@ func PrepareDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(dir, 0o700)
+	return fileperm.Restrict(dir, 0o700)
 }
 
 // DefaultConfig is the minimal server configuration Pyre uses. remain-on-exit
@@ -292,55 +319,10 @@ func SessionTarget(name string) string { return "=" + name }
 // session name.
 func PaneTarget(name string) string { return "=" + name + ":" }
 
-var nameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
-
 // ValidName reports whether name is a safe tmux session/buffer name.
-func ValidName(name string) bool { return nameRe.MatchString(name) }
+func ValidName(name string) bool { return sessionhost.ValidName(name) }
 
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// SessionSpec describes a new detached session running argv.
-type SessionSpec struct {
-	Name string
-	Cwd  string
-	// Env is added to the pane process's environment. Values may be
-	// secrets: they travel through a private 0600 file read (and deleted)
-	// by the pane launcher, never through a command line or the tmux
-	// session environment, so windows a human opens later in the session
-	// do not inherit them.
-	Env map[string]string
-	// Unset lists inherited variables (panes inherit the server's global
-	// environment) removed from the command's environment
-	// (ResolvedLaunch.Unset). A variable also present in Env is kept
-	// (explicit wins).
-	Unset  []string
-	Argv   []string
-	Width  int // default 200
-	Height int // default 50
-}
-
-func (spec SessionSpec) validate() error {
-	if !ValidName(spec.Name) {
-		return fmt.Errorf("tmux: invalid session name %q", spec.Name)
-	}
-	if len(spec.Argv) == 0 || spec.Argv[0] == "" {
-		return errors.New("tmux: empty argv")
-	}
-	for k, v := range spec.Env {
-		if !envKeyRe.MatchString(k) {
-			return fmt.Errorf("tmux: invalid environment variable name %q", k)
-		}
-		if strings.IndexByte(v, 0) >= 0 {
-			return fmt.Errorf("%w: %s", errNUL, k)
-		}
-	}
-	for _, k := range spec.Unset {
-		if !envKeyRe.MatchString(k) {
-			return fmt.Errorf("tmux: invalid environment variable name %q", k)
-		}
-	}
-	return nil
-}
 
 // commandArgs renders argv so tmux executes it directly (execvp) rather than
 // through `sh -c`: tmux only does that when given two or more arguments, so a
@@ -468,7 +450,7 @@ func (s *Server) runArgv(ctx context.Context, argv []string) (string, error) {
 // (paneCommand); no command line carries an environment value, and the
 // command is never interpreted by a shell.
 func (s *Server) NewSession(ctx context.Context, spec SessionSpec) error {
-	if err := spec.validate(); err != nil {
+	if err := spec.Validate(); err != nil {
 		return err
 	}
 	if s.Config != "" {
@@ -529,7 +511,7 @@ func (s *Server) respawnArgs(spec SessionSpec) (args []string, envFile string, e
 // NewSession, spec.Env reaches only the new pane process.
 func (s *Server) RespawnPane(ctx context.Context, name string, spec SessionSpec) error {
 	spec.Name = name
-	if err := spec.validate(); err != nil {
+	if err := spec.Validate(); err != nil {
 		return err
 	}
 	args, envFile, err := s.respawnArgs(spec)
@@ -576,14 +558,6 @@ func (s *Server) ListSessions(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
-// Client is an attached tmux client.
-type Client struct {
-	TTY      string
-	PID      int
-	ReadOnly bool
-	Flags    string
-}
-
 // ListClients lists clients attached to the session. An attached writable
 // client is Pyre's signal that a human holds the terminal (input lease).
 func (s *Server) ListClients(ctx context.Context, name string) ([]Client, error) {
@@ -621,26 +595,7 @@ func parseClients(out string) []Client {
 }
 
 // WritableClients counts attached clients that can type.
-func WritableClients(cs []Client) int {
-	n := 0
-	for _, c := range cs {
-		if !c.ReadOnly {
-			n++
-		}
-	}
-	return n
-}
-
-// CaptureOptions bounds capture-pane.
-type CaptureOptions struct {
-	// History is the number of scrollback lines above the visible screen to
-	// include (0 = visible screen only).
-	History int
-	// Escapes keeps SGR escape sequences (-e).
-	Escapes bool
-	// Join joins wrapped lines (-J).
-	Join bool
-}
+func WritableClients(cs []Client) int { return sessionhost.WritableClients(cs) }
 
 // CapturePane returns the pane contents (bounded to MaxCaptureBytes).
 func (s *Server) CapturePane(ctx context.Context, name string, o CaptureOptions) (string, error) {
@@ -679,28 +634,6 @@ func (s *Server) Paste(ctx context.Context, name, buffer string, text []byte) er
 	return err
 }
 
-// Key is a named tmux key. Only the keys below may be sent; literal text
-// always goes through Paste.
-type Key string
-
-const (
-	KeyEnter     Key = "Enter"
-	KeyEscape    Key = "Escape"
-	KeyCtrlU     Key = "C-u"
-	KeyCtrlC     Key = "C-c"
-	KeyCtrlD     Key = "C-d"
-	KeyBackspace Key = "BSpace"
-	KeyUp        Key = "Up"
-	KeyDown      Key = "Down"
-	KeyTab       Key = "Tab"
-	KeyEnd       Key = "End"
-)
-
-var allowedKeys = map[Key]bool{
-	KeyEnter: true, KeyEscape: true, KeyCtrlU: true, KeyCtrlC: true, KeyCtrlD: true,
-	KeyBackspace: true, KeyUp: true, KeyDown: true, KeyTab: true, KeyEnd: true,
-}
-
 // SendKeys sends named keys (never literal text) to the pane. A pane left
 // in copy-mode (mouse on: a wheel over an application without mouse
 // reporting enters it) would take the keys as copy-mode commands, so the
@@ -710,7 +643,7 @@ func (s *Server) SendKeys(ctx context.Context, name string, keys ...Key) error {
 		return nil
 	}
 	for _, k := range keys {
-		if !allowedKeys[k] {
+		if !sessionhost.AllowedKey(k) {
 			return fmt.Errorf("tmux: key %q is not an allowed named key", k)
 		}
 	}
@@ -772,14 +705,13 @@ func (s *Server) KillSession(ctx context.Context, name string) error {
 // kill-session alone (SIGHUP), it returns only once the processes are gone.
 func (s *Server) TerminateSession(ctx context.Context, name string, grace time.Duration) error {
 	if p, err := s.Pane(ctx, name); err == nil && p.PID > 0 && !p.Dead {
-		pg := -p.PID
-		_ = syscall.Kill(pg, syscall.SIGTERM)
+		_ = osutil.KillGroup(p.PID, false)
 		end := time.Now().Add(grace)
 		for time.Now().Before(end) && groupAlive(p.PID) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		if groupAlive(p.PID) {
-			_ = syscall.Kill(pg, syscall.SIGKILL)
+			_ = osutil.KillGroup(p.PID, true)
 			for i := 0; i < 40 && groupAlive(p.PID); i++ {
 				time.Sleep(50 * time.Millisecond)
 			}
@@ -795,19 +727,6 @@ func (s *Server) KillServer(ctx context.Context) error {
 		return nil
 	}
 	return err
-}
-
-// PaneInfo describes a session's active pane.
-type PaneInfo struct {
-	PaneID         string
-	PID            int
-	Dead           bool
-	ExitStatus     *int
-	CurrentCommand string
-	// Width and Height are the pane size in cells (0 if unknown). A pane
-	// takes the size of the last active attached client (window-size
-	// latest) and keeps it after that client detaches.
-	Width, Height int
 }
 
 // Pane returns the active pane of the session's current window.

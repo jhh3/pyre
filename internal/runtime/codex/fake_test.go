@@ -65,15 +65,16 @@ type fTurn struct {
 }
 
 type fThread struct {
-	id     string
-	named  bool   // thread/name/set seen (does not write the rollout)
-	mat    bool   // rollout written (thread/inject_items or a turn)
-	owner  *fConn // connection that started it
-	parent string
-	status map[string]any
-	turns  []*fTurn
-	active *fTurn
-	subs   map[*fConn]bool
+	id       string
+	named    bool   // thread/name/set seen (does not write the rollout)
+	mat      bool   // rollout written (thread/inject_items or a turn)
+	owner    *fConn // connection that started it
+	parent   string
+	status   map[string]any
+	turns    []*fTurn
+	active   *fTurn
+	subs     map[*fConn]bool
+	unloaded bool // thread/archive unloaded it (the real app-server keeps threads loaded otherwise)
 }
 
 type fakeServer struct {
@@ -288,6 +289,7 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 		}
 		s.mu.Lock()
 		t.subs[fc] = true
+		t.unloaded = false
 		s.mu.Unlock()
 		s.reply(fc, m.ID, map[string]any{"thread": s.threadJSON(t, false)})
 	case "thread/unsubscribe":
@@ -309,9 +311,30 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 				turns[i], turns[j] = turns[j], turns[i]
 			}
 		}
+		// Pages of `limit` turns; the cursor is the index of the next turn.
+		from, _ := strconv.Atoi(strings.TrimPrefix(fmt.Sprint(p["cursor"]), "c"))
+		if from > len(turns) {
+			s.mu.Unlock()
+			s.fail(fc, m.ID, "invalid cursor")
+			return
+		}
+		next := ""
+		if lim, _ := p["limit"].(float64); lim > 0 && from+int(lim) < len(turns) {
+			turns, next = turns[from:from+int(lim)], fmt.Sprintf("c%d", from+int(lim))
+		} else {
+			turns = turns[from:]
+		}
 		b, _ := json.Marshal(turns)
 		s.mu.Unlock()
-		s.reply(fc, m.ID, map[string]any{"data": json.RawMessage(b)})
+		if f, err := os.OpenFile(filepath.Join(os.Getenv("CODEX_HOME"), "fake-turns-list.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			fmt.Fprintf(f, "%v %d\n", p["cursor"], len(turns))
+			f.Close()
+		}
+		res := map[string]any{"data": json.RawMessage(b)}
+		if next != "" {
+			res["nextCursor"] = next
+		}
+		s.reply(fc, m.ID, res)
 	case "turn/start", "turn/steer":
 		if t == nil {
 			s.fail(fc, m.ID, "thread not loaded")
@@ -376,6 +399,30 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 		default:
 		}
 	case "thread/backgroundTerminals/clean":
+		s.reply(fc, m.ID, map[string]any{})
+	case "thread/loaded/list":
+		s.mu.Lock()
+		ids := []string{}
+		for id, th := range s.threads {
+			if !th.unloaded && th.parent == "" {
+				ids = append(ids, id)
+			}
+		}
+		s.mu.Unlock()
+		s.reply(fc, m.ID, map[string]any{"data": ids})
+	case "thread/read":
+		if t == nil {
+			s.fail(fc, m.ID, "no thread "+tid)
+			return
+		}
+		s.reply(fc, m.ID, map[string]any{"thread": s.threadJSON(t, false)})
+	case "thread/archive", "thread/unarchive":
+		logConfig(m.Method, map[string]any{"config": map[string]any{"threadId": tid}})
+		if t != nil && m.Method == "thread/archive" {
+			s.mu.Lock()
+			t.unloaded = true
+			s.mu.Unlock()
+		}
 		s.reply(fc, m.ID, map[string]any{})
 	case "account/rateLimits/read":
 		s.reply(fc, m.ID, map[string]any{"rateLimits": map[string]any{"limitId": "codex", "primary": map[string]any{"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1791200000}, "secondary": map[string]any{"usedPercent": 40, "windowDurationMins": 10080, "resetsAt": 1791600000}}})

@@ -21,11 +21,13 @@ var _ c.ReposAPI = (*Backend)(nil)
 func init() {
 	actionsAllowedForSessions[c.ActionWorktreeCreate] = true
 	actionsAllowedForSessions[c.ActionWorktreeScan] = true
+	actionsAllowedForSessions[c.ActionRepoClone] = true
 }
 
 var (
 	mockRepoMu sync.Mutex
 	mockWT     = map[*Backend]map[string]c.SessionWorktrees{} // by session; or by cwd before the session exists
+	mockClones = map[*Backend]map[string][]c.Repo{}           // node -> repositories cloned through repo.clone
 )
 
 // synthRepoNames per node name; unknown nodes get a default set.
@@ -66,15 +68,30 @@ func (b *Backend) ListRepos(ctx context.Context, req c.ListReposRequest) (c.Repo
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	all, nodes := b.repoEntriesLocked(req.NodeID)
+	out := c.RepoList{Items: []c.RepoEntry{}, Nodes: nodes}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	ranked := repoindex.Rank(req.Query, all)
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	out.Items = append(out.Items, ranked...)
+	return out, nil
+}
+
+func (b *Backend) repoEntriesLocked(nodeID string) ([]c.RepoEntry, map[string]time.Time) {
 	now := b.now()
-	out := c.RepoList{Items: []c.RepoEntry{}, Nodes: map[string]time.Time{}}
+	nodes := map[string]time.Time{}
 	var all []c.RepoEntry
 	for _, n := range b.nodes {
-		if req.NodeID != "" && n.NodeID != req.NodeID || n.Connection.State == c.ConnRevoked {
+		if nodeID != "" && n.NodeID != nodeID || n.Connection.State == c.ConnRevoked {
 			continue
 		}
-		out.Nodes[n.NodeID] = now.Add(-3 * time.Minute)
-		for _, r := range synthRepos(n, now) {
+		nodes[n.NodeID] = now.Add(-3 * time.Minute)
+		for _, r := range b.nodeRepos(n, now) {
 			e := c.RepoEntry{Repo: r, NodeID: n.NodeID, NodeName: n.Name}
 			for _, run := range b.runs {
 				if run.NodeID == n.NodeID && (run.Cwd == r.Path || strings.HasPrefix(run.Cwd, r.Path+"/") || synthCwdRepo(run.Cwd) == r.Name) {
@@ -87,16 +104,61 @@ func (b *Backend) ListRepos(ctx context.Context, req c.ListReposRequest) (c.Repo
 			all = append(all, e)
 		}
 	}
+	return all, nodes
+}
+
+// nodeRepos is a node's synthetic repositories plus what repo.clone added.
+func (b *Backend) nodeRepos(n *c.Node, now time.Time) []c.Repo {
+	out := synthRepos(n, now)
+	mockRepoMu.Lock()
+	out = append(out, mockClones[b][n.NodeID]...)
+	mockRepoMu.Unlock()
+	return out
+}
+
+// synthGitHub is the mock's GitHub snapshot (obviously synthetic: the
+// example.invalid host, the demo owner).
+func synthGitHub(now time.Time) c.GitHubRepoIndex {
+	at := func(d time.Duration) *time.Time { t := now.Add(-d); return &t }
+	repo := func(name, desc string, pushed time.Duration, contrib *time.Time) c.GitHubRepo {
+		return c.GitHubRepo{FullName: "demo/" + name, CloneURL: "https://example.invalid/demo/" + name + ".git",
+			SSHURL: "git@example.invalid:demo/" + name + ".git", Description: desc, DefaultBranch: "main", PushedAt: now.Add(-pushed), ContributedAt: contrib}
+	}
+	idx := c.GitHubRepoIndex{NodeID: "node_synth-mac", Login: "synth-owner", FetchedAt: now.Add(-20 * time.Minute), Repos: []c.GitHubRepo{
+		repo("atlas", "synthetic map tiles", 26*time.Hour, at(26*time.Hour)),
+		repo("notes-app", "synthetic notes", 72*time.Hour, at(72*time.Hour)),
+		repo("orbit", "synthetic orbit renderer", 5*time.Hour, at(5*time.Hour)),
+		repo("web", "synthetic web front end", 48*time.Hour, at(48*time.Hour)),
+		repo("lumen", "synthetic light sim", 40*24*time.Hour, nil),
+	}}
+	old := repo("old-archive", "synthetic archived", 400*24*time.Hour, nil)
+	old.Archived = true
+	idx.Repos = append(idx.Repos, old)
+	return idx
+}
+
+var _ c.RepoCatalogAPI = (*Backend)(nil)
+
+// RepoCatalog merges the synthetic repo index with the synthetic GitHub
+// snapshot.
+func (b *Backend) RepoCatalog(ctx context.Context, req c.RepoCatalogRequest) (c.RepoCatalog, error) {
+	if _, err := b.principal(ctx); err != nil {
+		return c.RepoCatalog{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	all, nodes := b.repoEntriesLocked("")
+	gh := synthGitHub(now)
+	items := repoindex.Catalog(repoindex.Rank("", all), []c.GitHubRepoIndex{gh}, req.Query, now)
 	limit := req.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = 200
 	}
-	ranked := repoindex.Rank(req.Query, all)
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
+	if len(items) > limit {
+		items = items[:limit]
 	}
-	out.Items = append(out.Items, ranked...)
-	return out, nil
+	return c.RepoCatalog{Items: items, Nodes: nodes, GitHub: &c.GitHubSource{Login: gh.Login, NodeID: gh.NodeID, FetchedAt: gh.FetchedAt}}, nil
 }
 
 // synthCwdRepo maps the demo fleet's /home/demo/src/<repo> cwds.
@@ -257,7 +319,46 @@ func (b *Backend) repoAction(n *c.Node, action string, params c.RawJSON) (any, b
 		mockRepoMu.Unlock()
 		return res, true, nil
 	case c.ActionRepoReindex:
-		return c.NodeRepoIndex{NodeID: n.NodeID, Roots: []string{"~/code"}, Repos: synthRepos(n, b.now()), IndexedAt: b.now()}, true, nil
+		return c.NodeRepoIndex{NodeID: n.NodeID, Roots: []string{"~/code"}, Repos: b.nodeRepos(n, b.now()), IndexedAt: b.now()}, true, nil
+	case c.ActionRepoClone:
+		var p c.RepoCloneParams
+		if err := decodeParams(params, &p); err != nil {
+			return nil, true, err
+		}
+		remote := repoindex.GitHubRemote(strings.TrimSpace(p.Remote))
+		if remote == "" {
+			return nil, true, c.Errorf(c.ErrInvalid, "repo.clone needs a remote")
+		}
+		key := repoindex.NormalizeRemote(remote)
+		name := path.Base(key)
+		base := "/home/demo/src"
+		if n.Platform == "darwin" {
+			base = "/Users/demo/code"
+		}
+		dest := path.Join(base, name)
+		if p.Dest != "" {
+			dest = p.Dest
+		}
+		res := c.RepoCloneResult{Path: dest, Remote: remote}
+		for _, r := range b.nodeRepos(n, b.now()) {
+			if r.Path != dest {
+				continue
+			}
+			if repoindex.NormalizeRemote(r.RemoteURL) == key {
+				res.Repo = r
+				return res, true, nil
+			}
+			return nil, true, c.Errorf(c.ErrConflict, "%s already exists and is a checkout of %s, not %s; nothing was changed", dest, r.RemoteURL, remote)
+		}
+		r := c.Repo{Name: name, Path: dest, DefaultBranch: "main", Branch: "main", RemoteURL: remote, LastActivity: b.now()}
+		mockRepoMu.Lock()
+		if mockClones[b] == nil {
+			mockClones[b] = map[string][]c.Repo{}
+		}
+		mockClones[b][n.NodeID] = append(mockClones[b][n.NodeID], r)
+		mockRepoMu.Unlock()
+		res.Repo, res.Cloned = r, true
+		return res, true, nil
 	}
 	return nil, false, nil
 }

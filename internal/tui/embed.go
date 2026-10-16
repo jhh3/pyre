@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/terminal"
 )
 
 // Embedded terminal: model integration. The Sessions view's right-hand
@@ -26,15 +27,38 @@ const (
 	termFocusGap  = time.Second / 120 // the pane you type into: one renderer frame (renderFPS)
 	termEchoGap   = 2 * time.Millisecond
 	termEchoFor   = 250 * time.Millisecond // output this soon after a key is its echo (local or remote): drawn at once
-	maxLiveTerms  = 2                      // embedded attach commands kept running
 	leaseTTL      = 120                    // seconds; renewed while focused
 	leaseRenew    = 40 * time.Second
 	termRetryWait = 15 * time.Second // after a failed or unavailable attach
 )
 
+// The warm-terminal cache (switching sessions without a wait). Moving the
+// selection back to a session viewed a moment ago used to re-run the whole
+// attach (sessions.attach, then the relay's websocket or a tmux client,
+// then the first screen) because only two attaches stayed running. Now the
+// selected session's stream and a few recently viewed (or prefetched
+// neighbour) streams keep running read-only, so switching to one paints a
+// live screen on the first frame; terminals whose stream was closed keep
+// their last screen, shown dimmed until the new stream draws. Streams out
+// of sight never schedule frames (termPoke), streams idle for termWarmIdle
+// are closed, and terminals of archived or vanished sessions are dropped
+// (sweepTerms).
+const (
+	maxLiveTerms      = 5                      // embedded attach commands kept running (warm streams)
+	maxCachedTerms    = 8                      // terminals kept with their last screen, live or not
+	termWarmIdle      = 3 * time.Minute        // a warm stream not viewed this long is closed (its screen stays)
+	termPrefetchDwell = 300 * time.Millisecond // the cursor rests this long before its neighbours are warmed
+	termPrefetchAge   = time.Minute            // a prefetched terminal ranks as viewed this long ago
+)
+
+// MaxWarmTerms is how many embedded attach commands the Sessions view keeps
+// running at most (tests).
+const MaxWarmTerms = maxLiveTerms
+
 // termMgr holds the embedded terminals (Update goroutine only).
 type termMgr struct {
 	views     map[string]*termView
+	shown     atomic.Value // string: the session whose terminal the pane draws (read by pokes)
 	notify    chan struct{}
 	waiting   bool
 	lastFrame time.Time
@@ -56,6 +80,12 @@ type termAttachMsg struct {
 	leaseAt  time.Time
 	takeover bool
 	err      error
+	conn     TermConn // a relayed stream, already open (relay.go)
+	relayOff string   // the node whose relay refused as unsupported
+	noSSH    string   // the node found to have no ssh route
+	local    bool     // d was built here: a tmux session on this machine (localterm.go)
+	screen   []byte   // its captured screen, drawn before the stream
+	localBad string   // the run whose local attach failed (the hub answered instead)
 }
 
 type leaseTickMsg struct{ sid, leaseID string }
@@ -175,16 +205,22 @@ func (m *Model) termViewFor(s contracts.SessionView) *termView {
 		if w <= 0 || h <= 0 {
 			w, h = max(40, m.width*60/100), max(10, m.height-6)
 		}
-		tv = newTermView(sid, runID, w, h+statusRows, m.termPoke())
+		tv = newTermView(sid, runID, w, h+statusRows, m.termPoke(sid))
 		tm.views[sid] = tv
 	}
 	tv.lastUse = time.Now()
 	return tv
 }
 
-func (m *Model) termPoke() func() {
-	ch := m.terms().notify
+// termPoke tells the frame waiter that sid's terminal drew; a warm
+// terminal out of sight updates its screen without scheduling a frame.
+func (m *Model) termPoke(sid string) func() {
+	tm := m.terms()
+	ch := tm.notify
 	return func() {
+		if shown, _ := tm.shown.Load().(string); shown != sid {
+			return
+		}
 		select {
 		case ch <- struct{}{}:
 		default:
@@ -192,17 +228,22 @@ func (m *Model) termPoke() func() {
 	}
 }
 
-// pruneTerms keeps at most maxLiveTerms attach commands running and drops
-// idle terminals beyond a small cache.
+// pruneTerms keeps at most maxLiveTerms attach commands running (closing
+// the least recently viewed) and at most maxCachedTerms terminals. The
+// selected session's, keep's, a lazily focused one and one holding the
+// input lease are never evicted.
 func (m *Model) pruneTerms(keep string) {
 	tm := m.terms()
+	evictable := func(tv *termView) bool {
+		return tv.sid != keep && tv.sid != m.sessList.sel && tv.sid != m.termLazy && tv.leaseID == ""
+	}
 	for {
 		var lru *termView
 		live := 0
 		for _, tv := range tm.views {
 			if ok, _ := tv.live(); ok {
 				live++
-				if tv.sid != keep && tv.sid != m.termLazy && tv.leaseID == "" && (lru == nil || tv.lastUse.Before(lru.lastUse)) {
+				if evictable(tv) && (lru == nil || tv.lastUse.Before(lru.lastUse)) {
 					lru = tv
 				}
 			}
@@ -212,10 +253,10 @@ func (m *Model) pruneTerms(keep string) {
 		}
 		lru.closeConn()
 	}
-	for len(tm.views) > 2*maxLiveTerms {
+	for len(tm.views) > maxCachedTerms {
 		var lru *termView
 		for _, tv := range tm.views {
-			if tv.sid != keep && tv.sid != m.termLazy && tv.leaseID == "" && (lru == nil || tv.lastUse.Before(lru.lastUse)) {
+			if evictable(tv) && (lru == nil || tv.lastUse.Before(lru.lastUse)) {
 				lru = tv
 			}
 		}
@@ -224,6 +265,102 @@ func (m *Model) pruneTerms(keep string) {
 		}
 		m.dropTerm(lru)
 	}
+}
+
+// sweepTerms closes what the cache should no longer hold (refresh tick,
+// session list changes): terminals of sessions that are archived or gone
+// are dropped; streams of ended or replaced runs, and warm streams not
+// viewed for termWarmIdle, are closed (their last screen stays).
+func (m *Model) sweepTerms() {
+	if m.term == nil {
+		return
+	}
+	now := time.Now()
+	for _, tv := range m.term.views {
+		if tv.leaseID != "" || tv.sid == m.termLazy || tv.wantInteractive() {
+			continue
+		}
+		s, ok := m.session(tv.sid)
+		if !ok || s.Session.Archived {
+			m.dropTerm(tv)
+			continue
+		}
+		if live, _ := tv.live(); !live || (m.view == viewSessions && tv.sid == m.sessList.sel) {
+			continue
+		}
+		if s.Run == nil || s.Run.RunID != tv.runID || s.Run.State.Terminal() || now.Sub(tv.lastUse) > termWarmIdle {
+			tv.closeConn()
+		}
+	}
+}
+
+// termPrefetchMsg: the cursor rested; warm its neighbours (token: previewTok).
+type termPrefetchMsg struct{ token int }
+
+func (m *Model) schedulePrefetch(tok int) tea.Cmd {
+	return tea.Tick(termPrefetchDwell, func(time.Time) tea.Msg { return termPrefetchMsg{token: tok} })
+}
+
+func (m *Model) onTermPrefetch(msg termPrefetchMsg) tea.Cmd {
+	if msg.token != m.previewTok {
+		return nil
+	}
+	return m.prefetchTerms()
+}
+
+// prefetchTerms warms the read-only terminals of the rows above and below
+// the cursor once it rests, so the next move paints a live screen at once.
+// Only streams that cost no ssh handshake are prefetched (the hub's relay,
+// or a tmux client on this machine), within the warm cap (pruneTerms); a
+// prefetched terminal ranks as viewed termPrefetchAge ago, so the sessions
+// actually looked at are evicted last.
+func (m *Model) prefetchTerms() tea.Cmd {
+	if m.view != viewSessions || m.tableShown() || m.overlay != nil {
+		return nil
+	}
+	l := &m.sessList
+	if l.sel == "" || l.idx < 0 || l.idx >= len(l.ids) || l.ids[l.idx] != l.sel {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for _, i := range []int{l.idx + 1, l.idx - 1} {
+		if i < 0 || i >= len(l.ids) {
+			continue
+		}
+		s, ok := m.session(l.ids[i])
+		if !ok {
+			continue // a group or machine row
+		}
+		if emb, _ := m.embeddable(s); !emb {
+			continue
+		}
+		relay := m.relayFor(s)
+		if !relay && (m.opts.ClientNodeID == "" || s.Run.NodeID != m.opts.ClientNodeID) {
+			continue // an ssh attach: never a handshake for a session not asked for
+		}
+		sid := s.Session.SessionID
+		if tv := m.terms().views[sid]; tv != nil && tv.runID == s.Run.RunID {
+			live, _ := tv.live()
+			st, _, _ := tv.status()
+			if live || tv.wantInteractive() || st == termConnecting || st == termStarting || time.Now().Before(tv.unavailableUntil) {
+				continue
+			}
+		}
+		if relay && !m.relayOpenOK(s.Run.NodeID) {
+			continue
+		}
+		var prev time.Time
+		if tv := m.terms().views[sid]; tv != nil {
+			prev = tv.lastUse
+		}
+		tv := m.termViewFor(s)
+		tv.lastUse = time.Now().Add(-termPrefetchAge)
+		if prev.After(tv.lastUse) {
+			tv.lastUse = prev
+		}
+		cmds = append(cmds, m.requestTerm(s, tv, termReadOnly))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) dropTerm(tv *termView) {
@@ -244,6 +381,16 @@ func (m *Model) LiveTerms() int {
 		}
 	}
 	return n
+}
+
+// TermLive reports whether a session's embedded terminal has a running
+// attach (tests).
+func (m *Model) TermLive(sessionID string) bool {
+	if tv := m.terms().views[sessionID]; tv != nil {
+		live, _ := tv.live()
+		return live
+	}
+	return false
 }
 
 // TermText is the plain text of a session's embedded terminal (tests).
@@ -300,12 +447,59 @@ func (m *Model) requestTerm(s contracts.SessionView, tv *termView, mode termMode
 		Preferred:    []contracts.AttachMechanism{contracts.AttachLocalTmux, contracts.AttachSSHTmux},
 		ReadOnly:     mode == termReadOnly,
 	}
-	api, parent, timeout := m.api, m.ctx, m.opts.LoadTimeout
+	// Watching a session on another machine streams through the hub's
+	// relay, never ssh (relay.go); typing keeps the native attach unless
+	// the node has no ssh route (then typing is relayed too).
+	relay := mode == termReadOnly && m.relayFor(s)
+	if relay {
+		req.Preferred = append([]contracts.AttachMechanism{contracts.AttachWebTerminal}, req.Preferred...)
+	}
+	typeRelay := mode == termInteractive && m.relayTypingFor(s)
+	canTypeRelay := mode == termInteractive && m.relayReachable(s)
+	// Watching a session on this machine: its tmux session directly, no
+	// hub (localterm.go); the hub answers when that fails.
+	local, isLocal := localTarget{}, false
+	if mode == termReadOnly && !relay {
+		local, isLocal = m.localFor(s)
+	}
+	cols, rows := tv.size()
+	api, parent, timeout, dial, node := m.api, m.ctx, m.opts.LoadTimeout, m.opts.DialRelay, s.Run.NodeID
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
+		if typeRelay {
+			return relayTyping(ctx, api, dial, req, termAttachMsg{sid: sid, tok: tok, mode: mode, takeover: takeover}, runID, cols, rows)
+		}
+		bad := ""
+		if isLocal {
+			screen, err := local.capture(ctx, true)
+			if err == nil {
+				return termAttachMsg{sid: sid, tok: tok, mode: mode, d: local.descriptor(), local: true, screen: screen}
+			}
+			bad = runID
+		}
 		d, err := api.AttachSession(ctx, req)
-		msg := termAttachMsg{sid: sid, tok: tok, mode: mode, d: d, err: err, takeover: takeover}
+		msg := termAttachMsg{sid: sid, tok: tok, mode: mode, d: d, err: err, takeover: takeover, localBad: bad}
+		if canTypeRelay && terminal.NoSSHRoute(err) {
+			// No ssh to that node: type through the relay, and remember.
+			msg = relayTyping(ctx, api, dial, req, termAttachMsg{sid: sid, tok: tok, mode: mode, takeover: takeover}, runID, cols, rows)
+			msg.noSSH = node
+			return msg
+		}
+		if relay && err == nil && d.Mechanism == contracts.AttachWebTerminal {
+			dctx, dcancel := context.WithTimeout(parent, timeout)
+			defer dcancel()
+			conn, err := dial(dctx, d, cols, rows, false)
+			if err != nil {
+				msg.err = err
+				if relayUnsupported(err) {
+					msg.relayOff = node
+				}
+				return msg
+			}
+			msg.conn = conn
+			return msg
+		}
 		if err != nil || mode != termInteractive || d.ReadOnly || !embedMechanism(d) {
 			return msg
 		}
@@ -319,6 +513,48 @@ func (m *Model) requestTerm(s contracts.SessionView, tv *termView, mode termMode
 	}
 }
 
+// relayTyping opens a writable relayed stream of the run under its input
+// lease: the lease first (the hub refuses an interactive web terminal
+// while someone else holds it, so a takeover happens before), then a
+// web_terminal descriptor and the stream. Any failure gives the lease back.
+func relayTyping(ctx context.Context, api contracts.API, dial RelayDialer, req contracts.AttachRequest, msg termAttachMsg, runID string, cols, rows int) termAttachMsg {
+	l, err := api.AcquireLease(ctx, contracts.LeaseRequest{Mutation: contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)}, RunID: runID, TTLSeconds: leaseTTL, Takeover: msg.takeover})
+	if err != nil {
+		msg.err = err
+		return msg
+	}
+	release := func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_, _ = api.ReleaseLease(rctx, contracts.LeaseReleaseRequest{Mutation: contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)}, LeaseID: l.LeaseID})
+	}
+	req.Mutation = contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)}
+	req.ReadOnly = false
+	req.Preferred = []contracts.AttachMechanism{contracts.AttachWebTerminal, contracts.AttachLocalTmux, contracts.AttachSSHTmux}
+	d, err := api.AttachSession(ctx, req)
+	msg.d = d
+	switch {
+	case err != nil:
+		msg.err = err
+	case d.Mechanism != contracts.AttachWebTerminal:
+		msg.err = contracts.Errorf(contracts.ErrUnsupported, "the hub has no terminal relay for this session (it answered %s)", d.Mechanism)
+	case d.ReadOnly:
+		msg.err = contracts.Errorf(contracts.ErrUnsupported, "the relay offers this session read-only")
+	}
+	if msg.err != nil {
+		release()
+		return msg
+	}
+	conn, err := dial(ctx, d, cols, rows, false)
+	if err != nil {
+		release()
+		msg.err = err
+		return msg
+	}
+	msg.conn, msg.leaseID, msg.leaseAt = conn, l.LeaseID, l.AcquiredAt
+	return msg
+}
+
 func embedMechanism(d contracts.AttachDescriptor) bool {
 	return (d.Mechanism == contracts.AttachLocalTmux || d.Mechanism == contracts.AttachSSHTmux) && len(d.Command) > 0
 }
@@ -330,11 +566,39 @@ func (m *Model) onTermAttach(msg termAttachMsg) tea.Cmd {
 		if msg.leaseID != "" {
 			m.releaseLease(msg.leaseID) // a stale answer: never keep its lease
 		}
+		if msg.conn != nil {
+			_ = msg.conn.Close()
+		}
 		return nil
 	}
+	if msg.noSSH != "" {
+		m.relays().noSSH[msg.noSSH] = true
+	}
+	m.localBad(msg.localBad)
+	if msg.err == nil && !msg.local {
+		if s, ok := m.session(msg.sid); ok {
+			m.learnLocalTmux(s, msg.d)
+		}
+	}
+	if msg.relayOff != "" {
+		// The node cannot relay this run: watch it the old way (ssh).
+		m.relayRefused(msg.relayOff)
+		tv.reqMode = termReadOnly
+		if live, _ := tv.live(); !live {
+			tv.setState(termIdle, "")
+		}
+		return m.openTermView()
+	}
+	if msg.conn != nil && msg.mode == termReadOnly { // the newest request: a relayed read-only view
+		tv.setConn(msg.conn, termReadOnly)
+		tv.note, tv.startWait = "", 0
+		m.pruneTerms(msg.sid)
+		return m.termWait()
+	}
 	interactive := msg.mode == termInteractive
+	relayed := msg.conn != nil // a writable relayed stream (relayTyping)
 	if interactive && !m.wantsInteractive(msg.sid) && m.wheelHeld(tv) &&
-		(msg.err != nil || !embedMechanism(msg.d) || msg.d.ReadOnly) {
+		(msg.err != nil || (!relayed && (!embedMechanism(msg.d) || msg.d.ReadOnly))) {
 		return m.wheelHoldFailed(tv, msg)
 	}
 	fail := func(state termState, text string) tea.Cmd {
@@ -368,6 +632,7 @@ func (m *Model) onTermAttach(msg termAttachMsg) tea.Cmd {
 			return m.setToast("cannot type into the session: "+text, toneWarn)
 		}
 		return fail(termFailed, text)
+	case relayed:
 	case !embedMechanism(msg.d):
 		if interactive {
 			fail(termUnavailable, msg.d.Notes)
@@ -388,11 +653,31 @@ func (m *Model) onTermAttach(msg termAttachMsg) tea.Cmd {
 		if msg.leaseID != "" {
 			m.releaseLease(msg.leaseID)
 		}
+		if relayed {
+			_ = msg.conn.Close()
+		}
 		tv.reqMode = termReadOnly
 		return nil
 	}
+	if !interactive && !relayed && msg.d.Mechanism == contracts.AttachSSHTmux && msg.sid != m.sessList.sel {
+		// A prefetch (or a row already left) answered with ssh (a hub
+		// without the relay): no handshake for a session not on screen.
+		if live, _ := tv.live(); !live {
+			tv.setState(termIdle, "")
+		}
+		return nil
+	}
+	if len(msg.screen) > 0 {
+		tv.seed(msg.screen) // the first frame: the pane as it is now
+	}
 	cols, rows := tv.size()
-	conn, err := m.starter()(msg.d, cols, rows)
+	conn, err := msg.conn, error(nil)
+	if !relayed {
+		conn, err = m.starter()(msg.d, cols, rows)
+	}
+	if err != nil && msg.local {
+		m.localBad(msg.d.RunID) // next time through the hub
+	}
 	if err != nil {
 		if msg.leaseID != "" {
 			m.releaseLease(msg.leaseID)
@@ -406,6 +691,9 @@ func (m *Model) onTermAttach(msg termAttachMsg) tea.Cmd {
 	}
 	tv.setConn(conn, msg.mode)
 	tv.note, tv.startWait = "", 0
+	if msg.local {
+		m.local.opened++
+	}
 	var cmds []tea.Cmd
 	if interactive {
 		tv.leaseID, tv.leaseAt, tv.lastKey, tv.leaseIdle = msg.leaseID, msg.leaseAt, time.Now(), false

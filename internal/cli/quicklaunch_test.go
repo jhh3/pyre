@@ -70,11 +70,52 @@ func TestNewMachineChoice(t *testing.T) {
 	if res = mustJSON[QuickLaunchResult](t, r); res.Session.NodeName != "synth-linux" {
 		t.Fatalf("most recently used machine: %s", res.Session.NodeName)
 	}
-	// A repository not on the named machine.
-	r = run(t, e, nil, "new", "web", "@synth-mac")
-	expectCode(t, r, ExitNotFound)
-	if !strings.Contains(r.stderr, `no repository matches "web" on synth-mac`) {
-		t.Fatalf("missing-on-machine: %s", r)
+	// A repository not on the named machine is cloned there first (a
+	// confirmation line on stderr), unless --no-clone.
+	r = run(t, e, nil, "new", "web", "@synth-mac", "--no-clone")
+	expectCode(t, r, ExitUsage)
+	if !strings.Contains(r.stderr, "web is not on synth-mac; drop --no-clone") {
+		t.Fatalf("--no-clone: %s", r)
+	}
+	r = run(t, e, nil, "--json", "new", "web", "@synth-mac", "shell")
+	expectCode(t, r, 0)
+	res = mustJSON[QuickLaunchResult](t, r)
+	if !strings.Contains(r.stderr, "cloning demo/web on synth-mac (not there yet)") || !strings.Contains(r.stderr, "cloned into /Users/demo/code/web") {
+		t.Fatalf("clone confirmation: %s", r)
+	}
+	if len(res.Cloned) != 1 || !res.Cloned[0].Cloned || res.Session.NodeName != "synth-mac" || res.Session.Run.Cwd != "/Users/demo/code/web" {
+		t.Fatalf("clone launch: cloned=%+v node=%s cwd=%s", res.Cloned, res.Session.NodeName, res.Session.Run.Cwd)
+	}
+}
+
+// owner/name from GitHub (the catalog), or any owner/name, is cloned onto
+// the chosen machine.
+func TestNewClonesGitHubRepo(t *testing.T) {
+	h := newHub(t)
+	e := newEnv(t, h)
+	// Two machines and none named: say which.
+	r := run(t, e, nil, "new", "demo/orbit", "shell")
+	expectCode(t, r, ExitUsage)
+	if !strings.Contains(r.stderr, "say which machine gets the clone") {
+		t.Fatalf("no machine: %s", r)
+	}
+	r = run(t, e, nil, "--json", "new", "demo/orbit", "@synth-linux", "shell")
+	expectCode(t, r, 0)
+	res := mustJSON[QuickLaunchResult](t, r)
+	if len(res.Cloned) != 1 || res.Cloned[0].Remote != "https://example.invalid/demo/orbit.git" || res.Session.Run.Cwd != "/home/demo/src/orbit" {
+		t.Fatalf("catalog clone: %+v cwd=%s", res.Cloned, res.Session.Run.Cwd)
+	}
+	// Now indexed there: no second clone.
+	r = run(t, e, nil, "--json", "new", "orbit", "shell")
+	expectCode(t, r, 0)
+	if res = mustJSON[QuickLaunchResult](t, r); len(res.Cloned) != 0 || res.Session.NodeName != "synth-linux" {
+		t.Fatalf("second launch: %+v on %s", res.Cloned, res.Session.NodeName)
+	}
+	// An owner/name nobody indexed: its GitHub URL.
+	r = run(t, e, nil, "--json", "new", "synth-org/brand-new", "@synth-mac", "shell")
+	expectCode(t, r, 0)
+	if res = mustJSON[QuickLaunchResult](t, r); len(res.Cloned) != 1 || res.Cloned[0].Remote != "https://github.com/synth-org/brand-new.git" || res.Session.Run.Cwd != "/Users/demo/code/brand-new" {
+		t.Fatalf("plain owner/name: %+v cwd=%s", res.Cloned, res.Session.Run.Cwd)
 	}
 }
 
@@ -132,10 +173,17 @@ func TestNewFreshAndMultiRepo(t *testing.T) {
 	if res.Session.NodeName != "synth-linux" || res.Session.Run.Cwd != "/home/demo/pyre-work/rename-share-endpoint" || len(res.Worktrees.Worktrees) != 2 {
 		t.Fatalf("multi: node=%s cwd=%s wt=%+v", res.Session.NodeName, res.Session.Run.Cwd, res.Worktrees)
 	}
-	r = run(t, e, nil, "new", "notes+web")
+	// Repositories on different machines: --no-clone refuses; otherwise
+	// the machine with most of them clones the rest.
+	r = run(t, e, nil, "new", "notes+web", "--no-clone")
 	expectCode(t, r, ExitUsage)
 	if !strings.Contains(r.stderr, "no single machine has all of these repositories") {
 		t.Fatalf("split repos: %s", r)
+	}
+	r = run(t, e, nil, "--json", "new", "notes+web", "shell")
+	expectCode(t, r, 0)
+	if res = mustJSON[QuickLaunchResult](t, r); len(res.Cloned) != 1 || len(res.Repos) != 2 || res.Worktrees == nil {
+		t.Fatalf("split repos cloned: %+v", res)
 	}
 }
 

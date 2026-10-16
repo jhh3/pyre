@@ -14,6 +14,16 @@ type Session struct {
 	Lineage      Lineage   `json:"lineage"`
 	Tags         []string  `json:"tags,omitempty"`
 	Archived     bool      `json:"archived"`
+	// Icon (W-archive2, additive) is an optional single emoji shown before
+	// the title (one grapheme, at most two cells). Automatic titling never
+	// changes it.
+	Icon string `json:"icon,omitempty"`
+	// OwnerActiveAt (additive) is when the owner last sent this session a
+	// message or typed into it through Pyre (terminal relay, input, input
+	// lease). The hub records it at most once a minute per session; nil
+	// when the owner never did. Sessions acting on the owner's behalf do not
+	// count.
+	OwnerActiveAt *time.Time `json:"owner_active_at,omitempty"`
 }
 
 // StartedBy reports whether session sessionID started s (it created s, or
@@ -26,11 +36,31 @@ func (s Session) StartedBy(sessionID string) bool {
 	return (s.CreatedBy.Kind == PrincipalSession && s.CreatedBy.ID == sessionID) || s.Lineage.ParentSessionID == sessionID
 }
 
+// Parent is the session s sits under and reports to ("" at the top level):
+// its lineage parent, else (never reparented) the session principal that
+// created it. Additive (W-reparent).
+func (s Session) Parent() string {
+	if p := s.Lineage.ParentSessionID; p != "" && p != s.SessionID {
+		return p
+	}
+	if s.Lineage.ReparentedAt == nil && s.CreatedBy.Kind == PrincipalSession && s.CreatedBy.ID != "" && s.CreatedBy.ID != s.SessionID {
+		return s.CreatedBy.ID
+	}
+	return ""
+}
+
 // Lineage links a session to where it came from.
 type Lineage struct {
-	ParentSessionID string `json:"parent_session_id,omitempty"` // session that launched it (peer launch), informational
+	ParentSessionID string `json:"parent_session_id,omitempty"` // session it sits under and reports to (its launcher unless reparented)
 	ForkedFrom      string `json:"forked_from,omitempty"`       // explicit fork/successor source session
 	HandoffNoteID   string `json:"handoff_note_id,omitempty"`   // reconstructed-continuation handoff
+	// ReparentedFrom/ReparentedAt (W-reparent, additive) record the last
+	// explicit reparent: the previous parent ("" when it was at the top
+	// level) and when. A non-nil ReparentedAt means the parent was chosen
+	// explicitly, so CreatedBy no longer implies one (Session.Parent).
+	// CreatedBy stays the historical creator.
+	ReparentedFrom string     `json:"reparented_from,omitempty"`
+	ReparentedAt   *time.Time `json:"reparented_at,omitempty"`
 }
 
 // RunState is a narrow observation of an execution. It is never a statement
@@ -218,6 +248,11 @@ const (
 	TagReportNone   = "report:none"
 )
 
+// TagArchiveWhenDone (W-archive2, additive) is the reserved session tag
+// the hub sets for UpdateSessionRequest.WhenDone: the session is archived
+// once its current turn ends and its run has been stopped.
+const TagArchiveWhenDone = "archive:when-done"
+
 // NodeSelector is a caller-supplied rule for choosing a node.
 type NodeSelector struct {
 	Platform    string            `json:"platform,omitempty"`
@@ -368,4 +403,22 @@ type UpdateSessionRequest struct {
 	Title     *string   `json:"title,omitempty"`
 	Tags      *[]string `json:"tags,omitempty"`
 	Archived  *bool     `json:"archived,omitempty"`
+	// WhenDone (W-archive2, additive): with Archived=true, a session whose
+	// run is still live is not archived at once. The hub records
+	// TagArchiveWhenDone, stops the run gracefully once its current turn
+	// ends (Claude: /exit; Codex: end the thread; shell: exit) and then
+	// archives the session. An ended session is archived at once.
+	// Archived=false cancels a pending archive.
+	WhenDone bool `json:"when_done,omitempty"`
+	// Icon (W-archive2, additive) sets the session's emoji ("" clears).
+	// Any principal may set any session's icon, like a rename.
+	Icon *string `json:"icon,omitempty"`
+	// Parent (W-reparent, additive) moves the session under another
+	// session: its lineage parent, which receives its automatic reports
+	// (pending reports retarget). "" (or "none") detaches it to the top
+	// level. The parent must exist, not be archived, and not be the session
+	// or one of its descendants. The owner may reparent any session; a
+	// session principal only itself, the sessions it currently parents, and
+	// sessions in its own project. Both sides get a Pyre notice message.
+	Parent *string `json:"parent,omitempty"`
 }

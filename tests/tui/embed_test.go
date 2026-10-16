@@ -158,16 +158,17 @@ func TestEmbeddedTerminalClickOnListReleasesLease(t *testing.T) {
 	})
 }
 
-// Switching sessions switches the embedded view; at most two attach
-// commands stay running.
-func TestEmbeddedTerminalKeepsAtMostTwoLive(t *testing.T) {
+// Switching sessions switches the embedded view; recently viewed
+// sessions stay warm (their read-only attach keeps running) up to
+// tui.MaxWarmTerms, beyond which the least recently viewed are closed.
+func TestEmbeddedTerminalKeepsWarmTermsBounded(t *testing.T) {
 	h, _ := startEmbed(t, 160, 40, nil)
 	selectSession(t, h, "ses_synth-a")
 	seen := map[string]bool{}
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 12; i++ {
 		h.Key("down")
 		h.Settle()
-		if n := h.M.LiveTerms(); n > 2 {
+		if n := h.M.LiveTerms(); n > tui.MaxWarmTerms {
 			t.Fatalf("%d embedded terminals live after %d moves", n, i+1)
 		}
 		seen[h.M.SelectedSession()] = true
@@ -181,8 +182,8 @@ func TestEmbeddedTerminalKeepsAtMostTwoLive(t *testing.T) {
 			closed++
 		}
 	}
-	if closed < len(h.Terms())-2 {
-		t.Fatalf("%d of %d terminals closed; want all but 2", closed, len(h.Terms()))
+	if closed < len(h.Terms())-tui.MaxWarmTerms {
+		t.Fatalf("%d of %d terminals closed; want all but %d", closed, len(h.Terms()), tui.MaxWarmTerms)
 	}
 }
 

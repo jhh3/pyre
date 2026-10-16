@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Discord connector 1.1.0: native polls (`create_poll`, `poll_voters`, `end_poll`; results stay in `message`), moderation with URL-encoded audit-log reasons (`timeout_member`, `kick_member`, `ban_member`, `unban_member`, `bans`, `add_member_role`, `remove_member_role`, `audit_log`, `bulk_delete`), channel/event/invite/webhook/slash-command management, and `api_get` / `api_call` for any other v10 endpoint on the fixed origin. Skill guidance now skips system messages (only types 0 and 19 are user posts) and requires reasons and owner policy for moderation.
+- HTTP connectors can bind an optional argument to a header (`argumentHeaders`, with URL encoding), expand plain-string array items through `itemTemplates`, accept relative times (`relativeTimeArguments`), and opt into a validated raw path below the fixed base URL with argument-chosen query, body, and method (`pathArgument`, `queryArgument`, `bodyArgument`, `methodArgument` + `methods`). Raw paths reject schemes, hosts, `//`, dot segments, queries, fragments, and encoded separators; a read using them must be GET-only.
+
+- Add a built-in Discord connector for the owner's own bot token (never a user token): server, channel, thread, forum, message, pin, member, role, and reaction reads; a composite `activity` snapshot for cheap polling; explicit `--write` replies, threads, forum posts, reactions, pins, and typing with `allowed_mentions` defaulting to nobody; and discord.com message/channel link context.
+- HTTP connectors can declare fixed executor headers (such as Discord's mandatory User-Agent), fixed query values, and string-only body arguments; JSON-looking arguments now keep large integers exactly.
+- HTTP execution honours 429 responses: it waits the provider's `retry_after`, `Retry-After`, or `X-RateLimit-Reset-After` (at most 30 s) and retries up to three times before reporting the delay.
+- Connector Kit supports composite read operations (`compose`) that run several read steps through one credential and project items to compact fields.
+
 ## 0.10.7
 
 - Evaluate the exact staged candidate through real Codex and Claude command traces, requiring safe live inspection and literal selected-mode routing instead of scoring only the final JSON answer.

@@ -5,159 +5,301 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/runtime/mock"
+	"github.com/jhh3/pyre/internal/tui/tuitest"
 )
 
-func TestQuickLaunchBarStartsInMainCheckout(t *testing.T) {
-	h, rec, _ := startMock(t, 120, 34, nil, nil)
+// New-session panel (W-newsession): a form with Where, Machine, Agent,
+// Workspace, Account, Prompt and Title.
+
+// nsOpen opens the panel and waits for the repo catalog.
+func nsOpen(t *testing.T, h *tuitest.Harness) {
+	t.Helper()
 	h.Key("n")
 	if !h.M.QuickLaunchOpen() {
-		t.Fatal("n did not open the quick-launch bar")
+		t.Fatal("n did not open the new-session panel")
 	}
-	h.WaitFor("repo index", 3*sec, func() bool { return h.Contains("notes-app") })
-	h.Type("tund")
-	if row := qlCurrentRow(h.View()); !strings.Contains(row, "tundra") || strings.Contains(row, "tundra-old") {
-		t.Fatalf("best completion not selected: %q\n%s", row, h.View())
+	h.WaitFor("catalog", 3*sec, func() bool { return h.Contains("demo/atlas") })
+	h.Settle()
+}
+
+// nsRow is the highlighted Where row.
+func nsRow(view string) string {
+	for _, l := range strings.Split(view, "\n") {
+		c := strings.TrimSpace(strings.Trim(strings.TrimSpace(l), "│"))
+		if strings.HasPrefix(c, "› ") && !strings.Contains(c, "Where") && !strings.Contains(c, "Machine") && !strings.Contains(c, "Agent") &&
+			!strings.Contains(c, "Workspace") && !strings.Contains(c, "Account") && !strings.Contains(c, "Prompt") && !strings.Contains(c, "Title") {
+			return c
+		}
 	}
-	if !h.Contains("Claude on synth-mac · ~/code/tundra · main checkout") || !h.Contains("● claude") || !h.Contains("● synth-mac") {
-		t.Fatalf("plan not shown:\n%s", h.View())
-	}
-	golden(t, "quicklaunch-120", h.View())
-	h.Key("enter")
+	return ""
+}
+
+func startReq(t *testing.T, h *tuitest.Harness, rec *tuitest.Recorder) contracts.StartSessionRequest {
+	t.Helper()
 	h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-	req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
-	if req.Cwd != "/Users/demo/code/tundra" || req.Harness != contracts.HarnessClaude || req.NodeID != "node_synth-mac" || req.InitialPrompt != "" || req.OperationID == "" {
+	return rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
+}
+
+func TestNewSessionFormStartsInMainCheckout(t *testing.T) {
+	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	golden(t, "newsession-open-120", h.View())
+	h.Type("tund")
+	if row := nsRow(h.View()); !strings.Contains(row, "tundra") || strings.Contains(row, "tundra-old") {
+		t.Fatalf("best match not highlighted: %q\n%s", row, h.View())
+	}
+	if !h.Contains("Claude on synth-mac · demo/tundra · main checkout · account auto") || !h.Contains("● synth-mac · has it") || !h.Contains("● Claude") {
+		t.Fatalf("summary:\n%s", h.View())
+	}
+	golden(t, "newsession-120", h.View())
+	h.Key("ctrl+s")
+	req := startReq(t, h, rec)
+	if req.Cwd != "/Users/demo/code/tundra" || req.Harness != contracts.HarnessClaude || req.NodeID != "node_synth-mac" || req.InitialPrompt != "" ||
+		req.AccountPolicy.Mode != contracts.AccountEligible || req.OperationID == "" {
 		t.Fatalf("start request: %+v", req)
 	}
-	if len(rec.Calls("InvokeNodeAction:"+contracts.ActionWorktreeCreate)) != 0 {
-		t.Fatal("main-checkout launch created a worktree")
+	if len(rec.Calls("InvokeNodeAction:"+contracts.ActionWorktreeCreate))+len(rec.Calls("InvokeNodeAction:"+contracts.ActionRepoClone)) != 0 {
+		t.Fatal("main-checkout launch created a worktree or cloned")
 	}
 	h.WaitFor("back on Sessions", 3*sec, func() bool {
 		return !h.M.OverlayOpen() && h.Contains("launch requested: claude in tundra on synth-mac")
 	})
 }
 
-func TestQuickLaunchFreshMachineHarness(t *testing.T) {
-	h, rec, _ := startMock(t, 120, 34, nil, nil)
-	h.Key("n")
-	h.WaitFor("repo index", 3*sec, func() bool { return h.Contains("notes-app") })
-	h.Type("atlas")
-	first := ""
-	if strings.Contains(h.View(), "● synth-linux") {
-		first = "synth-linux"
-	} else if strings.Contains(h.View(), "● synth-mac") {
-		first = "synth-mac"
+// Moving through the Where list (keys and wheel) never changes another
+// field's value.
+func TestNewSessionListScrollKeepsChoices(t *testing.T) {
+	h, _, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	h.Key("tab") // Machine
+	if !strings.Contains(h.View(), "› Machine") {
+		t.Fatalf("tab did not focus Machine:\n%s", h.View())
 	}
-	h.Key("ctrl+o") // the other machine
-	if first == "" || h.Contains("● "+first) {
-		t.Fatalf("machine chip did not cycle from %q:\n%s", first, h.View())
+	h.Key("right")
+	mach := summaryMachine(h.View())
+	h.Key("tab") // Agent
+	h.Key("right")
+	want := "Codex on " + mach
+	if mach == "" || !h.Contains(want) || h.Contains("auto · ←→") {
+		t.Fatalf("explicit choices (%q):\n%s", want, h.View())
 	}
-	h.Key("ctrl+t") // codex
-	h.Key("ctrl+f") // fresh worktree
-	h.Type(" fix the tile cache")
-	if !h.Contains("● codex") || !h.Contains("fresh worktree on branch pyre/fix-tile-cache") || !h.Contains("fix the tile cache  (from the line)") {
-		t.Fatalf("plan:\n%s", h.View())
+	h.Key("shift+tab", "shift+tab") // back to Where
+	before := nsRow(h.View())
+	for i := 0; i < 6; i++ {
+		h.Key("down")
+		if !h.Contains(want) || !h.Contains("● "+mach) || !h.Contains("● Codex") {
+			t.Fatalf("down #%d changed machine or agent:\n%s", i, h.View())
+		}
 	}
-	golden(t, "quicklaunch-fresh-120", h.View())
-	h.Key("enter")
-	h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-	wt := rec.Calls("InvokeNodeAction:" + contracts.ActionWorktreeCreate)
-	if len(wt) != 1 {
-		t.Fatalf("worktree.create calls: %d", len(wt))
+	if nsRow(h.View()) == before {
+		t.Fatalf("down did not move the list:\n%s", h.View())
 	}
-	var p contracts.WorktreeCreateParams
-	_ = json.Unmarshal(wt[0].Request.(contracts.NodeActionRequest).Params, &p)
-	if len(p.Repos) != 1 || p.Slug != "fix the tile cache" {
-		t.Fatalf("create params: %+v", p)
+	x, y := at(t, h, "Recent")
+	wheel(h, x, y+1, tea.MouseWheelUp)
+	wheel(h, x, y+1, tea.MouseWheelUp)
+	if !h.Contains(want) {
+		t.Fatalf("wheel changed a choice:\n%s", h.View())
 	}
-	req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
-	if req.Harness != contracts.HarnessCodex || !strings.HasSuffix(req.Cwd, "/atlas/.worktrees/fix-tile-cache") || req.InitialPrompt != "fix the tile cache" || req.NodeID == "node_"+first {
-		t.Fatalf("start request: %+v", req)
-	}
-}
-
-func TestQuickLaunchMultiRepoAndAdvanced(t *testing.T) {
-	h, rec, _ := startMock(t, 120, 34, nil, nil)
-	h.Key("n")
-	h.WaitFor("repo index", 3*sec, func() bool { return h.Contains("notes-app") })
-	h.Type("api+web")
-	if !h.Contains("fresh worktrees of api + web") || !h.Contains("● synth-linux") || h.Contains("synth-mac (") {
-		t.Fatalf("multi plan:\n%s", h.View())
-	}
-	h.Key("enter")
-	h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-	req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
-	if req.NodeID != "node_synth-linux" || !strings.Contains(req.Cwd, "/pyre-work/") {
-		t.Fatalf("multi start: %+v", req)
-	}
-	h.WaitFor("launched", 3*sec, func() bool { return !h.M.OverlayOpen() })
-	// ^a opens the step-by-step launch; an unknown name says so on Enter.
-	h.Key("n")
-	h.Type("zzz-nothing")
-	h.Key("enter")
-	if !h.Contains("no repository matches “zzz-nothing”") || len(rec.Calls("StartSession")) != 1 {
-		t.Fatalf("unknown repo:\n%s", h.View())
-	}
-	h.Key("ctrl+a")
-	if h.M.ActiveView() != "Launch" {
-		t.Fatalf("tab: %s", h.M.ActiveView())
+	// Typing a new filter keeps them too.
+	h.Type("notes")
+	if !h.Contains(want + " · demo/notes-app") {
+		t.Fatalf("filter changed a choice:\n%s", h.View())
 	}
 }
 
-func TestQuickLaunchEmptyLineStartsRecentRepo(t *testing.T) {
-	h, rec, _ := startMock(t, 120, 34, nil, nil)
-	h.Key("n")
-	h.WaitFor("repo index", 3*sec, func() bool { return h.Contains("notes-app") })
-	h.Settle()
-	golden(t, "quicklaunch-open-120", h.View())
-	row := qlCurrentRow(h.View())
-	h.Key("enter")
-	h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-	req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
-	name := req.Cwd[strings.LastIndexByte(req.Cwd, '/')+1:]
-	if !strings.Contains(row, name) {
-		t.Fatalf("started %s, selected row %q", req.Cwd, row)
-	}
-}
-
-// qlCurrentRow is the selected suggestion in the new-session panel (the
-// input line, always first, also starts with ›).
-func qlCurrentRow(view string) string {
-	n := 0
+// summaryMachine is the machine named in the summary line ("X on <m> · …").
+func summaryMachine(view string) string {
 	for _, l := range strings.Split(view, "\n") {
-		c := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "│"))
-		if strings.HasPrefix(c, "›") {
-			if n++; n == 2 {
-				return c
+		if i := strings.Index(l, " on synth-"); i >= 0 {
+			rest := l[i+4:]
+			if j := strings.Index(rest, " "); j >= 0 {
+				return rest[:j]
 			}
 		}
 	}
 	return ""
 }
 
-// A path launches in a plain folder on the chosen machine: Tab completes
-// a folder segment from the machine's listing, Enter starts there.
-func TestQuickLaunchFolderPath(t *testing.T) {
+// Segmented pickers change by click; Prompt and Title are fields; Enter
+// on the last field starts.
+func TestNewSessionClicksPromptTitle(t *testing.T) {
 	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	h.Type("atlas")
+	click(t, h, "○ Codex")
+	click(t, h, "○ fresh worktree")
+	if !strings.Contains(h.View(), "› Workspace") {
+		t.Fatalf("clicking an option did not focus its field:\n%s", h.View())
+	}
+	click(t, h, "○ synth-mac")
+	click(t, h, "Prompt")
+	h.Type("fix the tile cache")
+	h.Key("shift+enter")
+	h.Type("and add a test")
+	h.Key("enter") // Title
+	h.Type("tile cache")
+	if !h.Contains("Codex on synth-mac · demo/atlas · fresh worktree pyre/tile-cache · account auto") {
+		t.Fatalf("summary:\n%s", h.View())
+	}
+	golden(t, "newsession-fields-120", h.View())
+	h.Key("enter")
+	req := startReq(t, h, rec)
+	wt := rec.Calls("InvokeNodeAction:" + contracts.ActionWorktreeCreate)
+	if len(wt) != 1 {
+		t.Fatalf("worktree.create calls: %d", len(wt))
+	}
+	var p contracts.WorktreeCreateParams
+	_ = json.Unmarshal(wt[0].Request.(contracts.NodeActionRequest).Params, &p)
+	if len(p.Repos) != 1 || p.Repos[0] != "/Users/demo/code/atlas" || p.Slug != "tile cache" {
+		t.Fatalf("create params: %+v", p)
+	}
+	if req.Harness != contracts.HarnessCodex || req.NodeID != "node_synth-mac" || req.Title != "tile cache" ||
+		req.InitialPrompt != "fix the tile cache\nand add a test" || !strings.HasSuffix(req.Cwd, "/atlas/.worktrees/tile-cache") {
+		t.Fatalf("start request: %+v", req)
+	}
+}
+
+// A repository the machine lacks (here: only on GitHub) is cloned there
+// first; the panel says so before and while it runs.
+func TestNewSessionClonesMissingRepo(t *testing.T) {
+	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	h.Type("orbit")
+	if row := nsRow(h.View()); !strings.Contains(row, "orbit") || !h.Contains("GitHub") {
+		t.Fatalf("GitHub repo not listed:\n%s", h.View())
+	}
+	if !h.Contains("● synth-linux · will clone") || !h.Contains("demo/orbit (clone first)") {
+		t.Fatalf("clone not announced:\n%s", h.View())
+	}
+	golden(t, "newsession-clone-120", h.View())
+	h.Key("ctrl+enter")
+	req := startReq(t, h, rec)
+	cl := rec.Calls("InvokeNodeAction:" + contracts.ActionRepoClone)
+	if len(cl) != 1 {
+		t.Fatalf("repo.clone calls: %d", len(cl))
+	}
+	var p contracts.RepoCloneParams
+	_ = json.Unmarshal(cl[0].Request.(contracts.NodeActionRequest).Params, &p)
+	if p.Remote != "https://example.invalid/demo/orbit.git" || cl[0].Request.(contracts.NodeActionRequest).NodeID != "node_synth-linux" {
+		t.Fatalf("clone params: %+v", p)
+	}
+	if req.Cwd != "/home/demo/src/orbit" || req.NodeID != "node_synth-linux" {
+		t.Fatalf("start request: %+v", req)
+	}
+	h.WaitFor("toast", 3*sec, func() bool { return !h.M.OverlayOpen() && h.Contains("launch requested") })
+	// The clone is in the index now: the machine has it.
+	nsOpen(t, h)
+	h.Type("orbit")
+	h.WaitFor("present", 3*sec, func() bool { return h.Contains("● synth-linux · has it") })
+}
+
+// A repository only on another machine goes there automatically (marked
+// auto); what was used is remembered per repository.
+func TestNewSessionAutoMachineAndMemory(t *testing.T) {
+	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	h.Type("notes")
+	if !strings.Contains(nsRow(h.View()), "notes-app") || !h.Contains("● synth-mac · has it") || !h.Contains("○ synth-linux · will clone") || !h.Contains("has it   auto") {
+		t.Fatalf("auto machine:\n%s", h.View())
+	}
+	h.Key("ctrl+t") // Codex (accelerator)
+	click(t, h, "○ fresh worktree")
+	h.Key("ctrl+s")
+	req := startReq(t, h, rec)
+	if req.NodeID != "node_synth-mac" || req.Harness != contracts.HarnessCodex {
+		t.Fatalf("start request: %+v", req)
+	}
+	h.WaitFor("closed", 3*sec, func() bool { return !h.M.OverlayOpen() })
+	nsOpen(t, h)
+	h.Type("notes")
+	if !h.Contains("Codex on synth-mac · demo/notes-app · fresh worktree") {
+		t.Fatalf("not remembered:\n%s", h.View())
+	}
+}
+
+// Several repositories: + adds the highlighted one; they get fresh
+// worktrees on a machine that has them all.
+func TestNewSessionMultiRepo(t *testing.T) {
+	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	h.Type("api")
+	h.Key("+")
+	h.Type("web")
+	if !h.Contains("demo/web + demo/api") && !h.Contains("demo/api + demo/web") {
+		t.Fatalf("multi summary:\n%s", h.View())
+	}
+	if !h.Contains("● synth-linux · has all") || !h.Contains("○ main checkout") {
+		t.Fatalf("multi machine/workspace:\n%s", h.View())
+	}
+	h.Key("ctrl+s")
+	req := startReq(t, h, rec)
+	if req.NodeID != "node_synth-linux" || !strings.Contains(req.Cwd, "/pyre-work/") {
+		t.Fatalf("multi start: %+v", req)
+	}
+}
+
+// Problems are inline; nothing starts. ^a opens the step-by-step launch.
+func TestNewSessionValidation(t *testing.T) {
+	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	h.Type("zzz-nothing")
+	if !h.Contains("no repository matches “zzz-nothing”") || !strings.Contains(nsRow(h.View()), "Browse folders") {
+		t.Fatalf("unknown repo:\n%s", h.View())
+	}
+	h.Key("ctrl+s") // on Browse folders: opens the browser, starts nothing
+	if !h.Contains("Use this folder") || len(rec.Calls("StartSession")) != 0 {
+		t.Fatalf("unknown repo start:\n%s", h.View())
+	}
+	h.Key("esc")
+	h.Key("ctrl+u")
+	h.Type("notes")
+	click(t, h, "○ new branch")
+	h.Key("ctrl+s")
+	if !h.Contains("type the new branch name") || len(rec.Calls("StartSession")) != 0 {
+		t.Fatalf("empty branch:\n%s", h.View())
+	}
+	h.Type("pyre/share-fix")
+	h.Key("ctrl+s")
+	startReq(t, h, rec)
+	wt := rec.Calls("InvokeNodeAction:" + contracts.ActionWorktreeCreate)
+	var p contracts.WorktreeCreateParams
+	_ = json.Unmarshal(wt[0].Request.(contracts.NodeActionRequest).Params, &p)
+	if p.Branch != "pyre/share-fix" {
+		t.Fatalf("branch: %+v", p)
+	}
+	h.WaitFor("closed", 3*sec, func() bool { return !h.M.OverlayOpen() })
 	h.Key("n")
+	h.Key("ctrl+a")
+	if h.M.ActiveView() != "Launch" {
+		t.Fatalf("^a: %s", h.M.ActiveView())
+	}
+}
+
+// A path launches in a plain folder: Tab completes a folder segment from
+// the machine's listing.
+func TestNewSessionFolderPath(t *testing.T) {
+	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
 	h.Type("~/scr")
-	h.WaitFor("listing", 3*sec, func() bool { return strings.Contains(qlCurrentRow(h.View()), "scratch") })
+	h.WaitFor("listing", 3*sec, func() bool { return strings.Contains(nsRow(h.View()), "scratch") })
 	if !h.Contains("create scr") {
 		t.Fatalf("missing folder not offered for creation:\n%s", h.View())
 	}
 	h.Key("tab")
 	h.WaitFor("completed", 3*sec, func() bool { return h.Contains("~/scratch · folder, no project") })
-	if !h.Contains("› ~/scratch/") {
+	if !h.Contains("~/scratch/▏") {
 		t.Fatalf("tab did not complete the segment:\n%s", h.View())
 	}
 	h.Settle()
-	golden(t, "quicklaunch-path-120", h.View())
-	h.Key("tab") // nothing left to complete: the prompt field
+	golden(t, "newsession-path-120", h.View())
+	click(t, h, "Prompt")
 	h.Type("tidy up")
-	h.Key("enter")
-	h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-	req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
+	h.Key("ctrl+s")
+	req := startReq(t, h, rec)
 	if req.Cwd != "~/scratch" || req.InitialPrompt != "tidy up" || req.Harness != contracts.HarnessClaude {
 		t.Fatalf("start request: %+v", req)
 	}
@@ -166,46 +308,53 @@ func TestQuickLaunchFolderPath(t *testing.T) {
 	}
 }
 
-// A folder that does not exist is created through the machine first.
-func TestQuickLaunchCreatesFolder(t *testing.T) {
-	h, rec, _ := startMock(t, 120, 34, nil, nil)
-	h.Key("n")
-	h.Type("~/vid-convert @synth-mac codex")
-	h.WaitFor("create offer", 3*sec, func() bool { return h.Contains("new folder, created on start") })
-	if row := qlCurrentRow(h.View()); !strings.Contains(row, "create vid-convert") {
-		t.Fatalf("create row not selected: %q\n%s", row, h.View())
+// A missing folder is created through the machine first; "home" is the
+// home folder (a scratch session); a pasted escaped path is unescaped.
+func TestNewSessionFolders(t *testing.T) {
+	prep := func(b *mock.Backend) {
+		for _, nid := range []string{"node_synth-mac", "node_synth-linux"} {
+			params, _ := json.Marshal(contracts.FsMkdirParams{Path: "~/My Docs"})
+			if _, err := b.InvokeNodeAction(ctx(), contracts.NodeActionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-mk-" + nid}, NodeID: nid, Action: contracts.ActionFsMkdir, Params: params}); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	h.Key("enter")
-	h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-	mk := rec.Calls("InvokeNodeAction:" + contracts.ActionFsMkdir)
-	if len(mk) != 1 {
-		t.Fatalf("fs.mkdir calls: %d", len(mk))
+	cases := []struct {
+		name, typed, paste, cwd string
+		shell, mkdir            bool
+	}{
+		{name: "create", typed: "~/vid-convert", cwd: "~/vid-convert", mkdir: true},
+		{name: "home", typed: "home", cwd: "~", shell: true},
+		{name: "pasted escaped", paste: `~/My\ Docs`, cwd: "~/My Docs"},
+		{name: "spaces new", typed: "~/New Stuff/two words", cwd: "~/New Stuff/two words", mkdir: true},
 	}
-	var p contracts.FsMkdirParams
-	_ = json.Unmarshal(mk[0].Request.(contracts.NodeActionRequest).Params, &p)
-	req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
-	if p.Path != "~/vid-convert" || req.Cwd != "~/vid-convert" || req.Harness != contracts.HarnessCodex || req.NodeID != mk[0].Request.(contracts.NodeActionRequest).NodeID {
-		t.Fatalf("mkdir %+v start %+v", p, req)
-	}
-	h.WaitFor("toast", 3*sec, func() bool { return h.Contains("launch requested: codex in ~/vid-convert (new folder)") })
-}
-
-// "home" (or ~) is the home folder: a projectless scratch session; chips
-// click.
-func TestQuickLaunchHomeAndChipClicks(t *testing.T) {
-	h, rec, _ := startMock(t, 120, 34, nil, nil)
-	h.Key("n")
-	h.Type("home")
-	h.WaitFor("home", 3*sec, func() bool { return h.Contains("home folder · scratch session, no project") })
-	click(t, h, "○ shell")
-	if !h.Contains("● shell") {
-		t.Fatalf("clicking the shell chip:\n%s", h.View())
-	}
-	h.Key("enter")
-	h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-	req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
-	if req.Cwd != "~" || req.Harness != contracts.HarnessShell {
-		t.Fatalf("start request: %+v", req)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rec, _ := startMock(t, 120, 34, prep, nil)
+			nsOpen(t, h)
+			h.Type(tc.typed)
+			if tc.paste != "" {
+				h.Paste(tc.paste)
+			}
+			h.WaitFor("target", 3*sec, func() bool {
+				return h.Contains(" on synth-") && h.Contains(" · account auto") && !h.Contains("checking")
+			})
+			if tc.shell {
+				click(t, h, "○ Shell")
+			}
+			h.Key("ctrl+s")
+			req := startReq(t, h, rec)
+			want := contracts.HarnessClaude
+			if tc.shell {
+				want = contracts.HarnessShell
+			}
+			if req.Cwd != tc.cwd || req.Harness != want {
+				t.Fatalf("start request: %+v", req)
+			}
+			if mk := rec.Calls("InvokeNodeAction:" + contracts.ActionFsMkdir); (len(mk) == 1) != tc.mkdir {
+				t.Fatalf("fs.mkdir calls: %d (want create=%v)", len(mk), tc.mkdir)
+			}
+		})
 	}
 }
 
@@ -245,7 +394,7 @@ func TestArchiveOffersSessionWorktreeRemoval(t *testing.T) {
 	h.WaitFor("archived", 3*sec, func() bool { return len(rec.Calls("UpdateSession")) == 1 })
 	// The offer never pops up on its own (it would land seconds after the
 	// archive, over whatever is selected then): a toast names it, W opens it.
-	h.WaitFor("offer toast", 3*sec, func() bool { return h.Contains("W reviews / removes them") })
+	h.WaitFor("offer toast", 3*sec, func() bool { return h.Contains("W reviews / removes") })
 	if h.Contains("Remove this session's worktrees?") {
 		t.Fatalf("worktree offer opened by itself:\n%s", h.View())
 	}
@@ -266,58 +415,114 @@ func TestArchiveOffersSessionWorktreeRemoval(t *testing.T) {
 	}
 }
 
-// Paths with spaces: an escaped (~/My\ Docs, as terminals paste a dragged
-// folder) or quoted target, and ^l, where the whole line is the path.
-func TestQuickLaunchPathWithSpaces(t *testing.T) {
-	prep := func(b *mock.Backend) {
-		for _, nid := range []string{"node_synth-mac", "node_synth-linux"} {
-			params, _ := json.Marshal(contracts.FsMkdirParams{Path: "~/My Docs"})
-			if _, err := b.InvokeNodeAction(ctx(), contracts.NodeActionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-mk-" + nid}, NodeID: nid, Action: contracts.ActionFsMkdir, Params: params}); err != nil {
-				t.Fatal(err)
-			}
+// The folder browser (W-browse): always the last Where row; opens at ~ on
+// the machine; into, up, filter, new folder, use.
+func TestNewSessionBrowseFolders(t *testing.T) {
+	h, rec, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	if !h.Contains("type a repo name, or a path like ~/scratch · ↓ Browse folders") {
+		t.Fatalf("hint missing on an empty Where:\n%s", h.View())
+	}
+	// Agent and workspace set first: choosing a folder must not change them.
+	click(t, h, "○ Codex")
+	click(t, h, "Where")
+	h.Type("atl")
+	if h.Contains("↓ Browse folders") {
+		t.Fatalf("hint still shown while filtering:\n%s", h.View())
+	}
+	if !h.Contains("📁 Browse folders…") {
+		t.Fatalf("browse row hidden while filtering:\n%s", h.View())
+	}
+	h.Key("ctrl+u")
+	mach := summaryMachine(h.View())
+	click(t, h, "📁 Browse folders…")
+	h.WaitFor("listing", 3*sec, func() bool { return h.Contains("work/") })
+	if !h.Contains("Browse ~ on "+mach) || !strings.Contains(nsBrowseRow(h.View()), "Use this folder") {
+		t.Fatalf("browser:\n%s", h.View())
+	}
+	h.Key("down", "down", "down") // New folder, scratch, src
+	if row := nsBrowseRow(h.View()); !strings.Contains(row, "src/") {
+		t.Fatalf("down: %q\n%s", row, h.View())
+	}
+	h.Key("right") // into ~/src
+	h.WaitFor("into", 3*sec, func() bool { return h.Contains("Browse ~/src on") && h.Contains("work/") })
+	h.Key("left") // back up: src highlighted
+	h.WaitFor("up", 3*sec, func() bool { return h.Contains("Browse ~ on") })
+	if row := nsBrowseRow(h.View()); !strings.Contains(row, "src/") {
+		t.Fatalf("up did not keep the folder highlighted: %q", row)
+	}
+	h.Type("wo") // filter
+	if row := nsBrowseRow(h.View()); !strings.Contains(row, "work/") || h.Contains("scratch/") {
+		t.Fatalf("filter: %q\n%s", row, h.View())
+	}
+	h.Key("enter") // into ~/work
+	h.WaitFor("work", 3*sec, func() bool { return h.Contains("Browse ~/work on") })
+	h.Key("down") // New folder…
+	h.Key("enter")
+	h.Type("clips")
+	if !h.Contains("＋ New folder: clips") {
+		t.Fatalf("naming:\n%s", h.View())
+	}
+	h.Settle()
+	golden(t, "newsession-browse-120", h.View())
+	h.Key("enter")
+	h.WaitFor("created", 3*sec, func() bool { return h.Contains("Browse ~/work/clips on") })
+	mk := rec.Calls("InvokeNodeAction:" + contracts.ActionFsMkdir)
+	if len(mk) != 1 {
+		t.Fatalf("fs.mkdir calls: %d", len(mk))
+	}
+	var mp contracts.FsMkdirParams
+	_ = json.Unmarshal(mk[0].Request.(contracts.NodeActionRequest).Params, &mp)
+	if mp.Path != "~/work/clips" {
+		t.Fatalf("mkdir: %+v", mp)
+	}
+	h.Key("ctrl+s") // use this folder
+	if !h.Contains("Codex on "+mach+" · ~/work/clips · folder, no project") || !strings.Contains(h.View(), "› Machine") || h.Contains("auto · ←→") {
+		t.Fatalf("chosen:\n%s", h.View())
+	}
+	if !h.Contains("● "+mach) || h.Contains("Browse ~") {
+		t.Fatalf("machine not fixed or browser still open:\n%s", h.View())
+	}
+	h.Key("ctrl+s")
+	req := startReq(t, h, rec)
+	if req.Cwd != "~/work/clips" || req.Harness != contracts.HarnessCodex || req.NodeID != "node_"+mach {
+		t.Fatalf("start: %+v", req)
+	}
+	if n := len(rec.Calls("InvokeNodeAction:" + contracts.ActionFsMkdir)); n != 1 {
+		t.Fatalf("folder created again: %d", n)
+	}
+}
+
+// Esc in the browser returns to the list; a typed path opens it there.
+func TestNewSessionBrowseEscAndPath(t *testing.T) {
+	h, _, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	h.Type("~/src/")
+	h.WaitFor("listing", 3*sec, func() bool { return h.Contains("📁 Browse folders…") })
+	click(t, h, "📁 Browse folders…")
+	h.WaitFor("browser", 3*sec, func() bool { return h.Contains("Browse ~/src on") })
+	h.Key("esc")
+	if h.Contains("Browse ~/src on") || !h.M.QuickLaunchOpen() || !h.Contains("~/src/▏") {
+		t.Fatalf("esc did not return to the list:\n%s", h.View())
+	}
+}
+
+// Recent folders (not repositories) show by name with their path.
+func TestNewSessionRecentFolders(t *testing.T) {
+	h, _, _ := startMock(t, 120, 34, nil, nil)
+	nsOpen(t, h)
+	if !h.Contains("Recent") || !strings.Contains(h.View(), "ses_synth-a             ~/work/ses_synth-a") {
+		t.Fatalf("recent folders:\n%s", h.View())
+	}
+}
+
+// nsBrowseRow is the highlighted browser row.
+func nsBrowseRow(view string) string {
+	for _, l := range strings.Split(view, "\n") {
+		c := strings.TrimSpace(strings.Trim(strings.TrimSpace(l), "│"))
+		if strings.HasPrefix(c, "› ") && !strings.Contains(c, "Where") {
+			return c
 		}
 	}
-	cases := []struct {
-		name, typed, cwd string
-		whole            bool
-		harness          contracts.Harness
-		prompt           string
-	}{
-		{"escaped+tab", `~/My\ D`, "~/My Docs", false, contracts.HarnessCodex, "tidy"},
-		{"quoted", `"~/My Docs" shell look around`, "~/My Docs", false, contracts.HarnessShell, "look around"},
-		{"whole line", `~/My Docs`, "~/My Docs", true, contracts.HarnessClaude, ""},
-		{"whole line new", `~/New Stuff/two words`, "~/New Stuff/two words", true, contracts.HarnessClaude, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h, rec, _ := startMock(t, 120, 34, prep, nil)
-			h.Key("n")
-			if tc.whole {
-				h.Key("ctrl+l")
-				if !h.Contains("the whole line is one folder path") {
-					t.Fatalf("^l not shown:\n%s", h.View())
-				}
-			}
-			h.Type(tc.typed)
-			if tc.name == "escaped+tab" {
-				h.WaitFor("listing", 3*sec, func() bool { return strings.Contains(qlCurrentRow(h.View()), "My Docs") })
-				h.Key("tab")
-				if !h.Contains(`› ~/My\ Docs/`) {
-					t.Fatalf("tab did not complete with an escape:\n%s", h.View())
-				}
-				h.Type(" codex tidy")
-			}
-			h.WaitFor("target", 3*sec, func() bool { return h.Contains(tc.cwd+" · ") && !h.Contains("checking") })
-			h.Key("enter")
-			h.WaitFor("start", 3*sec, func() bool { return len(rec.Calls("StartSession")) == 1 })
-			req := rec.Calls("StartSession")[0].Request.(contracts.StartSessionRequest)
-			if req.Cwd != tc.cwd || req.Harness != tc.harness || req.InitialPrompt != tc.prompt {
-				t.Fatalf("start request: %+v", req)
-			}
-			mk := rec.Calls("InvokeNodeAction:" + contracts.ActionFsMkdir)
-			if want := tc.name == "whole line new"; (len(mk) == 1) != want {
-				t.Fatalf("fs.mkdir calls: %d (want create=%v)", len(mk), want)
-			}
-		})
-	}
+	return ""
 }

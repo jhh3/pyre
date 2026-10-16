@@ -172,7 +172,7 @@ func TestAcceptedDeliveryReportsAttemptThenReceipt(t *testing.T) {
 		t.Fatalf("delivered = %d", len(p.Delivered))
 	}
 	text := p.Delivered[0].Text
-	if !strings.HasPrefix(text, "[pyre-msg:msg_1] from session:ses_sender (planner) (thread thr_1):\nbody of msg_1") ||
+	if !strings.HasPrefix(text, "[pyre-msg:msg_1] from session:planner (thread thr_1):\nbody of msg_1") ||
 		!strings.Contains(text, "pyre artifact get ver_9") {
 		t.Fatalf("rendered = %q", text)
 	}

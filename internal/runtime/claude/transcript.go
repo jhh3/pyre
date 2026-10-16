@@ -126,58 +126,67 @@ func defaultConfigDir() string {
 }
 
 // entriesFromTranscript converts records to bounded transcript entries.
+// Every record advances Seq, kept or not.
 func entriesFromTranscript(runID string, recs []transcriptRecord, startSeq int64) []contracts.TranscriptEntry {
 	var out []contracts.TranscriptEntry
 	seq := startSeq
 	for _, r := range recs {
 		seq++
-		e := contracts.TranscriptEntry{Seq: seq, RunID: runID, At: r.at()}
-		switch {
-		case r.Type == "user" && r.isPromptRecord():
-			e.Kind = "user"
-			e.Text = r.text()
-			if r.IsMeta {
-				e.Kind = "system"
-			}
-			if ms := findMarkers(e.Text); len(ms) > 0 {
-				e.MessageID = ms[0]
-				e.Kind = "pyre_message"
-			}
-		case r.Type == "user":
-			e.Kind = "tool"
-			e.Text = "tool result"
-		case r.Type == "assistant" && !r.IsSidechain:
-			var texts, tools []string
-			for _, b := range r.blocks() {
-				switch b.Type {
-				case "text":
-					texts = append(texts, b.Text)
-				case "tool_use":
-					tools = append(tools, toolUseSummary(b))
-				}
-			}
-			if len(texts) > 0 {
-				e.Kind = "assistant"
-				e.Text = strings.Join(texts, "\n")
-			} else if len(tools) > 0 {
-				e.Kind = "tool"
-				e.Text = strings.Join(tools, "; ")
-			} else {
-				continue
-			}
-		case r.Type == "system" && r.Subtype == "turn_duration":
-			e.Kind = "system"
-			e.Text = "turn ended (" + (time.Duration(r.DurationMs) * time.Millisecond).String() + ")"
-		default:
-			continue
+		if e, ok := transcriptEntry(runID, r, seq); ok {
+			out = append(out, e)
 		}
-		if len(e.Text) > 2000 {
-			e.Text = truncStr(e.Text, 2000)
-			e.Truncated = true
-		}
-		out = append(out, e)
 	}
 	return out
+}
+
+// transcriptEntry converts one record numbered seq; false when sessions.read
+// does not show it.
+func transcriptEntry(runID string, r transcriptRecord, seq int64) (contracts.TranscriptEntry, bool) {
+	e := contracts.TranscriptEntry{Seq: seq, RunID: runID, At: r.at()}
+	switch {
+	case r.Type == "user" && r.isPromptRecord():
+		e.Kind = "user"
+		e.Text = r.text()
+		if r.IsMeta {
+			e.Kind = "system"
+		}
+		if ms := findMarkers(e.Text); len(ms) > 0 {
+			e.MessageID = ms[0]
+			e.Kind = "pyre_message"
+		}
+	case r.Type == "user":
+		e.Kind = "tool"
+		e.Text = "tool result"
+	case r.Type == "assistant" && !r.IsSidechain:
+		var texts, tools []string
+		for _, b := range r.blocks() {
+			switch b.Type {
+			case "text":
+				texts = append(texts, b.Text)
+			case "tool_use":
+				tools = append(tools, toolUseSummary(b))
+			}
+		}
+		if len(texts) > 0 {
+			e.Kind = "assistant"
+			e.Text = strings.Join(texts, "\n")
+		} else if len(tools) > 0 {
+			e.Kind = "tool"
+			e.Text = strings.Join(tools, "; ")
+		} else {
+			return e, false
+		}
+	case r.Type == "system" && r.Subtype == "turn_duration":
+		e.Kind = "system"
+		e.Text = "turn ended (" + (time.Duration(r.DurationMs) * time.Millisecond).String() + ")"
+	default:
+		return e, false
+	}
+	if len(e.Text) > 2000 {
+		e.Text = truncStr(e.Text, 2000)
+		e.Truncated = true
+	}
+	return e, true
 }
 
 func toolUseSummary(b tBlock) string {

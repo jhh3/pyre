@@ -626,6 +626,14 @@ func (s *Store) SwitchConnection(ctx context.Context, name, expectedRef, mode, c
 	return true, cleanupOld, tx.Commit()
 }
 
+// PurgeRemovedConnection deletes the row of a removed connection (its
+// discovered tools cascade) so its name can be used again. An active
+// connection is never touched.
+func (s *Store) PurgeRemovedConnection(ctx context.Context, name string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM connections WHERE name=? AND status='removed'`, name)
+	return err
+}
+
 func (s *Store) RemoveConnection(ctx context.Context, name, expectedRef, cleanupID string) (bool, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

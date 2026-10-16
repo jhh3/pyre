@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -85,11 +86,19 @@ type gridAttachMsg struct {
 	probe      []string
 	note       string
 	err        error
+	relayOff   string // the node whose relay refused as unsupported (relay.go)
+	localBad   string // the run whose local attach failed (localterm.go)
 }
 
 // gridRequest asks the hub for a read-only attach descriptor for s, sizes
-// it safely (gridPrepare) and starts it, all off the Update goroutine.
+// it safely (gridPrepare) and starts it, all off the Update goroutine. A
+// session on another machine streams through the hub's relay, fitted to
+// its window by the node (relay.go): no ssh connection and no probe.
 func (m *Model) gridRequest(s contracts.SessionView, t *gridTile, cols, rows int) tea.Cmd {
+	relay := m.relayTileFor(s)
+	if relay && !m.relayOpenOK(s.Run.NodeID) {
+		return m.gridRelayWait() // per-node open budget spent: try again shortly
+	}
 	t.tok++
 	t.state, t.note = termConnecting, ""
 	tok, sid := t.tok, s.Session.SessionID
@@ -101,11 +110,61 @@ func (m *Model) gridRequest(s contracts.SessionView, t *gridTile, cols, rows int
 		ReadOnly:     true,
 	}
 	api, parent, timeout, start := m.api, m.ctx, m.opts.LoadTimeout, m.starter()
+	dial, node, hello := m.opts.DialRelay, s.Run.NodeID, m.relays().hello
+	local, isLocal := localTarget{}, false
+	if !relay {
+		local, isLocal = m.localFor(s) // this machine: no hub (localterm.go)
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 		msg := gridAttachMsg{sid: sid, tok: tok}
-		d, err := api.AttachSession(ctx, req)
+		if isLocal {
+			// The window-size probe proves the session exists; anything
+			// failing here asks the hub below, as before.
+			if d, probe, c, r, err := gridPrepare(ctx, local.descriptor(), cols, rows); err == nil {
+				if conn, err := start(d, c, r); err == nil {
+					msg.conn, msg.cols, msg.rows, msg.argv, msg.probe = conn, c, r, d.Command, probe
+					return msg
+				}
+			}
+			msg.localBad = local.name
+		}
+		var d contracts.AttachDescriptor
+		var err error
+		answered := false
+		if relay && hubFits(ctx, api, hello) {
+			rreq := req
+			rreq.Mutation = contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)}
+			rreq.Preferred = append([]contracts.AttachMechanism{contracts.AttachWebTerminal}, req.Preferred...)
+			d, err = api.AttachSession(ctx, rreq)
+			answered = err != nil || d.Mechanism != contracts.AttachWebTerminal
+			if !answered {
+				dctx, dcancel := context.WithTimeout(parent, timeout)
+				conn, derr := dial(dctx, d, cols, rows, true)
+				dcancel()
+				switch {
+				case derr == nil:
+					ws, ok := conn.(WindowSizer)
+					if !ok {
+						_ = conn.Close()
+						msg.err = errors.New("the relayed tile is not sized to its window")
+						return msg
+					}
+					msg.conn, msg.argv = conn, []string{"pyre-relay", d.URL}
+					msg.cols, msg.rows = ws.WindowSize()
+					return msg
+				case relayUnsupported(derr):
+					msg.relayOff = node // watch it the old way below
+				default:
+					msg.err = derr
+					return msg
+				}
+			}
+		}
+		if !answered {
+			d, err = api.AttachSession(ctx, req)
+		}
 		switch {
 		case err != nil:
 			msg.err = err
@@ -155,6 +214,7 @@ func gridPrepare(ctx context.Context, d contracts.AttachDescriptor, cols, rows i
 func runProbe(ctx context.Context, probe []string) (cols, rows int, ignoreSize bool, err error) {
 	pctx, cancel := context.WithTimeout(ctx, gridProbeLimit)
 	defer cancel()
+	probe = sshMux(probe)
 	cmd := exec.CommandContext(pctx, probe[0], probe[1:]...)
 	cmd.Env = termEnv(os.Environ())
 	out, err := cmd.Output()
@@ -235,13 +295,15 @@ func tmuxAtLeast(v string, major, minor int) bool {
 type tmuxAttach struct {
 	argv   []string // the tmux command line
 	verb   int      // index of the attach verb in argv
+	glob   int      // end of the binary and its global flags in argv
 	target string
 	ssh    []string // ssh argv before the remote command; nil for a local client
 	wrap   []string // remote wrapper ("bash", "-lc"); nil when the remote command is tmux itself
 }
 
-// parseTmuxAttach recognises `tmux … attach-session -t T [-r]` and
-// `ssh … "bash -lc '<that>'"` (what Pyre's descriptors run).
+// parseTmuxAttach recognises `tmux … [cmd … ;] attach-session -t T [-r]`
+// and `ssh … "bash -lc '<that>'"` (what Pyre's descriptors run: the tmux
+// runtime prefixes `set-option -g mouse on ;`).
 func parseTmuxAttach(cmd []string) (tmuxAttach, bool) {
 	if len(cmd) == 0 {
 		return tmuxAttach{}, false
@@ -275,21 +337,35 @@ func parseLocalAttach(argv []string) (tmuxAttach, bool) {
 	if len(argv) < 3 || !strings.Contains(filepath.Base(argv[0]), "tmux") {
 		return tmuxAttach{}, false
 	}
+	glob := 0
 	for i := 1; i < len(argv); i++ {
 		switch argv[i] {
 		case "-S", "-L", "-f", "-c", "-T":
 			i++ // global flag with a value
 		case "attach-session", "attach", "a":
-			t := tmuxAttach{argv: argv, verb: i}
-			for j := i + 1; j < len(argv)-1; j++ {
+			if glob == 0 {
+				glob = i
+			}
+			t := tmuxAttach{argv: argv, verb: i, glob: glob}
+			for j := i + 1; j < len(argv)-1 && argv[j] != ";"; j++ {
 				if argv[j] == "-t" {
 					t.target = argv[j+1]
 				}
 			}
 			return t, t.target != ""
 		default:
-			if !strings.HasPrefix(argv[i], "-") {
-				return tmuxAttach{}, false // another command
+			if strings.HasPrefix(argv[i], "-") && glob == 0 {
+				continue
+			}
+			// Another command before the attach: skip to the next ";".
+			if glob == 0 {
+				glob = i
+			}
+			for i < len(argv) && argv[i] != ";" {
+				i++
+			}
+			if i >= len(argv) {
+				return tmuxAttach{}, false // no attach
 			}
 		}
 	}
@@ -313,7 +389,11 @@ func (t tmuxAttach) probeCommand() []string {
 }
 
 func (t tmuxAttach) command(tail []string, tty bool) []string {
-	argv := append(append([]string(nil), t.argv[:t.verb]...), tail...)
+	glob := t.glob
+	if glob == 0 {
+		glob = t.verb
+	}
+	argv := append(append([]string(nil), t.argv[:glob]...), tail...)
 	if t.ssh == nil {
 		return argv
 	}
@@ -401,6 +481,10 @@ func shellJoinArgs(argv []string) string {
 
 // onGridAttach installs a started tile client (or records why not).
 func (m *Model) onGridAttach(msg gridAttachMsg) tea.Cmd {
+	if msg.relayOff != "" {
+		m.relayRefused(msg.relayOff)
+	}
+	m.localBad(msg.localBad)
 	t := m.grid.tiles[msg.sid]
 	if t == nil || t.tok != msg.tok || m.view != viewGrid {
 		if msg.conn != nil {
@@ -430,6 +514,16 @@ func (m *Model) onGridAttach(msg gridAttachMsg) tea.Cmd {
 	t.tv.setConn(msg.conn, termReadOnly)
 	t.state, t.note, t.argv, t.probe = termLive, "", msg.argv, msg.probe
 	return m.gridWait()
+}
+
+// gridRelayWait schedules one retry tick for tiles held back by the
+// per-node relay open budget.
+func (m *Model) gridRelayWait() tea.Cmd {
+	if m.grid.relayWaiting {
+		return nil
+	}
+	m.grid.relayWaiting = true
+	return gridRelayRetryTick()
 }
 
 // gridWait waits off the Update goroutine for a tile to draw, no sooner

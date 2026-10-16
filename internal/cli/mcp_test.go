@@ -113,7 +113,7 @@ func TestMCPServerToolsAndCalls(t *testing.T) {
 		}
 	}
 
-	out, isErr := cl.tool("list_nodes", map[string]any{})
+	out, isErr := cl.tool("list_nodes", map[string]any{"format": "json"})
 	var nodes c.Page[c.Node]
 	if isErr || json.Unmarshal(out, &nodes) != nil || len(nodes.Items) == 0 {
 		t.Fatalf("list_nodes: %s", out)
@@ -130,7 +130,7 @@ func TestMCPServerToolsAndCalls(t *testing.T) {
 	if isErr || json.Unmarshal(out, &sent) != nil || sent.Status.Storage != c.StorageStored {
 		t.Fatalf("send_message: %s", out)
 	}
-	out, isErr = cl.tool("get_message", map[string]any{"message_id": sent.Envelope.MessageID})
+	out, isErr = cl.tool("get_message", map[string]any{"message_id": sent.Envelope.MessageID, "format": "json"})
 	var got c.MessageView
 	if isErr || json.Unmarshal(out, &got) != nil || got.Envelope.MessageID != sent.Envelope.MessageID {
 		t.Fatalf("get_message: %s", out)

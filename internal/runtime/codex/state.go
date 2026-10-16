@@ -56,6 +56,16 @@ type threadState struct {
 	subagents  map[string]*subagent
 	subOrder   []string
 	limit      *contracts.LimitEvent
+	// lastErr is the newest failed turn's error (cleared by a completed
+	// turn). Codex reports such a thread as systemError although it is idle
+	// and takes input.
+	lastErr   *turnError
+	lastErrAt time.Time
+	// Capacity retry: a turn that failed because the model was at capacity
+	// is continued at retryAt (capRetries so far; reset by a completed turn).
+	capRetries int
+	retryAt    time.Time
+	errProbed  bool // the last turn was read once to learn a systemError's cause
 	known      bool // status learned from the server at least once
 	turnDone   chan struct{}
 	// config is the thread's Pyre identity overrides (threadConfig), re-sent
@@ -182,15 +192,44 @@ func (ts *threadState) onTurnCompleted(t turn, at time.Time) {
 		ts.lastTurn, ts.activeTurn = t.ID, ""
 	}
 	ts.inflight.Clear()
+	ts.retryAt = time.Time{}
 	if t.Status == "failed" && t.Error != nil {
-		if le := limitFromError(*t.Error, at); le != nil {
-			ts.limit = le
-		}
+		ts.noteFailure(*t.Error, at)
 	} else if t.Status == "completed" {
 		ts.limit = nil
+		ts.lastErr, ts.capRetries = nil, 0
 	}
 	close(ts.turnDone)
 	ts.turnDone = make(chan struct{})
+}
+
+// capBackoff spaces automatic continues after capacity failures; after the
+// last one the run stays idle with the error shown.
+var capBackoff = []time.Duration{2 * time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
+
+// noteFailure records a failed turn: usage/auth limits feed account
+// fallback; a capacity failure schedules the next automatic continue.
+func (ts *threadState) noteFailure(e turnError, at time.Time) {
+	ts.lastErr, ts.lastErrAt = &e, at
+	if le := limitFromError(e, at); le != nil {
+		ts.limit = le
+		return
+	}
+	if isCapacityError(e) && ts.capRetries < len(capBackoff) {
+		ts.retryAt = at.Add(capBackoff[ts.capRetries])
+	}
+}
+
+// isCapacityError: the provider was overloaded ("Selected model is at
+// capacity"); retrying later with the same account and model can succeed.
+func isCapacityError(e turnError) bool {
+	var code string
+	_ = json.Unmarshal(e.CodexErrorInfo, &code)
+	if code == "serverOverloaded" {
+		return true
+	}
+	l := strings.ToLower(e.Message)
+	return strings.Contains(l, "at capacity") || strings.Contains(l, "overloaded")
 }
 
 // limitFromError maps codexErrorInfo to a LimitEvent (input to fallback).

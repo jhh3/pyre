@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"path/filepath"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
@@ -51,6 +52,31 @@ func (d *Daemon) bindAccount(ctx context.Context, h contracts.Harness, p contrac
 	}
 	dir, env, asg, err := d.cfg.Accounts.Resolve(ctx, h, p, runID)
 	return AccountBinding{ProfileDir: dir, Env: env, Assignment: asg}, err
+}
+
+// transcriptStores names the config-home entry that holds a harness's
+// native conversation transcripts (what a native resume reads).
+var transcriptStores = map[contracts.Harness]string{contracts.HarnessClaude: "projects", contracts.HarnessCodex: "sessions"}
+
+// sharedTranscripts reports whether the previous run's config home and
+// newProfile resolve the transcript store to the same directory, so the
+// previous native thread is reachable from the new binding.
+func (d *Daemon) sharedTranscripts(ctx context.Context, h contracts.Harness, prevRunID, newProfile string) bool {
+	store := transcriptStores[h]
+	if store == "" || newProfile == "" || prevRunID == "" {
+		return false
+	}
+	rec, ok, err := d.st.run(ctx, prevRunID)
+	if err != nil || !ok || rec.Handle == nil {
+		return false
+	}
+	old := rec.Handle.Data[HandleProfileDir]
+	if old == "" {
+		return false
+	}
+	a, err1 := filepath.EvalSymlinks(filepath.Join(old, store))
+	b, err2 := filepath.EvalSymlinks(filepath.Join(newProfile, store))
+	return err1 == nil && err2 == nil && a == b
 }
 
 func (d *Daemon) releaseAccount(runID string) {
@@ -168,40 +194,51 @@ type ContinuationRequest struct {
 	SessionID     string
 	PreviousRunID string
 	AccountID     string
-	Kind          contracts.ContinuationKind // native_resume | handoff
+	Kind          contracts.ContinuationKind // native_resume | handoff (planned)
 	Reason        string
+	// Prompt is the successor's first prompt (e.g. "continue where you left
+	// off; account switched ..."). It never repeats the interrupted
+	// instruction. A handoff gets it after the handoff instructions.
+	Prompt string
 }
 
 // StartContinuation starts a successor run in the same session, bound to
-// AccountID via an explicit policy. Native resume passes the previous
-// native reference; handoff starts a reconstructed continuation with a
-// handoff-note request. The interrupted instruction is never replayed.
+// AccountID via an explicit policy. Native resume is used whenever the
+// previous thread is reachable from the new account (startRun decides; a
+// planned native resume that turns out unreachable becomes a handoff
+// rather than failing); a handoff starts a reconstructed continuation with
+// a handoff-note request. The interrupted instruction is never replayed.
 // The successor stays in the same Pyre session (lineage via previous run);
 // creating a linked successor session needs the hub and is not done here.
-func (d *Daemon) StartContinuation(ctx context.Context, c ContinuationRequest) (string, error) {
+// It returns the new run and the continuation actually used.
+func (d *Daemon) StartContinuation(ctx context.Context, c ContinuationRequest) (string, contracts.ContinuationKind, error) {
 	prev, ok, err := d.st.run(ctx, c.PreviousRunID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !ok {
-		return "", contracts.Errorf(contracts.ErrNotFound, "previous run not on this node").WithRef(contracts.KindRun, c.PreviousRunID)
+		return "", "", contracts.Errorf(contracts.ErrNotFound, "previous run not on this node").WithRef(contracts.KindRun, c.PreviousRunID)
 	}
 	tok, _, _ := d.st.tokenForSession(ctx, c.SessionID)
 	runID := contracts.NewID(contracts.PrefixRun)
 	prevRun := prev.Run
 	sc := contracts.StartRunCommand{Session: prev.Session, RunID: runID, Cwd: prevRun.Cwd,
 		AccountPolicy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: c.AccountID},
-		SessionToken:  tok, PreviousRun: &prevRun, AllowHandoff: c.Kind == contracts.ContinuationHandoff}
+		SessionToken:  tok, PreviousRun: &prevRun, AllowHandoff: true, InitialPrompt: c.Prompt}
 	cmd := contracts.NodeCommand{CommandID: contracts.NewID(contracts.PrefixCommand), Kind: contracts.CmdResume,
 		Actor: contracts.Principal{Kind: contracts.PrincipalSystem, ID: "account-fallback"}, IssuedAt: d.now()}
 	res, err := d.startRun(ctx, cmd, sc, true)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if res.Outcome == contracts.OutcomeFailed || res.Outcome == contracts.OutcomeUnsupported {
-		return "", contracts.Errorf(contracts.ErrConflict, "successor run not started")
+		return "", "", contracts.Errorf(contracts.ErrConflict, "successor run not started")
 	}
-	return runID, nil
+	kind := c.Kind
+	if rec, ok, err := d.st.run(ctx, runID); err == nil && ok && rec.Run.ContinuationKind != "" {
+		kind = rec.Run.ContinuationKind
+	}
+	return runID, kind, nil
 }
 
 // ActiveRun is a supervised run as seen by configuration/updates (WP14):

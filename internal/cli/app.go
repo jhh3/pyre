@@ -23,6 +23,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/buildinfo"
 	"github.com/jhh3/pyre/internal/client"
+	"github.com/jhh3/pyre/internal/cloud"
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/notifications"
 )
@@ -43,10 +44,21 @@ type App struct {
 	Notify func(title, body string) error
 	// IsTerminal reports whether stdin and stdout are a terminal.
 	IsTerminal func() bool
+	// Console is the local terminal a relayed attach drives (raw mode,
+	// size, resizes); nil uses Stdin/Stdout (tests inject a fake).
+	Console AttachConsole
 	// API, when non-nil, replaces connection resolution (in-process tests).
 	API contracts.API
 	// PollInterval paces follow/wait loops (default 1s).
 	PollInterval time.Duration
+	// Cloud nodes (W-gcp): gcloud and tailscale runners, the Tailscale key
+	// source, the wait poll interval and the auto-logon handoff time; nil/0
+	// use the real binaries and defaults (tests inject fakes).
+	CloudRunner     cloud.Runner
+	TailscaleRunner cloud.Runner
+	CloudKeys       cloud.KeyMinter
+	CloudPoll       time.Duration
+	CloudHandoff    time.Duration
 
 	// per-invocation state
 	jsonOut    bool
@@ -277,7 +289,8 @@ else the client config.
 			if err != nil {
 				return err
 			}
-			return a.RunTUI(cmd.Context(), ops.API, TUIOptions{Stdin: a.Stdin, Stdout: a.Stdout, Stderr: a.Stderr, Self: ops.Self})
+			viaHub := a.conn != nil && a.conn.Mode == "hub" // the local daemon socket has no terminal relay
+			return a.RunTUI(cmd.Context(), ops.API, TUIOptions{Stdin: a.Stdin, Stdout: a.Stdout, Stderr: a.Stderr, Self: ops.Self, Relay: viaHub})
 		}),
 	}
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return &usageError{msg: err.Error()} })
@@ -295,6 +308,8 @@ else the client config.
 		a.addAttentionCommands, a.addAgentCommands, a.addDigestCommands, a.addSearchCommands,
 		a.addQuickLaunchCommands, // W-quicklaunch
 		a.addAuditCommands,       // W-audit
+		a.addAskCommands,         // W-asks
+		a.addWebCommands,         // W-web-inbox
 	} {
 		add(root)
 	}

@@ -133,10 +133,10 @@ func paneSize(t *testing.T, a *Adapter, h contracts.RunHandle) (int, int) {
 func narrowPane(t *testing.T, a *Adapter, h contracts.RunHandle) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := a.srv.Run(ctx, nil, "resize-window", "-t", tmux.PaneTarget(h.TmuxTarget), "-x", "80", "-y", "23"); err != nil {
+	if _, err := a.srv.(*tmux.Server).Run(ctx, nil, "resize-window", "-t", tmux.PaneTarget(h.TmuxTarget), "-x", "80", "-y", "23"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.srv.Run(ctx, nil, "set-option", "-w", "-u", "-t", tmux.PaneTarget(h.TmuxTarget), "window-size"); err != nil {
+	if _, err := a.srv.(*tmux.Server).Run(ctx, nil, "set-option", "-w", "-u", "-t", tmux.PaneTarget(h.TmuxTarget), "window-size"); err != nil {
 		t.Fatal(err)
 	}
 	if w, _ := paneSize(t, a, h); w != 80 {

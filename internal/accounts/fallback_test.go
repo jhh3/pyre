@@ -70,6 +70,10 @@ func TestFallbackNativeResume(t *testing.T) {
 	if k.Kind != contracts.ContinuationNativeResume || k.Resume == nil || k.Resume.ID != "00000000-0000-4000-8000-0000000000fb" || k.SessionID != "ses_1" {
 		t.Fatalf("continuation %+v", k)
 	}
+	// The successor continues unattended; nothing of the interrupted turn is replayed.
+	if k.Prompt != "[pyre] Continue where you left off (account switched from A to B because of the usage limit)." {
+		t.Fatalf("prompt %q", k.Prompt)
+	}
 	// Old assignment released (kept for audit), new one bound to B.
 	old, _ := e.svc.assignmentForRun(ctx, e.svc.db, "run_1")
 	if old.ReleasedAt == nil || old.AccountID != "acct_synth-a" {

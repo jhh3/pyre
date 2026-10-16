@@ -36,6 +36,7 @@ import (
 	"strings"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // mirrorSpec describes how one profile directory mirrors an owner directory.
@@ -148,7 +149,7 @@ func (s *Service) composeFromOwner(info *ProfileInfo, dir, userDir string, h con
 // composition); the target itself is never touched.
 func (s *Service) removeLegacyLink(p, target string) bool {
 	fi, err := os.Lstat(p)
-	if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+	if err != nil || fi.Mode()&osutil.LinkModes == 0 {
 		return false
 	}
 	if cur, _ := os.Readlink(p); cur != target {
@@ -162,7 +163,7 @@ func (s *Service) removeLegacyLink(p, target string) bool {
 func (s *Service) copyIn(info *ProfileInfo, rel, p, src string) bool {
 	fi, err := os.Lstat(p)
 	switch {
-	case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+	case err == nil && fi.Mode()&osutil.LinkModes != 0:
 		if !s.removeLegacyLink(p, src) {
 			info.Conflicts = append(info.Conflicts, rel+": a symlink not made by Pyre; left untouched")
 			return false
@@ -190,7 +191,7 @@ func (s *Service) copyIn(info *ProfileInfo, rel, p, src string) bool {
 func (s *Service) mirror(info *ProfileInfo, rel, p, src string, spec *mirrorSpec) bool {
 	fi, err := os.Lstat(p)
 	switch {
-	case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+	case err == nil && fi.Mode()&osutil.LinkModes != 0:
 		if !s.removeLegacyLink(p, src) {
 			info.Conflicts = append(info.Conflicts, rel+": a symlink not made by Pyre; left untouched")
 			return false
@@ -248,7 +249,7 @@ func (s *Service) mirror(info *ProfileInfo, rel, p, src string, spec *mirrorSpec
 	if cur, err := os.ReadDir(p); err == nil {
 		for _, e := range cur {
 			cp := filepath.Join(p, e.Name())
-			if want[e.Name()] || e.Type()&fs.ModeSymlink == 0 {
+			if want[e.Name()] || e.Type()&osutil.LinkModes == 0 {
 				continue
 			}
 			if t, _ := os.Readlink(cp); t == filepath.Join(src, e.Name()) {
@@ -280,6 +281,13 @@ func (s *Service) refreshComposition(dir string, h contracts.Harness) {
 	}
 	var info ProfileInfo
 	s.composeFromOwner(&info, dir, userDir, h)
+	if h == contracts.HarnessClaude {
+		// Profiles made before a store entry was shared get it now
+		// (sharedstore.go); idempotent.
+		if sharedRoot, err := ensureDir(filepath.Join(s.cfg.SharedRoot, string(h))); err == nil {
+			s.composeShared(&info, dir, sharedRoot, claudeShared)
+		}
+	}
 	if len(info.Conflicts) > 0 {
 		s.log.Warn("accounts: profile composition conflicts (left untouched)", "profile", dir, "conflicts", strings.Join(info.Conflicts, "; "))
 	}

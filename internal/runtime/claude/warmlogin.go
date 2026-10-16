@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
+	"github.com/jhh3/pyre/internal/osutil"
+	"github.com/jhh3/pyre/internal/runtime/hostsel"
+	"github.com/jhh3/pyre/internal/runtime/sessionhost"
+	"github.com/jhh3/pyre/internal/runtime/termhost"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
 )
 
@@ -58,7 +61,14 @@ func WarmLogin(ctx context.Context, o WarmLoginOptions, profileDir string, fresh
 		return err
 	}
 	defer os.RemoveAll(dir)
-	srv, err := tmux.NewServer(o.TmuxBin, filepath.Join(dir, "s"))
+	// A throwaway host of the node's kind (tmux with no config, as before;
+	// a termhost on Windows).
+	var srv sessionhost.Host
+	if hostsel.Kind() == hostsel.KindTmux {
+		srv, err = tmux.NewServer(o.TmuxBin, filepath.Join(dir, "s"))
+	} else {
+		srv, err = termhost.New(filepath.Join(dir, "s"))
+	}
 	if err != nil {
 		return err
 	}
@@ -78,8 +88,8 @@ func WarmLogin(ctx context.Context, o WarmLoginOptions, profileDir string, fresh
 	}
 	defer func() {
 		_ = srv.KillServer(bg)
-		if pid > 0 && syscall.Kill(pid, 0) == nil {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
+		if pid > 0 && osutil.SignalZero(pid) == nil {
+			_ = osutil.Terminate(pid)
 		}
 	}()
 	t := time.NewTicker(o.Poll)

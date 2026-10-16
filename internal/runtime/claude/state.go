@@ -36,6 +36,11 @@ type approvalTrack struct {
 	Behavior                                string
 	TimedOut, Withdrawn                     bool
 	Summary                                 string
+	// DialogSeenAt: an observation showed a permission dialog while this
+	// request was open. ScreenAnsweredAt: a later observation showed the
+	// dialog gone and the turn working (answered in the terminal; Claude
+	// fires no hook for a TUI "Yes" until the tool finishes).
+	DialogSeenAt, ScreenAnsweredAt time.Time
 }
 
 // runState is the incremental fold of a run's hook events and transcript.
@@ -61,6 +66,7 @@ type runState struct {
 	toolPostAt    map[string]time.Time // tool ran: PostToolUse or PostToolUseFailure
 	toolDeniedAt  map[string]time.Time // auto mode denied it: PermissionDenied
 	humanTool     string               // tool_use_id of a pending human-only dialog tool
+	permPrompt    bool                 // waiting_approval came from a permission request/prompt
 
 	subagents map[string]*subagent
 	subOrder  []string
@@ -76,6 +82,10 @@ type runState struct {
 	doorbellFailed int       // Claude reported the monitor script failed (it is not restarted)
 
 	lastTurnDurationAt time.Time
+
+	pluginVersion string                   // Claude version the delivery module reported at load
+	pluginClaimed map[string]time.Time     // msg id -> the module claimed it from the spool
+	pluginFailed  map[string]pluginFailure // msg id -> dropped / submit failed
 }
 
 func newRunState() *runState {
@@ -83,11 +93,13 @@ func newRunState() *runState {
 		state: contracts.RunStarting, reason: "launching; no SessionStart hook yet",
 		approvals: map[string]*approvalTrack{}, toolPostAt: map[string]time.Time{}, toolDeniedAt: map[string]time.Time{},
 		subagents: map[string]*subagent{}, accepted: map[string][]evidence{}, consumed: map[string]evidence{}, acked: map[string]time.Time{},
+		pluginClaimed: map[string]time.Time{}, pluginFailed: map[string]pluginFailure{},
 	}
 }
 
 func (rs *runState) set(s contracts.RunState, reason string, at time.Time) {
 	rs.state, rs.reason, rs.lastStateAt = s, reason, at
+	rs.permPrompt = false
 }
 
 func (rs *runState) addEvidence(e evidence) {
@@ -188,6 +200,7 @@ func (rs *runState) applyHook(r hookRecord) {
 		rs.doingHint = ""
 	case "PermissionRequest":
 		rs.set(contracts.RunWaitingApproval, "permission request ("+r.ToolName+")", r.At)
+		rs.permPrompt = true
 		if r.RequestID != "" {
 			if _, ok := rs.approvals[r.RequestID]; !ok {
 				rs.approvalOrder = append(rs.approvalOrder, r.RequestID)
@@ -202,6 +215,7 @@ func (rs *runState) applyHook(r hookRecord) {
 		switch str(p, "notification_type") {
 		case "permission_prompt":
 			rs.set(contracts.RunWaitingApproval, "permission prompt shown", r.At)
+			rs.permPrompt = true
 		case "idle_prompt":
 			if rs.state != contracts.RunWaitingApproval {
 				rs.set(contracts.RunWaitingInput, "idle prompt", r.At)
@@ -276,7 +290,37 @@ func (rs *runState) applyHook(r hookRecord) {
 			rs.addEvidence(evidence{MessageID: r.MessageID, Kind: contracts.EvidenceClaudeStopHook, Ref: r.ID, At: r.At, Source: 'e', Offset: r.offset})
 		}
 		rs.set(contracts.RunRunning, "continuing after Stop-hook injection", r.At)
+	case evAskNudged:
+		rs.set(contracts.RunRunning, "continuing: asked to file its owner question as an ask", r.At)
+	case evPageNudged:
+		rs.set(contracts.RunRunning, "continuing: asked to update its project page", r.At)
+	case claudeplugin.EvPluginReady:
+		rs.pluginVersion = str(p, "version")
+	case claudeplugin.EvPluginClaim:
+		if r.MessageID != "" {
+			rs.pluginClaimed[r.MessageID] = r.At
+		}
+	case claudeplugin.EvPluginSubmitted:
+		if r.MessageID != "" {
+			rs.addEvidence(evidence{MessageID: r.MessageID, Kind: contracts.EvidenceClaudePluginPrompt, Ref: r.ID, At: r.At, Source: 'e', Offset: r.offset})
+		}
+	case claudeplugin.EvPluginDropped, claudeplugin.EvPluginFailed:
+		if r.MessageID != "" {
+			why := str(p, "reason")
+			if why == "" {
+				why = str(p, "error")
+			}
+			rs.pluginFailed[r.MessageID] = pluginFailure{Event: r.Event, Reason: oneLine(why, 300), At: r.At}
+		}
 	}
+}
+
+// pluginFailure is the plugin module's report that a claimed message did
+// not enter the session (dropped by a prompt hook) or that its submit call
+// failed (outcome unknown).
+type pluginFailure struct {
+	Event, Reason string
+	At            time.Time
 }
 
 // hiddenAgentEvent reports whether a tool hook event comes from one of
@@ -415,7 +459,7 @@ func (rs *runState) bestEvidence(msgID string) (evidence, bool) {
 		return evidence{}, false
 	}
 	rank := map[contracts.EvidenceCategory]int{
-		contracts.EvidenceClaudeInboxRead: 5, contracts.EvidenceClaudePromptHook: 4, contracts.EvidenceClaudeStopHook: 3,
+		contracts.EvidenceClaudePluginPrompt: 6, contracts.EvidenceClaudeInboxRead: 5, contracts.EvidenceClaudePromptHook: 4, contracts.EvidenceClaudeStopHook: 3,
 		contracts.EvidenceClaudeQueue: 2, contracts.EvidenceClaudeUserRecord: 1,
 	}
 	best := evs[0]
@@ -434,11 +478,21 @@ func oneLine(s string, n int) string {
 
 // Limit detection (input to account fallback, WP13). Patterns observed in
 // Claude Code error text; matching is deliberately narrow.
+//
+// Claude Code 2.1.x on a subscription limit (server, 2026-10-08): the
+// StopFailure hook carries {"error":"rate_limit","last_assistant_message":
+// "You've hit your session limit · resets 3pm (America/Los_Angeles)"} and
+// the same text is the transcript's API-error record and the screen line.
+// "session"/"weekly"/"Opus" limits, curly apostrophes and the StopFailure
+// error codes are all recognised.
 var (
-	limitUsageRe = regexp.MustCompile(`(?i)(usage limit reached|you'?ve hit your (usage )?limit|out of extra usage|limit will reset|5-hour limit reached|weekly limit reached)`)
-	limitRateRe  = regexp.MustCompile(`(?i)(rate_limit_error|rate limit exceeded|too many requests)`)
-	limitAuthRe  = regexp.MustCompile(`(?i)(invalid api key|oauth token (has )?expired|please run /login|authentication_error|not logged in|invalid authentication credentials|token has been revoked)`)
+	limitUsageRe = regexp.MustCompile(`(?i)(usage limit reached|you(?:'|’)?ve hit your (?:[\w-]+ )?limit|out of extra usage|limit will reset|5-hour limit reached|weekly limit reached|session limit reached|"error"\s*:\s*"billing_error")`)
+	limitRateRe  = regexp.MustCompile(`(?i)(rate_limit_error|rate limit exceeded|too many requests|"error"\s*:\s*"rate_limit")`)
+	limitAuthRe  = regexp.MustCompile(`(?i)(invalid api key|oauth token (has )?expired|please run /login|authentication_error|not logged in|invalid authentication credentials|token has been revoked|"error"\s*:\s*"authentication_failed")`)
 	limitEpochRe = regexp.MustCompile(`limit reached\|(\d{9,11})`)
+	// "resets 3pm (America/Los_Angeles)", "resets 3:30pm", "resets Oct 10,
+	// 9am (Europe/Berlin)".
+	limitResetRe = regexp.MustCompile(`(?i)resets\s+(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?`)
 )
 
 func detectLimit(text string, at time.Time) *contracts.LimitEvent {
@@ -463,10 +517,65 @@ func detectLimit(text string, at time.Time) *contracts.LimitEvent {
 			le.ResetAt = &t
 		}
 	}
+	if le.ResetAt == nil && kind != "auth_invalid" {
+		le.ResetAt = parseResetClock(text, at)
+	}
 	return le
 }
 
-// limitDetail keeps a short, credential-free excerpt around the match.
+// parseResetClock reads Claude's "resets 3pm (America/Los_Angeles)": the
+// next such wall-clock time after at in that zone (local when unnamed or
+// unknown). nil when absent.
+func parseResetClock(text string, at time.Time) *time.Time {
+	m := limitResetRe.FindStringSubmatch(text)
+	if m == nil {
+		return nil
+	}
+	loc := time.Local
+	if m[6] != "" {
+		if l, err := time.LoadLocation(strings.TrimSpace(m[6])); err == nil {
+			loc = l
+		}
+	}
+	h, _ := strconv.Atoi(m[3])
+	mi := 0
+	if m[4] != "" {
+		mi, _ = strconv.Atoi(m[4])
+	}
+	if h < 1 || h > 12 || mi > 59 {
+		return nil
+	}
+	h %= 12
+	if strings.EqualFold(m[5], "pm") {
+		h += 12
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	now := at.In(loc)
+	var t time.Time
+	if m[1] != "" {
+		mon, err := time.Parse("Jan", strings.ToUpper(m[1][:1])+strings.ToLower(m[1][1:3]))
+		day, _ := strconv.Atoi(m[2])
+		if err != nil || day < 1 || day > 31 {
+			return nil
+		}
+		t = time.Date(now.Year(), mon.Month(), day, h, mi, 0, 0, loc)
+		if t.Before(now.Add(-24 * time.Hour)) {
+			t = t.AddDate(1, 0, 0)
+		}
+	} else {
+		t = time.Date(now.Year(), now.Month(), now.Day(), h, mi, 0, 0, loc)
+		if !t.After(now) {
+			t = t.AddDate(0, 0, 1)
+		}
+	}
+	u := t.UTC()
+	return &u
+}
+
+// limitDetail keeps a short, credential-free excerpt around the match
+// (StopFailure: "<error code>: <message>").
 func limitDetail(text string) string {
 	var s string
 	if json.Valid([]byte(text)) {
@@ -477,6 +586,9 @@ func limitDetail(text string) string {
 					s = v
 					break
 				}
+			}
+			if msg := str(m, "last_assistant_message"); msg != "" && msg != s {
+				s = strings.TrimPrefix(s+": "+msg, ": ")
 			}
 		}
 	}

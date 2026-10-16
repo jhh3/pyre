@@ -325,6 +325,8 @@ func (s *Service) homeNote(c *candidate, list, all []*candidate) string {
 		return "home account " + name + " is not available now"
 	case h.near:
 		return "home account " + name + " is near its limit (" + h.room.Numbers() + ")"
+	case h.crowd > c.crowd:
+		return "spreading runs: home account " + name + " has " + s.crowdNote(h)
 	case len(h.others) > 0:
 		return "home account " + name + " is also in use on " + h.otherNames() + " (there first)"
 	}

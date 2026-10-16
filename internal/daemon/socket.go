@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/httpapi"
 )
 
@@ -125,7 +126,7 @@ func (d *Daemon) ServeLocal(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(path, 0o600)
+	_ = fileperm.Restrict(path, 0o600)
 	srv := &http.Server{Handler: d.LocalHandler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

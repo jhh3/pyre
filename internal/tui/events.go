@@ -128,17 +128,26 @@ func (m *Model) onEvents(msg eventsMsg) tea.Cmd {
 func invalidationKeys(ev contracts.Event) []string {
 	var keys []string
 	add := func(k ...string) { keys = append(keys, k...) }
+	// sessions marks the one session the event names (patched in place by
+	// flushEvents, sessions_patch.go), or the whole list when it names none.
+	sessions := func() {
+		if ev.SessionID != "" {
+			add(sessionKeyPrefix + ev.SessionID)
+		} else {
+			add("sessions")
+		}
+	}
 	k := string(ev.Kind)
 	switch {
 	case strings.HasPrefix(k, "node."):
 		add("nodes", "sessions")
 	case strings.HasPrefix(k, "session.") || strings.HasPrefix(k, "run.") || k == string(contracts.EvLeaseChanged):
-		add("sessions")
+		sessions()
 		if ev.SessionID != "" {
 			add("preview:" + ev.SessionID)
 		}
 	case strings.HasPrefix(k, "message."):
-		add("sessions")
+		sessions()
 		if ev.SessionID != "" {
 			add("messages:" + ev.SessionID)
 		}
@@ -147,10 +156,14 @@ func invalidationKeys(ev contracts.Event) []string {
 			add("proj:" + *ev.ProjectID + ":thread")
 		}
 	case strings.HasPrefix(k, "approval."):
-		add("attention", "sessions", "approval:")
+		add("attention", "approval:")
+		sessions()
 	case k == string(contracts.EvAttentionChanged):
 		// Session flags are computed from attention items by the hub.
-		add("attention", "approval:", "sessions", ownerInboxKey)
+		add("attention", "approval:", ownerInboxKey)
+		sessions()
+	case k == string(contracts.EvAskChanged):
+		add(asksKey) // the ask signals (asks.go)
 	case k == string(contracts.EvProjectChanged):
 		add("projects")
 	case strings.HasPrefix(k, "document."):
@@ -191,6 +204,14 @@ func (m *Model) flushEvents() tea.Cmd {
 	m.stats.Refreshes++
 	dirty := m.ev.dirty
 	m.ev.dirty = nil
+	var cmds []tea.Cmd
+	if ids := takeSessionIDs(dirty); len(ids) > 0 && !dirty["sessions"] {
+		if cmd, ok := m.patchSessions(ids); ok {
+			cmds = append(cmds, cmd)
+		} else {
+			dirty["sessions"] = true
+		}
+	}
 	matches := func(key string) bool {
 		if dirty[key] {
 			return true
@@ -207,7 +228,6 @@ func (m *Model) flushEvents() tea.Cmd {
 			st.stale = true
 		}
 	}
-	var cmds []tea.Cmd
 	for _, k := range baseKeys {
 		if st := m.loads[k]; st != nil && st.stale {
 			cmds = append(cmds, m.reload(k, nil))

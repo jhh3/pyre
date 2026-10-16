@@ -6,6 +6,7 @@ package tuitest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"reflect"
@@ -66,6 +67,9 @@ type Harness struct {
 	AttachCalls []contracts.AttachDescriptor
 	mu          sync.Mutex
 	terms       []*FakeTerm
+	relays      []*RelayTerm // relay.go
+	// RelayErr fails relay dials while set (SetRelayErr).
+	RelayErr error
 }
 
 // Options returns test defaults: no periodic refresh, short debounce and
@@ -80,6 +84,11 @@ func Options() tui.Options {
 		Output:          io.Discard,
 		KeysFile:        "none",          // never read the user's ~/.config/pyre/keys.toml
 		StartTerm:       FakeTermStarter, // never run a real attach command
+		// Never open a browser: I copies the web inbox link instead.
+		OpenURL: func(string) error { return errors.New("tests open no browser") },
+		// A selection never counts as viewed by wall-clock time passing
+		// (lead signals, leads.go); tests that need it set a short dwell.
+		SeenDwell: time.Hour,
 	}
 }
 
@@ -107,6 +116,9 @@ func New(t testing.TB, api contracts.API, opts tui.Options, w, h int) *Harness {
 		// Embedded terminals never run a real command in tests unless the
 		// test asks for one (tui.StartPTY against an isolated tmux).
 		opts.StartTerm = hs.startTerm
+	}
+	if opts.DialRelay != nil && reflect.ValueOf(opts.DialRelay).Pointer() == reflect.ValueOf(FakeRelayDialer).Pointer() {
+		opts.DialRelay = hs.dialRelay // relayed views get recording fakes
 	}
 	if opts.ExecFunc == nil {
 		// Run the suspended command synchronously inside the command

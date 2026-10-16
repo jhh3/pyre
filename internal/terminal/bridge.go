@@ -21,7 +21,48 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/runtime/termhost"
 )
+
+// attachTerm is the node side of one stream: the PTY of a `tmux attach`
+// client, or a direct termhost attach stream.
+type attachTerm interface {
+	io.ReadWriteCloser
+	Resize(cols, rows int) error
+}
+
+// ptyTerm is an attach client's PTY master.
+type ptyTerm struct{ *os.File }
+
+func (p ptyTerm) Resize(cols, rows int) error {
+	return pty.Setsize(p.File, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+}
+
+// openDirect attaches a stream to a termhost session (Windows runs, or
+// PYRE_SESSION_HOST=termhost). A fitted stream is read-only and
+// ignore-size, starts at the session's size and follows the host's size
+// events; a read-only stream can never type or resize (the host enforces
+// it too). It returns the stream's starting size.
+func (b *NodeBridge) openDirect(ctx context.Context, s *nodeSession, tc contracts.TerminalOpenCommand, ta termhost.AttachTarget, cols, rows int) (int, int, error) {
+	if tc.Fit && !tc.ReadOnly {
+		return 0, 0, contracts.Errorf(contracts.ErrInvalid, "fit is only for read-only streams")
+	}
+	dctx, cancel := context.WithTimeout(ctx, b.cfg.DialTimeout)
+	defer cancel()
+	conn, err := termhost.DialAttach(dctx, termhost.DialOptions{Socket: ta.Socket, Name: ta.Name,
+		ReadOnly: ta.ReadOnly || tc.ReadOnly, IgnoreSize: tc.Fit, Cols: cols, Rows: rows})
+	if err != nil {
+		return 0, 0, contracts.Errorf(contracts.ErrUnavailable, "attach to the run's terminal host: %v", err).WithRef(contracts.KindRun, tc.RunID)
+	}
+	s.term, s.direct = conn, true
+	close(s.exited) // no attach process to wait for
+	if tc.Fit {
+		c, r, _ := conn.TakeWindowSize() // consumes the initial report: Open sends it
+		cols, rows = ClampSize(c, r)
+		s.fitHost, s.cols, s.rows = true, cols, rows
+	}
+	return cols, rows, nil
+}
 
 // BridgeConfig configures a NodeBridge.
 type BridgeConfig struct {
@@ -31,6 +72,7 @@ type BridgeConfig struct {
 	Logger *slog.Logger
 
 	DialTimeout   time.Duration // dial-back to the hub (10s)
+	FitEvery      time.Duration // a fitted stream re-reads its window's size (10s)
 	KillGrace     time.Duration // wait after SIGHUP before SIGKILL of the attach client (2s)
 	MaxSessions   int           // concurrent streams on this node (16)
 	MaxFrameBytes int64         // largest accepted frame from the hub (64 KiB)
@@ -80,6 +122,9 @@ func NewNodeBridge(cfg BridgeConfig) (*NodeBridge, error) {
 	if cfg.KillGrace <= 0 {
 		cfg.KillGrace = 2 * time.Second
 	}
+	if cfg.FitEvery <= 0 {
+		cfg.FitEvery = 10 * time.Second
+	}
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 16
 	}
@@ -102,8 +147,13 @@ type nodeSession struct {
 	id       string
 	runID    string
 	readOnly bool
-	cmd      *exec.Cmd
-	ptmx     *os.File
+	fit      *tmuxFit // non-nil: sized to the window by the node (TerminalOpenCommand.Fit)
+	cols     int      // fitted PTY size (fit only)
+	rows     int
+	cmd      *exec.Cmd  // nil for a direct termhost stream
+	term     attachTerm // the attach client's PTY, or the termhost stream
+	direct   bool       // term is a termhost stream (no attach process)
+	fitHost  bool       // a fitted termhost stream: sized by the host's size events
 	ws       *websocket.Conn
 	exited   chan struct{}
 	once     sync.Once
@@ -144,42 +194,78 @@ func (b *NodeBridge) Open(ctx context.Context, tc contracts.TerminalOpenCommand,
 	}
 
 	cols, rows := ClampSize(tc.Cols, tc.Rows)
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = b.env()
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-	if err != nil {
-		release()
-		return contracts.Errorf(contracts.ErrUnavailable, "start attach client: %v", err).WithRef(contracts.KindRun, tc.RunID)
+	if ta, ok := termhost.ParseAttachArgv(argv); ok {
+		// A Pyre terminal host session (Windows): connect to the host
+		// directly; there is no attach process or PTY to run.
+		c, r, err := b.openDirect(ctx, s, tc, ta, cols, rows)
+		if err != nil {
+			release()
+			return err
+		}
+		cols, rows = c, r
+	} else {
+		if tc.Fit {
+			f, fargv, c, r, err := b.fitPrepare(ctx, tc, argv)
+			if err != nil {
+				release()
+				return err
+			}
+			s.fit, argv, cols, rows, s.cols, s.rows = &f, fargv, c, r, c, r
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Env = b.env()
+		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+		if err != nil {
+			release()
+			return contracts.Errorf(contracts.ErrUnavailable, "start attach client: %v", err).WithRef(contracts.KindRun, tc.RunID)
+		}
+		s.cmd, s.term = cmd, ptyTerm{ptmx}
+		go func() {
+			_ = cmd.Wait()
+			close(s.exited)
+		}()
 	}
-	s.cmd, s.ptmx = cmd, ptmx
-	go func() {
-		_ = cmd.Wait()
-		close(s.exited)
-	}()
 
 	ws, err := b.dial(ctx, tc.StreamID)
 	if err != nil {
 		s.stopChild()
-		_ = ptmx.Close()
+		_ = s.term.Close()
 		release()
 		return err
 	}
 	ws.SetReadLimit(b.cfg.MaxFrameBytes)
+	if s.fit != nil || s.fitHost {
+		// The size goes first, so the client sizes its screen before any
+		// byte drawn for it arrives.
+		if err := writeJSON(ctx, ws, fitFrame(cols, rows)); err != nil {
+			ws.CloseNow()
+			s.stopChild()
+			_ = s.term.Close()
+			release()
+			return contracts.Errorf(contracts.ErrUnavailable, "send the window size to the hub: %v", err)
+		}
+	}
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		ws.CloseNow()
 		s.stopChild()
-		_ = ptmx.Close()
+		_ = s.term.Close()
 		release()
 		return contracts.Errorf(contracts.ErrUnavailable, "terminal bridge is shutting down")
 	}
 	s.ws = ws
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	b.wg.Add(2)
+	if s.fit != nil {
+		b.wg.Add(1)
+	}
 	b.mu.Unlock()
 	go s.ptyToHub()
 	go s.hubToPTY()
+	if s.fit != nil {
+		go s.refit()
+	}
 	b.cfg.Logger.Info("terminal stream connected", "stream", tc.StreamID, "run", tc.RunID, "read_only", tc.ReadOnly)
 	return nil
 }
@@ -227,7 +313,18 @@ func (s *nodeSession) ptyToHub() {
 	defer s.b.wg.Done()
 	buf := make([]byte, 32<<10)
 	for {
-		n, err := s.ptmx.Read(buf)
+		n, err := s.term.Read(buf)
+		if s.fitHost {
+			// The host resized the session: the new size goes first.
+			if cols, rows, ok := s.term.(*termhost.Conn).TakeWindowSize(); ok {
+				cols, rows = ClampSize(cols, rows)
+				if werr := writeJSON(s.ctx, s.ws, fitFrame(cols, rows)); werr != nil {
+					s.close("hub write failed")
+					return
+				}
+				s.cols, s.rows = cols, rows
+			}
+		}
 		if n > 0 {
 			wctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
 			werr := s.ws.Write(wctx, websocket.MessageBinary, buf[:n])
@@ -259,18 +356,44 @@ func (s *nodeSession) hubToPTY() {
 			if s.readOnly {
 				continue
 			}
-			if _, err := s.ptmx.Write(b); err != nil {
+			if _, err := s.term.Write(b); err != nil {
 				s.close("terminal write failed")
 				return
 			}
 		case websocket.MessageText:
 			f, err := parseFrame(b)
-			if err != nil || f.Type != FrameResize {
-				continue
+			if err != nil || f.Type != FrameResize || s.fit != nil || s.fitHost {
+				continue // a fitted stream keeps the window's size
 			}
 			cols, rows := ClampSize(f.Cols, f.Rows)
-			_ = pty.Setsize(s.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+			_ = s.term.Resize(cols, rows)
 		}
+	}
+}
+
+// refit follows the window's size while a fitted stream is open: the new
+// size is sent first, then the PTY resized, so the client's screen is
+// already that size when tmux redraws for it.
+func (s *nodeSession) refit() {
+	defer s.b.wg.Done()
+	t := time.NewTicker(s.b.cfg.FitEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-t.C:
+		}
+		cols, rows, _, err := s.fit.probe(s.ctx, s.b.env())
+		if err != nil || (cols == s.cols && rows == s.rows) {
+			continue
+		}
+		if err := writeJSON(s.ctx, s.ws, fitFrame(cols, rows)); err != nil {
+			s.close("hub write failed")
+			return
+		}
+		s.cols, s.rows = cols, rows
+		_ = s.term.Resize(cols, rows)
 	}
 }
 
@@ -285,7 +408,7 @@ func (s *nodeSession) close(reason string) {
 			s.cancel()
 		}()
 		s.stopChild()
-		_ = s.ptmx.Close()
+		_ = s.term.Close()
 		s.b.mu.Lock()
 		delete(s.b.sessions, s.id)
 		s.b.mu.Unlock()
@@ -295,6 +418,9 @@ func (s *nodeSession) close(reason string) {
 
 // stopChild signals the attach client by PID (not its process group).
 func (s *nodeSession) stopChild() {
+	if s.cmd == nil {
+		return // a direct termhost stream: closing it detaches
+	}
 	select {
 	case <-s.exited:
 		return

@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/fileperm"
+	"github.com/jhh3/pyre/internal/osutil"
 )
 
 // Link is one composed profile entry.
@@ -52,8 +54,16 @@ type sharedItem struct {
 }
 
 var (
-	claudeShared = []sharedItem{{"projects", true}, {"history.jsonl", false}, {"file-history", true}, {"todos", true}}
-	codexShared  = []sharedItem{{"sessions", true}, {"archived_sessions", true}, {"session_index.jsonl", false}}
+	// claudeShared is everything `claude --resume <uuid>` reads back about a
+	// conversation (transcripts, rewind checkpoints, todo and task lists,
+	// plans, per-session hook env, shell snapshots, prompt history). Every
+	// Claude profile on a node links these to <SharedRoot>/claude, so a
+	// session continues natively under any account (sharedstore.go). Login
+	// state (.credentials.json, keychain, .claude.json) and the live-process
+	// registry (sessions/) stay per profile.
+	claudeShared = []sharedItem{{"projects", true}, {"history.jsonl", false}, {"file-history", true}, {"todos", true},
+		{"plans", true}, {"tasks", true}, {"session-env", true}, {"shell-snapshots", true}}
+	codexShared = []sharedItem{{"sessions", true}, {"archived_sessions", true}, {"session_index.jsonl", false}}
 	// Credential stores are never created, copied, linked or read by
 	// composition.
 	credentialNames = map[string]bool{".credentials.json": true, "auth.json": true, "oauth-token": true}
@@ -242,6 +252,9 @@ func (s *Service) composeShared(info *ProfileInfo, dir, sharedRoot string, items
 			}
 			f.Close()
 		}
+		if filepath.Base(sharedRoot) == string(contracts.HarnessClaude) {
+			s.adoptShared(info, filepath.Join(dir, it.name), target, it.dir) // sharedstore.go
+		}
 		if s.link(info, filepath.Join(dir, it.name), target) {
 			info.Shared = append(info.Shared, Link{Name: it.name, Target: target})
 		}
@@ -253,7 +266,7 @@ func (s *Service) composeShared(info *ProfileInfo, dir, sharedRoot string, items
 func (s *Service) link(info *ProfileInfo, p, target string) bool {
 	fi, err := os.Lstat(p)
 	if err == nil {
-		if fi.Mode()&fs.ModeSymlink != 0 {
+		if fi.Mode()&osutil.LinkModes != 0 {
 			if cur, _ := os.Readlink(p); cur == target {
 				return true
 			}
@@ -261,7 +274,7 @@ func (s *Service) link(info *ProfileInfo, p, target string) bool {
 		info.Conflicts = append(info.Conflicts, filepath.Base(p)+": exists and is not the expected link; left untouched")
 		return false
 	}
-	if err := os.Symlink(target, p); err != nil {
+	if err := osutil.Symlink(target, p); err != nil {
 		info.Conflicts = append(info.Conflicts, filepath.Base(p)+": "+err.Error())
 		return false
 	}
@@ -362,7 +375,7 @@ func (s *Service) writeCodexConfig(info *ProfileInfo, dir, userCodex string) err
 		info.Conflicts = append(info.Conflicts, "config.toml: exists and is not Pyre-managed; left untouched (login command passes -c cli_auth_credentials_store=\"file\")")
 		return nil
 	}
-	if fi, err := os.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+	if fi, err := os.Lstat(p); err == nil && fi.Mode()&osutil.LinkModes != 0 {
 		info.Conflicts = append(info.Conflicts, "config.toml: is a symlink; left untouched")
 		return nil
 	}
@@ -426,7 +439,7 @@ func writeFileAtomic(p string, b []byte, mode os.FileMode) error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
-	if err := tmp.Chmod(mode); err != nil {
+	if err := fileperm.RestrictFile(tmp, mode); err != nil {
 		tmp.Close()
 		return err
 	}

@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // Release signatures: packaging/release.sh signs the release SHA256SUMS with
@@ -36,6 +37,9 @@ const ReleaseNamespace = "pyre-release"
 func DefaultReleaseSigners() string {
 	if p := os.Getenv("PYRE_RELEASE_ALLOWED_SIGNERS"); p != "" {
 		return p
+	}
+	if d := winenv.ConfigDir(os.Getenv); d != "" {
+		return filepath.Join(d, "release-allowed-signers") // %APPDATA%\Pyre
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {

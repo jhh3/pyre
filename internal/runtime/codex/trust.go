@@ -51,14 +51,21 @@ func isCodexTrustScreen(screen string) bool {
 		(strings.Contains(s, "trust this folder") && strings.Contains(s, "continue"))
 }
 
-// codexConversationScreen: the TUI is past start-up dialogs.
+// codexConversationScreen: the TUI is past start-up dialogs (its composer
+// is showing). The "OpenAI Codex" header is not enough: Codex draws it
+// before the trust prompt, and stopping on it left every prompt unanswered.
 func codexConversationScreen(screen string) bool {
-	return strings.Contains(screen, "Ask Codex") || strings.Contains(screen, "OpenAI Codex")
+	return strings.Contains(screen, "Ask Codex") && !isCodexTrustScreen(screen)
 }
 
 var (
-	trustWatchWindow  = 30 * time.Second
+	// trustWatchWindow covers a slow TUI start on a loaded host (server at
+	// load 70 took longer than the former 30s).
+	trustWatchWindow  = 3 * time.Minute
 	trustPollInterval = 400 * time.Millisecond
+	// trustRecheckEvery is how often Observe looks for a prompt that
+	// appeared later (a respawned or reconnected TUI).
+	trustRecheckEvery = 20 * time.Second
 )
 
 // watchTrust answers Codex's "Trust this folder?" in a run's TUI pane with
@@ -81,7 +88,7 @@ func (a *Adapter) watchTrust(rr *runRef) {
 		defer cancel()
 		t := time.NewTicker(trustPollInterval)
 		defer t.Stop()
-		ups, enters := 0, 0
+		ups, enters, seen := 0, 0, 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -111,9 +118,32 @@ func (a *Adapter) watchTrust(rr *runRef) {
 				}
 			default:
 				if codexConversationScreen(screen) {
-					return
+					if seen++; seen >= 2 {
+						return
+					}
 				}
 			}
+		}
+	}()
+}
+
+// recheckTrust restarts the watcher at most every trustRecheckEvery while
+// the run is observed, so a trust prompt shown after launch is answered too.
+func (a *Adapter) recheckTrust(rr *runRef, now time.Time) {
+	last := rr.trustChecked.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < trustRecheckEvery {
+		return
+	}
+	rr.trustChecked.Store(now.UnixNano())
+	if a.o.TrustWorkspace == nil || !a.o.TrustWorkspace(rr.meta.Cwd) || rr.trustWatch.Load() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		screen, err := a.srv.CapturePane(ctx, rr.meta.RunID, tmux.CaptureOptions{})
+		if err == nil && isCodexTrustScreen(screen) {
+			a.watchTrust(rr)
 		}
 	}()
 }

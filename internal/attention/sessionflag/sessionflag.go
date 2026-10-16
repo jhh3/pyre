@@ -24,6 +24,8 @@ var kinds = map[contracts.AttentionKind]kindInfo{
 	contracts.AttnApproval:      {contracts.FlagNeedsYou, "approval", 100, true},
 	contracts.AttnQuestion:      {contracts.FlagNeedsYou, "question", 95, true},
 	contracts.AttnFlag:          {contracts.FlagNeedsYou, "asked", 90, false},
+	contracts.AttnAsk:           {contracts.FlagNeedsYou, "ask", 92, true},
+	contracts.AttnWaiting:       {contracts.FlagNeedsYou, "waiting", 91, true}, // a lead's question in its chat; flags while read
 	contracts.AttnFailure:       {contracts.FlagNeedsYou, "failed", 80, false},
 	contracts.AttnAccountPool:   {contracts.FlagNeedsYou, "reauth", 75, false},
 	contracts.AttnIndeterminate: {contracts.FlagNeedsYou, "delivery", 70, true},
@@ -63,13 +65,42 @@ func Flags(it contracts.AttentionItem) bool {
 // session's items in any state), or nil when nothing flags. Text is the
 // top item's title as stored; callers resolve IDs in it.
 func Compute(items []contracts.AttentionItem) *contracts.SessionFlag {
+	return ComputeRun(items, nil)
+}
+
+// LaunchFailed reports whether r is a run that never started: it failed at
+// launch (no account with capacity, no checkout, a rejected login...).
+func LaunchFailed(r *contracts.Run) bool {
+	return r != nil && r.State == contracts.RunFailed &&
+		(strings.HasPrefix(r.StateReason, "launch ") || strings.HasPrefix(r.StateReason, "Launch "))
+}
+
+// launchInfo is how a failure or account item ranks on a session whose
+// current run failed at launch: informational ("message" level, reason
+// kept), below every blocking reason. Nothing is running there and nothing
+// waits on the owner; the inbox item stays (owner report 2026-10-12: 44
+// ended sessions counted "needs you").
+var launchInfo = map[contracts.AttentionKind]kindInfo{
+	contracts.AttnFailure:     {contracts.FlagMessage, "failed", 35, false},
+	contracts.AttnAccountPool: {contracts.FlagMessage, "reauth", 34, false},
+}
+
+// ComputeRun is Compute for a session whose current run is r (nil:
+// unknown). When r failed at launch (LaunchFailed), failure and
+// account_exhausted items flag the session at the "message" level only, so
+// an ended session flagged only by its failed launch is never "needs you".
+func ComputeRun(items []contracts.AttentionItem, r *contracts.Run) *contracts.SessionFlag {
 	var f *contracts.SessionFlag
 	best := -1
+	launch := LaunchFailed(r)
 	for _, it := range items {
 		if !Flags(it) {
 			continue
 		}
 		ki := info(it.Kind)
+		if li, ok := launchInfo[it.Kind]; ok && launch {
+			ki = li
+		}
 		if f == nil {
 			f = &contracts.SessionFlag{}
 		}

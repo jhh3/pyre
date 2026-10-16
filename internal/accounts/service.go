@@ -92,12 +92,21 @@ type Continuation struct {
 	Resume        *contracts.NativeRef       // native_resume only
 	UncertainWork bool                       // do not replay the interrupted instruction
 	Reason        string
+	// Prompt is the successor's first prompt: a short "continue where you
+	// left off (account switched from X to Y because of the usage limit)"
+	// so the work goes on without a human "go". Never the interrupted
+	// instruction itself.
+	Prompt string
 }
 
 // ContinuationResult identifies the successor.
 type ContinuationResult struct {
 	NewRunID     string
 	NewSessionID string // set for handoff successors (linked session)
+	// Kind is the continuation the daemon actually used ("" = as planned):
+	// a planned native resume whose thread turned out unreachable from the
+	// new account starts as a handoff instead.
+	Kind contracts.ContinuationKind
 }
 
 // CodexRateLimitReader is implemented by the Codex adapter (WP07). It calls
@@ -175,12 +184,31 @@ type Config struct {
 	// MaxAssignmentsPerAccount bounds concurrent local runs per account
 	// (0 = unlimited).
 	MaxAssignmentsPerAccount int
+	// SpreadRuns: an account already carrying this many active runs on this
+	// machine is ranked after accounts with fewer (spread.go; default 4,
+	// negative: off). Never a hard limit.
+	SpreadRuns int
+	// SpreadFivePercent: an account whose 5-hour window is at or above this
+	// used-percent is ranked after accounts below it (default 50, negative:
+	// off).
+	SpreadFivePercent float64
 	// ExhaustedPercent is the used-percent at or above which a window counts
 	// as exhausted (default 100).
 	ExhaustedPercent float64
 	// DefaultCooldown applies after a limit event without a reset hint
 	// (default 30m).
 	DefaultCooldown time.Duration
+	// SessionSwitchWindow is the circuit breaker for automatic account
+	// switches: at most one per session within it (default 30m). A further
+	// limit inside the window pauses switching for that session (the run is
+	// left as it is and the owner is asked) instead of switching again.
+	SessionSwitchWindow time.Duration
+	// NodeSwitchMax / NodeSwitchWindow pause automatic switching once that
+	// many different accounts ran out on this node within the window
+	// (default 10 per 10m). Moving more sessions off an account already
+	// counted is never paused: one account running out moves all of them.
+	NodeSwitchMax    int
+	NodeSwitchWindow time.Duration
 	// ReauthCooldown holds a login the provider rejected (401) out of
 	// selection before it is checked out and probed again (default 1h; a
 	// rota snapshot rewritten by a new login ends it at once; reauth.go).
@@ -312,8 +340,23 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 	if cfg.ExhaustedPercent <= 0 {
 		cfg.ExhaustedPercent = 100
 	}
+	if cfg.SpreadRuns == 0 {
+		cfg.SpreadRuns = defaultSpreadRuns
+	}
+	if cfg.SpreadFivePercent == 0 {
+		cfg.SpreadFivePercent = defaultSpreadFivePercent
+	}
 	if cfg.DefaultCooldown <= 0 {
 		cfg.DefaultCooldown = 30 * time.Minute
+	}
+	if cfg.SessionSwitchWindow <= 0 {
+		cfg.SessionSwitchWindow = 30 * time.Minute
+	}
+	if cfg.NodeSwitchMax <= 0 {
+		cfg.NodeSwitchMax = 10
+	}
+	if cfg.NodeSwitchWindow <= 0 {
+		cfg.NodeSwitchWindow = 10 * time.Minute
 	}
 	if cfg.FleetTimeout <= 0 {
 		cfg.FleetTimeout = defaultFleetTimeout

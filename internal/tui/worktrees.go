@@ -170,7 +170,7 @@ func (m *Model) offerWorktreeCleanup(s contracts.SessionView) tea.Cmd {
 		// after the archive was confirmed, over whatever is selected by
 		// then. W opens it, bound to this session.
 		m.wtOffer = o
-		return m.setToast(fmt.Sprintf("archived — %q created %s · W reviews / removes them", trunc(s.Session.Title, 32), plural(len(o.removable), "clean worktree", "clean worktrees")), toneMuted)
+		return m.setToast(fmt.Sprintf("archived · W reviews / removes the %s %q created", plural(len(o.removable), "clean worktree", "clean worktrees"), trunc(s.Session.Title, 32)), toneMuted)
 	})
 }
 

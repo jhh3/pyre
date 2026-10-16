@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,11 @@ type QuickParams struct {
 	Permissions string   `json:"permissions,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	OperationID string   `json:"operation_id,omitempty"`
+	// NoClone refuses instead of cloning a repository the machine lacks
+	// (W-newsession: by default it is cloned there first).
+	NoClone bool `json:"no_clone,omitempty"`
+	// Progress receives one-line progress notes (clone confirmations).
+	Progress func(string) `json:"-"`
 }
 
 // QuickLaunchResult is `pyre new --json` output: the start response plus
@@ -53,6 +59,7 @@ type QuickLaunchResult struct {
 	Worktrees *c.WorktreeCreateResult `json:"worktrees,omitempty"`
 	Folder    string                  `json:"folder,omitempty"`  // plain-folder launch: the folder
 	Created   bool                    `json:"created,omitempty"` // the folder was created for it
+	Cloned    []c.RepoCloneResult     `json:"cloned,omitempty"`  // repositories cloned onto the machine first
 }
 
 // RepoPicker chooses among ambiguous matches (index into groups), or
@@ -268,7 +275,26 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 		connected[n.NodeID] = n.Connection.State == c.ConnConnected
 		names[n.NodeID] = n.Name
 	}
-	var chosen [][]c.RepoEntry
+	// Each spec is a repository some machine has indexed, else one from
+	// the global catalog (GitHub), else an owner/name or clone URL.
+	type choice struct {
+		group []c.RepoEntry
+		cat   *c.CatalogRepo
+	}
+	var choices []choice
+	var catalog []c.CatalogRepo
+	catLoaded := false
+	loadCatalog := func() {
+		if catLoaded {
+			return
+		}
+		catLoaded = true
+		if ca, ok := o.API.(c.RepoCatalogAPI); ok {
+			if cat, err := ca.RepoCatalog(ctx, c.RepoCatalogRequest{Limit: 2000}); err == nil {
+				catalog = cat.Items
+			}
+		}
+	}
 	for _, spec := range p.Repos {
 		spec = strings.TrimSpace(spec)
 		if spec == "" {
@@ -279,12 +305,45 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 			return res, err
 		}
 		groups := repoindex.Contenders(repoindex.Group(list.Items))
+		if len(groups) > 0 && filterNode != "" {
+			// On a named machine, an exact repository elsewhere beats a
+			// loose match here (it is cloned there).
+			exact := false
+			for _, g := range groups {
+				exact = exact || strings.EqualFold(g[0].Name, spec) || strings.EqualFold(repoindex.FullNameOf(g[0].RemoteURL), spec)
+			}
+			if !exact {
+				loadCatalog()
+				if item, _, ok := repoindex.FindCatalog(spec, catalog); ok {
+					choices = append(choices, choice{cat: &item})
+					continue
+				}
+			}
+		}
 		if len(groups) == 0 {
+			loadCatalog()
+			item, many, ok := repoindex.FindCatalog(spec, catalog)
+			switch {
+			case ok:
+				choices = append(choices, choice{cat: &item})
+				continue
+			case len(many) > 1:
+				var lines []string
+				for _, m := range many {
+					lines = append(lines, "  "+orDash(m.FullName)+" "+m.RemoteURL)
+				}
+				return res, usagef("%q matches several repositories; name it as owner/name:\n%s", spec, strings.Join(lines, "\n"))
+			case repoindex.IsGitHubSpec(spec) || strings.Contains(spec, "://") || strings.HasPrefix(spec, "git@"):
+				remote := repoindex.GitHubRemote(spec)
+				name := path.Base(strings.TrimSuffix(repoindex.NormalizeRemote(remote), "/"))
+				choices = append(choices, choice{cat: &c.CatalogRepo{Key: repoindex.CatalogKey(c.Repo{RemoteURL: remote}), Name: name, FullName: repoindex.FullNameOf(remote), RemoteURL: remote, Present: []c.RepoEntry{}}})
+				continue
+			}
 			where := "any machine"
 			if filterNode != "" {
 				where = names[filterNode]
 			}
-			return res, c.Errorf(c.ErrNotFound, "no repository matches %q on %s; `pyre repos` lists the index (nodes scan ~/code, ~/src, ~/Documents/code and ~/projects every 10 minutes; pyred --repo-roots changes that)", spec, where)
+			return res, c.Errorf(c.ErrNotFound, "no repository matches %q on %s or in your GitHub repositories; `pyre repos` lists the index (nodes scan ~/code, ~/src, ~/Documents/code and ~/projects every 10 minutes; pyred --repo-roots changes that), and owner/name clones any GitHub repository", spec, where)
 		}
 		i, ok := repoindex.PickGroup(spec, groups)
 		if !ok {
@@ -295,25 +354,116 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 				return res, err
 			}
 		}
-		chosen = append(chosen, groups[i])
+		choices = append(choices, choice{group: groups[i]})
 	}
-	nodeID, err := chooseNode(chosen, connected, filterNode)
-	if err != nil {
-		return res, err
-	}
-	var paths []string
-	for _, g := range chosen {
-		for _, e := range g {
-			if e.NodeID == nodeID {
-				res.Repos = append(res.Repos, e)
-				paths = append(paths, e.Path)
-				break
+	// The machine: the named one; else one holding every repository; else
+	// the one holding most of them (the rest are cloned); else this one.
+	nodeID := filterNode
+	if nodeID == "" {
+		var chosen [][]c.RepoEntry
+		all := true
+		for _, ch := range choices {
+			if ch.group == nil {
+				all = false
+				continue
 			}
+			chosen = append(chosen, ch.group)
+		}
+		if all {
+			id, err := repoindex.ChooseMachine(chosen, connected, "")
+			if err == nil {
+				nodeID = id
+			} else if p.NoClone {
+				_, err := chooseNode(chosen, connected, "")
+				return res, err
+			}
+		}
+		if nodeID == "" {
+			// Most repositories present; ties go to the better machine
+			// (connected, used most recently) of the first repository.
+			best := 0
+			count := map[string]int{}
+			var order []string
+			for _, g := range chosen {
+				for _, id := range repoindex.Machines([][]c.RepoEntry{g}, connected) {
+					if connected[id] {
+						if count[id] == 0 {
+							order = append(order, id)
+						}
+						count[id]++
+					}
+				}
+			}
+			for _, id := range order {
+				if count[id] > best {
+					nodeID, best = id, count[id]
+				}
+			}
+		}
+		if nodeID == "" {
+			id, err := o.NodeID(ctx, "")
+			if err != nil {
+				return res, usagef("say which machine gets the clone: pyre new %s @<machine> (%v)", strings.Join(p.Repos, "+"), err)
+			}
+			nodeID = id
 		}
 	}
 	opID := p.OperationID
 	if opID == "" {
 		opID = c.NewID(c.PrefixOperation)
+	}
+	var paths []string
+	for i, ch := range choices {
+		if e, ok := repoindex.EntryOn(ch.group, nodeID); ok {
+			res.Repos = append(res.Repos, e)
+			paths = append(paths, e.Path)
+			continue
+		}
+		var remote, label string
+		var elsewhere []string
+		switch {
+		case ch.group != nil:
+			remote, label = ch.group[0].RemoteURL, ch.group[0].Name
+			for _, e := range ch.group {
+				elsewhere = append(elsewhere, e.NodeName)
+			}
+		default:
+			remote, label = ch.cat.RemoteURL, orDash(ch.cat.FullName)
+			if ch.cat.FullName == "" {
+				label = ch.cat.Name
+			}
+			for _, e := range ch.cat.Present {
+				elsewhere = append(elsewhere, e.NodeName)
+			}
+		}
+		if remote == "" {
+			return res, usagef("%s has no remote, so it cannot be cloned onto %s (it is on %s)", label, orDash(names[nodeID]), strings.Join(elsewhere, ", "))
+		}
+		if p.NoClone {
+			return res, usagef("%s is not on %s; drop --no-clone to clone it there", label, orDash(names[nodeID]))
+		}
+		if !connected[nodeID] {
+			return res, c.Errorf(c.ErrUnavailable, "%s is not connected; cannot clone %s there", orDash(names[nodeID]), label)
+		}
+		if p.Progress != nil {
+			p.Progress(repoindex.DescribeClone(remote, orDash(names[nodeID])) + "…")
+		}
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		cl, err := repoindex.CloneVia(cctx, o.API, nodeID, c.RepoCloneParams{Remote: remote}, fmt.Sprintf("%s.clone.%d", opID, i))
+		cancel()
+		if err != nil {
+			return res, err
+		}
+		if p.Progress != nil {
+			if cl.Cloned {
+				p.Progress("cloned into " + cl.Path)
+			} else {
+				p.Progress("already there: " + cl.Path)
+			}
+		}
+		res.Cloned = append(res.Cloned, cl)
+		res.Repos = append(res.Repos, c.RepoEntry{Repo: cl.Repo, NodeID: nodeID, NodeName: names[nodeID]})
+		paths = append(paths, cl.Path)
 	}
 	fresh := p.Fresh || p.Branch != "" || len(paths) > 1
 	cwd := paths[0]
@@ -452,6 +602,13 @@ named from the prompt or title (pyre/fix-share-link-redirect, deduplicated),
 in the repository's worktree folder (<repo>/.worktrees/, or an existing
 <repo>-worktrees/ next to it). --branch names that branch (implies --fresh).
 
+Any repository works on any machine: owner/name (one of your GitHub
+repositories, or any GitHub repository) or a repository another machine has
+is cloned onto the chosen machine first, into its repo root laid out like the
+repositories already there (~/code/<name>, or ~/code/<owner>/<name>), with
+that machine's own git credentials; a line on stderr says so. An existing
+directory is never overwritten. --no-clone refuses instead.
+
 Several repositories (a+b) always get fresh worktrees on one branch, side by
 side in ~/pyre-work/<slug>/, and the agent starts in that folder; a
 CLAUDE.md/AGENTS.md there lists the repositories.
@@ -464,8 +621,9 @@ unless --mkdir creates it (inside the machine's home only).
 
 Examples:
   pyre new pyre
-  pyre new tundra @server "fix the share link redirect"
-  pyre new tundra --fresh fix the share link redirect
+  pyre new studio @server "fix the share link redirect"
+  pyre new acme/atlas @laptop          # cloned onto laptop first if it lacks it
+  pyre new studio --fresh fix the share link redirect
   pyre new api+web codex "rename the share endpoint in both"
   pyre new ~ "what is using my disk space?"
   pyre new ~/scratch/vid @server --mkdir "convert these clips"`,
@@ -499,6 +657,7 @@ Examples:
 			}
 			q := p
 			q.Repos, q.Path, q.OperationID = repos, folder, a.opID
+			q.Progress = func(line string) { a.warnf("%s", line) } // stderr: the confirmation line, also with --json
 			if node != "" {
 				q.Node = node
 			}
@@ -529,6 +688,7 @@ Examples:
 		}),
 	}
 	f := cmd.Flags()
+	f.BoolVar(&p.NoClone, "no-clone", false, "refuse instead of cloning a repository the machine does not have yet")
 	f.BoolVar(&p.Mkdir, "mkdir", false, "with a path: create the folder first (inside the machine's home)")
 	f.BoolVar(&p.Fresh, "fresh", false, "start in a new worktree on a new branch (default: the main checkout; the agent decides about worktrees)")
 	f.StringVar(&p.Branch, "branch", "", "branch for the fresh worktree (implies --fresh; default pyre/<slug of the prompt or title>)")
@@ -631,6 +791,11 @@ func printQuickLaunch(w io.Writer, res QuickLaunchResult) {
 		fmt.Fprintf(w, " %q", s.Session.Title)
 	}
 	fmt.Fprintln(w)
+	for _, cl := range res.Cloned {
+		if cl.Cloned {
+			fmt.Fprintf(w, "cloned %s into %s\n", cl.Remote, cl.Path)
+		}
+	}
 	if res.Worktrees != nil {
 		fmt.Fprintf(w, "fresh worktree on branch %s: %s\n", res.Worktrees.Branch, res.Worktrees.Cwd)
 	} else if len(res.Repos) == 1 {

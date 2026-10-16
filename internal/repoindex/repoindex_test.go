@@ -140,7 +140,7 @@ func TestRankFuzzyRecentFirst(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	used := now.Add(-time.Hour)
 	es := []contracts.RepoEntry{
-		{Repo: contracts.Repo{Name: "voyager-web", Path: "/c/voyager-web", RemoteURL: "git@example.invalid:acme/voyager-web.git", LastActivity: now.Add(-48 * time.Hour)}, NodeName: "server"},
+		{Repo: contracts.Repo{Name: "vortex-web", Path: "/c/vortex-web", RemoteURL: "git@example.invalid:acme/vortex-web.git", LastActivity: now.Add(-48 * time.Hour)}, NodeName: "server"},
 		{Repo: contracts.Repo{Name: "tundra", Path: "/c/tundra", RemoteURL: "git@example.invalid:acme/tundra.git", LastActivity: now.Add(-72 * time.Hour)}, NodeName: "server", LastUsedAt: &used},
 		{Repo: contracts.Repo{Name: "tundra", Path: "/u/tundra", RemoteURL: "https://example.invalid/acme/tundra", LastActivity: now.Add(-1 * time.Hour)}, NodeName: "mac"},
 		{Repo: contracts.Repo{Name: "tundra-old", Path: "/c/tundra-old", LastActivity: now}, NodeName: "server"},
@@ -154,7 +154,7 @@ func TestRankFuzzyRecentFirst(t *testing.T) {
 	if len(g) != 2 || len(g[0]) != 2 || g[0][0].NodeName != "server" {
 		t.Fatalf("group: %+v", g)
 	}
-	if r := Rank("vw", es); len(r) != 1 || r[0].Name != "voyager-web" {
+	if r := Rank("vw", es); len(r) != 1 || r[0].Name != "vortex-web" {
 		t.Fatalf("initials: %+v", r)
 	}
 	if r := Rank("jhh3", es); len(r) != 1 || r[0].Name != "pyre" {
@@ -330,5 +330,22 @@ func TestFindRepoFromLinkedWorktree(t *testing.T) {
 	}
 	if _, ok := FindRepo(home); ok {
 		t.Fatal("home is not a repo")
+	}
+}
+
+// A .git directory without HEAD (a stray empty one) is not a repository:
+// FindRepo keeps walking up instead of reporting it.
+func TestFindRepoIgnoresEmptyGitDir(t *testing.T) {
+	home := isolate(t)
+	stray := filepath.Join(home, "scratch")
+	if err := os.MkdirAll(filepath.Join(stray, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := FindRepo(filepath.Join(stray, "a", "b")); ok {
+		t.Fatalf("empty .git counted as a repo: %q", m)
+	}
+	r := mkrepo(t, filepath.Join(stray, "real"))
+	if m, ok := FindRepo(filepath.Join(r, "sub")); !ok || !samePath(m, r) {
+		t.Fatalf("FindRepo = %q %v", m, ok)
 	}
 }

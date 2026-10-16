@@ -155,3 +155,16 @@ func TestRenameRules(t *testing.T) {
 		t.Fatalf("codex %v", got)
 	}
 }
+
+func TestValidIcon(t *testing.T) {
+	for _, ok := range []string{"🚀", "🐛", "👍🏽", "👩‍💻", "🇺🇸", "1️⃣", "♥", ""} {
+		if _, err := ValidIcon(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"a", "ab", "1", "#", "🚀🚀", "🚀x", "\x07", "  x "} {
+		if _, err := ValidIcon(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

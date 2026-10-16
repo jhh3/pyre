@@ -8,10 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/header"
+	"github.com/jhh3/pyre/internal/osutil"
 	"github.com/jhh3/pyre/internal/runtime/claudeplugin"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
 )
@@ -40,6 +41,10 @@ type journalRec struct {
 	// the attempting record so a leftover draft whose marker scrolled out
 	// of view can still be recognised (Reconcile, Observe).
 	Tail string `json:"tail,omitempty"`
+	// NoEnter marks an indeterminate record written before Enter was
+	// pressed: if the input box is later seen empty (and no human is on the
+	// terminal), the paste provably was not submitted (Reconcile).
+	NoEnter bool `json:"no_enter,omitempty"`
 }
 
 func (a *Adapter) journal(h contracts.RunHandle, r journalRec) error {
@@ -87,11 +92,11 @@ func lockFile(stateDir string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := osutil.Lock(f); err != nil {
 		f.Close()
 		return nil, err
 	}
-	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+	return func() { _ = osutil.Unlock(f); f.Close() }, nil
 }
 
 func (a *Adapter) evidenceFor(h contracts.RunHandle, msgID string) (evidence, bool) {
@@ -144,6 +149,25 @@ func (a *Adapter) doorbellHold(h contracts.RunHandle, in contracts.DeliveryInput
 		at.UTC().Format(time.RFC3339), a.o.DoorbellPasteHold)), true
 }
 
+// DoorbellNotifiedAt implements delivery.DoorbellNotifier: when the run's
+// doorbell told the agent about the message (only while the doorbell
+// watcher runs; a dead watcher re-notifies nobody).
+func (a *Adapter) DoorbellNotifiedAt(h contracts.RunHandle, messageID string) (time.Time, bool) {
+	if len(a.o.DoorbellCommand) == 0 || !DoorbellAlive(h.StateDir) {
+		return time.Time{}, false
+	}
+	return claudeplugin.NotifiedAt(h.StateDir, messageID)
+}
+
+// RemindUnread implements delivery.StaleReminder: the doorbell rings one
+// summary line for mail pyred left in the inbox instead of pasting it.
+func (a *Adapter) RemindUnread(h contracts.RunHandle, messageIDs []string) {
+	if len(a.o.DoorbellCommand) == 0 || !DoorbellAlive(h.StateDir) {
+		return
+	}
+	_ = claudeplugin.RequestReminder(h.StateDir, messageIDs)
+}
+
 func rejected(reason string) contracts.DeliveryResult {
 	return contracts.DeliveryResult{State: contracts.DeliveryRejected, Evidence: contracts.EvidenceNone, Detail: reason}
 }
@@ -161,11 +185,10 @@ func (a *Adapter) crash(point string) error {
 
 // renderInput makes sure the text starts with contracts.MessageMarker.
 func renderInput(in contracts.DeliveryInput) string {
-	marker := contracts.MessageMarker(in.MessageID)
-	if strings.Contains(in.Text, marker) {
+	if header.HasMarker(in.Text, in.MessageID) {
 		return in.Text
 	}
-	return marker + " " + in.Text
+	return contracts.MessageMarker(in.MessageID) + " " + in.Text
 }
 
 // Deliver pastes marked input into the TUI when it is safe, or queues.
@@ -209,6 +232,12 @@ func (a *Adapter) Deliver(ctx context.Context, h contracts.RunHandle, in contrac
 			return a.deliverStopHook(ctx, h, in)
 		}
 	}
+	// Preferred: the run's plugin module submits it between turns (no
+	// typing into the TUI, no input lease). Paste is the fallback when the
+	// module is not loaded (older Claude Code, plugin disabled).
+	if a.pluginLive(h) {
+		return a.deliverPlugin(ctx, h, in)
+	}
 	return a.deliverPaste(ctx, h, in)
 }
 
@@ -220,6 +249,9 @@ func (a *Adapter) Deliver(ctx context.Context, h contracts.RunHandle, in contrac
 func (a *Adapter) InputReady(ctx context.Context, h contracts.RunHandle, mode contracts.MessageMode) (bool, string) {
 	if mode == contracts.ModeSteer {
 		return true, ""
+	}
+	if a.pluginLive(h) {
+		return a.pluginReady(h)
 	}
 	_, refusal, err := a.gate(ctx, h)
 	if err != nil || refusal == nil || refusal.State != contracts.DeliveryQueued {
@@ -433,8 +465,11 @@ func (a *Adapter) deliverPaste(ctx context.Context, h contracts.RunHandle, in co
 		default:
 			detail += " (the box shows text that is neither the marker nor the end of this message)"
 		}
+		if ctx.Err() != nil {
+			detail += " (cut by pyred shutdown)"
+		}
 		detail += ". " + draftAction(in.MessageID)
-		_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jIndeterminate, Detail: detail})
+		_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jIndeterminate, Detail: detail, NoEnter: true})
 		return indeterminate(detail), nil
 	}
 	// A human who attached after the gate may be typing into the box: never
@@ -461,15 +496,29 @@ func (a *Adapter) deliverPaste(ctx context.Context, h contracts.RunHandle, in co
 
 func (a *Adapter) awaitEvidence(ctx context.Context, h contracts.RunHandle, in contracts.DeliveryInput) (contracts.DeliveryResult, error) {
 	end := time.Now().Add(a.o.DeliverTimeout)
+	cut := false
 	for {
 		if ev, ok := a.evidenceFor(h, in.MessageID); ok {
 			_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jAccepted, Evidence: string(ev.Kind), Ref: ev.Ref})
 			return accepted(ev, ""), nil
 		}
-		if time.Now().After(end) || ctx.Err() != nil {
+		if time.Now().After(end) {
 			break
 		}
+		if ctx.Err() != nil && !cut {
+			// Enter was pressed: the evidence (prompt hook, transcript) is
+			// normally a moment away. A shutdown keeps looking briefly
+			// instead of leaving the outcome unknown.
+			cut = true
+			if soon := time.Now().Add(3 * time.Second); soon.Before(end) {
+				end = soon
+			}
+		}
 		time.Sleep(150 * time.Millisecond)
+	}
+	if cut {
+		_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jIndeterminate, Detail: "submitted; pyred shutdown before acceptance evidence arrived"})
+		return indeterminate("submitted (Enter pressed) but pyred shut down before acceptance evidence arrived; evidence found after restart resolves it (never auto-replayed)"), nil
 	}
 	_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jIndeterminate, Detail: "no evidence within timeout"})
 	return indeterminate(fmt.Sprintf("submitted but no acceptance evidence within %s; reconcile later (never auto-replayed)", a.o.DeliverTimeout)), nil
@@ -538,6 +587,9 @@ func (a *Adapter) Reconcile(ctx context.Context, h contracts.RunHandle, messageI
 	case jRejected, jCleared:
 		return rejected("previous attempt known not submitted: " + last.Detail), nil
 	}
+	if last.Mode == "plugin" {
+		return a.reconcilePlugin(h, messageID, last), nil
+	}
 	// Stop-hook injection still queued → withdraw it.
 	if r, done := a.reconcileInjection(h, messageID, last); done {
 		return r, nil
@@ -567,6 +619,15 @@ func (a *Adapter) Reconcile(ctx context.Context, h contracts.RunHandle, messageI
 	}
 	if err != nil {
 		return indeterminate("screen unavailable: " + err.Error()), nil
+	}
+	// Enter was never pressed (the paste was not recognised) and the box is
+	// empty: the text never reached Claude as a prompt. Not with a human on
+	// the terminal, who could have sent it.
+	if last.State == jIndeterminate && last.NoEnter && si.HasInputBox && si.InputEmpty() {
+		if cs, cerr := a.srv.ListClients(ctx, h.TmuxTarget); cerr == nil && tmux.WritableClients(cs) == 0 {
+			_ = a.journal(h, journalRec{MessageID: messageID, AttemptID: last.AttemptID, State: jRejected, Detail: "Enter was never pressed and the input box is empty: not submitted"})
+			return rejected("Enter was never pressed and the input box is empty: not submitted; safe to retry"), nil
+		}
 	}
 	return indeterminate(fmt.Sprintf("attempt %s (%s) has no evidence and no visible draft; may have been submitted — resolve explicitly", last.AttemptID, last.State)), nil
 }

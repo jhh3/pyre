@@ -4,25 +4,35 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/jhh3/pyre/internal/osutil"
+	"github.com/jhh3/pyre/internal/sysstats"
 )
+
+// nativeTable converts the Win32 process table (sysstats) to rows.
+func nativeTable(now time.Time) (map[int]Proc, error) {
+	t, err := sysstats.NativeProcTable()
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[int]Proc, len(t))
+	for pid, p := range t {
+		m[pid] = Proc{PID: p.PID, PPID: p.PPID, RSSKB: p.RSSBytes / 1024, CPUPct: sysstats.LifetimeCPUPct(p, now), Start: p.Start}
+	}
+	return m, nil
+}
 
 // Alive reports whether a process with pid exists (it may belong to another
 // user, in which case signalling is not permitted but it is alive).
 func Alive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return osutil.ProcessAlive(pid)
 }
 
 // Proc is one row of the process table.
@@ -31,11 +41,17 @@ type Proc struct {
 	PPID   int
 	RSSKB  int64
 	CPUPct float64
+	// Start is the creation time where known (Windows); zero from ps.
+	Start time.Time
 }
 
 // ProcessTable returns a snapshot of all processes (one bounded `ps`
-// invocation; works on macOS and Linux).
+// invocation on macOS and Linux; a Toolhelp snapshot on Windows, with
+// CPUPct the lifetime average like procps pcpu).
 func ProcessTable(ctx context.Context) (map[int]Proc, error) {
+	if runtime.GOOS == "windows" {
+		return nativeTable(time.Now())
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,rss=,pcpu=")
@@ -72,6 +88,9 @@ func parsePS(b []byte) map[int]Proc {
 func TreeUsage(table map[int]Proc, roots []int) (rssKB int64, cpuPct float64, count int) {
 	children := map[int][]int{}
 	for _, p := range table {
+		if parent, ok := table[p.PPID]; ok && !parent.Start.IsZero() && !p.Start.IsZero() && p.Start.Before(parent.Start) {
+			continue // Windows: stale parent PID reused by a newer process
+		}
 		children[p.PPID] = append(children[p.PPID], p.PID)
 	}
 	seen := map[int]bool{}
@@ -101,14 +120,6 @@ type SelfSampler struct {
 	lastCPU time.Duration
 }
 
-func cpuTime() time.Duration {
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
-		return 0
-	}
-	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
-}
-
 // Sample returns RSS in MB and CPU percent (of one core) since the previous
 // call (0 on the first call).
 func (s *SelfSampler) Sample(ctx context.Context) (rssMB float64, cpuPct float64) {
@@ -128,6 +139,10 @@ func (s *SelfSampler) Sample(ctx context.Context) (rssMB float64, cpuPct float64
 
 // SelfRSSMB returns the current resident set size of this process in MB.
 func SelfRSSMB(ctx context.Context) float64 {
+	if runtime.GOOS == "windows" {
+		_, rss, _ := sysstats.NativeSelf()
+		return float64(rss) / (1 << 20)
+	}
 	if runtime.GOOS == "linux" {
 		if b, err := os.ReadFile("/proc/self/statm"); err == nil {
 			f := strings.Fields(string(b))

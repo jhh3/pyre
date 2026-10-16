@@ -51,9 +51,10 @@ class ThemeContrastTest {
     @Test fun darkPaletteMeetsContrast() = check("dark", PyreDark)
 
     @Test
-    fun homeIsSessionsAndThereAreFourDestinations() {
+    fun homeIsSessionsAndThereAreFiveDestinations() {
         assertEquals(Screen.Sessions, Navigator().current.screen)
-        val roots = listOf(Screen.Sessions, Screen.Projects, Screen.Settings, Screen.Machines, Screen.Accounts, Screen.Activity).filter { it.isRoot }
-        assertEquals(listOf(Screen.Sessions, Screen.Projects, Screen.Machines, Screen.Accounts), roots)
+        val roots = listOf(Screen.Sessions, Screen.Inbox(), Screen.Projects, Screen.Settings, Screen.Machines, Screen.Accounts, Screen.Activity).filter { it.isRoot }
+        assertEquals(listOf(Screen.Sessions, Screen.Inbox(), Screen.Projects, Screen.Machines, Screen.Accounts), roots)
+        assertTrue(Screen.Inbox(openAskId = "ask_1").isRoot)
     }
 }

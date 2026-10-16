@@ -36,7 +36,7 @@ func TestEveryActionRenders(t *testing.T) {
 		contracts.AuditAccountTokenReplaced, contracts.AuditAccountTokenRemoved, contracts.AuditAccountTokenSynced, contracts.AuditAccountLoginAdded,
 		contracts.AuditAccountAdded, contracts.AuditAccountFolded, contracts.AuditAccountRenamed, contracts.AuditAccountDisabled, contracts.AuditAccountEnabled,
 		contracts.AuditSessionStarted, contracts.AuditSessionStopped, contracts.AuditSessionInterrupted, contracts.AuditSessionResumed,
-		contracts.AuditSessionArchived, contracts.AuditSessionUnarchived, contracts.AuditSessionRenamed, contracts.AuditSessionAutoTitled,
+		contracts.AuditSessionArchived, contracts.AuditSessionUnarchived, contracts.AuditSessionArchiveScheduled, contracts.AuditSessionArchiveCanceled, contracts.AuditSessionIconSet, contracts.AuditSessionRenamed, contracts.AuditSessionAutoTitled,
 		contracts.AuditSessionLeaseTakenOver, contracts.AuditSessionReportedToParent,
 		contracts.AuditNodeEnrolled, contracts.AuditNodeRevoked, contracts.AuditNodeConnected, contracts.AuditNodeDisconnected, contracts.AuditNodeUpgraded,
 		contracts.AuditNodeUpdateFailed, contracts.AuditHubUpgraded, contracts.AuditNodeTrustAccepted, contracts.AuditNodeExitConfirmed,
@@ -89,5 +89,14 @@ func TestParsing(t *testing.T) {
 	if When(day, day.Add(time.Hour)) != "09:00" || When(day.Add(-48*time.Hour), day) != day.Add(-48*time.Hour).Format("Mon 15:04") ||
 		When(day.Add(-30*24*time.Hour), day) != day.Add(-30*24*time.Hour).Format("Jan 2 15:04") {
 		t.Fatal("when")
+	}
+}
+
+func TestSummarizeSwitchPaused(t *testing.T) {
+	e := contracts.AuditEntry{Action: contracts.AuditAccountWaiting, SessionTitle: "Credit perf", From: "me", To: "switching paused",
+		Reason: "account switching paused: repeated limits within 30m (last automatic switch 14:05Z)"}
+	want := "'Credit perf' hit a limit on me again soon after a switch; automatic account switching paused (needs you) — account switching paused: repeated limits within 30m (last automatic switch 14:05Z)"
+	if s := Summarize(e); s != want {
+		t.Fatalf("summary %q", s)
 	}
 }

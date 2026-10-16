@@ -19,6 +19,8 @@ func TestGoldenScreens(t *testing.T) {
 	all := []int{60, 100, 160}
 	screens := []screen{
 		{"sessions", nil, all},
+		// The sidebar footer at sidebar widths 56, 64, 72 and 80 (W-archive2).
+		{"sidebar-foot", nil, []int{100, 128, 144, 223}},
 		{"sessions-filtered", []string{"/", "l", "i", "n", "u", "x", "enter"}, []int{100}},
 		{"sessions-table", []string{"v"}, []int{100, 120, 200}},
 		{"sessions-attention", []string{":", "group attention", "enter"}, []int{100}},
@@ -31,6 +33,7 @@ func TestGoldenScreens(t *testing.T) {
 		{"messages-indeterminate", []string{"/", "w", "o", "r", "k", "e", "r", "enter", "M"}, []int{160}},
 		{"palette", []string{":"}, all},
 		{"help", []string{"?"}, []int{100}},
+		{"help-agent-commands", []string{"?", "agent commands"}, all},
 		{"machines", []string{":", "M", "a", "c", "h", "i", "n", "e", "s", "enter"}, []int{100}},
 		{"machines-stats", []string{":", "M", "a", "c", "h", "i", "n", "e", "s", "enter", "down"}, []int{160}},
 		{"sessions-usage", []string{"u"}, []int{160}},

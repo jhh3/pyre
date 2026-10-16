@@ -60,12 +60,13 @@ type Plan struct {
 	Tool               string            `json:"tool,omitempty"`
 	Arguments          map[string]string `json:"arguments"`
 	Headers            map[string]string `json:"headers,omitempty"`
-	Body               map[string]any    `json:"body,omitempty"`
+	Body               any               `json:"body,omitempty"`
 	CredentialFields   []string          `json:"credentialFields,omitempty"`
 	CredentialBoundary string            `json:"credentialBoundary"`
 	Class              string            `json:"class"`
 	Available          bool              `json:"available"`
 	Availability       string            `json:"availability"`
+	Steps              []Plan            `json:"steps,omitempty"`
 }
 
 func (e Executor) Plan(mode kit.Mode, operation kit.Operation, arguments map[string]string) (Plan, error) {
@@ -86,24 +87,34 @@ func (e Executor) PlanWithCredentials(mode kit.Mode, operation kit.Operation, ar
 		redacted[field.Key] = "<secret:" + field.Key + ">"
 	}
 	sort.Strings(plan.CredentialFields)
+	if len(operation.Compose) > 0 {
+		return e.planCompose(mode, operation, arguments, credentials, plan)
+	}
 	switch mode.Executor.Kind {
 	case "http":
 		if operation.HTTP == nil {
 			return Plan{}, errors.New("operation has no HTTP contract")
 		}
-		target, err := httpTarget(mode, operation, arguments)
+		request, err := prepareHTTP(mode, operation, arguments, redacted)
 		if err != nil {
 			return Plan{}, err
 		}
-		plan.Destination, plan.Method, plan.Path = target.Scheme+"://"+target.Host, strings.ToUpper(operation.HTTP.Method), target.RequestURI()
+		target := request.target
+		plan.Destination, plan.Method, plan.Path = target.Scheme+"://"+target.Host, request.method, target.RequestURI()
 		plan.Available, plan.Availability = true, "contract is valid; live reachability is intentionally not tested by planning"
 		plan.Headers = map[string]string{"Accept": "application/json"}
-		if len(operation.HTTP.Body) > 0 || len(operation.HTTP.BodyValues) > 0 {
+		for name, value := range mode.Executor.Headers {
+			plan.Headers[name] = value
+		}
+		if request.hasBody {
 			plan.Headers["Content-Type"] = "application/json"
-			plan.Body = httpPayload(operation, arguments, redacted)
+			plan.Body = request.payload
 		}
 		for name, value := range operation.HTTP.Headers {
 			plan.Headers[name] = expand(value, arguments, redacted)
+		}
+		for name, value := range request.headers {
+			plan.Headers[name] = value
 		}
 		for _, binding := range credentials.Bindings {
 			if binding.Target == "http-header" {
@@ -211,6 +222,9 @@ func (e Executor) RunWithCredentialsIO(ctx context.Context, mode kit.Mode, opera
 	}
 	if _, err := e.PlanWithCredentials(mode, operation, arguments, credentials); err != nil {
 		return Result{}, err
+	}
+	if len(operation.Compose) > 0 {
+		return e.runCompose(ctx, mode, operation, arguments, secret, credentials)
 	}
 	switch mode.Executor.Kind {
 	case "http":
@@ -413,61 +427,259 @@ func (e Executor) runHTTP(ctx context.Context, mode kit.Mode, operation kit.Oper
 	if operation.HTTP == nil {
 		return Result{}, errors.New("operation has no HTTP contract")
 	}
-	target, err := httpTarget(mode, operation, arguments)
+	prepared, err := prepareHTTP(mode, operation, arguments, secret)
 	if err != nil {
 		return Result{}, err
 	}
-	var body io.Reader
-	if len(operation.HTTP.Body) > 0 || len(operation.HTTP.BodyValues) > 0 {
-		payload := httpPayload(operation, arguments, secret)
-		encoded, err := json.Marshal(payload)
-		if err != nil {
+	target, hasBody := prepared.target, prepared.hasBody
+	var encoded []byte
+	if hasBody {
+		if encoded, err = json.Marshal(prepared.payload); err != nil {
 			return Result{}, err
 		}
-		body = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequestWithContext(ctx, strings.ToUpper(operation.HTTP.Method), target.String(), body)
-	if err != nil {
-		return Result{}, err
-	}
-	request.Header.Set("Accept", "application/json")
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	for name, value := range operation.HTTP.Headers {
-		request.Header.Set(name, expand(value, arguments, secret))
-	}
-	query := request.URL.Query()
-	for _, binding := range credentials.Bindings {
-		switch binding.Target {
-		case "http-header":
-			request.Header.Set(binding.Name, expand(binding.Value, arguments, secret))
-		case "http-query":
-			query.Set(binding.Name, expand(binding.Value, arguments, secret))
-		}
-	}
-	request.URL.RawQuery = query.Encode()
 	client := e.HTTPClient
 	if client == nil {
 		client = safeHTTPClient(mode.Executor.PrivateNet)
 	}
-	response, err := client.Do(request)
+	for attempt := 0; ; attempt++ {
+		var body io.Reader
+		if hasBody {
+			body = bytes.NewReader(encoded)
+		}
+		request, err := http.NewRequestWithContext(ctx, prepared.method, target.String(), body)
+		if err != nil {
+			return Result{}, err
+		}
+		request.Header.Set("Accept", "application/json")
+		if hasBody {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		for name, value := range mode.Executor.Headers {
+			request.Header.Set(name, value)
+		}
+		for name, value := range operation.HTTP.Headers {
+			request.Header.Set(name, expand(value, arguments, secret))
+		}
+		for name, value := range prepared.headers {
+			request.Header.Set(name, value)
+		}
+		query := request.URL.Query()
+		for _, binding := range credentials.Bindings {
+			switch binding.Target {
+			case "http-header":
+				request.Header.Set(binding.Name, expand(binding.Value, arguments, secret))
+			case "http-query":
+				query.Set(binding.Name, expand(binding.Value, arguments, secret))
+			}
+		}
+		request.URL.RawQuery = query.Encode()
+		response, err := client.Do(request)
+		if err != nil {
+			return Result{}, err
+		}
+		raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+		response.Body.Close()
+		if err != nil {
+			return Result{}, err
+		}
+		result := decodeResult(raw, response.Header.Get("Content-Type"), response.StatusCode)
+		if response.StatusCode == http.StatusTooManyRequests {
+			delay := rateLimitDelay(response.Header, result.Data)
+			if attempt < maxRateLimitRetries && delay <= maxRateLimitWait {
+				if err := sleepContext(ctx, delay); err != nil {
+					return result, err
+				}
+				continue
+			}
+			return result, fmt.Errorf("upstream returned %s (rate limited; retry after %s)", response.Status, delay.Round(time.Millisecond))
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if operation.HTTP != nil {
+				if payload, ok := result.Data.(map[string]any); ok {
+					detail := providerErrorText(payload[operation.HTTP.ErrorField])
+					if detail == "" {
+						detail = providerErrorText(payload["message"])
+					}
+					if detail != "" {
+						return result, fmt.Errorf("upstream returned %s: %s", response.Status, detail)
+					}
+				}
+			}
+			return result, fmt.Errorf("upstream returned %s", response.Status)
+		}
+		if err := providerEnvelopeError(operation, result.Data); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+}
+
+// A 429 means the provider rejected the request without executing it, so a
+// bounded retry after the provider-stated delay is safe for writes as well.
+const (
+	maxRateLimitRetries = 3
+	maxRateLimitWait    = 30 * time.Second
+)
+
+// rateLimitDelay reads the provider's requested wait: a JSON retry_after
+// (Discord: float seconds), the standard Retry-After header (seconds or
+// HTTP date), or X-RateLimit-Reset-After. Unknown shapes wait one second.
+func rateLimitDelay(header http.Header, data any) time.Duration {
+	if payload, ok := data.(map[string]any); ok {
+		if seconds, ok := numberValue(payload["retry_after"]); ok && seconds >= 0 {
+			return time.Duration(seconds * float64(time.Second))
+		}
+	}
+	for _, name := range []string{"Retry-After", "X-RateLimit-Reset-After"} {
+		value := strings.TrimSpace(header.Get(name))
+		if value == "" {
+			continue
+		}
+		if seconds, err := strconv.ParseFloat(value, 64); err == nil && seconds >= 0 {
+			return time.Duration(seconds * float64(time.Second))
+		}
+		if when, err := http.ParseTime(value); err == nil {
+			if wait := time.Until(when); wait > 0 {
+				return wait
+			}
+			return 0
+		}
+	}
+	return time.Second
+}
+
+func numberValue(value any) (float64, bool) {
+	switch current := value.(type) {
+	case float64:
+		return current, true
+	case json.Number:
+		parsed, err := current.Float64()
+		return parsed, err == nil
+	case string:
+		parsed, err := strconv.ParseFloat(current, 64)
+		return parsed, err == nil
+	}
+	return 0, false
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (e Executor) planCompose(mode kit.Mode, operation kit.Operation, arguments map[string]string, credentials CredentialContext, plan Plan) (Plan, error) {
+	plan.Executor = "compose"
+	plan.Available, plan.Availability = true, "every step is available"
+	for _, step := range operation.Compose {
+		target, ok := FindOperation(mode, step.Operation)
+		if !ok {
+			return Plan{}, fmt.Errorf("compose step cites unknown operation %s", step.Operation)
+		}
+		stepPlan, err := e.PlanWithCredentials(mode, target, composeArguments(step, target, arguments), credentials)
+		if err != nil {
+			return Plan{}, fmt.Errorf("compose step %s: %w", step.As, err)
+		}
+		if plan.Destination == "" {
+			plan.Destination = stepPlan.Destination
+		}
+		if !stepPlan.Available {
+			plan.Available, plan.Availability = false, "step "+step.As+": "+stepPlan.Availability
+		}
+		plan.CredentialBoundary = stepPlan.CredentialBoundary
+		plan.Steps = append(plan.Steps, stepPlan)
+	}
+	return plan, nil
+}
+
+// runCompose executes a composite read's steps sequentially and returns one
+// object keyed by step name. Any failing step fails the whole read so a
+// monitor never mistakes a partial snapshot for "nothing changed".
+func (e Executor) runCompose(ctx context.Context, mode kit.Mode, operation kit.Operation, arguments, secret map[string]string, credentials CredentialContext) (Result, error) {
+	combined := map[string]any{}
+	for _, step := range operation.Compose {
+		target, ok := FindOperation(mode, step.Operation)
+		if !ok {
+			return Result{}, fmt.Errorf("compose step cites unknown operation %s", step.Operation)
+		}
+		result, err := e.RunWithCredentials(ctx, mode, target, composeArguments(step, target, arguments), secret, credentials)
+		if err != nil {
+			return result, fmt.Errorf("compose step %s (%s): %w", step.As, step.Operation, err)
+		}
+		combined[step.As] = projectFields(result.Data, step.ItemsPath, step.Fields)
+	}
+	raw, err := json.Marshal(combined)
 	if err != nil {
 		return Result{}, err
 	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
-		return Result{}, err
+	return Result{Data: combined, Raw: raw, ContentType: "application/json", Status: http.StatusOK}, nil
+}
+
+func composeArguments(step kit.ComposeStep, target kit.Operation, arguments map[string]string) map[string]string {
+	result := map[string]string{}
+	properties, _ := target.Input["properties"].(map[string]any)
+	for name := range properties {
+		if _, mapped := step.Arguments[name]; mapped {
+			continue
+		}
+		if value, ok := arguments[name]; ok {
+			result[name] = value
+		}
 	}
-	result := decodeResult(raw, response.Header.Get("Content-Type"), response.StatusCode)
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return result, fmt.Errorf("upstream returned %s", response.Status)
+	for name, source := range step.Arguments {
+		if strings.HasPrefix(source, "=") {
+			result[name] = strings.TrimPrefix(source, "=")
+		} else if value, ok := arguments[source]; ok {
+			result[name] = value
+		}
 	}
-	if err := providerEnvelopeError(operation, result.Data); err != nil {
-		return result, err
+	return result
+}
+
+func projectFields(data any, itemsPath string, fields []string) any {
+	if len(fields) == 0 {
+		return data
 	}
-	return result, nil
+	items := data
+	path := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(itemsPath), "$"), ".")
+	if path != "" {
+		for _, key := range strings.Split(path, ".") {
+			object, ok := items.(map[string]any)
+			if !ok {
+				return data
+			}
+			items = object[key]
+		}
+	}
+	list, ok := items.([]any)
+	if !ok {
+		return data
+	}
+	projected := make([]any, 0, len(list))
+	for _, item := range list {
+		object, ok := item.(map[string]any)
+		if !ok {
+			projected = append(projected, item)
+			continue
+		}
+		compact := map[string]any{}
+		for _, field := range fields {
+			if value, ok := object[field]; ok {
+				compact[field] = value
+			}
+		}
+		projected = append(projected, compact)
+	}
+	return projected
 }
 
 func providerEnvelopeError(operation kit.Operation, data any) error {
@@ -494,13 +706,35 @@ func providerEnvelopeError(operation kit.Operation, data any) error {
 }
 
 func providerReportedError(payload map[string]any, field string) error {
-	if message, ok := payload[field].(string); ok && strings.TrimSpace(message) != "" {
+	if message := providerErrorText(payload[field]); message != "" {
 		return fmt.Errorf("upstream reported %s", message)
 	}
 	if field != "" {
 		return fmt.Errorf("upstream reported an error in %s", field)
 	}
 	return errors.New("upstream reported an unsuccessful response")
+}
+
+// providerErrorText renders an error field as plain text: a string as is, or
+// the "message" of each object in a list (GraphQL's errors array).
+func providerErrorText(value any) string {
+	switch current := value.(type) {
+	case string:
+		return strings.TrimSpace(current)
+	case map[string]any:
+		if message, ok := current["message"].(string); ok {
+			return strings.TrimSpace(message)
+		}
+	case []any:
+		messages := make([]string, 0, len(current))
+		for _, item := range current {
+			if message := providerErrorText(item); message != "" {
+				messages = append(messages, message)
+			}
+		}
+		return strings.Join(messages, "; ")
+	}
+	return ""
 }
 
 func envelopeValuePresent(value any) bool {
@@ -520,8 +754,9 @@ func envelopeValuePresent(value any) bool {
 
 func httpPayload(operation kit.Operation, arguments, secret map[string]string) map[string]any {
 	payload := map[string]any{}
+	coder := newArgumentCoder(operation)
 	for name, value := range operation.HTTP.BodyValues {
-		if expanded, present := expandAnyPresent(value, arguments, secret); present {
+		if expanded, present := expandAnyPresent(value, arguments, secret, coder); present {
 			payload[name] = expanded
 		}
 	}
@@ -531,13 +766,13 @@ func httpPayload(operation kit.Operation, arguments, secret map[string]string) m
 			if providerName == "" {
 				providerName = name
 			}
-			payload[providerName] = coerceJSON(value)
+			payload[providerName] = coder.value(name, value)
 		}
 	}
 	return payload
 }
 
-func expandAnyPresent(value any, arguments, secret map[string]string) (any, bool) {
+func expandAnyPresent(value any, arguments, secret map[string]string, coder argumentCoder) (any, bool) {
 	switch current := value.(type) {
 	case string:
 		if match := placeholder.FindStringSubmatch(current); len(match) > 0 && match[0] == current {
@@ -546,7 +781,7 @@ func expandAnyPresent(value any, arguments, secret map[string]string) (any, bool
 				if !ok {
 					return nil, false
 				}
-				return coerceJSON(raw), true
+				return coder.value(match[2], raw), true
 			}
 			raw, ok := secret[match[2]]
 			if !ok {
@@ -558,7 +793,7 @@ func expandAnyPresent(value any, arguments, secret map[string]string) (any, bool
 	case map[string]any:
 		result := make(map[string]any, len(current))
 		for key, item := range current {
-			if expanded, present := expandAnyPresent(item, arguments, secret); present {
+			if expanded, present := expandAnyPresent(item, arguments, secret, coder); present {
 				result[key] = expanded
 			}
 		}
@@ -566,7 +801,7 @@ func expandAnyPresent(value any, arguments, secret map[string]string) (any, bool
 	case []any:
 		result := make([]any, 0, len(current))
 		for _, item := range current {
-			if expanded, present := expandAnyPresent(item, arguments, secret); present {
+			if expanded, present := expandAnyPresent(item, arguments, secret, coder); present {
 				result = append(result, expanded)
 			}
 		}
@@ -585,15 +820,34 @@ func httpTarget(mode kit.Mode, operation kit.Operation, arguments map[string]str
 	if err != nil {
 		return nil, err
 	}
-	relative, err := url.Parse(strings.TrimPrefix(path, "/"))
-	if err != nil {
-		return nil, err
+	var target *url.URL
+	if operation.HTTP.PathArgument != "" {
+		suffix, err := rawPath(base, arguments[operation.HTTP.PathArgument])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", operation.HTTP.PathArgument, err)
+		}
+		basePath := strings.TrimSuffix(base.EscapedPath(), "/")
+		prefix := strings.Trim(path, "/")
+		if prefix != "" {
+			prefix = "/" + prefix
+		}
+		if target, err = url.Parse(base.Scheme + "://" + base.Host + basePath + prefix + suffix); err != nil {
+			return nil, err
+		}
+	} else {
+		relative, err := url.Parse(strings.TrimPrefix(path, "/"))
+		if err != nil {
+			return nil, err
+		}
+		target = base.ResolveReference(relative)
 	}
-	target := base.ResolveReference(relative)
-	if target.Scheme != base.Scheme || target.Host != base.Host || !strings.HasPrefix(target.Path, base.Path) {
+	if target.Scheme != base.Scheme || target.Host != base.Host || target.User != nil || !strings.HasPrefix(target.Path, base.Path) {
 		return nil, errors.New("operation escaped its fixed HTTP origin")
 	}
 	query := target.Query()
+	for name, value := range operation.HTTP.QueryValues {
+		query.Set(name, value)
+	}
 	for _, name := range operation.HTTP.Query {
 		if value, ok := arguments[name]; ok {
 			providerName := operation.HTTP.QueryNames[name]
@@ -601,6 +855,20 @@ func httpTarget(mode kit.Mode, operation kit.Operation, arguments map[string]str
 				providerName = name
 			}
 			query.Set(providerName, value)
+		}
+	}
+	if name := operation.HTTP.QueryArgument; name != "" {
+		if raw, ok := arguments[name]; ok && strings.TrimSpace(raw) != "" {
+			extra, err := queryArgument(raw)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			for key, values := range extra {
+				query.Del(key)
+				for _, value := range values {
+					query.Add(key, value)
+				}
+			}
 		}
 	}
 	target.RawQuery = query.Encode()
@@ -938,12 +1206,19 @@ func expand(value string, arguments map[string]string, secret map[string]string)
 	})
 }
 
+// coerceJSON decodes JSON-looking arguments. Numbers stay json.Number so
+// large integers such as 64-bit snowflake IDs keep every digit.
 func coerceJSON(value string) any {
 	var decoded any
-	if json.Unmarshal([]byte(value), &decoded) == nil {
-		return decoded
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.UseNumber()
+	if decoder.Decode(&decoded) != nil {
+		return value
 	}
-	return value
+	if _, err := decoder.Token(); err != io.EOF {
+		return value
+	}
+	return decoded
 }
 
 func validateArguments(operation kit.Operation, arguments map[string]string) error {

@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/terminal"
 )
 
 // visibleSessions applies the ended-sessions toggle, the filter and
@@ -63,20 +65,71 @@ func (m *Model) selectedSession() (contracts.SessionView, bool) {
 	return m.session(m.sessList.sel)
 }
 
-// schedulePreview debounces the preview load for the current selection, so
-// holding an arrow key does not issue a read per row.
+// schedulePreview loads the preview and terminal of the current selection.
+// A single move loads at once: nothing waits on the switch path. Moves that
+// follow within PreviewDelay (a held arrow key, typing in the filter) are
+// debounced, so a burst issues one load, for the row it rests on.
 func (m *Model) schedulePreview() tea.Cmd {
 	m.previewTok++
 	tok := m.previewTok
+	now := time.Now()
+	burst := now.Sub(m.previewAt) < m.opts.PreviewDelay
+	m.previewAt = now
+	if !burst {
+		return func() tea.Msg { return previewDueMsg{token: tok} }
+	}
 	return tea.Tick(m.opts.PreviewDelay, func(time.Time) tea.Msg { return previewDueMsg{token: tok} })
 }
+
+// Preview reads (sessions.read: hub → node → transcript parse) are paced:
+// a preview is re-read when an event says its session changed (at most
+// once per previewMinGap) and otherwise at most once per previewMaxAge,
+// never on every refresh; at most previewReadsMax run at once. The
+// Sessions pane reads none while it shows the session's own terminal
+// screen, or when the session is on this machine (localterm.go).
+const (
+	previewMaxAge   = 30 * time.Second
+	previewMinGap   = 5 * time.Second
+	previewReadsMax = 2
+	loadingAfter    = 300 * time.Millisecond // "loading…" only once nothing has shown this long
+	localCapMaxAge  = 5 * time.Second        // a local capture for the Activity section (finder, digest)
+)
+
+type previewRetryMsg struct{}
+
+type loadingDueMsg struct{}
 
 func (m *Model) loadPreview(force bool) tea.Cmd {
 	s, ok := m.selectedSession()
 	if !ok {
 		return nil
 	}
-	return tea.Batch(m.loadPreviewFor(s, force), m.loadSessionMessage(s))
+	var read tea.Cmd
+	if m.paneWantsPreview(s) {
+		read = m.loadPreviewFor(s, force)
+	}
+	return tea.Batch(read, m.loadSessionMessage(s))
+}
+
+// paneWantsPreview reports whether the Sessions pane would draw s's
+// preview: only its last captured screen is used there, and only while
+// the pane has no screen of the session's terminal and no local capture
+// is coming.
+func (m *Model) paneWantsPreview(s contracts.SessionView) bool {
+	if m.view != viewSessions || m.tableShown() || s.Run == nil {
+		return false
+	}
+	if emb, _ := m.embeddable(s); emb {
+		if _, ok := m.localFor(s); ok {
+			return false
+		}
+	}
+	if tv := m.terms().views[s.Session.SessionID]; tv != nil && tv.runID == s.Run.RunID {
+		if st, _, drawn := tv.status(); drawn && st != termUnavailable {
+			return false
+		}
+	}
+	return true
 }
 
 // loadPreviewFor loads the transcript tail and screen snapshot of s (used
@@ -93,10 +146,103 @@ func (m *Model) loadPreviewFor(s contracts.SessionView, force bool) tea.Cmd {
 		return api.ReadSession(ctx, contracts.ReadSessionRequest{SessionID: sid, Tail: true, Limit: 30})
 	}
 	key := "preview:" + sid
-	if force {
-		return m.reload(key, fn)
+	var cmds []tea.Cmd
+	if emb, _ := m.embeddable(s); emb {
+		// A session here: its screen at once in the Activity section
+		// (finder, digest); the Sessions pane never asks (paneWantsPreview).
+		cmds = append(cmds, m.loadLocalCapture(s))
 	}
-	return m.ensure(key, 3*time.Second, fn)
+	st := m.loads[key]
+	if st != nil && st.inflight {
+		if force {
+			st.dirty = true
+		}
+		return tea.Batch(cmds...)
+	}
+	if !force && st != nil && st.have && !st.stale && m.now().Sub(st.at) < previewMaxAge {
+		return tea.Batch(cmds...)
+	}
+	if !force && st != nil && st.have {
+		// Changed (an event) or aged out: not more often than previewMinGap.
+		if wait := previewMinGap - m.now().Sub(m.previewReadAt[key]); wait > 0 {
+			return tea.Batch(append(cmds, m.previewLater(wait))...)
+		}
+	}
+	if m.previewReads() >= previewReadsMax {
+		m.previewQueued = true // asked again when one lands (onLoaded)
+		return tea.Batch(cmds...)
+	}
+	if m.previewReadAt == nil {
+		m.previewReadAt = map[string]time.Time{}
+	}
+	var load tea.Cmd
+	if force {
+		load = m.reload(key, fn)
+	} else {
+		load = m.ensure(key, previewMaxAge, fn)
+	}
+	if load != nil {
+		m.previewReadAt[key] = m.now()
+		if st == nil || !st.have {
+			cmds = append(cmds, tea.Tick(loadingAfter, func(time.Time) tea.Msg { return loadingDueMsg{} }))
+		}
+	}
+	return tea.Batch(append(cmds, load)...)
+}
+
+// previewReads counts preview reads in flight.
+func (m *Model) previewReads() int {
+	n := 0
+	for k, st := range m.loads {
+		if st.inflight && strings.HasPrefix(k, "preview:") {
+			n++
+		}
+	}
+	return n
+}
+
+// previewLater asks for the shown preview again after d (one tick at a
+// time).
+func (m *Model) previewLater(d time.Duration) tea.Cmd {
+	if m.previewTick {
+		return nil
+	}
+	m.previewTick = true
+	return tea.Tick(d, func(time.Time) tea.Msg { return previewRetryMsg{} })
+}
+
+// previewRetry re-asks for the preview the current screen shows (a paced
+// or queued read).
+func (m *Model) previewRetry() tea.Cmd {
+	switch m.view {
+	case viewSessions:
+		return m.loadPreview(false)
+	case viewDigest:
+		return m.digestPreview()
+	}
+	return nil
+}
+
+// loadLocalCapture captures the screen of s's tmux session on this machine
+// (plain text) for the Activity section while the hub's preview loads.
+func (m *Model) loadLocalCapture(s contracts.SessionView) tea.Cmd {
+	lt, ok := m.localFor(s)
+	if !ok {
+		return nil
+	}
+	return m.ensure("localcap:"+s.Session.SessionID, localCapMaxAge, func(ctx context.Context) (any, error) {
+		b, err := lt.capture(ctx, false)
+		return string(b), err
+	})
+}
+
+// localCapture is the last local capture of sid's screen ("" when none).
+func (m *Model) localCapture(sid string) string {
+	v, st := get[string](m, "localcap:"+sid)
+	if st == nil || !st.have {
+		return ""
+	}
+	return v
 }
 
 // ---- keys ----
@@ -208,6 +354,9 @@ func (m *Model) attach(s contracts.SessionView) tea.Cmd {
 		return m.setToast("attach unavailable: "+r, toneWarn)
 	}
 	sid := s.Session.SessionID
+	if emb, _ := m.embeddable(s); emb && m.relayTypingFor(s) {
+		return m.focusPane(s) // no ssh to its machine (learnt): type in the relayed pane
+	}
 	if m.busy["attach"] {
 		return m.setToast("attach already in progress…", toneMuted)
 	}
@@ -224,6 +373,14 @@ func (m *Model) attach(s contracts.SessionView) tea.Cmd {
 		func(m *Model, v any, err error) tea.Cmd {
 			if err != nil {
 				m.busy["attach"] = false
+				if terminal.NoSSHRoute(err) && m.relayReachable(s) {
+					if emb, _ := m.embeddable(s); emb {
+						// No ssh to that node (a Windows cloud VM): type in
+						// the pane through the hub's relay instead.
+						m.relays().noSSH[s.Run.NodeID] = true
+						return tea.Batch(m.setToast("no ssh to "+orDash(s.NodeName)+": typing in the pane through the hub ("+m.unfocusLabel()+" returns to the list)", toneMuted), m.focusPane(s))
+					}
+				}
 				return m.errToast("attach failed", err)
 			}
 			d := v.(contracts.AttachDescriptor)

@@ -113,6 +113,10 @@ type candidate struct {
 	senior bool      // home and shared: this machine was on it first
 	others []string  // other machines with active runs on it (sorted ids)
 	tie    uint64    // per-node hash for equal headroom
+	// crowd spreads runs on this machine (spread.go): 0 room, 1 already
+	// Config.SpreadRuns local runs, 2 5-hour window at/above
+	// Config.SpreadFivePercent.
+	crowd int
 }
 
 type availClass int
@@ -320,16 +324,25 @@ func noneEligible(provider contracts.Provider, cands []*candidate, notes []strin
 	return e
 }
 
-// rank orders candidates: preference order, then the machine-affinity tier
-// (affinity.go: home, free, shared, rest), then most fresh headroom (the
-// lower 5-hour use, then the lower weekly use; usage.Headroom.Compare),
-// then fewest active local assignments, then a per-node hash and the id
-// (deterministic).
+// rank orders candidates: preference order, then the local spread level
+// (spread.go: an account with room before one that already carries
+// SpreadRuns runs here, before one whose 5-hour window is at
+// SpreadFivePercent; among busy ones the fewest local runs), then the
+// machine-affinity tier (affinity.go: home, free, shared, rest), then most
+// fresh headroom (the lower 5-hour use, then the lower weekly use;
+// usage.Headroom.Compare), then fewest active local assignments, then a
+// per-node hash and the id (deterministic).
 func rank(cs []*candidate) {
 	sort.SliceStable(cs, func(i, j int) bool {
 		a, b := cs[i], cs[j]
 		if a.pref != b.pref {
 			return a.pref < b.pref
+		}
+		if a.crowd != b.crowd {
+			return a.crowd < b.crowd
+		}
+		if a.crowd == crowdRuns && a.active != b.active {
+			return a.active < b.active
 		}
 		ta, tb := a.tier(), b.tier()
 		if ta != tb {
@@ -467,6 +480,7 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 	if err := s.markAffinity(ctx, q, provider, cands); err != nil {
 		return nil, err
 	}
+	s.markCrowd(cands) // spread.go
 	// A token account outranks the same person's other logins (token.go).
 	pt := preferTokens(fresh, fresh, verify, refresh, unknown)
 	fresh, verify, refresh, unknown = pt[0], pt[1], pt[2], pt[3]
@@ -481,6 +495,14 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 		// assignment: "most headroom (5h 12% used, weekly 40%)".
 		c := fresh[0]
 		c.why = s.explainAuto(c, fresh, cands)
+		if c.crowd != crowdNone && len(fresh) > 1 {
+			c.why = "every eligible account is busy on " + s.nodeName() + " (" + s.crowdNote(c) + "); " + c.why
+		}
+		for _, x := range fresh {
+			if x.home && x != c && x.crowd > c.crowd && !strings.Contains(c.why, "home account "+acctName(x.acct)) {
+				c.why = "spreading runs: home account " + acctName(x.acct) + " has " + s.crowdNote(x) + "; " + c.why
+			}
+		}
 		if c.pref < len(req.Policy.Prefer) {
 			c.why = "preferred account (" + c.room.Numbers() + ")"
 		}

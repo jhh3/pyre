@@ -1,6 +1,9 @@
 package contracts
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // MessageMode separates ordinary queued input from explicit steering.
 type MessageMode string
@@ -119,6 +122,17 @@ const (
 	// EvidenceClaudeMonitorNotified: the doorbell notification reached the
 	// session. Informational only; it never establishes acceptance.
 	EvidenceClaudeMonitorNotified EvidenceCategory = "claude.monitor.notified"
+	// EvidencePyreRead (W-delivery, additive): the recipient session itself
+	// read the message body through the Pyre API (MCP get_message / inbox /
+	// wait_reply, or the same CLI commands run with the session's token), or
+	// acknowledged / replied to it. Recorded by the hub; the agent has the
+	// message, so it is acceptance (and consumption) and pull evidence: a node
+	// that still holds it queued records the acceptance and never pastes it.
+	EvidencePyreRead EvidenceCategory = "pyre.read"
+	// EvidenceClaudePluginPrompt (W-plugdeliver, additive): Pyre's per-run
+	// Claude plugin submitted the marked message with $.prompt.submit and
+	// Claude resolved it as entered (its turn started). Acceptance evidence.
+	EvidenceClaudePluginPrompt EvidenceCategory = "claude.plugin.prompt_submit"
 )
 
 // AcceptanceEvidence reports whether an evidence category can establish
@@ -129,7 +143,7 @@ func AcceptanceEvidence(e EvidenceCategory) bool {
 	case EvidenceProtocolAck, EvidenceHookReceipt, EvidenceTranscript, EvidenceMock,
 		EvidenceClaudePromptHook, EvidenceClaudeQueue, EvidenceClaudeUserRecord,
 		EvidenceClaudeChannel, EvidenceClaudeStopHook, EvidenceCodexUserMessage,
-		EvidenceClaudeInboxRead:
+		EvidenceClaudeInboxRead, EvidencePyreRead, EvidenceClaudePluginPrompt:
 		return true
 	}
 	return false
@@ -140,7 +154,7 @@ func AcceptanceEvidence(e EvidenceCategory) bool {
 // record, a Codex userMessage item, or the agent reading the message with
 // the pyre inbox tool. Such a receipt sets DeliveryStatus.ConsumedAt.
 func ConsumptionEvidence(e EvidenceCategory) bool {
-	return e == EvidenceClaudeUserRecord || e == EvidenceCodexUserMessage || e == EvidenceClaudeInboxRead
+	return e == EvidenceClaudeUserRecord || e == EvidenceCodexUserMessage || e == EvidenceClaudeInboxRead || e == EvidencePyreRead
 }
 
 // PullEvidence reports evidence that the recipient runtime fetched the
@@ -148,7 +162,7 @@ func ConsumptionEvidence(e EvidenceCategory) bool {
 // such a message still queued records the acceptance by minting an attempt
 // bound to the reporting run (decision I16).
 func PullEvidence(e EvidenceCategory) bool {
-	return e == EvidenceClaudeInboxRead
+	return e == EvidenceClaudeInboxRead || e == EvidencePyreRead
 }
 
 // MessageMarker is the prefix rendered at the start of input delivered to a
@@ -200,6 +214,66 @@ type MessageView struct {
 	Envelope MessageEnvelope `json:"envelope"`
 	Status   DeliveryStatus  `json:"status"`
 	Cursor   int64           `json:"cursor"` // hub ingestion order within the recipient's inbox
+	// Delivery (W-stuckmail, additive) is a derived, human-readable summary
+	// of how far the message got and, while it waits, why. Hubs fill it on
+	// messages.send and messages.get (not on lists); older hubs omit it and
+	// clients may derive it themselves (internal/messaging/msgstatus). It is
+	// a presentation of Status plus the recipient's current run, never a
+	// new fact: it claims delivery only with acceptance evidence.
+	Delivery *DeliverySummary `json:"delivery_status,omitempty"`
+}
+
+// DeliverySummaryState is the coarse class of a DeliverySummary.
+type DeliverySummaryState string
+
+const (
+	SummaryPending       DeliverySummaryState = "pending"       // not yet stored on the hub (origin outbox)
+	SummaryStored        DeliverySummaryState = "stored"        // stored; no runtime delivery applies (owner, channel, project, info)
+	SummaryDelivering    DeliverySummaryState = "delivering"    // recipient can take input; Pyre is submitting it
+	SummaryQueued        DeliverySummaryState = "queued"        // waiting; Cause says why
+	SummaryHeld          DeliverySummaryState = "held"          // recipient session ended; waits for a resume
+	SummaryDelivered     DeliverySummaryState = "delivered"     // runtime accepted it (evidence recorded)
+	SummaryRead          DeliverySummaryState = "read"          // the recipient fetched it itself
+	SummaryAcknowledged  DeliverySummaryState = "acknowledged"  // explicit acknowledgement
+	SummaryReplied       DeliverySummaryState = "replied"       // the recipient replied
+	SummaryIndeterminate DeliverySummaryState = "indeterminate" // may have been accepted; needs reconciliation
+	SummaryUndeliverable DeliverySummaryState = "undeliverable" // rejected, expired, cancelled, or recipient archived
+)
+
+// Delivery summary causes (DeliverySummary.Cause): why a message waits or
+// will not be delivered.
+const (
+	CauseRecipientWorking  = "recipient_working"
+	CauseRecipientFailed   = "recipient_last_turn_failed"
+	CauseNodeDisconnected  = "node_disconnected"
+	CauseRecipientUnknown  = "recipient_state_unknown"
+	CauseWaitingApproval   = "recipient_waiting_approval"
+	CauseRecipientStarting = "recipient_starting"
+	CauseRecipientExiting  = "recipient_exiting"
+	CauseRecipientEnded    = "recipient_ended"
+	CauseRecipientArchived = "recipient_archived"
+	CauseInputBlocked      = "input_blocked" // recipient idle, but its input is held (lease, attach, doorbell, ...)
+	CauseRuntimeRejected   = "runtime_rejected"
+	CauseExpired           = "expired"
+	CauseCancelled         = "cancelled"
+	CauseStorageRejected   = "storage_rejected"
+)
+
+// DeliverySummary is the derived delivery status of one message.
+type DeliverySummary struct {
+	State DeliverySummaryState `json:"state"`
+	// Cause is a stable machine-readable reason (Cause* constants) for
+	// queued, held and undeliverable messages.
+	Cause string `json:"cause,omitempty"`
+	// Summary is one line for people and agents, e.g. "queued: recipient's
+	// last turn failed (model at capacity); Pyre retries at 19:52".
+	Summary string `json:"summary"`
+	// Since is when the current state began (stored, accepted, ended,
+	// last seen), when known.
+	Since *time.Time `json:"since,omitempty"`
+	// Final: no reply can arrive unless someone acts (the recipient ended,
+	// was archived, or delivery was refused, expired or cancelled).
+	Final bool `json:"final,omitempty"`
 }
 
 type SendMessageRequest struct {
@@ -234,6 +308,32 @@ type ListMessagesRequest struct {
 	AfterCursor int64 `json:"after_cursor,omitempty"`
 	// WaitSeconds long-polls up to this many seconds for a new match (<=60).
 	WaitSeconds int `json:"wait_seconds,omitempty"`
+}
+
+// OpMarkMessagesRead (W-delivery, additive, optional): the calling session
+// reports that it read these messages (their bodies were returned to it by
+// get_message / inbox / wait_reply). The hub records EvidencePyreRead for
+// each one addressed to that session whose runtime delivery is still
+// pending and withdraws its paste delivery. Not part of API: callers
+// type-assert MessageReadAPI; a hub without it answers 404 and the read is
+// simply not recorded (the paste path stays as before).
+const OpMarkMessagesRead = "messages.mark_read"
+
+type MarkMessagesReadRequest struct {
+	MessageIDs []string `json:"message_ids"`
+	// Via names the read for the receipt detail (e.g. "mcp get_message").
+	Via string `json:"via,omitempty"`
+}
+
+type MarkMessagesReadResponse struct {
+	// Recorded lists the messages whose pending delivery the read resolved.
+	Recorded []string `json:"recorded"`
+}
+
+// MessageReadAPI is implemented by hubs (and the client and node-local
+// proxy) that offer OpMarkMessagesRead.
+type MessageReadAPI interface {
+	MarkMessagesRead(ctx context.Context, req MarkMessagesReadRequest) (MarkMessagesReadResponse, error)
 }
 
 type AckMessageRequest struct {

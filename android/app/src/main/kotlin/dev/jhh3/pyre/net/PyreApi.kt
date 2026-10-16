@@ -59,6 +59,16 @@ interface PyreApi {
     /** Audit log (`audit.list`, additive, read-only); hubs that predate it answer HTTP 404. */
     suspend fun listAudit(req: ListAuditRequest): Page<AuditEntry> =
         throw PyreApiException(ErrorCodes.UNSUPPORTED, "audit.list is not available")
+    /** Asks (`asks.*`, additive; Hello feature "asks"); hubs without them answer HTTP 404. */
+    suspend fun listAsks(req: ListAsksRequest): Page<Ask> =
+        throw PyreApiException(ErrorCodes.UNSUPPORTED, "asks.list is not available")
+    suspend fun getAsk(id: String): Ask =
+        throw PyreApiException(ErrorCodes.UNSUPPORTED, "asks.get is not available")
+    /** Batch: one call answers several asks; each item commits independently. */
+    suspend fun answerAsks(req: AnswerAsksRequest): AnswerAsksResponse =
+        throw PyreApiException(ErrorCodes.UNSUPPORTED, "asks.answer is not available")
+    suspend fun withdrawAsk(req: WithdrawAskRequest): Ask =
+        throw PyreApiException(ErrorCodes.UNSUPPORTED, "asks.withdraw is not available")
 }
 
 class HttpPyreApi(val client: HubClient) : PyreApi {
@@ -113,4 +123,8 @@ class HttpPyreApi(val client: HubClient) : PyreApi {
     override suspend fun nodeAction(req: NodeActionRequest): NodeActionResult = call(Ops.INVOKE_NODE_ACTION, req, true)
     override suspend fun listRepos(req: ListReposRequest): RepoList = call(RepoOps.LIST_REPOS, req)
     override suspend fun listAudit(req: ListAuditRequest): Page<AuditEntry> = call(AuditOps.LIST_AUDIT, req)
+    override suspend fun listAsks(req: ListAsksRequest): Page<Ask> = call(AsksOps.LIST, req)
+    override suspend fun getAsk(id: String): Ask = call(AsksOps.GET, GetRequest(id))
+    override suspend fun answerAsks(req: AnswerAsksRequest): AnswerAsksResponse = call(AsksOps.ANSWER, req, true)
+    override suspend fun withdrawAsk(req: WithdrawAskRequest): Ask = call(AsksOps.WITHDRAW, req, true)
 }

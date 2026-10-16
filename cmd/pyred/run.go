@@ -20,6 +20,7 @@ import (
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/daemon"
 	"github.com/jhh3/pyre/internal/enrollment"
+	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 	"github.com/jhh3/pyre/internal/supervisor"
 	"github.com/jhh3/pyre/internal/terminal"
@@ -32,6 +33,7 @@ type runOpts struct {
 	maxRuns                                                     int
 	devMock, noIntegrations, noDoorbell                         bool
 	trustDirs                                                   []string
+	worktreeRoot                                                string
 	rotaCheckout                                                bool
 	rotaIndependent                                             string
 	rotaHome                                                    string
@@ -57,6 +59,7 @@ func cmdRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	takeTrampolineEnv() // Windows exec handoff (supervise.go)
 	err := runDaemon(o)
 	var ex *execRequest
 	if errors.As(err, &ex) {
@@ -83,6 +86,7 @@ func runFlags(o *runOpts) *flag.FlagSet {
 		o.trustDirs = append(o.trustDirs, v)
 		return nil
 	})
+	fs.StringVar(&o.worktreeRoot, "worktree-root", "", "directory for new Pyre worktrees (<dir>/<repo>/<branch>); default next to the repo as <repo>-worktrees")
 	fs.Func("tool-path", "extra directory to search for tmux/claude/codex/node (repeatable; also PYRE_TOOL_PATH)", func(v string) error {
 		o.toolPaths = append(o.toolPaths, v)
 		return nil
@@ -112,11 +116,12 @@ func runDaemon(o runOpts) error {
 	if !accounts.ValidDefaultAccount(o.defaultAccount) {
 		return fmt.Errorf("--default-account %q: want auto, subscription or ambient", o.defaultAccount)
 	}
-	if err := os.MkdirAll(o.state, 0o700); err != nil {
+	if err := fileperm.MkdirAll(o.state, 0o700); err != nil {
 		return err
 	}
 	logger, closeLog := newLogger(o.state, o.logLevel)
 	defer closeLog()
+	sqlitex.SetLogger(logger.With("component", "sqlite")) // slow/nested transaction warnings
 	// The launcher hands off to an active managed pyred (in-product update).
 	if ex := daemonBoot(o.state, logger); ex != nil {
 		return ex
@@ -164,11 +169,12 @@ func runDaemon(o runOpts) error {
 	}
 	defer db.Close()
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		_ = os.Chmod(p, 0o600)
+		_ = fileperm.Restrict(p, 0o600)
 	}
 
 	cfg := daemon.Config{StateDir: o.state, DB: db, NodeID: nodeID, NodeName: o.name, SSHAlias: o.sshAlias,
-		MaxRuns: o.maxRuns, OwnerToken: ownerToken, Logger: logger, ReadCacheQueue: o.readCacheQueue, Permissions: o.permissions}
+		MaxRuns: o.maxRuns, OwnerToken: ownerToken, Logger: logger, ReadCacheQueue: o.readCacheQueue, Permissions: o.permissions,
+		WorktreeRoot: o.worktreeRoot}
 	cfg.RepoIndex = repoIndexConfig() // W-quicklaunch
 	if o.permissions == daemon.PermissionsBypass {
 		logger.Warn("permissions bypass: Pyre-launched runs on this node execute without approval prompts or sandbox (--permissions bypass)")
@@ -184,7 +190,9 @@ func runDaemon(o runOpts) error {
 			return client.New(hubURL, bearer, client.Options{CertSHA256: pin, UserAgent: "pyred-local-proxy"})
 		}
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	sctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := watchSupervisor(sctx) // Windows: stop when the supervisor is gone
 	defer cancel()
 
 	// Integrations need the node ID; standalone nodes persist a local one.

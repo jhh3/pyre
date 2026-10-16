@@ -15,11 +15,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/runtime/hostsel"
+	"github.com/jhh3/pyre/internal/runtime/sessionhost"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
 )
 
@@ -45,7 +48,7 @@ type Options struct {
 // Adapter implements contracts.RuntimeAdapter for plain shells.
 type Adapter struct {
 	o   Options
-	srv *tmux.Server
+	srv sessionhost.Host
 }
 
 var _ contracts.RuntimeAdapter = (*Adapter)(nil)
@@ -56,11 +59,8 @@ func New(o Options) (*Adapter, error) {
 	if o.TmuxSocket == "" {
 		return nil, errors.New("shell: TmuxSocket is required")
 	}
-	srv, err := tmux.NewServer(o.TmuxBin, o.TmuxSocket)
+	srv, err := hostsel.New(o.TmuxBin, o.TmuxSocket)
 	if err != nil {
-		return nil, err
-	}
-	if err := srv.WriteConfig(); err != nil {
 		return nil, err
 	}
 	if o.Now == nil {
@@ -70,13 +70,13 @@ func New(o Options) (*Adapter, error) {
 		o.Shell = os.Getenv("SHELL")
 	}
 	if o.Shell == "" {
-		o.Shell = "/bin/bash"
+		o.Shell = defaultShell()
 	}
 	return &Adapter{o: o, srv: srv}, nil
 }
 
-// Server exposes the tmux server (for daemon housekeeping).
-func (a *Adapter) Server() *tmux.Server { return a.srv }
+// Server exposes the session host (for daemon housekeeping).
+func (a *Adapter) Server() sessionhost.Host { return a.srv }
 
 func (a *Adapter) Name() string               { return AdapterName }
 func (a *Adapter) Harness() contracts.Harness { return contracts.HarnessShell }
@@ -91,14 +91,10 @@ func Capabilities() []string {
 
 func (a *Adapter) Probe(ctx context.Context) (contracts.ProbeResult, error) {
 	pr := contracts.ProbeResult{Harness: contracts.HarnessShell, Adapter: AdapterName, Executable: a.o.Shell, Capabilities: Capabilities()}
-	v, err := a.srv.Version(ctx)
+	desc, err := a.srv.Check(ctx)
+	pr.Version = desc
 	if err != nil {
 		pr.Reason = err.Error()
-		return pr, nil
-	}
-	pr.Version = "tmux " + strconv.Itoa(v.Major) + "." + strconv.Itoa(v.Minor)
-	if !v.AtLeast(3, 2) {
-		pr.Reason = "tmux >= 3.2 required, found " + v.Raw
 		return pr, nil
 	}
 	if _, err := exec.LookPath(a.o.Shell); err != nil {
@@ -125,6 +121,9 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 		return contracts.RunHandle{}, contracts.Errorf(contracts.ErrConflict, "run %s already has a live tmux session", l.RunID)
 	}
 	argv := []string{a.o.Shell, "-l"}
+	if !loginShells[strings.TrimSuffix(filepath.Base(a.o.Shell), ".exe")] {
+		argv = argv[:1] // PowerShell/cmd: no login-shell flag
+	}
 	if l.Executable != "" {
 		argv = append([]string{l.Executable}, l.Args...)
 		if len(l.Args) == 0 && loginShells[filepath.Base(l.Executable)] {
@@ -136,7 +135,7 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	}
 	h := contracts.RunHandle{
 		RunID: l.RunID, SessionID: l.SessionID, Adapter: AdapterName, Harness: contracts.HarnessShell,
-		TmuxSocket: a.o.TmuxSocket, TmuxTarget: l.RunID, StateDir: l.StateDir,
+		TmuxSocket: a.srv.SocketPath(), TmuxTarget: l.RunID, StateDir: l.StateDir,
 		NativeRef: &contracts.NativeRef{Kind: "tmux_session", ID: l.RunID},
 	}
 	if p, err := a.srv.Pane(ctx, l.RunID); err == nil {
@@ -280,7 +279,7 @@ func (a *Adapter) Attach(ctx context.Context, h contracts.RunHandle, req contrac
 	if ok, err := a.srv.HasSession(ctx, h.TmuxTarget); err != nil || !ok {
 		return contracts.AttachDescriptor{}, contracts.Errorf(contracts.ErrNotFound, "tmux session %s is gone", h.TmuxTarget)
 	}
-	return tmux.BuildAttach(tmux.AttachConfig{NodeID: a.o.NodeID, SSHAlias: a.o.SSHAlias, TmuxBin: a.srv.Bin, Socket: a.o.TmuxSocket},
+	return a.srv.AttachDescriptor(sessionhost.AttachConfig{NodeID: a.o.NodeID, SSHAlias: a.o.SSHAlias},
 		h.RunID, h.TmuxTarget, req, a.o.Now())
 }
 
@@ -329,4 +328,24 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 
 func (a *Adapter) ResumeSpec(context.Context, contracts.Run, bool) (contracts.ContinuationKind, *contracts.NativeRef, error) {
 	return contracts.ContinuationNone, nil, unsupported("resume")
+}
+
+// defaultShell is the shell when neither Options.Shell nor $SHELL names one:
+// /bin/bash on unix; on Windows PowerShell 7 (pwsh) when installed, else
+// Windows PowerShell, else %ComSpec% (cmd.exe).
+func defaultShell() string {
+	if runtime.GOOS != "windows" {
+		return "/bin/bash"
+	}
+	if p, err := exec.LookPath("pwsh.exe"); err == nil {
+		return p
+	}
+	ps := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	if _, err := os.Stat(ps); err == nil {
+		return ps
+	}
+	if c := os.Getenv("ComSpec"); c != "" {
+		return c
+	}
+	return "cmd.exe"
 }

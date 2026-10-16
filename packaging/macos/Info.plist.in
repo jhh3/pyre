@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Pyre.app wraps pyred so macOS privacy permissions (Full Disk Access, removable
+     volumes, other apps' data) belong to one app, "Pyre" (dev.jhh3.pyre), that keeps
+     its identity across releases. Rendered by packaging/release.sh. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.jhh3.pyre</string>
+  <key>CFBundleName</key>
+  <string>Pyre</string>
+  <key>CFBundleDisplayName</key>
+  <string>Pyre</string>
+  <key>CFBundleExecutable</key>
+  <string>pyred</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

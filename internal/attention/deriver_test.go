@@ -286,3 +286,34 @@ func TestOneLimitIsOneAttentionOccurrence(t *testing.T) {
 		t.Fatalf("second limit: %+v", pool)
 	}
 }
+
+// An exhaustion item a session raised ("No eligible Claude account") is
+// withdrawn when a later run of that session goes live (not while it is
+// only starting); another session's item stays.
+func TestRunStartedWithdrawsStaleExhaustion(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct{ ses, prov string }{{"ses_synth-a", "anthropic"}, {"ses_synth-b", "openai"}} {
+		plan := contracts.FallbackPlan{SessionID: c.ses, FromRunID: "run_" + c.ses, FromAccountID: "acct_synth-2", Outcome: contracts.FallbackWaiting,
+			Provider: contracts.Provider(c.prov), Reason: "no eligible subscription"}
+		e.log.AppendPayload(contracts.EvFallbackPlanned, contracts.ObjectRef{Kind: contracts.KindSession, ID: c.ses}, c.ses, nil, plan)
+	}
+	e.drain()
+	if a, b := e.byGroup("pool:anthropic"), e.byGroup("pool:openai"); len(a) != 1 || a[0].State != contracts.AttnOpen || len(b) != 1 {
+		t.Fatalf("raised: %+v %+v", a, b)
+	}
+	run := contracts.Run{RunID: "run_synth-next", SessionID: "ses_synth-a", State: contracts.RunStarting}
+	e.log.AppendPayload(contracts.EvRunStarted, contracts.ObjectRef{Kind: contracts.KindRun, ID: run.RunID}, "ses_synth-a", nil, run)
+	e.drain()
+	if a := e.byGroup("pool:anthropic"); len(a) != 1 || a[0].State != contracts.AttnOpen {
+		t.Fatalf("withdrawn by a run that is only starting: %+v", a)
+	}
+	run.State = contracts.RunRunning
+	e.log.AppendPayload(contracts.EvRunObserved, contracts.ObjectRef{Kind: contracts.KindRun, ID: run.RunID}, "ses_synth-a", nil, run)
+	e.drain()
+	if a := e.byGroup("pool:anthropic"); len(a) != 1 || a[0].State != contracts.AttnWithdrawn {
+		t.Fatalf("stale exhaustion kept: %+v", a)
+	}
+	if b := e.byGroup("pool:openai"); len(b) != 1 || b[0].State != contracts.AttnOpen {
+		t.Fatalf("other session's item touched: %+v", b)
+	}
+}

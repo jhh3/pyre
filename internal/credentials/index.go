@@ -10,6 +10,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/jhh3/pyre/internal/fileperm"
 )
 
 // Provision records that a credential for a connection has been provisioned
@@ -85,7 +87,7 @@ func (ix *Index) save(ps []Provision) error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := fileperm.RestrictFile(tmp, 0o600); err != nil {
 		tmp.Close()
 		return err
 	}

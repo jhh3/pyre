@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -305,6 +306,14 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 		if err := h.validateAccountPolicy(ctx, req.Harness, &req.AccountPolicy); err != nil {
 			return contracts.StartSessionResponse{}, err
 		}
+		// A child started without a project joins its parent's project
+		// (an explicit "" keeps it outside any project).
+		if req.ProjectID == nil && req.ParentSessionID != "" {
+			if parent, err := h.getSession(ctx, h.db, req.ParentSessionID); err == nil && parent.ProjectID != nil && *parent.ProjectID != "" {
+				pid := *parent.ProjectID
+				req.ProjectID = &pid
+			}
+		}
 		if req.ProjectID != nil && *req.ProjectID != "" && h.cfg.Projects != nil {
 			if _, err := h.cfg.Projects.GetProject(ctx, contracts.GetRequest{ID: *req.ProjectID}); err != nil {
 				return contracts.StartSessionResponse{}, err
@@ -455,6 +464,7 @@ func (h *Hub) ListSessions(ctx context.Context, req contracts.ListSessionsReques
 		states[st] = true
 	}
 	page := contracts.Page[contracts.SessionView]{Items: []contracts.SessionView{}, SnapshotAt: h.now()}
+	ctx = withNodeMemo(ctx)
 	curK, curI := pc.K, pc.I
 	for {
 		w := append([]string{}, where...)
@@ -465,24 +475,28 @@ func (h *Hub) ListSessions(ctx context.Context, req contracts.ListSessionsReques
 		}
 		const batch = 100
 		a = append(a, batch)
-		rows, err := h.db.QueryContext(ctx, `SELECT s.session_id,s.harness,s.title,s.project_id,s.created_by,s.created_at,s.current_run_id,s.lineage,s.tags,s.archived
+		rows, err := h.db.QueryContext(ctx, `SELECT s.session_id,s.harness,s.title,s.project_id,s.created_by,s.created_at,s.current_run_id,s.lineage,s.tags,s.archived,s.icon,s.owner_active_at,r.run
 			FROM sessions s LEFT JOIN runs r ON r.run_id = s.current_run_id WHERE `+strings.Join(w, " AND ")+` ORDER BY s.created_at DESC, s.session_id DESC LIMIT ?`, a...)
 		if err != nil {
 			return page, err
 		}
 		var batchSessions []contracts.Session
+		var bodies []sql.NullString
 		for rows.Next() {
-			s, err := scanSession(rows)
+			var body sql.NullString
+			s, err := scanSession(extraScan{sc: rows, extra: []any{&body}})
 			if err != nil {
 				rows.Close()
 				return page, err
 			}
 			batchSessions = append(batchSessions, s)
+			bodies = append(bodies, body)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return page, err
 		}
+		h.prefetchList(ctx, h.db, batchSessions, bodies) // W-dbhygiene: no per-session run/approval/lease queries
 		for _, s := range batchSessions {
 			curK, curI = persistence.Time(s.CreatedAt), s.SessionID
 			v, err := h.sessionView(ctx, h.db, s, true)
@@ -780,12 +794,35 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 		if err := h.checkArchive(ctx, p, req); err != nil { // W-childnotify
 			return contracts.SessionView{}, err
 		}
+		if err := h.checkReparent(ctx, p, req); err != nil { // W-reparent
+			return contracts.SessionView{}, err
+		}
 	}
+	var reparented *contracts.Session // W-reparent: the session before a parent change made by this call
+	if req.Icon != nil {              // W-archive2: any principal may set any session's icon
+		icon, err := autotitle.ValidIcon(*req.Icon)
+		if err != nil {
+			return contracts.SessionView{}, err
+		}
+		req.Icon = &icon
+	}
+	// W-archive2: archiving a live session "when done" records the tag;
+	// the archive-when-done worker stops the run after its turn and then
+	// archives it (archivewhen.go).
+	schedule := req.Archived != nil && *req.Archived && req.WhenDone && h.runLive(ctx, req.SessionID)
 	auditEdit := func(ctx context.Context, tx *sql.Tx, before, after contracts.Session) {
 		act := actorOf(p)
 		node := ""
 		if r, err := h.getRun(ctx, tx, after.CurrentRunID); err == nil {
 			node = r.NodeID
+		}
+		if before.Parent() != after.Parent() {
+			b := before
+			reparented = &b
+			h.reparentTx(ctx, tx, act, node, before, after)
+		}
+		if before.Icon != after.Icon {
+			h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionIconSet, Actor: act, NodeID: node, SessionID: after.SessionID, From: before.Icon, To: after.Icon})
 		}
 		if before.Title != after.Title {
 			h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionRenamed, Actor: act, NodeID: node, SessionID: after.SessionID, From: before.Title, To: after.Title})
@@ -795,7 +832,18 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 			if after.Archived {
 				a = contracts.AuditSessionArchived
 			}
-			h.auditTx(ctx, tx, auditRec{Action: a, Actor: act, NodeID: node, SessionID: after.SessionID})
+			reason := ""
+			if hasArchiveWhenDone(before) && after.Archived {
+				reason = "it was scheduled to archive when done"
+			}
+			h.auditTx(ctx, tx, auditRec{Action: a, Actor: act, NodeID: node, SessionID: after.SessionID, Reason: reason})
+		}
+		switch had, has := hasArchiveWhenDone(before), hasArchiveWhenDone(after); {
+		case !had && has:
+			h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionArchiveScheduled, Actor: act, NodeID: node, SessionID: after.SessionID,
+				Reason: "archive when the current turn ends"})
+		case had && !has && !after.Archived:
+			h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionArchiveCanceled, Actor: act, NodeID: node, SessionID: after.SessionID})
 		}
 	}
 	v, err := h.editSession(ctx, req.OperationID, contracts.OpUpdateSession, p, req, req.SessionID, auditEdit, func(s *contracts.Session) map[string]any {
@@ -804,18 +852,44 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 			s.Tags = append([]string{}, (*req.Tags)...)
 			ch["tags"] = s.Tags
 		}
+		if req.Icon != nil {
+			s.Icon = *req.Icon
+			ch["icon"] = *req.Icon
+		}
+		if req.Parent != nil {
+			for k, v := range h.applyReparent(s, reparentTarget(req.Parent)) {
+				ch[k] = v
+			}
+		}
 		if req.Title != nil {
 			s.Title = *req.Title
 			ch["title"] = *req.Title
 			s.Tags = autotitle.RenameTags(p, s.Tags) // W-names: an explicit rename ends auto-naming
 			ch["tags"] = s.Tags
 		}
-		if req.Archived != nil {
+		switch {
+		case schedule:
+			if !hasArchiveWhenDone(*s) {
+				s.Tags = append(slices.Clone(s.Tags), contracts.TagArchiveWhenDone)
+			}
+			ch["tags"] = s.Tags
+		case req.Archived != nil:
 			s.Archived = *req.Archived
 			ch["archived"] = *req.Archived
+			if hasArchiveWhenDone(*s) { // archived now, or the pending archive is canceled
+				s.Tags = withoutTag(s.Tags, contracts.TagArchiveWhenDone)
+				ch["tags"] = s.Tags
+			}
 		}
 		return ch
 	})
+	if err == nil && reparented != nil {
+		h.reparentNotices(ctx, p, req.OperationID, v.Session, reparented.Parent())
+	}
+	if err == nil && schedule {
+		h.noteArchiveScheduled(req.SessionID)
+		return v, nil // its run keeps its tokens until the turn ends
+	}
 	if err == nil && req.Archived != nil && *req.Archived && h.cfg.Tokens != nil {
 		if rerr := h.cfg.Tokens.RevokeSessionTokens(ctx, req.SessionID); rerr != nil {
 			return v, contracts.Errorf(contracts.ErrUnavailable, "session archived but token revocation failed: %v", rerr)
@@ -825,9 +899,28 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 }
 
 // checkArchive lets a session principal archive (or unarchive) only itself
-// and the sessions it started; other principals are unaffected.
+// and the sessions it started, and never archive itself when the owner
+// started it; other principals are unaffected.
 func (h *Hub) checkArchive(ctx context.Context, p contracts.Principal, req contracts.UpdateSessionRequest) error {
-	if req.Archived == nil || p.Kind != contracts.PrincipalSession || p.ID == req.SessionID {
+	if req.Archived == nil || p.Kind != contracts.PrincipalSession {
+		return nil
+	}
+	if p.ID == req.SessionID {
+		if !*req.Archived {
+			return nil
+		}
+		// A session the owner started is the owner's conversation: it never
+		// archives itself (Codex agents archived owner chats right after
+		// answering, 2026-10-09). Helpers started by another session may
+		// still clean up after themselves.
+		s, err := h.getSession(ctx, h.db, req.SessionID)
+		if err != nil {
+			return err
+		}
+		if s.CreatedBy.Kind == contracts.PrincipalOwner && s.Parent() == "" {
+			return contracts.Errorf(contracts.ErrForbidden, "this session was started by the owner, so only the owner archives it; tell the owner you are done instead").
+				WithRef(contracts.KindSession, req.SessionID)
+		}
 		return nil
 	}
 	s, err := h.getSession(ctx, h.db, req.SessionID)

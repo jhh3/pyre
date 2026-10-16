@@ -167,7 +167,7 @@ var canon = map[string]string{
 	"sessions.attach_full": "A", "sessions.info": "i",
 	"sessions.stop": "x", "sessions.project": "p", "sessions.archive": "X", "sessions.toggle_ended": ".",
 	"sessions.dismiss": "d", "digest.open": "enter", "digest.transcript": "r",
-	"projects.open":        "enter",
+	"projects.open": "enter", "projects.archive": "X",
 	"project.next_section": "right", "project.prev_section": "left", "project.open": "enter",
 	"project.edit": "e", "project.comment": "c", "project.refresh": "r",
 	"artifact.comment": "c", "artifact.scroll_down": "J", "artifact.scroll_up": "K",
@@ -307,6 +307,8 @@ func (m *Model) runAction(id string) tea.Cmd {
 		return m.goTop(viewProjects)
 	case "global.digest":
 		return m.openDigest()
+	case "global.inbox":
+		return m.openWebInbox() // the inbox is in the web app (weblink.go)
 	case "global.grid":
 		return m.toggleGrid() // the grid is a Sessions view (sessions_modes.go)
 	case "global.machines":
@@ -381,8 +383,10 @@ func (m *Model) runAction(id string) tea.Cmd {
 		return m.copyText(s.Session.SessionID, "copied session ID "+s.Session.SessionID)
 	case "reader.search":
 		return m.startReaderSearch()
+	case "sessions.reparent":
+		return m.reparentSelected() // reparent.go
 	case "sessions.rename":
-		return m.renameSelected()
+		return m.renameOrRelaunch() // relaunch.go: R relaunches a never-started session
 	case "sessions.worktrees":
 		return m.openWorktreeOffer() // worktrees.go
 	case "manage.rename":

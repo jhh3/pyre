@@ -234,19 +234,31 @@ func (h *Hub) WelcomeCommands(ctx context.Context, nodeID string) ([]contracts.N
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// Mint session tokens before the transaction: the auth store writes on
+	// its own connection, which would wait on this transaction's write lock
+	// until busy_timeout and fail every hello with a queued launch.
+	now := h.now()
+	prepared := make(map[string]contracts.NodeCommand, len(recs))
+	for _, r := range recs {
+		if r.expiredUnsent(now) {
+			continue
+		}
+		cmd, err := h.prepareForSend(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		prepared[r.CommandID] = cmd
+	}
 	var out []contracts.NodeCommand
 	err = sqlitex.Tx(ctx, h.db, func(tx *sql.Tx) error {
 		out = out[:0]
 		for _, r := range recs {
-			if r.expiredUnsent(h.now()) {
+			cmd, ok := prepared[r.CommandID]
+			if !ok {
 				if err := h.expireCommandTx(ctx, tx, r); err != nil {
 					return err
 				}
 				continue
-			}
-			cmd, err := h.prepareForSend(ctx, r)
-			if err != nil {
-				return err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE commands SET state=?, sent_at=? WHERE command_id=? AND state=?`, cmdSent, persistence.Time(h.now()), r.CommandID, cmdQueued); err != nil {
 				return err

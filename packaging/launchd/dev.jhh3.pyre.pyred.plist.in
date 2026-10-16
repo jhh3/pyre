@@ -9,7 +9,8 @@
   Stopping or restarting pyred never stops runs. Runs live in Pyre-owned tmux
   servers that have left pyred's process group; AbandonProcessGroup keeps
   launchd from killing anything pyred started (runtime REPORT section 10.6,
-  internal/supervisor/doc.go). ProcessType is Standard, not Background,
+  internal/supervisor/doc.go). ExitTimeOut stays above pyred's 20 s SIGTERM
+  drain of in-flight launches. ProcessType is Standard, not Background,
   because launchd's background throttling would be inherited by agent runs.
 -->
 <plist version="1.0">
@@ -39,7 +40,7 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>ExitTimeOut</key>
-  <integer>20</integer>
+  <integer>30</integer>
   <key>AbandonProcessGroup</key>
   <true/>
   <key>ProcessType</key>

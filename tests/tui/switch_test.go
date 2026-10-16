@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/tui"
 	"github.com/jhh3/pyre/internal/tui/tuitest"
 )
 
@@ -97,7 +98,7 @@ func TestSwitchFlickTakesNoLeases(t *testing.T) {
 		t.Fatalf("flicking took %d leases", n)
 	}
 	h.WaitFor("the first lease released", 3*sec, func() bool { return len(rec.Calls("ReleaseLease")) == 1 })
-	if h.M.LiveTerms() > 2 {
+	if h.M.LiveTerms() > tui.MaxWarmTerms {
 		t.Fatalf("%d live embedded attaches after flicking", h.M.LiveTerms())
 	}
 }

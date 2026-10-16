@@ -228,11 +228,24 @@ type Config struct {
 	Poll              PollConfig
 	HeartbeatInterval time.Duration // default 30s (hub marks stale after ~90s)
 	MaxRuns           int           // advertised launch capacity; 0 = unlimited
+	// WorktreeRoot, when set, is where new Pyre worktrees go:
+	// <root>/<repo>/<branch>, instead of <repo>-worktrees/<branch> next to
+	// the source repo (e.g. a larger/faster disk). A worktree already at the
+	// old place keeps being used there. Runs see it as PYRE_WORKTREE_ROOT.
+	WorktreeRoot string
 	// Permissions is the node's default run permission mode: "ask"
 	// (default) or "bypass" (no approval prompts, no sandbox). A launch may
 	// override it (PermissionsArg).
-	Permissions    string
-	LaunchTimeout  time.Duration // default 60s
+	Permissions   string
+	LaunchTimeout time.Duration // default 60s
+	// LaunchPrepTimeout bounds the work before adapter.Launch (checkout,
+	// environment generation, connection prep); default 3m. Exceeding it
+	// fails the launch (provably nothing ran).
+	LaunchPrepTimeout time.Duration
+	// ShutdownGrace is how long Close waits for in-flight launches to
+	// record a handle (or fail) after new launches are refused; default 20s.
+	// Keep systemd TimeoutStopSec / launchd ExitTimeOut above it.
+	ShutdownGrace  time.Duration
 	CommandTimeout time.Duration // interrupt/stop/attach/answer/read, default 20s
 	MaxActions     int           // concurrent async actions, default 4
 	OutboxFlush    time.Duration // local outbox flush interval, default 5s
@@ -279,6 +292,12 @@ func (c *Config) defaults() {
 	}
 	if c.CommandTimeout <= 0 {
 		c.CommandTimeout = 20 * time.Second
+	}
+	if c.LaunchPrepTimeout <= 0 {
+		c.LaunchPrepTimeout = 3 * time.Minute
+	}
+	if c.ShutdownGrace <= 0 {
+		c.ShutdownGrace = 20 * time.Second
 	}
 	if c.MaxActions <= 0 {
 		c.MaxActions = 4

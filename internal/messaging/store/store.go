@@ -76,7 +76,7 @@ type Config struct {
 	Events contracts.EventSink
 	Limits Limits
 	// PollInterval bounds long-poll latency for commits made without
-	// Notify. Default 250ms.
+	// Notify. Default 5s (waiters wake on Notify).
 	PollInterval time.Duration
 
 	// ValidateRecipient checks a recipient inside the storing tx (e.g. the
@@ -114,7 +114,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		cfg.Clock = contracts.SystemClock{}
 	}
 	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = 250 * time.Millisecond
+		cfg.PollInterval = 5 * time.Second
 	}
 	cfg.Limits.defaults()
 	if err := sqlitex.Migrate(ctx, cfg.DB, sqlitex.OperationsMigration); err != nil {
@@ -1034,6 +1034,50 @@ func (s *Store) MarkNodeReceivedTx(ctx context.Context, tx *sql.Tx, messageID, n
 		return err
 	}
 	return s.emitDelivery(ctx, tx, nv)
+}
+
+// RecordReadTx records that the recipient session itself read (or acked or
+// replied to) a message whose runtime delivery is still pending (queued at
+// the hub or held by the recipient node, no attempt in flight): acceptance
+// and consumption with evidence ev, bound to runID (the session's current
+// run; "" leaves it unbound). ok=false means the delivery was not pending
+// (attempting, accepted, indeterminate, terminal, informational) and nothing
+// changed. Decision I16 extended to hub-observed reads (W-delivery).
+func (s *Store) RecordReadTx(ctx context.Context, tx *sql.Tx, messageID, runID string, ev contracts.EvidenceCategory, detail string) (contracts.MessageView, bool, error) {
+	v, err := s.GetTx(ctx, tx, messageID)
+	if err != nil {
+		return v, false, err
+	}
+	switch v.Status.Runtime {
+	case contracts.DeliveryQueued, contracts.DeliveryNodeReceived:
+	default:
+		return v, false, nil
+	}
+	if v.Envelope.Mode == contracts.ModeInfo || v.Envelope.Recipient.Kind != contracts.AddrSession {
+		return v, false, nil
+	}
+	bound := v.Status.BoundRunID
+	if bound == "" {
+		bound = runID
+	}
+	now := s.now()
+	rc := contracts.DeliveryReceipt{
+		MessageID: messageID, SessionID: v.Envelope.Recipient.ID, RunID: bound,
+		State: contracts.DeliveryAccepted, Evidence: ev, Detail: detail, ObservedAt: now, Consumed: true,
+	}
+	if err := s.recordReceipt(ctx, tx, "", rc); err != nil {
+		return v, false, err
+	}
+	reason := fmt.Sprintf("accepted (evidence %s): %s", ev, detail)
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET runtime=?, runtime_reason=?, bound_run_id=?, consumed_at=COALESCE(consumed_at, ?), updated_at=? WHERE message_id=?`,
+		string(contracts.DeliveryAccepted), reason, persistence.NullStr(bound), persistence.Time(now), persistence.Time(now), messageID); err != nil {
+		return v, false, err
+	}
+	nv, err := s.GetTx(ctx, tx, messageID)
+	if err != nil {
+		return nv, false, err
+	}
+	return nv, true, s.emitDelivery(ctx, tx, nv)
 }
 
 // UnattemptedForSessionTx lists messages for a session that are queued at

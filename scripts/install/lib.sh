@@ -238,6 +238,44 @@ render_template() {
 
 is_managed() { [ -f "$1" ] && grep -q "$PYRE_MARKER" "$1"; }
 
+# sync_app: on macOS keep $PREFIX/Pyre.app (the launchd program, at a fixed
+# path) identical to the active version's Pyre.app, so macOS privacy grants,
+# which belong to the signed bundle dev.jhh3.pyre at that path, survive
+# upgrades and rollbacks. A running pyred keeps its open binary.
+sync_app() {
+  local src dst
+  src=$(r "$PREFIX/current/Pyre.app") dst=$(r "$PREFIX/Pyre.app")
+  if [ ! -d "$src" ]; then
+    # The active version predates Pyre.app (a rollback): keep the launchd
+    # path valid with that version's pyred in an ad-hoc signed bundle
+    # (macOS grants do not carry over to it).
+    [ -d "$dst" ] || return 0
+    [ -x "$(r "$PREFIX/current/bin/pyred")" ] || return 0
+    if [ "$DRY" = 1 ]; then echo "[dry-run] rebuild $dst from current/bin/pyred"; return 0; fi
+    if [ "$("$dst/Contents/MacOS/pyred" version 2>/dev/null | head -1)" = "$("$(r "$PREFIX/current/bin/pyred")" version 2>/dev/null | head -1)" ] && \
+      ! codesign -dv "$dst" 2>&1 | grep -q '^TeamIdentifier=[A-Z0-9]'; then return 0; fi
+    rm -rf "$dst.new.$$" "$dst.old.$$"
+    mkdir -p "$dst.new.$$/Contents/MacOS"
+    cp "$(r "$PREFIX/current/bin/pyred")" "$dst.new.$$/Contents/MacOS/pyred"
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>dev.jhh3.pyre</string><key>CFBundleName</key><string>Pyre</string>' \
+      '<key>CFBundleExecutable</key><string>pyred</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>' \
+      >"$dst.new.$$/Contents/Info.plist"
+    ! command -v codesign >/dev/null 2>&1 || codesign --force --sign - "$dst.new.$$" >/dev/null 2>&1 || true
+    mv "$dst" "$dst.old.$$"; mv "$dst.new.$$" "$dst"; rm -rf "$dst.old.$$"
+    warn "Pyre.app now runs $(cat "$(r "$PREFIX/current/VERSION")" 2>/dev/null || echo current) ad-hoc signed (it predates the signed bundle): macOS permissions must be granted again until you upgrade"
+    return 0
+  fi
+  if [ "$DRY" = 1 ]; then echo "[dry-run] sync $src -> $dst"; return 0; fi
+  if [ -d "$dst" ] && diff -rq "$src" "$dst" >/dev/null 2>&1; then return 0; fi
+  rm -rf "$dst.new.$$" "$dst.old.$$"
+  if command -v ditto >/dev/null 2>&1; then ditto "$src" "$dst.new.$$"; else cp -R "$src" "$dst.new.$$"; fi
+  [ ! -d "$dst" ] || mv "$dst" "$dst.old.$$"
+  mv "$dst.new.$$" "$dst"
+  rm -rf "$dst.old.$$"
+  note "Pyre.app -> $(cat "$(r "$PREFIX/current/VERSION")" 2>/dev/null || echo current) ($dst)"
+}
+
 # swap_symlink TARGET LINK: atomically point LINK at TARGET (relative).
 swap_symlink() {
   local target=$1 link=$2 tmp

@@ -233,6 +233,14 @@ func (service Service) ConfigureWithMethod(ctx context.Context, name, connectorK
 		mergeSafeIdentity(identity, result.Data)
 	}
 	existing, existingErr := service.State.Connection(ctx, name)
+	if existingErr == nil && existing.Status == "removed" {
+		// A removed connection keeps its row (and name) as history; adding
+		// the name again replaces it with a fresh connection.
+		if err := service.State.PurgeRemovedConnection(ctx, name); err != nil {
+			return state.Connection{}, err
+		}
+		existing, existingErr = service.State.Connection(ctx, name)
+	}
 	if state.IsNotFound(existingErr) {
 		connection := state.Connection{ID: newID("con"), Name: name, ConnectorKey: connectorKey, SelectedMode: modeID, CredentialMethod: methodID, Status: "active", CredentialRef: candidateRef, SafeIdentity: identity}
 		for index := range discovered {
@@ -450,6 +458,10 @@ func (service Service) Remove(ctx context.Context, name string) error {
 	connection, err := service.State.Connection(ctx, name)
 	if err != nil {
 		return err
+	}
+	if connection.Status == "removed" {
+		// Already removed: drop the leftover row so the name is free.
+		return service.State.PurgeRemovedConnection(ctx, name)
 	}
 	cleanupID := newID("clean")
 	removed, cleanupCredential, err := service.State.RemoveConnection(ctx, name, connection.CredentialRef, cleanupID)

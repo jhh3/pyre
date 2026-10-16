@@ -1,8 +1,9 @@
  Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts             /pairing  ● live
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  STATUS       SESSION · 1 of 10       MACHINE      AGE  │ pairing session · ○ i…  ✉ message for you
-  No project 1 · 1 message                               │ read-only snapshot · MOCK backend: there…
-› ✉ message    pairing session         synth-mac    30s  │
+  STATUS       SESSION · 1 of 10       MACHINE      AGE  │ p…  typing elsewhere · enter to take over
+  No project 1                                           │ ✉ message for you: Synthet… — m reply · …
+› ✉ message    pairing session         synth-mac    30s  │ read-only snapshot · MOCK backend: there…
+                                                         │
                                                          │ [mock screen] pairing session — waiting_i
                                                          │ Working on it (synthetic).
                                                          │ >
@@ -22,9 +23,8 @@
                                                          │
                                                          │
                                                          │
-                                                         │
-                                                         │
-
- ✓ Nothing needs you · ✉ 1 message   ○ 1 idle
-
- n new session   enter type   F full-screen   m message   i info   / filter   ␣␣ find        ? help
+ ──────────────────────────────────────────────────────  │
+ ✓ Nothing needs you · ✉ 1 message   ○ 1 idle            │
+ n new session     enter type        F full-screen       │
+ m message         i info            / filter            │
+ ␣␣ find           ? keys                                │

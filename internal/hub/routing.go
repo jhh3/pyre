@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/jhh3/pyre/internal/contracts"
 )
@@ -12,13 +13,51 @@ import (
 
 var hubPrincipal = contracts.Principal{Kind: contracts.PrincipalSystem, ID: "hub"}
 
-// validateRecipient requires session recipients to exist.
+// validateRecipient requires session recipients to exist, and only
+// top-level sessions to message the owner (W-asks).
 func (h *Hub) validateRecipient(ctx context.Context, tx *sql.Tx, addr contracts.Address) error {
+	if addr.Kind == contracts.AddrOwner {
+		return h.checkOwnerSender(ctx, tx)
+	}
 	if addr.Kind != contracts.AddrSession {
 		return nil
 	}
 	_, err := h.getSession(ctx, tx, addr.ID)
 	return err
+}
+
+// checkOwnerSender refuses mail to the owner from a session that has a
+// parent: its parent decides what reaches the owner. The owner and system
+// principals are exempt.
+func (h *Hub) checkOwnerSender(ctx context.Context, tx *sql.Tx) error {
+	p, ok := contracts.PrincipalFrom(ctx)
+	if !ok {
+		return nil
+	}
+	if p.OnBehalfOf != nil {
+		p = *p.OnBehalfOf
+	}
+	if p.Kind != contracts.PrincipalSession {
+		return nil
+	}
+	s, err := h.getSession(ctx, tx, p.ID)
+	if err != nil {
+		if contracts.IsCode(err, contracts.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	parentID := s.Parent()
+	if parentID == "" {
+		return nil
+	}
+	name := parentID
+	if parent, err := h.getSession(ctx, tx, parentID); err == nil && parent.Title != "" {
+		name = fmt.Sprintf("%q (%s)", parent.Title, parentID)
+	}
+	return contracts.Errorf(contracts.ErrForbidden,
+		"only top-level sessions message the owner; send this to your parent %s (or use ask_owner from the top-level session)", name).
+		WithDetail("parent_session_id", parentID)
 }
 
 // routeStored queues a deliver command to the node running the recipient's

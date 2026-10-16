@@ -1,0 +1,30 @@
+ Pyre  [S Sessions 2] v sidenav · P Projects · M Machines · A Accounts · ● 2 asks                      anthropic 1 ready · 1 at limit   openai 0 ready   ● live
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  STATUS       SESSION                         MACHINE     HARNESS  AGE  │ coordinator · ● working · Claude on synth-mac · ambient login               needs you
+  Synthetic Outfit 8 · ● 2 asks · ◆ 1 waiting · • 1 new · ◌ 1 working    │ read-only snapshot · MOCK backend: there is no live terminal; showing transcript/scr…
+› ! needs you  coordinator ▾1         ● asks 2 synth-mac   claude   30s  │
+  ● working    └ migration work                synth-mac   claude   30s  │ [mock screen] coordinator — running
+▎ ○ idle       api work (handoff succes… • new synth-linux codex    now  │ Working on it (synthetic).
+  ○ idle       pairing session ▾2    ◆ waiting synth-mac   claude   30s  │ >
+  ! approval   ├ deploy prep                   synth-mac   claude   30s  │
+  ! needs you  └ worker                        synth-linux claude   30s  │
+  ○ idle       scratch (standalo… ▾1 ◌ working synth-mac   claude   30s  │
+  ● working    └ outfit API client             synth-linux claude   30s  │
+                                                                         │
+  No project 1                                                           │
+  ◌ stale      long refactor                   synth-linux claude    7m  │
+                                                                         │
+  machines  synth-linux ● 4 · synth-mac ● 5                              │
+  1 ended — . show                                                       │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+                                                                         │
+ ──────────────────────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ◆ coordinator   ⁇ worker                     │
+ n new session      enter type         F full-screen                     │
+ m message          i info             / filter                          │
+ ␣␣ find            ? keys                                               │

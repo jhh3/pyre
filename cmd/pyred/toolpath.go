@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // Harness tools are often installed by interactive-shell setup (user-local
@@ -29,7 +32,12 @@ func widenToolPath(ctx context.Context, explicit []string, log *slog.Logger) {
 		add = append(add, filepath.SplitList(v)...)
 	}
 	add = append(add, interactiveShellPath(ctx)...)
-	if home != "" {
+	if runtime.GOOS == "windows" {
+		// The registry PATH as it is now (tools installed after logon), then
+		// the well-known per-user/machine tool dirs (W-winport).
+		add = append(add, winenv.RegistryPath()...)
+		add = append(add, winenv.Default().ToolDirs()...)
+	} else if home != "" {
 		add = append(add,
 			filepath.Join(home, "homebrew", "bin"), "/opt/homebrew/bin", "/usr/local/bin",
 			filepath.Join(home, ".local", "bin"), filepath.Join(home, ".bun", "bin"),
@@ -53,7 +61,12 @@ func widenToolPath(ctx context.Context, explicit []string, log *slog.Logger) {
 		out = append(out, d)
 	}
 	os.Setenv("PATH", strings.Join(out, string(os.PathListSeparator)))
-	for _, tool := range []string{"tmux", "claude", "codex", "node"} {
+	tools := []string{"tmux", "claude", "codex", "node"}
+	if runtime.GOOS == "windows" {
+		tools = []string{"claude", "codex", "node", "npm", "npx", "git"}
+		windowsToolEnv(log)
+	}
+	for _, tool := range tools {
 		if p, err := exec.LookPath(tool); err == nil {
 			log.Info("tool found", "tool", tool, "path", p)
 		} else {
@@ -67,7 +80,7 @@ func widenToolPath(ctx context.Context, explicit []string, log *slog.Logger) {
 // prompt/integration output). Empty on failure.
 func interactiveShellPath(ctx context.Context) []string {
 	sh := os.Getenv("SHELL")
-	if sh == "" {
+	if sh == "" || runtime.GOOS == "windows" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -88,6 +101,26 @@ func interactiveShellPath(ctx context.Context) []string {
 		s = s[:j]
 	}
 	return filepath.SplitList(s)
+}
+
+// windowsToolEnv reports Git Bash and the VS Build Tools, and points
+// Claude Code at Git Bash (CLAUDE_CODE_GIT_BASH_PATH) when it is installed
+// somewhere Claude's own discovery may miss and the variable is unset.
+func windowsToolEnv(log *slog.Logger) {
+	we := winenv.Default()
+	if bash := we.GitBash(); bash != "" {
+		log.Info("tool found", "tool", "git-bash", "path", bash)
+		if os.Getenv("CLAUDE_CODE_GIT_BASH_PATH") == "" {
+			os.Setenv("CLAUDE_CODE_GIT_BASH_PATH", bash)
+		}
+	} else {
+		log.Warn("Git for Windows (bash.exe) not found: Claude Code falls back to PowerShell for its shell and hooks, and the Pyre doorbell monitor is disabled; install Git for Windows (winget install Git.Git)")
+	}
+	if vw := we.VSWhere(); vw != "" {
+		log.Info("tool found", "tool", "vswhere", "path", vw)
+	} else {
+		log.Info("Visual Studio Build Tools not found: native Node modules (node-gyp) cannot be built in sessions")
+	}
 }
 
 // nvmToolDirs returns nvm Node bin directories that contain codex or

@@ -113,7 +113,7 @@ func TestSwitchStepSkipsFoldedAndArchived(t *testing.T) {
 }
 
 // In the default project grouping alt+up/down follow the project groups
-// (most recently started project first, "No project" last) and skip a
+// (projects by name, "No project" last) and skip a
 // folded project.
 func TestSwitchStepFollowsProjectGroups(t *testing.T) {
 	at := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
@@ -133,18 +133,18 @@ func TestSwitchStepFollowsProjectGroups(t *testing.T) {
 	if m.GroupMode() != "project" {
 		t.Fatalf("default grouping %s", m.GroupMode())
 	}
-	want := []string{"ses_new2", "ses_new1", "ses_old1", "ses_old2", "ses_loose"} // by machine inside a project
+	want := []string{"ses_new1", "ses_new2", "ses_old1", "ses_old2", "ses_loose"} // projects by name, creation order inside
 	if !reflect.DeepEqual(m.sessList.ids, want) {
 		t.Fatalf("rows %v, want %v", m.sessList.ids, want)
 	}
-	m.sessList.selectID("ses_new1")
+	m.sessList.selectID("ses_new2")
 	m.onKey(KeyAlt(tea.KeyDown))
 	if m.sessList.sel != "ses_old1" {
 		t.Fatalf("alt+down into the next project: %s", m.sessList.sel)
 	}
 	m.grouping.collapsed = map[string]bool{"project:prj_old": true}
 	m.syncSessions()
-	m.sessList.selectID("ses_new1")
+	m.sessList.selectID("ses_new2")
 	m.onKey(KeyAlt(tea.KeyDown))
 	if m.sessList.sel != "ses_loose" {
 		t.Fatalf("alt+down over a folded project: %s (rows %v)", m.sessList.sel, m.sessList.ids)

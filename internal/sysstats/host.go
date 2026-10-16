@@ -2,7 +2,8 @@
 // memory pressure, disk) and per-run process-tree usage for node status
 // reports. It uses no cgo and no extra dependencies: Linux reads /proc and
 // statfs; macOS uses sysctl (syscall.Sysctl), statfs and, for what has no
-// sysctl, one bounded vm_stat/iostat/ps invocation per sample.
+// sysctl, one bounded vm_stat/iostat/ps invocation per sample; Windows
+// calls kernel32/ntdll directly (no WMI, no subprocess).
 //
 // Cost is bounded: one sample per call, at most one per MinInterval (cached
 // in between), and no goroutine per metric.
@@ -73,6 +74,8 @@ type Sampler struct {
 	// does: one trailing NUL may be trimmed).
 	Sysctl func(name string) ([]byte, error)
 	Statfs func(path string) (FSInfo, error)
+	// Win reads the Windows machine counters (sys_windows.go).
+	Win func() (WinRaw, error)
 	// AsyncCPU (macOS) takes the 1 s CPU sample in the background.
 	AsyncCPU bool
 
@@ -91,7 +94,7 @@ type Sampler struct {
 // filesystems.
 func NewSampler(paths ...PathRole) *Sampler {
 	return &Sampler{GOOS: runtime.GOOS, ProcRoot: "/proc", Paths: paths, MinInterval: 10 * time.Second,
-		Now: time.Now, NumCPU: runtime.NumCPU, Exec: execOut, Sysctl: sysctlRaw, Statfs: statfs, AsyncCPU: true}
+		Now: time.Now, NumCPU: runtime.NumCPU, Exec: execOut, Sysctl: sysctlRaw, Statfs: statfs, Win: winRaw, AsyncCPU: true}
 }
 
 // DefaultPaths is the home directory plus the Pyre data directory.
@@ -140,6 +143,8 @@ func (s *Sampler) Sample(ctx context.Context) Host {
 		s.sampleLinux(&h)
 	case "darwin":
 		s.sampleDarwin(ctx, &h)
+	case "windows":
+		s.sampleWindows(&h)
 	}
 	h.Disks = s.disks()
 	s.last, s.haveLast = h, true

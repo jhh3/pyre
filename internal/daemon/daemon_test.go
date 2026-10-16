@@ -117,16 +117,22 @@ func TestOrphanedLaunchIsNeverRelaunched(t *testing.T) {
 	dir := t.TempDir()
 	ad := &countingAdapter{RuntimeAdapter: mock.NewAdapter()}
 	n := startNode(t, dir, Config{Adapters: []contracts.RuntimeAdapter{ad}})
-	// Simulate a crash after the launching record committed but before
-	// adapter.Launch returned.
+	// Simulate a crash after the launching record committed and after the
+	// adapter was invoked (launch marker present), before Launch returned.
 	rec := runRecord{Session: contracts.Session{SessionID: "ses_o", Harness: contracts.HarnessMock}, Phase: phaseLaunching,
 		Run: contracts.Run{RunID: "run_o", SessionID: "ses_o", Adapter: "mock", Harness: contracts.HarnessMock, State: contracts.RunStarting}}
 	if err := sqlitex.Tx(context.Background(), n.db, func(tx *sql.Tx) error { return putRunTx(context.Background(), tx, rec, time.Now()) }); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(n.d.runDir("run_o"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLaunchMarker(n.d.runDir("run_o"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	n = n.restart()
 	got := n.run("run_o")
-	if got.Phase != phaseOrphaned || got.Run.State != contracts.RunUnknown {
+	if got.Phase != phaseOrphaned || got.Run.State != contracts.RunUnknown || got.Run.AdapterData[AdapterDataNoHandle] != "true" {
 		t.Fatalf("orphan = %+v %s", got.Run, got.Phase)
 	}
 	n.do(command(contracts.CmdStartRun, startCmd("ses_o", "run_o", contracts.HarnessMock, t.TempDir())))
@@ -139,6 +145,178 @@ func TestOrphanedLaunchIsNeverRelaunched(t *testing.T) {
 	if res.Error == nil || res.Error.Code != contracts.ErrConflict {
 		t.Fatalf("second run beside orphan = %+v", res)
 	}
+}
+
+// W-resilience: a launch interrupted before the adapter was invoked (no
+// marker, no process, no tmux session) is provably never started: it fails
+// with a relaunch hint, is never relaunched by Pyre, and an explicit resume
+// relaunches it fresh with the original prompt.
+func TestNeverStartedLaunchFailsAndRelaunches(t *testing.T) {
+	old := runProcessFound
+	runProcessFound = func(string) (bool, bool) { return false, true }
+	t.Cleanup(func() { runProcessFound = old })
+	dir := t.TempDir()
+	ad := &recordingAdapter{countingAdapter: countingAdapter{RuntimeAdapter: mock.NewAdapter()}}
+	n := startNode(t, dir, Config{Adapters: []contracts.RuntimeAdapter{ad}})
+	cwd := t.TempDir()
+	sc := startCmd("ses_n", "run_n", contracts.HarnessMock, cwd)
+	sc.InitialPrompt = "synthetic task prompt"
+	sc.Session.Lineage.ParentSessionID = "ses_parent"
+	// The launching record and spec as startRun commits them; then pyred dies
+	// before the launch goroutine reaches the adapter.
+	rec := runRecord{Session: sc.Session, Phase: phaseLaunching,
+		Run: contracts.Run{RunID: "run_n", SessionID: "ses_n", Adapter: "mock", Harness: contracts.HarnessMock, State: contracts.RunStarting, Cwd: cwd,
+			Capabilities: mock.AdapterCaps}}
+	if err := sqlitex.Tx(context.Background(), n.db, func(tx *sql.Tx) error {
+		if err := putRunTx(context.Background(), tx, rec, time.Now()); err != nil {
+			return err
+		}
+		return putLaunchSpecTx(context.Background(), tx, "run_n", sc, nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(n.d.runDir("run_n"), 0o700) // empty run dir, like server
+	n = n.restart()
+	got := n.run("run_n")
+	if got.Phase != phaseEnded || got.Run.State != contracts.RunFailed || got.Run.StateReason != NeverStartedReason ||
+		got.Run.AdapterData[AdapterDataNeverStarted] != "true" || got.Run.EndedAt == nil {
+		t.Fatalf("never started = %+v %s", got.Run, got.Phase)
+	}
+	var reported bool
+	for _, r := range n.rep.Reports(contracts.ReportRun) {
+		var run contracts.Run
+		_ = json.Unmarshal(r.Payload, &run)
+		if run.RunID == "run_n" && run.State == contracts.RunFailed {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Fatal("failed run not reported (child->parent report needs it)")
+	}
+	if ad.launches.Load() != 0 {
+		t.Fatal("never-started run relaunched automatically")
+	}
+	// A second restart leaves it alone.
+	n = n.restart()
+	if r := n.run("run_n"); r.Phase != phaseEnded {
+		t.Fatalf("after second restart: %s", r.Phase)
+	}
+	// Explicit relaunch (hub resume) with an empty prompt: same spec.
+	prev := got.Run
+	rc := contracts.ResumeCommand{StartRunCommand: contracts.StartRunCommand{Session: sc.Session, RunID: "run_n2", Cwd: cwd,
+		AccountPolicy: contracts.AccountPolicy{Mode: contracts.AccountEligible}, PreviousRun: &prev}}
+	res := n.do(command(contracts.CmdResume, rc))
+	if res.Error != nil {
+		t.Fatalf("relaunch: %+v", res.Error)
+	}
+	n.d.WaitLaunches()
+	if ad.launches.Load() != 1 || ad.last.InitialPrompt != "synthetic task prompt" || ad.last.Resume != nil {
+		t.Fatalf("relaunch launches=%d last=%+v", ad.launches.Load(), ad.last)
+	}
+	r2 := n.run("run_n2")
+	if r2.Run.PreviousRunID != "run_n" || r2.Run.ContinuationKind != contracts.ContinuationFresh || r2.Phase != phaseLive {
+		t.Fatalf("relaunched run = %+v %s", r2.Run, r2.Phase)
+	}
+	if _, ok := n.d.launchSpecOf(context.Background(), "run_n"); ok {
+		t.Fatal("spec of the relaunched run kept")
+	}
+	if _, ok := n.d.launchSpecOf(context.Background(), "run_n2"); ok {
+		t.Fatal("spec kept after the handle was recorded")
+	}
+}
+
+// W-resilience: an interrupted launch whose process exists is adopted.
+func TestInterruptedLaunchWithLiveProcessIsAdopted(t *testing.T) {
+	dir := t.TempDir()
+	ad := &countingAdapter{RuntimeAdapter: mock.NewAdapter()}
+	n := startNode(t, dir, Config{Adapters: []contracts.RuntimeAdapter{ad}})
+	n.start(startCmd("ses_l", "run_l", contracts.HarnessMock, t.TempDir()))
+	// Pretend the handle never got recorded.
+	rec := n.run("run_l")
+	rec.Phase, rec.Handle = phaseLaunching, nil
+	n.stop()
+	db, err := sqlitex.Open(filepath.Join(dir, "pyred.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlitex.Tx(context.Background(), db, func(tx *sql.Tx) error { return putRunTx(context.Background(), tx, rec, time.Now()) }); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	cfg := n.cfg
+	cfg.DB, cfg.Reporter = nil, nil
+	n = startNode(t, dir, cfg)
+	got := n.run("run_l")
+	if got.Phase != phaseLive || got.Handle == nil || got.Run.State.Terminal() {
+		t.Fatalf("adopted = %+v %s", got.Run, got.Phase)
+	}
+	if ad.launches.Load() != 1 {
+		t.Fatalf("launches = %d", ad.launches.Load())
+	}
+}
+
+// W-resilience: shutdown refuses new launches and waits (bounded) for
+// in-flight ones to record their handle.
+func TestDrainWaitsForInflightLaunch(t *testing.T) {
+	gate := make(chan struct{})
+	ad := &blockingAdapter{RuntimeAdapter: mock.NewAdapter(), gate: gate}
+	n := startNode(t, t.TempDir(), Config{Adapters: []contracts.RuntimeAdapter{ad}, ShutdownGrace: 2 * time.Second})
+	if res := n.do(command(contracts.CmdStartRun, startCmd("ses_d", "run_d", contracts.HarnessMock, t.TempDir()))); res.Error != nil {
+		t.Fatal(res.Error)
+	}
+	if left := n.d.Drain(50 * time.Millisecond); left != 1 {
+		t.Fatalf("in flight = %d, want 1", left)
+	}
+	res := n.do(command(contracts.CmdStartRun, startCmd("ses_d2", "run_d2", contracts.HarnessMock, t.TempDir())))
+	if res.Error == nil || res.Error.Code != contracts.ErrUnavailable {
+		t.Fatalf("launch during drain = %+v", res)
+	}
+	go func() { time.Sleep(100 * time.Millisecond); close(gate) }()
+	start := time.Now()
+	if left := n.d.Drain(2 * time.Second); left != 0 {
+		t.Fatalf("still in flight = %d", left)
+	}
+	if time.Since(start) > 1500*time.Millisecond {
+		t.Fatal("drain did not return when the launch finished")
+	}
+	if r := n.run("run_d"); r.Phase != phaseLive || r.Handle == nil {
+		t.Fatalf("drained launch = %+v %s", r.Run, r.Phase)
+	}
+}
+
+// W-resilience: a launch stuck past the grace period does not block Close.
+func TestCloseGivesUpOnStuckLaunch(t *testing.T) {
+	gate := make(chan struct{})
+	defer close(gate)
+	ad := &blockingAdapter{RuntimeAdapter: mock.NewAdapter(), gate: gate}
+	n := startNode(t, t.TempDir(), Config{Adapters: []contracts.RuntimeAdapter{ad}, ShutdownGrace: 100 * time.Millisecond})
+	n.do(command(contracts.CmdStartRun, startCmd("ses_s", "run_s", contracts.HarnessMock, t.TempDir())))
+	start := time.Now()
+	n.d.Close()
+	n.d = nil
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("Close blocked on a stuck launch")
+	}
+}
+
+type blockingAdapter struct {
+	contracts.RuntimeAdapter
+	gate chan struct{}
+}
+
+func (b *blockingAdapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contracts.RunHandle, error) {
+	<-b.gate
+	return b.RuntimeAdapter.Launch(ctx, l)
+}
+
+type recordingAdapter struct {
+	countingAdapter
+	last contracts.ResolvedLaunch
+}
+
+func (r *recordingAdapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contracts.RunHandle, error) {
+	r.last = l
+	return r.countingAdapter.Launch(ctx, l)
 }
 
 func TestDeliverHumanLeaseBlocksPaste(t *testing.T) {
@@ -325,6 +503,7 @@ func TestApprovalsAnswerAndLimitFallback(t *testing.T) {
 	// Limit event -> fallback plan via the (ambient) account resolver.
 	ma.InjectLimit("run_p", "usage_limit")
 	n.d.PollNow(context.Background(), "run_p")
+	n.d.WaitLaunches() // the fallback is planned outside the poll
 	fb := n.rep.Reports(contracts.ReportFallback)
 	if len(fb) != 1 {
 		t.Fatalf("fallback reports = %d", len(fb))

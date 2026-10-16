@@ -32,34 +32,12 @@ const MonitorDescription = "New Pyre messages for this session"
 
 // Generate writes the plugin into dir (created 0700) with one monitor
 // running monitorCommand, a shell command line (quote it with
-// tmux.ShellJoin). It returns dir.
+// tmux.ShellJoin). It returns dir. Write also adds the delivery module.
 func Generate(dir, monitorCommand string) (string, error) {
 	if monitorCommand == "" {
 		return "", fmt.Errorf("claudeplugin: empty monitor command")
 	}
-	for _, d := range []string{dir, filepath.Join(dir, ".claude-plugin"), filepath.Join(dir, "monitors")} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return "", err
-		}
-	}
-	manifest := map[string]any{
-		"name":        Name,
-		"version":     "1.0.0",
-		"description": "Pyre session doorbell: notifies the agent when Pyre messages arrive (generated per run; do not edit)",
-		"author":      map[string]string{"name": "Pyre"},
-	}
-	monitors := []map[string]string{{
-		"name":        MonitorName,
-		"command":     monitorCommand,
-		"description": MonitorDescription,
-	}}
-	if err := writeJSON(filepath.Join(dir, ".claude-plugin", "plugin.json"), manifest); err != nil {
-		return "", err
-	}
-	if err := writeJSON(filepath.Join(dir, "monitors", "monitors.json"), monitors); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return Write(dir, Spec{MonitorCommand: monitorCommand})
 }
 
 func writeJSON(path string, v any) error {

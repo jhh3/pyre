@@ -9,7 +9,7 @@ const Namespace = "attention"
 // shared operations table used for idempotent mutations. Pass them to
 // sqlitex.Migrate (NewStore does this itself).
 func Migrations() []sqlitex.Migration {
-	return []sqlitex.Migration{sqlitex.OperationsMigration, migration1}
+	return []sqlitex.Migration{sqlitex.OperationsMigration, migration1, migration2}
 }
 
 var migration1 = sqlitex.Migration{Namespace: Namespace, Version: 1, Name: "attention inbox", SQL: `
@@ -97,4 +97,18 @@ CREATE TABLE attention_notify (
 	PRIMARY KEY (attention_id, seq, action)
 );
 CREATE INDEX attention_notify_due ON attention_notify(done, next_attempt_at);
+`}
+
+// migration2: the sessions behind a grouped item (one "N launches waiting
+// for the reset" item per provider). Rows of items that are no longer
+// active are pruned by PruneMembers.
+var migration2 = sqlitex.Migration{Namespace: Namespace, Version: 2, Name: "attention group members", SQL: `
+CREATE TABLE attention_members (
+	attention_id TEXT NOT NULL,
+	session_id   TEXT NOT NULL,
+	label        TEXT NOT NULL DEFAULT '',
+	added_at     TEXT NOT NULL,
+	PRIMARY KEY (attention_id, session_id)
+);
+CREATE INDEX attention_members_session ON attention_members(session_id);
 `}

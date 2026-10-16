@@ -189,3 +189,128 @@ type ReposAPI interface {
 	ListRepos(ctx context.Context, req ListReposRequest) (RepoList, error)
 	SessionWorktrees(ctx context.Context, req SessionWorktreesRequest) (SessionWorktrees, error)
 }
+
+// ---- Global repo catalog and clone-on-demand (additive, W-newsession) ----
+//
+// The catalog merges every node's repo index with the owner's GitHub
+// repositories into one list, deduplicated by normalized remote (ssh and
+// https forms of one repository are one entry), ranked: used in Pyre
+// recently > contributed to on GitHub recently > present on a machine >
+// the rest. GitHub data comes from the gh CLI's own authentication on a
+// node (Pyre stores no GitHub token): a node with an authenticated gh
+// refreshes hourly and reports a replaceable GitHubRepoIndex; the hub keeps
+// the latest per node. A machine that lacks a chosen repository clones it
+// first (repo.clone) into its primary repo root, laid out like the
+// repositories already there; an existing directory is never overwritten.
+const (
+	// OpRepoCatalog lists the merged catalog (RepoCatalogRequest -> RepoCatalog).
+	OpRepoCatalog = "repos.catalog"
+	// ReportGitHubRepos carries a node's GitHubRepoIndex (replaceable per node).
+	ReportGitHubRepos ReportKind = "github_repos"
+	// ActionRepoClone clones a repository onto the node (RepoCloneParams ->
+	// RepoCloneResult); asynchronous on the node, idempotent per destination.
+	ActionRepoClone = "repo.clone"
+	// ActionGitHubRefresh refetches the owner's GitHub repositories through
+	// the node's gh CLI now and reports them ({} -> GitHubRepoIndex).
+	ActionGitHubRefresh = "repos.github"
+)
+
+// GitHubRepo is one repository GitHub lists for the owner (their own,
+// collaborator and organization repositories, plus repositories they
+// recently committed or opened pull requests to).
+type GitHubRepo struct {
+	FullName      string    `json:"full_name"`         // owner/name
+	CloneURL      string    `json:"clone_url"`         // https
+	SSHURL        string    `json:"ssh_url,omitempty"` // git@github.com:owner/name.git
+	Description   string    `json:"description,omitempty"`
+	DefaultBranch string    `json:"default_branch,omitempty"`
+	Private       bool      `json:"private,omitempty"`
+	Fork          bool      `json:"fork,omitempty"`
+	Archived      bool      `json:"archived,omitempty"`
+	PushedAt      time.Time `json:"pushed_at,omitempty"`
+	// ContributedAt is the owner's latest commit, push or pull request seen
+	// in GitHub's commit search and the owner's recent events.
+	ContributedAt *time.Time `json:"contributed_at,omitempty"`
+}
+
+// GitHubRepoIndex is a node's GitHub snapshot (ReportGitHubRepos payload).
+type GitHubRepoIndex struct {
+	NodeID    string       `json:"node_id,omitempty"`
+	Login     string       `json:"login"`
+	Repos     []GitHubRepo `json:"repos"`
+	FetchedAt time.Time    `json:"fetched_at"`
+	Truncated bool         `json:"truncated,omitempty"`
+}
+
+type RepoCatalogRequest struct {
+	Query string `json:"query,omitempty"` // fuzzy over name, owner/name, remote and path
+	Limit int    `json:"limit,omitempty"` // default 200, max 2000
+}
+
+// Catalog ranks (CatalogRepo.Rank).
+const (
+	CatalogRankOther       = 0
+	CatalogRankLocal       = 1 // checked out on a machine
+	CatalogRankContributed = 2 // the owner contributed on GitHub recently
+	CatalogRankUsed        = 3 // a Pyre session ran in it
+)
+
+// CatalogRepo is one repository across the fleet and GitHub.
+type CatalogRepo struct {
+	// Key is the normalized remote ("remote:github.com/owner/name"), or
+	// "name:<dir>" for a repository without a remote (RepoKey).
+	Key         string `json:"key"`
+	Name        string `json:"name"`                // directory/repository name
+	FullName    string `json:"full_name,omitempty"` // owner/name when known
+	RemoteURL   string `json:"remote_url,omitempty"`
+	Description string `json:"description,omitempty"`
+	Private     bool   `json:"private,omitempty"`
+	Archived    bool   `json:"archived,omitempty"`
+	// Present lists the checkouts on machines, best first.
+	Present       []RepoEntry `json:"present"`
+	GitHub        bool        `json:"github,omitempty"` // listed by GitHub for the owner
+	LastUsedAt    *time.Time  `json:"last_used_at,omitempty"`
+	ContributedAt *time.Time  `json:"contributed_at,omitempty"`
+	PushedAt      *time.Time  `json:"pushed_at,omitempty"`
+	LastActivity  time.Time   `json:"last_activity,omitempty"` // newest local git activity
+	Rank          int         `json:"rank"`
+	Score         int         `json:"score,omitempty"`
+}
+
+// GitHubSource says where the catalog's GitHub part came from.
+type GitHubSource struct {
+	Login     string    `json:"login"`
+	NodeID    string    `json:"node_id"`
+	FetchedAt time.Time `json:"fetched_at"`
+}
+
+type RepoCatalog struct {
+	Items []CatalogRepo `json:"items"`
+	// Nodes maps node ID to when its repo index was last reported.
+	Nodes  map[string]time.Time `json:"nodes"`
+	GitHub *GitHubSource        `json:"github,omitempty"` // nil: no node has reported GitHub repositories
+}
+
+// RepoCloneParams: Remote is a clone URL (ssh or https) or GitHub
+// "owner/name". Dest defaults to the node's primary repo root, laid out
+// like the repositories already there (<root>/<owner>/<name> or
+// <root>/<name>); an explicit Dest must be inside the node's home.
+type RepoCloneParams struct {
+	Remote string `json:"remote"`
+	Dest   string `json:"dest,omitempty"`
+}
+
+type RepoCloneResult struct {
+	Path   string `json:"path"`
+	Remote string `json:"remote"`
+	// Cloned is false when Path already held a checkout of the same
+	// repository (nothing was changed).
+	Cloned bool `json:"cloned"`
+	Repo   Repo `json:"repo"`
+}
+
+// RepoCatalogAPI is implemented by hubs, the mock backend, the client and
+// the node-local API (older hubs answer 404: unsupported).
+type RepoCatalogAPI interface {
+	RepoCatalog(ctx context.Context, req RepoCatalogRequest) (RepoCatalog, error)
+}

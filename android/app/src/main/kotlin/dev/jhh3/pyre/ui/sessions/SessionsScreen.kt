@@ -47,17 +47,24 @@ import androidx.lifecycle.viewModelScope
 import dev.jhh3.pyre.R
 import dev.jhh3.pyre.core.Clock
 import dev.jhh3.pyre.core.Ids
+import dev.jhh3.pyre.core.Times
 import dev.jhh3.pyre.data.Load
 import dev.jhh3.pyre.data.LocalSettings
 import dev.jhh3.pyre.data.Repository
+import dev.jhh3.pyre.data.valueOrNull
 import dev.jhh3.pyre.digest.Digest
 import dev.jhh3.pyre.digest.DigestFetcher
 import dev.jhh3.pyre.digest.LastSeen
 import dev.jhh3.pyre.digest.LastSeenStore
 import dev.jhh3.pyre.domain.Flags
+import dev.jhh3.pyre.domain.LeadKind
+import dev.jhh3.pyre.domain.LeadSignal
+import dev.jhh3.pyre.domain.Leads
 import dev.jhh3.pyre.domain.Pins
 import dev.jhh3.pyre.domain.Status
 import dev.jhh3.pyre.domain.Tone
+import dev.jhh3.pyre.model.Ask
+import dev.jhh3.pyre.model.AskState
 import dev.jhh3.pyre.model.ConnectionState
 import dev.jhh3.pyre.model.Node
 import dev.jhh3.pyre.model.SessionView
@@ -113,6 +120,8 @@ data class SessionsUi(
     val endedHidden: Int = 0,
     /** "While you were away" digest; null when not loaded, dismissed or empty. */
     val digest: Digest? = null,
+    /** Lead signals by lead session id (domain/Leads); a session without an entry is not a lead. */
+    val leads: Map<String, LeadSignal> = emptyMap(),
 )
 
 class SessionsViewModel(
@@ -131,6 +140,39 @@ class SessionsViewModel(
     )
     val ui: StateFlow<SessionsUi> = _ui.asStateFlow()
     private var all: List<SessionView> = emptyList()
+    private var openAsks: List<Ask> = emptyList()
+
+    /** Lead signals over the loaded sessions and open asks, with this app's "opened" times. */
+    private fun leads(): Map<String, LeadSignal> {
+        val prefs = settings?.prefs?.value
+        val since = Times.parse(prefs?.leadSeenSince) ?: firstLook.also { t ->
+            // The first launch with lead signals: nothing that finished earlier is new.
+            settings?.update { it.copy(leadSeenSince = t.toString()) }
+        }
+        val seen = prefs?.leadSeen.orEmpty().mapNotNull { (k, v) -> Times.parse(v)?.let { k to it } }.toMap() + localSeen
+        return Leads.signals(all, openAsks, seen, since)
+    }
+
+    /** This model's start: the seen baseline without settings. */
+    private val firstLook: Instant = clock.now()
+
+    /** Opened sessions, for a model without settings (tests). */
+    private val localSeen = HashMap<String, Instant>()
+
+    /**
+     * Records that the owner opened [id] (its lead loses "new"). Bounded:
+     * archived sessions go, then the oldest beyond Leads.SEEN_MAX.
+     */
+    fun markSeen(id: String) {
+        val now = clock.now()
+        if (settings == null) localSeen[id] = now
+        val archived = all.filter { it.session.archived }.map { it.session.sessionId }.toSet()
+        settings?.update { p ->
+            val next = (p.leadSeen + (id to now.toString())).filterKeys { it !in archived }
+            p.copy(leadSeen = next.entries.sortedByDescending { it.value }.take(Leads.SEEN_MAX).associate { it.key to it.value })
+        }
+        _ui.value = _ui.value.copy(leads = leads())
+    }
 
     init {
         refresh()
@@ -194,6 +236,7 @@ class SessionsViewModel(
         val projects = (repo.projects() as? Load.Ready)?.value.orEmpty().associate { it.projectId to it.name.ifEmpty { it.projectId } }
         val g = _ui.value.grouping
         val showEnded = _ui.value.showEnded
+        openAsks = if (repo.asksSupported()) repo.asks("open", listOf(AskState.OPEN)).valueOrNull().orEmpty() else emptyList()
         _ui.value = when (sessions) {
             is Load.Ready -> {
                 all = sessions.value
@@ -213,6 +256,7 @@ class SessionsViewModel(
                     showEnded = showEnded,
                     endedHidden = if (showEnded) 0 else hiddenEnded(all),
                     digest = _ui.value.digest,
+                    leads = leads(),
                 )
             }
             is Load.Failed -> SessionsUi(loading = false, refreshing = _ui.value.refreshing, error = sessions.error.describe(), now = clock.now(), grouping = g, showEnded = showEnded, digest = _ui.value.digest)
@@ -339,7 +383,9 @@ fun SessionsScreen(
                 }
                 item(key = "grouping") { GroupingBar(ui, vm::setGrouping) }
                 ui.groups.forEach { g ->
-                    item(key = "h_" + g.nodeId) { GroupHeader(g, ui.now, onOpenMachine) }
+                    // A project header sums its leads (the TUI's project header); quiet when they all are.
+                    val summary = if (ui.grouping == Grouping.PROJECT && !g.pinned) Leads.summary(g.sessions.mapNotNull { ui.leads[it.session.sessionId] }) else null
+                    item(key = "h_" + g.nodeId) { GroupHeader(g, ui.now, onOpenMachine, summary) }
                     items(g.sessions, key = { it.session.sessionId }) { s ->
                         SessionRow(
                             s,
@@ -347,7 +393,11 @@ fun SessionsScreen(
                             ui.now,
                             showMachine = ui.grouping != Grouping.MACHINE || g.pinned,
                             onTogglePin = { vm.togglePin(s) },
-                        ) { onOpen(s.session.sessionId) }
+                            lead = ui.leads[s.session.sessionId],
+                        ) {
+                            vm.markSeen(s.session.sessionId)
+                            onOpen(s.session.sessionId)
+                        }
                     }
                 }
                 if (ui.endedHidden > 0 || ui.showEnded) {
@@ -415,9 +465,13 @@ private fun EndedToggle(hidden: Int, shown: Boolean, onToggle: () -> Unit) {
     }
 }
 
-/** Group name and count; a machine group adds a status dot and word, and an unhealthy machine says when it was last seen. */
+/**
+ * Group name and count; a machine group adds a status dot and word, and an
+ * unhealthy machine says when it was last seen. A project group's [summary]
+ * sums its leads ("● 2 asks · ◆ 1 waiting · • 1 new"); "" reads quiet (dim name).
+ */
 @Composable
-private fun GroupHeader(g: NodeGroup, now: Instant, onOpenMachine: (String) -> Unit) {
+private fun GroupHeader(g: NodeGroup, now: Instant, onOpenMachine: (String) -> Unit, summary: String? = null) {
     val node = g.node
     Column(
         Modifier.fillMaxWidth()
@@ -425,10 +479,11 @@ private fun GroupHeader(g: NodeGroup, now: Instant, onOpenMachine: (String) -> U
             .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 32.dp)) {
+            val quiet = summary != null && summary.isEmpty()
             Text(
                 g.title,
                 style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (quiet) 0.6f else 1f),
                 modifier = Modifier.weight(1f, fill = false).semantics { heading() },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -441,6 +496,16 @@ private fun GroupHeader(g: NodeGroup, now: Instant, onOpenMachine: (String) -> U
             )
             node?.let { StatusChip(Status.node(it, now)) }
         }
+        if (!summary.isNullOrEmpty()) {
+            Text(
+                summary,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag("lead-summary-" + g.nodeId),
+            )
+        }
         if (node != null && node.connection.state != ConnectionState.CONNECTED) {
             Supporting(Status.node(node, now).detail.replaceFirstChar { it.uppercase() })
         }
@@ -451,7 +516,10 @@ private fun GroupHeader(g: NodeGroup, now: Instant, onOpenMachine: (String) -> U
  * One row per session: dot · title (a small pin when pinned) · its
  * attention flag ("! needs you · approval" amber, "✉ message" accent) or
  * status word · harness · machine (outside machine grouping) · age. A long
- * press offers Pin / Unpin.
+ * press offers Pin / Unpin. A lead ([lead] non-null) carries its signal as a
+ * chip at the end of the title line ("● asks 2", "◆ waiting", "• new",
+ * "◌ working"), left out when the row itself already says it; a quiet lead's
+ * title is dim.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -461,12 +529,14 @@ fun SessionRow(
     now: Instant,
     showMachine: Boolean = false,
     onTogglePin: (() -> Unit)? = null,
+    lead: LeadSignal? = null,
     onClick: () -> Unit,
 ) {
     val status = Status.row(s, node, now)
     val level = Flags.of(s).first
-    val needsYou = level == Flags.NEEDS_YOU
+    val needsYou = Flags.needsYou(s) && level == Flags.NEEDS_YOU
     val hasMessage = level == Flags.MESSAGE
+    val history = Flags.history(s) // an ended session's failure: shown, not counted
     val pinned = Pins.isPinned(s)
     var menu by remember { mutableStateOf(false) }
     Box {
@@ -487,13 +557,18 @@ fun SessionRow(
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                val quietLead = lead != null && lead.kind == LeadKind.QUIET
+                // The row's own status already says "working" / "needs you" for the lead itself.
+                val redundant = lead != null && ((lead.kind == LeadKind.WORKING && Leads.working(s)) || (lead.kind == LeadKind.WAITING && Flags.needsYou(s)))
+                val chip = if (lead != null && !redundant) lead.chip else ""
                 Text(
-                    s.session.title.ifEmpty { s.session.sessionId },
+                    (if (s.session.icon.isNotEmpty()) s.session.icon + " " else "") + s.session.title.ifEmpty { s.session.sessionId },
                     style = MaterialTheme.typography.bodyLarge,
+                    color = if (quietLead) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurface,
                     fontWeight = if (needsYou || hasMessage) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier.weight(1f, fill = chip.isNotEmpty()),
                 )
                 if (pinned) {
                     Spacer(Modifier.width(6.dp))
@@ -504,16 +579,36 @@ fun SessionRow(
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                if (lead != null && chip.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        chip,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = when (lead.kind) {
+                            LeadKind.ASKS -> MaterialTheme.colorScheme.error
+                            LeadKind.WAITING -> toneColor(Tone.ATTENTION)
+                            LeadKind.NEW -> MaterialTheme.colorScheme.tertiary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        fontWeight = if (lead.kind >= LeadKind.WAITING) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                        modifier = Modifier.testTag("lead-chip-${s.session.sessionId}"),
+                    )
+                }
             }
             val emphasize = status.tone == Tone.ATTENTION || status.tone == Tone.ERROR
             val wordColor = if (emphasize) toneColor(status.tone) else MaterialTheme.colorScheme.onSurfaceVariant
-            val flagColor = if (needsYou) toneColor(Tone.ATTENTION) else MaterialTheme.colorScheme.tertiary
+            val flagColor = when {
+                needsYou -> toneColor(Tone.ATTENTION)
+                history -> toneColor(Tone.ERROR)
+                else -> MaterialTheme.colorScheme.tertiary
+            }
             val machine = if (showMachine) s.nodeName.ifEmpty { node?.name ?: s.run?.nodeId.orEmpty() }.let { n ->
                 if (n.isNotEmpty() && node != null && node.connection.state != ConnectionState.CONNECTED) "$n (" + Status.node(node, now).label.lowercase() + ")" else n
             } else ""
             Text(
                 buildAnnotatedString {
-                    if (needsYou || hasMessage) {
+                    if (needsYou || hasMessage || history) {
                         withStyle(SpanStyle(color = flagColor, fontWeight = FontWeight.SemiBold)) { append(Flags.label(s)) }
                         append(" · ")
                     }

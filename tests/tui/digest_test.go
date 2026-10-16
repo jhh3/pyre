@@ -62,8 +62,8 @@ func TestDigestPanelOnLaunch(t *testing.T) {
 	if !h.Contains("While you were away: 5 agents, 2 need you — :digest shows it") {
 		t.Fatalf("launch toast missing:\n%s", h.View())
 	}
-	if strings.Contains(h.View(), "Inbox") {
-		t.Fatalf("there is no Inbox view any more:\n%s", h.View())
+	if strings.Contains(h.View(), "› Inbox") {
+		t.Fatalf("the digest opens at launch, not the Inbox (W-inbox):\n%s", h.View())
 	}
 	openDigest(h)
 	v := h.View()

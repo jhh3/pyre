@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/transport"
 )
 
@@ -87,7 +86,7 @@ func LoadClientCredential(path string) (ClientCredentialFile, error) {
 }
 
 func saveSecretJSON(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := fileperm.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("enrollment: create credential dir: %w", err)
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
@@ -98,7 +97,7 @@ func saveSecretJSON(path string, v any) error {
 }
 
 func loadSecretJSON(path string, v any) error {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := fileperm.OpenNoFollow(path)
 	if err != nil {
 		return fmt.Errorf("enrollment: open credential file: %w", err)
 	}
@@ -110,11 +109,11 @@ func loadSecretJSON(path string, v any) error {
 	if !st.Mode().IsRegular() {
 		return fmt.Errorf("enrollment: credential file %s is not a regular file", path)
 	}
-	if perm := st.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("enrollment: refusing to read credential file %s with mode %04o (readable by others); run `chmod 600 %s` and consider revoking and re-enrolling", path, perm, path)
+	if desc, bad := fileperm.Exposed(path, st); bad {
+		return fmt.Errorf("enrollment: refusing to read credential file %s with %s (readable by others); %s and consider revoking and re-enrolling", path, desc, fileperm.FixHint(path, false))
 	}
-	if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Getuid() {
-		return fmt.Errorf("enrollment: credential file %s is owned by uid %d, not the current user", path, sys.Uid)
+	if owner, bad := fileperm.ForeignOwner(path, st); bad {
+		return fmt.Errorf("enrollment: credential file %s is owned by %s, not the current user", path, owner)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {

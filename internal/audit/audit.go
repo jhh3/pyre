@@ -161,6 +161,10 @@ func Summarize(e contracts.AuditEntry) string {
 		return fmt.Sprintf("switched %s from %s to %s", title, withNote(orID(e.From, e.FromAccountID), e.FromNote),
 			withNote(orID(e.To, e.ToAccountID), e.ToNote)) + " — " + ShortReason(e.Reason)
 	case contracts.AuditAccountWaiting:
+		if e.To == "switching paused" {
+			return fmt.Sprintf("%s hit a limit on %s again soon after a switch; automatic account switching paused (needs you)", title,
+				withNote(orID(e.From, e.FromAccountID), e.FromNote)) + because(e.Reason)
+		}
 		s := fmt.Sprintf("%s hit a limit on %s; no other account is eligible", title, withNote(orID(e.From, e.FromAccountID), e.FromNote))
 		if e.To != "" {
 			s += " (" + e.To + ")"
@@ -222,9 +226,18 @@ func Summarize(e contracts.AuditEntry) string {
 		}
 		return s + By(e.Actor)
 	case contracts.AuditSessionArchived:
-		return "archived " + title + By(e.Actor)
+		return "archived " + title + By(e.Actor) + because(e.Reason)
+	case contracts.AuditSessionArchiveScheduled:
+		return title + " will be archived when its turn ends" + By(e.Actor)
+	case contracts.AuditSessionArchiveCanceled:
+		return "canceled the scheduled archive of " + title + By(e.Actor)
 	case contracts.AuditSessionUnarchived:
 		return "unarchived " + title + By(e.Actor)
+	case contracts.AuditSessionIconSet:
+		if e.To == "" {
+			return "cleared the icon of " + title + By(e.Actor)
+		}
+		return "set the icon of " + title + " to " + e.To + By(e.Actor)
 	case contracts.AuditSessionRenamed:
 		return fmt.Sprintf("renamed %s to %s", quote(e.From), quote(e.To)) + By(e.Actor)
 	case contracts.AuditSessionAutoTitled:
@@ -238,6 +251,11 @@ func Summarize(e contracts.AuditEntry) string {
 			s += " from " + e.From
 		}
 		return s + By(e.Actor)
+	case contracts.AuditSessionReparented: // W-reparent; Reason: from "A" to "B"
+		if e.Reason != "" {
+			return "moved " + title + " " + e.Reason + By(e.Actor)
+		}
+		return fmt.Sprintf("moved %s from %s to %s", title, orDash(e.From), orDash(e.To)) + By(e.Actor)
 	case contracts.AuditSessionReportedToParent:
 		s := title + " reported to its parent"
 		if e.To != "" {
@@ -270,6 +288,8 @@ func Summarize(e contracts.AuditEntry) string {
 		return s
 	case contracts.AuditNodeExitConfirmed:
 		return "confirmed Claude's exit dialog while stopping " + title + " (background tasks stopped)"
+	case contracts.AuditNodeCapacityRetry:
+		return "continued " + title + " after the model was at capacity" + because(e.Reason)
 	}
 	s := e.Action
 	if e.SessionTitle != "" {

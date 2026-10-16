@@ -16,14 +16,19 @@ import (
 	"unicode"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/header"
 )
 
 // Message is one inbox entry the agent should be told about. It never
 // carries the body.
 type Message struct {
 	ID     string
-	Sender string
+	Sender string // "<kind>:<title or id>"
+	SentAt time.Time
 	Cursor int64
+	// Reminder marks a re-notification of mail the agent was already told
+	// about; reminders ring as one summary line, at most once per message.
+	Reminder bool
 }
 
 // Source is where the watcher learns about mail.
@@ -53,7 +58,10 @@ type WatchOptions struct {
 	// the paste path (idle, unattached) claim it first (default 3s).
 	Grace time.Duration
 	// Remind re-notifies mail that is still unread this long after its
-	// notification (default 10m; negative disables).
+	// notification, once, as a summary line (default 10m; negative
+	// disables). After pyred comes back from a restart (polls failed, then
+	// succeed) still-unread notified mail is reminded at once, so a restart
+	// produces one summary line instead of a pasted backlog (W-delivery).
 	Remind time.Duration
 	// PollWait is the long-poll duration (default 50s).
 	PollWait time.Duration
@@ -100,6 +108,7 @@ var ErrSessionGone = errors.New("inbox-watch: session process gone")
 type watchState struct {
 	Cursor   int64            `json:"cursor"`
 	Notified map[string]int64 `json:"notified"` // message id -> unix time of last notification
+	Reminded map[string]bool  `json:"reminded,omitempty"`
 }
 
 type pendingMsg struct {
@@ -143,13 +152,25 @@ func Watch(ctx context.Context, src Source, o WatchOptions) error {
 				if _, seen := w.pending[m.ID]; seen {
 					continue
 				}
-				if t, done := w.st.Notified[m.ID]; done && (w.o.Remind < 0 || now.Sub(time.Unix(t, 0)) < w.o.Remind) {
-					continue
+				if _, done := w.st.Notified[m.ID]; done && !m.Reminder {
+					continue // already told; only a due reminder re-rings
 				}
 				w.pending[m.ID] = &pendingMsg{msg: m, firstSeen: now}
 			}
 			w.mu.Unlock()
 		case <-tick.C:
+			// pyred parked announced mail instead of pasting it: one
+			// summary line for what is still unread (W-delivery2).
+			if ids := takeReminders(w.o.RunDir); len(ids) > 0 {
+				now := w.o.Now()
+				w.mu.Lock()
+				for _, id := range ids {
+					if _, seen := w.pending[id]; !seen {
+						w.pending[id] = &pendingMsg{msg: Message{ID: id, Reminder: true}, firstSeen: now.Add(-w.o.Grace)}
+					}
+				}
+				w.mu.Unlock()
+			}
 			if w.o.Alive != nil && time.Since(lastAlive) >= w.o.AliveEvery {
 				lastAlive = time.Now()
 				if !w.o.Alive() {
@@ -166,6 +187,7 @@ func Watch(ctx context.Context, src Source, o WatchOptions) error {
 
 func (w *watcher) pollLoop(ctx context.Context, out chan<- []Message) {
 	backoff := time.Second
+	failed := false
 	for ctx.Err() == nil {
 		w.mu.Lock()
 		cur := w.st.Cursor
@@ -184,9 +206,12 @@ func (w *watcher) pollLoop(ctx context.Context, out chan<- []Message) {
 			if backoff < 30*time.Second {
 				backoff *= 2
 			}
+			failed = true
 			continue
 		}
 		backoff = time.Second
+		reconnected := failed
+		failed = false
 		w.mu.Lock()
 		if next > w.st.Cursor {
 			w.st.Cursor = next
@@ -202,7 +227,7 @@ func (w *watcher) pollLoop(ctx context.Context, out chan<- []Message) {
 		}
 		// Remind: re-offer notified-but-unread mail periodically.
 		if w.o.Remind > 0 {
-			if again := w.dueReminders(); len(again) > 0 {
+			if again := w.dueReminders(reconnected); len(again) > 0 {
 				select {
 				case out <- again:
 				case <-ctx.Done():
@@ -213,14 +238,19 @@ func (w *watcher) pollLoop(ctx context.Context, out chan<- []Message) {
 	}
 }
 
-func (w *watcher) dueReminders() []Message {
+// dueReminders returns notified mail due for its single reminder: Remind
+// after the notification, or at once after a reconnection (all = true).
+func (w *watcher) dueReminders(all bool) []Message {
 	now := w.o.Now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var out []Message
 	for id, t := range w.st.Notified {
-		if now.Sub(time.Unix(t, 0)) >= w.o.Remind {
-			out = append(out, Message{ID: id})
+		if w.st.Reminded[id] {
+			continue
+		}
+		if all || now.Sub(time.Unix(t, 0)) >= w.o.Remind {
+			out = append(out, Message{ID: id, Reminder: true})
 		}
 	}
 	return out
@@ -270,6 +300,7 @@ func (w *watcher) maybeRing(ctx context.Context) error {
 			ring = append(ring, m)
 		} else {
 			delete(w.st.Notified, m.ID) // read/acked or handled elsewhere: stop reminding
+			delete(w.st.Reminded, m.ID)
 		}
 	}
 	w.mu.Unlock()
@@ -278,6 +309,13 @@ func (w *watcher) maybeRing(ctx context.Context) error {
 	}
 	sort.Slice(ring, func(i, j int) bool { return ring[i].Cursor < ring[j].Cursor })
 	line := FormatLine(ring)
+	reminder := true
+	for _, m := range ring {
+		reminder = reminder && m.Reminder
+	}
+	if reminder {
+		line = FormatSummary(len(ring))
+	}
 	if _, err := io.WriteString(w.o.Out, line+"\n"); err != nil {
 		return fmt.Errorf("stdout closed: %w", err)
 	}
@@ -289,7 +327,14 @@ func (w *watcher) maybeRing(ctx context.Context) error {
 	if w.st.Notified == nil {
 		w.st.Notified = map[string]int64{}
 	}
+	if w.st.Reminded == nil {
+		w.st.Reminded = map[string]bool{}
+	}
 	for _, m := range ring {
+		if m.Reminder {
+			w.st.Reminded[m.ID] = true
+			continue // keep the original notification time
+		}
 		w.st.Notified[m.ID] = now.Unix()
 	}
 	w.mu.Unlock()
@@ -298,9 +343,13 @@ func (w *watcher) maybeRing(ctx context.Context) error {
 	return nil
 }
 
-// FormatLine renders one notification: count, ids and senders, and the
-// instruction. Never the body.
+// FormatLine renders one notification: count, ids, senders and send times
+// (node-local, with age), and the instruction. Never the body.
 func FormatLine(ms []Message) string {
+	return formatLineAt(ms, time.Now(), time.Local)
+}
+
+func formatLineAt(ms []Message, now time.Time, loc *time.Location) string {
 	var parts []string
 	for i, m := range ms {
 		if i == 5 {
@@ -308,8 +357,11 @@ func FormatLine(ms []Message) string {
 			break
 		}
 		p := clean(m.ID, 80)
-		if s := clean(m.Sender, 40); s != "" {
+		if s := clean(m.Sender, 60); s != "" {
 			p += " from " + s
+		}
+		if s := header.Sent(m.SentAt, now, loc); s != "" {
+			p += ", " + s
 		}
 		parts = append(parts, p)
 	}
@@ -325,6 +377,17 @@ func FormatLine(ms []Message) string {
 	// opens a permission dialog that may sit unanswered.
 	return fmt.Sprintf("Pyre: %d new %s for this session (%s). Read %s with the MCP tool mcp__pyre__inbox (unacked: true; pre-approved, not the pyre shell command), then reply with mcp__pyre__send_message (reply_to: the message id) or call mcp__pyre__ack_message for %s.",
 		len(ms), noun, strings.Join(parts, ", "), it, each)
+}
+
+// FormatSummary is the single reminder line for mail the agent was already
+// told about and has not read or acknowledged (never one line per message,
+// never a paste of the backlog).
+func FormatSummary(n int) string {
+	noun := "message"
+	if n != 1 {
+		noun = "messages"
+	}
+	return fmt.Sprintf("Pyre: %d unread Pyre %s for this session — use inbox: read with the MCP tool mcp__pyre__inbox (unacked: true), then reply with mcp__pyre__send_message (reply_to) or call mcp__pyre__ack_message for each.", n, noun)
 }
 
 func clean(s string, n int) string {
@@ -374,7 +437,7 @@ func pasteAttempts(runDir string) map[string]bool {
 }
 
 func (w *watcher) load() {
-	w.st = watchState{Notified: map[string]int64{}}
+	w.st = watchState{Notified: map[string]int64{}, Reminded: map[string]bool{}}
 	if w.o.StateFile == "" {
 		return
 	}
@@ -385,6 +448,9 @@ func (w *watcher) load() {
 	_ = json.Unmarshal(b, &w.st)
 	if w.st.Notified == nil {
 		w.st.Notified = map[string]int64{}
+	}
+	if w.st.Reminded == nil {
+		w.st.Reminded = map[string]bool{}
 	}
 }
 
@@ -411,6 +477,11 @@ func (w *watcher) save() {
 			w.st.Notified[e.id] = e.t
 		}
 	}
+	for id := range w.st.Reminded {
+		if _, ok := w.st.Notified[id]; !ok {
+			delete(w.st.Reminded, id)
+		}
+	}
 	b, _ := json.Marshal(w.st)
 	w.mu.Unlock()
 	tmp := w.o.StateFile + ".tmp"
@@ -421,12 +492,65 @@ func (w *watcher) save() {
 
 // APISource reads a session's inbox through the Pyre API (local pyred
 // socket or hub) with the session's own credential.
+//
+// Waiting (W-localwait): when the API offers inbox.wait (pyred's local
+// socket), Poll blocks there, on pyred's in-memory per-session signal, and
+// then lists the inbox once without waiting, so an idle session holds no
+// request against the hub. Against a hub or an older pyred (inbox.wait
+// answers unsupported) it long-polls messages.list as before, and probes
+// for the local wait again after the next failed poll (pyred restarted,
+// perhaps upgraded).
 type APISource struct {
 	API     contracts.API
 	Session string
+
+	mu       sync.Mutex
+	local    bool   // inbox.wait answered at least once
+	noLocal  bool   // inbox.wait unsupported here: long-poll the hub
+	epoch    string // last inbox.wait answer
+	gen      int64
+	more     bool // the last list filled a page: list again before waiting
+	hubPolls int  // hub long-polls (fallback path)
 }
 
-var _ Source = APISource{}
+var _ Source = (*APISource)(nil)
+
+const pollLimit = 200
+
+// LocalWait reports whether Poll waits on pyred's inbox.wait.
+func (s *APISource) LocalWait() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.local && !s.noLocal
+}
+
+// waitLocal blocks on inbox.wait. It returns false when the API does not
+// offer it (the caller long-polls the hub instead).
+func (s *APISource) waitLocal(ctx context.Context, wait time.Duration) (bool, error) {
+	w, ok := s.API.(contracts.InboxWaitAPI)
+	s.mu.Lock()
+	if !ok || s.noLocal {
+		s.mu.Unlock()
+		return false, nil
+	}
+	req := contracts.InboxWaitRequest{SessionID: s.Session, Epoch: s.epoch, AfterGeneration: s.gen, WaitSeconds: int(wait / time.Second)}
+	if s.more {
+		req.WaitSeconds = 0 // a full page: fetch the rest now, keeping the generation current
+	}
+	s.mu.Unlock()
+	resp, err := w.InboxWait(ctx, req)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		if contracts.IsCode(err, contracts.ErrUnsupported) {
+			s.noLocal, s.local = true, false
+			return false, nil
+		}
+		return true, err
+	}
+	s.local, s.epoch, s.gen = true, resp.Epoch, resp.Generation
+	return true, nil
+}
 
 // skipStates are messages the runtime path already handled or that need
 // reconciliation, never a doorbell.
@@ -439,15 +563,34 @@ func needsAgent(v contracts.MessageView) bool {
 	return v.Envelope.Mode != contracts.ModeInfo && v.Status.Ack == contracts.AckNone && !skipStates[v.Status.Runtime]
 }
 
-func (s APISource) Poll(ctx context.Context, after int64, wait time.Duration) ([]Message, int64, error) {
-	pg, err := s.API.ListMessages(ctx, contracts.ListMessagesRequest{
-		PageRequest: contracts.PageRequest{Limit: 200},
-		Box:         "inbox", Address: &contracts.Address{Kind: contracts.AddrSession, ID: s.Session},
-		Unacked: true, AfterCursor: after, WaitSeconds: int(wait / time.Second),
-	})
+// Poll waits for mail (locally on pyred when it can, else by long-polling
+// the hub) and lists the session's unacked inbox after cursor.
+func (s *APISource) Poll(ctx context.Context, after int64, wait time.Duration) ([]Message, int64, error) {
+	local, err := s.waitLocal(ctx, wait)
 	if err != nil {
 		return nil, after, err
 	}
+	req := contracts.ListMessagesRequest{
+		PageRequest: contracts.PageRequest{Limit: pollLimit},
+		Box:         "inbox", Address: &contracts.Address{Kind: contracts.AddrSession, ID: s.Session},
+		Unacked: true, AfterCursor: after,
+	}
+	if !local {
+		req.WaitSeconds = int(wait / time.Second)
+		s.mu.Lock()
+		s.hubPolls++
+		s.mu.Unlock()
+	}
+	pg, err := s.API.ListMessages(ctx, req)
+	if err != nil {
+		s.mu.Lock()
+		s.noLocal = false // probe inbox.wait again: pyred may have restarted (upgraded)
+		s.mu.Unlock()
+		return nil, after, err
+	}
+	s.mu.Lock()
+	s.more = len(pg.Items) >= pollLimit || pg.NextCursor != ""
+	s.mu.Unlock()
 	next := after
 	var out []Message
 	for _, v := range pg.Items {
@@ -461,12 +604,15 @@ func (s APISource) Poll(ctx context.Context, after int64, wait time.Duration) ([
 		if sender == "" {
 			sender = v.Envelope.Sender.ID
 		}
-		out = append(out, Message{ID: v.Envelope.MessageID, Sender: sender, Cursor: v.Cursor})
+		if v.Envelope.Sender.Kind != "" {
+			sender = string(v.Envelope.Sender.Kind) + ":" + sender
+		}
+		out = append(out, Message{ID: v.Envelope.MessageID, Sender: sender, SentAt: v.Envelope.CreatedAt, Cursor: v.Cursor})
 	}
 	return out, next, nil
 }
 
-func (s APISource) Pending(ctx context.Context, ids []string) ([]string, error) {
+func (s *APISource) Pending(ctx context.Context, ids []string) ([]string, error) {
 	var out []string
 	for _, id := range ids {
 		v, err := s.API.GetMessage(ctx, contracts.GetRequest{ID: id})

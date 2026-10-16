@@ -213,6 +213,9 @@ func (m *Model) messageDetail(mv contracts.MessageView, w int) []string {
 	// The words first, then how far they got.
 	out = append(out, wrap(e.Body.Text, w)...)
 	out = append(out, "", m.sectionTitle("Delivery facts", w))
+	if d := m.deliverySummary(mv); d.Summary != "" {
+		out = append(out, m.kvl("Status", trunc(d.Summary, w-lw+20), lw))
+	}
 	stored := string(s.Storage)
 	if s.StoredAt != nil {
 		stored += " " + ago(now, *s.StoredAt)

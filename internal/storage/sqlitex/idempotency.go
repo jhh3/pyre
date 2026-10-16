@@ -169,20 +169,13 @@ func Idempotent(ctx context.Context, tx *sql.Tx, opID, op string, principal cont
 // retry of a pruned operation executes again, so callers keep records far
 // longer than any client retries.
 func PruneOperations(ctx context.Context, db *sql.DB, cutoff time.Time, batch int) (int64, error) {
-	if batch <= 0 {
-		batch = 5000
-	}
-	var total int64
-	for i := 0; i < 100; i++ {
-		res, err := db.ExecContext(ctx, `DELETE FROM operations WHERE rowid IN (SELECT rowid FROM operations WHERE created_at < ? LIMIT ?)`, FormatTime(cutoff), batch)
+	// Short write transactions (Batched). The hub indexes created_at
+	// (operations_created); without the index each batch scans the table.
+	return Batched(ctx, db, batch, 0, func(tx *sql.Tx, limit int) (int64, error) {
+		res, err := tx.ExecContext(ctx, `DELETE FROM operations WHERE rowid IN (SELECT rowid FROM operations WHERE created_at < ? LIMIT ?)`, FormatTime(cutoff), limit)
 		if err != nil {
-			return total, err
+			return 0, err
 		}
-		n, _ := res.RowsAffected()
-		total += n
-		if n < int64(batch) {
-			break
-		}
-	}
-	return total, nil
+		return res.RowsAffected()
+	})
 }

@@ -2,15 +2,17 @@ package tmux
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/jhh3/pyre/internal/fileperm"
+	"github.com/jhh3/pyre/internal/osutil"
+	"github.com/jhh3/pyre/internal/runtime/sessionhost"
 )
 
 // A run's environment (PYRE_SESSION_TOKEN, connection secrets, API keys from
@@ -74,7 +76,7 @@ func execEnvMain(args []string) int {
 	}
 	// Resolve argv[0] with the new PATH, as tmux's execvp would.
 	path := argv[0]
-	if !strings.Contains(path, "/") {
+	if !strings.ContainsAny(path, `/\`) {
 		p, err := exec.LookPath(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pyre: %v\n", err)
@@ -82,7 +84,7 @@ func execEnvMain(args []string) int {
 		}
 		path = p
 	}
-	err = syscall.Exec(path, argv, os.Environ())
+	err = osutil.Exec(path, argv, os.Environ())
 	fmt.Fprintf(os.Stderr, "pyre: exec %s: %v\n", argv[0], err)
 	return 127
 }
@@ -95,11 +97,11 @@ func readEnvFile(file string) (set, unset []string, err error) {
 		return nil, nil, err
 	}
 	defer os.Remove(file)
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+	if _, bad := fileperm.Exposed(file, st); !st.Mode().IsRegular() || bad {
 		return nil, nil, fmt.Errorf("%s: not a private regular file (%v)", file, st.Mode())
 	}
-	if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Getuid() {
-		return nil, nil, fmt.Errorf("%s: owned by uid %d", file, sys.Uid)
+	if owner, bad := fileperm.ForeignOwner(file, st); bad {
+		return nil, nil, fmt.Errorf("%s: owned by %s", file, owner)
 	}
 	b, err := os.ReadFile(file)
 	if err != nil {
@@ -220,7 +222,7 @@ func (s *Server) writeEnvFile(data []byte) (string, error) {
 		return "", err
 	}
 	name := f.Name()
-	if err := f.Chmod(0o600); err != nil {
+	if err := fileperm.RestrictFile(f, 0o600); err != nil {
 		f.Close()
 		os.Remove(name)
 		return "", err
@@ -237,4 +239,4 @@ func (s *Server) writeEnvFile(data []byte) (string, error) {
 	return name, nil
 }
 
-var errNUL = errors.New("tmux: environment value contains a NUL byte")
+var errNUL = sessionhost.ErrNUL

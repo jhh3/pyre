@@ -18,8 +18,12 @@ import (
 )
 
 func (a *App) addFleetCommands(root *cobra.Command) {
-	var includeRevoked bool
+	var includeRevoked, cloudLs bool
+	var lsCloud cloudFlags
 	nodesLs := func(cmd *cobra.Command, args []string) error {
+		if cloudLs {
+			return a.cloudList(cmd, lsCloud) // W-gcp
+		}
 		ops, err := a.connect()
 		if err != nil {
 			return err
@@ -38,7 +42,14 @@ func (a *App) addFleetCommands(root *cobra.Command) {
 		RunE:    a.run(nodesLs),
 	}
 	nodes.PersistentFlags().BoolVar(&includeRevoked, "all", false, "include revoked nodes")
-	nodes.AddCommand(&cobra.Command{Use: "ls", Short: "List nodes", Args: cobra.NoArgs, RunE: a.run(nodesLs)})
+	nodes.Flags().BoolVar(&cloudLs, "cloud", false, "list Pyre cloud VMs (gcloud): type, state, uptime, estimated $/h")
+	lsCloud.add(nodes)
+	nodesLsCmd := &cobra.Command{Use: "ls", Short: "List nodes", Args: cobra.NoArgs, RunE: a.run(nodesLs)}
+	nodesLsCmd.Flags().BoolVar(&cloudLs, "cloud", false, "list Pyre cloud VMs (gcloud): type, state, uptime, estimated $/h")
+	lsCloud.add(nodesLsCmd)
+	nodes.AddCommand(nodesLsCmd)
+	a.addCloudNodeCommands(nodes) // W-gcp
+	a.addDrainCommands(nodes)     // node drain / node resume
 	nodes.AddCommand(&cobra.Command{
 		Use:   "show <node>",
 		Short: "Show one node (ID, name, ssh alias or hostname)",

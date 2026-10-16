@@ -243,3 +243,33 @@ func TestFormatLineNamesTheMCPReplyTool(t *testing.T) {
 		}
 	}
 }
+
+// After pyred comes back from a restart, mail the agent was told about and
+// has not read is reminded once, as one summary line (never a pasted
+// backlog, never one line per message, never again).
+func TestWatchRemindsUnreadOnceAfterPyredRestart(t *testing.T) {
+	src := &fakeSource{pending: map[string]bool{}}
+	out := &syncBuf{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Watch(ctx, src, WatchOptions{Out: out, MinInterval: 50 * time.Millisecond, Grace: 30 * time.Millisecond, PollWait: time.Second})
+	src.add("msg_1", "a")
+	src.add("msg_2", "b")
+	src.add("msg_3", "c")
+	waitLines(t, out, 1, 3*time.Second)
+	src.mu.Lock()
+	src.pending["msg_3"] = false // read and acked
+	src.fail = 2                 // pyred restarts
+	src.mu.Unlock()
+	l := waitLines(t, out, 2, 6*time.Second)
+	if !strings.Contains(l[1], "2 unread Pyre messages") || !strings.Contains(l[1], "use inbox") || strings.Contains(l[1], "msg_") {
+		t.Fatalf("summary %q", l[1])
+	}
+	src.mu.Lock()
+	src.fail = 2 // another restart: already reminded
+	src.mu.Unlock()
+	time.Sleep(time.Second)
+	if got := out.lines(); len(got) != 2 {
+		t.Fatalf("reminded twice: %q", got)
+	}
+}

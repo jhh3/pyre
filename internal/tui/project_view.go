@@ -120,7 +120,7 @@ func (m *Model) projectFacts(p contracts.Project, w int, full bool) []string {
 			break
 		}
 		st := sessionStatus(s, m.nodeOf(s))
-		out = append(out, trunc(m.th.tone(st.tone, st.sym+" "+pad(st.label, 10))+" "+s.Session.Title+m.th.dim.Render("  "+s.NodeName), w))
+		out = append(out, trunc(m.th.tone(st.tone, st.sym+" "+pad(st.label, 10))+" "+iconTitle(s)+m.th.dim.Render("  "+s.NodeName), w))
 	}
 	if full {
 		if arts, st := get[[]contracts.Artifact](m, "proj:"+p.ProjectID+":arts"); st != nil && st.have {

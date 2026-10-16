@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/jhh3/pyre/internal/contracts"
 	"strings"
 	"sync"
 	"time"
@@ -219,4 +220,14 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// iconTitle is a session's title with its emoji, if any, before it
+// (W-archive2). Width math goes through width(), which counts a wide emoji
+// as two cells.
+func iconTitle(s contracts.SessionView) string {
+	if s.Session.Icon == "" {
+		return s.Session.Title
+	}
+	return s.Session.Icon + " " + s.Session.Title
 }

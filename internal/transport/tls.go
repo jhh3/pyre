@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jhh3/pyre/internal/fileperm"
 )
 
 // Hub certificate file names inside the directory given to EnsureHubCert.
@@ -128,8 +130,8 @@ func loadHubCert(certPath, keyPath string) (*HubCert, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("transport: hub key %s has mode %04o; run `chmod 600 %s`", keyPath, st.Mode().Perm(), keyPath)
+	if desc, bad := fileperm.Exposed(keyPath, st); bad {
+		return nil, fmt.Errorf("transport: hub key %s has %s; %s", keyPath, desc, fileperm.FixHint(keyPath, false))
 	}
 	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
@@ -233,7 +235,7 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 			os.Remove(tmp)
 		}
 	}()
-	if err := f.Chmod(mode); err != nil {
+	if err := fileperm.RestrictFile(f, mode); err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {

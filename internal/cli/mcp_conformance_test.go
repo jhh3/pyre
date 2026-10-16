@@ -12,12 +12,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	c "github.com/jhh3/pyre/internal/contracts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -86,6 +88,7 @@ func TestMCPConformanceWithOfficialSDK(t *testing.T) {
 				t.Fatal(err)
 			}
 			schemas := map[string]*jsonschema.Resolved{}
+			compact := map[string]bool{}
 			tools := map[string]*mcp.Tool{}
 			for _, tl := range lt.Tools {
 				tools[tl.Name] = tl
@@ -108,6 +111,15 @@ func TestMCPConformanceWithOfficialSDK(t *testing.T) {
 				in, _ := tl.InputSchema.(map[string]any)
 				if in["type"] != "object" {
 					t.Errorf("%s: inputSchema type %v", tl.Name, in["type"])
+				}
+				if tl.OutputSchema == nil {
+					// A compact read tool (W-compact): text by default, the
+					// full result (as structuredContent) with format "json".
+					if p, _ := in["properties"].(map[string]any); p["format"] == nil {
+						t.Errorf("%s: no outputSchema and no format argument", tl.Name)
+					}
+					compact[tl.Name] = true
+					continue
 				}
 				out, _ := tl.OutputSchema.(map[string]any)
 				if out["type"] != "object" {
@@ -133,6 +145,17 @@ func TestMCPConformanceWithOfficialSDK(t *testing.T) {
 			os.WriteFile(file, []byte("# synthetic conformance artifact\n"), 0o600)
 			call := func(name string, args map[string]any) map[string]any {
 				t.Helper()
+				if compact[name] {
+					res, err := p.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+					if err != nil || res.IsError || res.StructuredContent != nil || strings.HasPrefix(textOf(res), "{") || textOf(res) == "" {
+						t.Fatalf("%s: compact result must be plain text without structuredContent: %+v %v", name, res, err)
+					}
+					full := map[string]any{"format": "json"}
+					for k, v := range args {
+						full[k] = v
+					}
+					args = full
+				}
 				res, err := p.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 				if err != nil {
 					t.Fatalf("%s: protocol error %v", name, err)
@@ -145,7 +168,11 @@ func TestMCPConformanceWithOfficialSDK(t *testing.T) {
 				if err := json.Unmarshal(b, &sc); err != nil || sc == nil {
 					t.Fatalf("%s: no structuredContent", name)
 				}
-				if err := schemas[name].Validate(sc); err != nil {
+				if s := schemas[name]; s == nil && !compact[name] {
+					t.Fatalf("%s: no schema", name)
+				} else if s == nil {
+					// compact tool: structuredContent carries the full result
+				} else if err := s.Validate(sc); err != nil {
 					t.Fatalf("%s: structuredContent does not conform to outputSchema: %v\n%s", name, err, b)
 				}
 				var text any
@@ -256,14 +283,8 @@ func TestNegotiateMCPVersion(t *testing.T) {
 
 // The derived schemas must actually constrain results (not be vacuous).
 func TestOutputSchemaRejectsWrongShapes(t *testing.T) {
-	var sv *MCPTool
-	ts := MCPTools()
-	for i := range ts {
-		if ts[i].Name == "get_session" {
-			sv = &ts[i]
-		}
-	}
-	rs := resolveSchema(t, "get_session", sv.OutputSchema)
+	// get_session is a compact tool (no outputSchema); derive its result's.
+	rs := resolveSchema(t, "get_session", OutputSchemaFor(reflect.TypeFor[c.SessionView]()))
 	good := map[string]any{
 		"session": map[string]any{"session_id": "ses_x", "harness": "claude", "title": "t", "project_id": nil,
 			"created_by": map[string]any{"kind": "owner", "id": "cli_x"}, "created_at": "2026-10-04T12:00:00Z",

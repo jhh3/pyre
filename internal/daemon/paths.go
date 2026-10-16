@@ -10,14 +10,18 @@ import (
 	"runtime"
 
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // DefaultStateDir returns the platform state directory for pyred:
 // macOS ~/Library/Application Support/pyre; Linux $XDG_STATE_HOME/pyre or
-// ~/.local/state/pyre. PYRE_STATE_DIR overrides both.
+// ~/.local/state/pyre; Windows %LOCALAPPDATA%\Pyre. PYRE_STATE_DIR overrides all.
 func DefaultStateDir() string {
 	if v := os.Getenv("PYRE_STATE_DIR"); v != "" {
 		return v
+	}
+	if d := winenv.StateDir(os.Getenv); d != "" {
+		return d // %LOCALAPPDATA%\Pyre
 	}
 	home, _ := os.UserHomeDir()
 	if runtime.GOOS == "darwin" {

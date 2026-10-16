@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -23,7 +22,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-	"unsafe"
 )
 
 func TestMain(m *testing.M) {
@@ -65,8 +63,12 @@ func fakeClaudeMain(args []string) int {
 	if p := os.Getenv("FAKE_ARGV_FILE"); p != "" {
 		_ = os.WriteFile(p, []byte(strings.Join(args, "\n")), 0o600)
 	}
-	var settings, prompt, resume string
+	var settings, prompt, resume, pluginDir string
 	for i := 0; i < len(args); i++ {
+		if d, ok := strings.CutPrefix(args[i], "--plugin-dir="); ok {
+			pluginDir = d
+			continue
+		}
 		switch args[i] {
 		case "--settings":
 			i++
@@ -109,6 +111,11 @@ func fakeClaudeMain(args []string) int {
 		cfg = filepath.Join(home, ".claude")
 	}
 	f.transcript = filepath.Join(cfg, "projects", projectSlug(f.cwd), f.sid+".jsonl")
+	if _, err := os.Stat(f.transcript); resume != "" && err != nil {
+		// Like Claude: --resume reads the conversation from this config dir.
+		os.Stdout.WriteString("No conversation found with session ID: " + resume + "\r\n")
+		return 1
+	}
 	_ = os.MkdirAll(filepath.Dir(f.transcript), 0o700)
 
 	stty := exec.Command("stty", "raw", "-echo")
@@ -122,6 +129,9 @@ func fakeClaudeMain(args []string) int {
 		f.start(resume != "")
 	}
 	f.render()
+	if pluginDir != "" && os.Getenv("FAKE_PLUGIN_HOST") == "1" {
+		go f.pluginHost(pluginDir)
+	}
 	if prompt != "" && f.dialog == "" {
 		f.submit(prompt)
 	}
@@ -263,16 +273,6 @@ func (f *fakeClaude) render() {
 	os.Stdout.WriteString(b.String())
 }
 
-// termWidth is the fake's terminal width (200 if unknown).
-func termWidth() int {
-	var ws struct{ Row, Col, X, Y uint16 }
-	_, _, e := syscall.Syscall(syscall.SYS_IOCTL, 1, uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(&ws)))
-	if e != 0 || ws.Col == 0 {
-		return 200
-	}
-	return int(ws.Col)
-}
-
 // wrapDraft wraps text at width runes per row (hard wrap; newlines kept).
 func wrapDraft(text string, width int) []string {
 	if width < 10 {
@@ -292,7 +292,7 @@ func wrapDraft(text string, width int) []string {
 
 func (f *fakeClaude) readLoop() {
 	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
+	notifyResize(winch)
 	go func() {
 		for range winch {
 			f.render()
@@ -516,7 +516,12 @@ func (f *fakeClaude) userRecord(text string, meta bool) {
 	f.say("> " + strings.ReplaceAll(text, "\n", " "))
 }
 
-var sleepRe = regexp.MustCompile(`FAKE_SLEEP_MS=(\d+)`)
+var (
+	sleepRe = regexp.MustCompile(`FAKE_SLEEP_MS=(\d+)`)
+	// FAKE_TOOL_MS: an approved FAKE_PERMISSION tool runs this long before
+	// its PostToolUse (a long Bash command).
+	toolMsRe = regexp.MustCompile(`FAKE_TOOL_MS=(\d+)`)
+)
 
 // wait sleeps d unless interrupted (returns false if interrupted).
 func (f *fakeClaude) wait(d time.Duration) bool {
@@ -570,7 +575,12 @@ func (f *fakeClaude) turn(text string) {
 		}
 	}
 	if strings.Contains(text, "FAKE_PERMISSION") {
-		if !f.permission() {
+		var toolTime time.Duration
+		if m := toolMsRe.FindStringSubmatch(text); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			toolTime = time.Duration(n) * time.Millisecond
+		}
+		if !f.permission(toolTime) {
 			f.endTurn(true)
 			return
 		}
@@ -632,7 +642,7 @@ func (f *fakeClaude) reply(s string) {
 // permission runs PreToolUse + PermissionRequest; the broker hook races the
 // TUI dialog like Claude: the first decision wins; a TUI "No" kills the
 // waiting hook. Returns false when the turn was interrupted (Esc/No).
-func (f *fakeClaude) permission() bool {
+func (f *fakeClaude) permission(toolTime time.Duration) bool {
 	id := f.toolID()
 	ti := map[string]any{"command": "ls", "description": "list"}
 	f.hook("PreToolUse", map[string]any{"tool_name": "Bash", "tool_use_id": id, "tool_input": ti})
@@ -673,6 +683,12 @@ func (f *fakeClaude) permission() bool {
 	f.dialog = ""
 	f.mu.Unlock()
 	f.render()
+	if allow && toolTime > 0 {
+		f.say("● Running ls…")
+		if !f.wait(toolTime) {
+			return false
+		}
+	}
 	if allow {
 		f.hook("PostToolUse", map[string]any{"tool_name": "Bash", "tool_use_id": id, "tool_input": ti, "tool_response": map[string]any{"stdout": "file"}})
 	}

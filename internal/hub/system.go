@@ -27,7 +27,8 @@ func (h *Hub) Hello(ctx context.Context, req contracts.HelloRequest) (contracts.
 }
 
 func (h *Hub) features() []string {
-	f := []string{"system", "sessions", "runs", "leases", "approvals", "messages", "events", "accounts", "node_actions", "connections"}
+	f := []string{"system", "sessions", "runs", "leases", "approvals", "messages", "events", "accounts", "node_actions", "connections",
+		contracts.FeatureSessionsGetMany, contracts.FeatureAsks, contracts.FeatureAskHold}
 	add := func(ok bool, name string) {
 		if ok {
 			f = append(f, name)
@@ -36,10 +37,12 @@ func (h *Hub) features() []string {
 	add(h.cfg.Fleet != nil, "fleet")
 	add(h.cfg.Projects != nil, "projects")
 	add(h.cfg.Documents != nil, "documents")
+	add(h.cfg.Documents != nil, contracts.FeatureProjectPage)
 	add(h.cfg.Artifacts != nil, "artifacts")
 	add(h.cfg.Reviews != nil, "reviews")
 	add(h.cfg.Notes != nil, "notes")
 	add(h.cfg.Attention != nil, "attention")
+	add(h.cfg.Terminal != nil, contracts.TerminalFit) // the relay forwards fit requests and size frames
 	return f
 }
 
@@ -59,7 +62,20 @@ func (h *Hub) ListEvents(ctx context.Context, req contracts.ListEventsRequest) (
 // ---- messages (delegated to the store; routing hooks in routing.go) ----
 
 func (h *Hub) SendMessage(ctx context.Context, req contracts.SendMessageRequest) (contracts.MessageView, error) {
-	return h.msgs.SendMessage(ctx, req)
+	mv, err := h.msgs.SendMessage(ctx, req)
+	if err == nil && req.InReplyTo != "" {
+		// Replying proves the recipient has the original (W-delivery).
+		if p, ok := contracts.PrincipalFrom(ctx); ok {
+			_, _ = h.recipientRead(ctx, p, "reply", req.InReplyTo)
+		}
+	}
+	if err == nil {
+		h.withDelivery(ctx, &mv) // W-stuckmail
+		if p, ok := contracts.PrincipalFrom(ctx); ok && mv.Envelope.Recipient.Kind == contracts.AddrSession {
+			h.ownerActive(p, mv.Envelope.Recipient.ID) // owner activity: a message (or reply) to the session
+		}
+	}
+	return mv, err
 }
 
 // GetMessage: the owner viewing a session's message to them answers that
@@ -71,6 +87,7 @@ func (h *Hub) GetMessage(ctx context.Context, req contracts.GetRequest) (contrac
 		if p, ok := contracts.PrincipalFrom(ctx); ok && env.Recipient.Kind == contracts.AddrOwner && env.Sender.Kind == contracts.PrincipalSession {
 			h.ownerEngaged(p, env.Sender.ID, "Read.", readKinds...)
 		}
+		h.withDelivery(ctx, &mv) // W-stuckmail
 	}
 	return mv, err
 }
@@ -79,8 +96,20 @@ func (h *Hub) ListMessages(ctx context.Context, req contracts.ListMessagesReques
 	return h.msgs.ListMessages(ctx, req)
 }
 
+// AckMessage: the recipient session acknowledging a message also resolves
+// its pending paste delivery (W-delivery: acked mail is never pasted).
 func (h *Hub) AckMessage(ctx context.Context, req contracts.AckMessageRequest) (contracts.MessageView, error) {
-	return h.msgs.AckMessage(ctx, req)
+	mv, err := h.msgs.AckMessage(ctx, req)
+	if err == nil {
+		if p, ok := contracts.PrincipalFrom(ctx); ok && p.Kind == contracts.PrincipalSession {
+			if rec, rerr := h.recipientRead(ctx, p, "ack", req.MessageID); rerr == nil && len(rec) > 0 {
+				if nv, gerr := h.msgs.GetMessage(ctx, contracts.GetRequest{ID: req.MessageID}); gerr == nil {
+					mv = nv
+				}
+			}
+		}
+	}
+	return mv, err
 }
 
 func (h *Hub) ReissueMessage(ctx context.Context, req contracts.ReissueMessageRequest) (contracts.MessageView, error) {

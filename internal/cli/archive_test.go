@@ -141,20 +141,19 @@ func TestSessionsPrune(t *testing.T) {
 	}
 }
 
-// archive_session is the CLI's Archive: an ended session is archived, a
-// live one refused; it is permissioned (not pre-approved, see
-// mcp_allow_test.go).
+// archive_session is the CLI's Archive: an ended session is archived at
+// once, a live one when its current turn ends (W-archive2).
 func TestMCPArchiveSession(t *testing.T) {
 	b := mock.New(mock.Options{Clock: mock.NewOffsetClock(mock.FixtureEpoch), DefaultPrincipal: &testOwner})
 	cl := startMCP(t, &Ops{API: b, PollInterval: 10 * time.Millisecond})
 	cl.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "test", "version": "0"}})
 	out, isErr := cl.tool("archive_session", map[string]any{"session": "ses_synth-b"})
-	if !isErr || !strings.Contains(string(out), "stop it first") {
-		t.Fatalf("live session must be refused: %s", out)
+	var res ArchiveResult
+	if isErr || json.Unmarshal(out, &res) != nil || res.Archived || !res.WhenDone {
+		t.Fatalf("a live session archives when done: %s", out)
 	}
 	out, isErr = cl.tool("archive_session", map[string]any{"session": "ses_synth-fbx"})
-	var sv c.SessionView
-	if isErr || json.Unmarshal(out, &sv) != nil || !sv.Session.Archived {
+	if isErr || json.Unmarshal(out, &res) != nil || !res.Archived {
 		t.Fatalf("archive_session: %s", out)
 	}
 	if out, isErr = cl.tool("archive_session", map[string]any{"session": "ses_synth-fbx", "force": true}); !isErr {

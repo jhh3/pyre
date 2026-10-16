@@ -200,6 +200,10 @@ object AttentionKind {
     const val COMMENT = "comment"
     const val UPDATE = "update"
     const val NODE = "node"
+    /** A session flagged itself ("I need you"). */
+    const val FLAG = "flag"
+    /** An open ask (AsksOps); handled when the ask is decided. */
+    const val ASK = "ask"
 }
 
 object Eligibility {
@@ -247,6 +251,8 @@ object EventKinds {
     const val APPROVAL_RESOLVED = "approval.resolved"
     const val APPROVAL_WITHDRAWN = "approval.withdrawn"
     const val APPROVAL_REQUESTED = "approval.requested"
+    /** Every ask change (payload: Ask). */
+    const val ASK_CHANGED = "ask.changed"
 }
 
 object NodeActions {

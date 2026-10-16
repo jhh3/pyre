@@ -1,0 +1,33 @@
+# systemd user unit: the ngrok tunnel in front of pyre-web.service
+# (https://pyre-example.ngrok.app, Google sign-in, @example.org only), docs/web.md.
+# Install:
+#   install -d -m 0700 ~/.config/pyre/ngrok
+#   install -m 0644 packaging/ngrok/pyre-web-policy.yml ~/.config/pyre/ngrok/
+#   install -m 0644 packaging/systemd/pyre-web-tunnel.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now pyre-web-tunnel
+# ngrok reads its authtoken from its own config (~/.config/ngrok/ngrok.yml,
+# `ngrok config add-authtoken`); it is never written here. The reserved
+# domain pyre-example.ngrok.app must belong to that ngrok account.
+
+[Unit]
+Description=ngrok tunnel for the Pyre web inbox (https://pyre-example.ngrok.app)
+Documentation=https://github.com/jhh3/pyre/blob/main/docs/web.md
+Wants=pyre-web.service
+After=pyre-web.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ngrok http 127.0.0.1:7390 --url https://pyre-example.ngrok.app --traffic-policy-file %h/.config/pyre/ngrok/pyre-web-policy.yml --log stdout --log-format logfmt
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
+MemoryMax=256M
+TasksMax=64
+NoNewPrivileges=yes
+SyslogIdentifier=pyre-web-tunnel
+
+[Install]
+WantedBy=default.target

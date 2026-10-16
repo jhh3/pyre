@@ -1,3 +1,5 @@
+//go:build !windows
+
 package claude
 
 // S-D doorbell measurement on the real Claude Code (PYRE_REAL_HARNESS=1).

@@ -1,10 +1,10 @@
  Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────
   STATUS       SESSION                 MACHINE      AGE  │ worker · ✗ failed · Claude      needs you
-  Synthetic Outfit 1 · 1 working                         │ Could not start: claude: synthetic
+  Synthetic Outfit 1 · ◌ 1 working                       │ Could not start: claude: synthetic
   ● working    outfit API client       synth-linux  30s  │ executable not found.
                                                          │
-  No project 9 · ! 2 need you · ✗ 1 failed · 3 working   │ [mock screen] worker — failed
+  No project 9 · ◆ 3 waiting · ◌ 3 working               │ [mock screen] worker — failed
   ◔ starting   api work (handoff succ… synth-linux  30s  │ Working on it (synthetic).
   – exited     api work (limited)      synth-linux  30s  │ >
   ◌ stale      long refactor           synth-linux   7m  │
@@ -22,9 +22,9 @@
                                                          │
                                                          │
                                                          │
-                                                         │
-                                                         │
-
- Needs you  ! deploy prep   ⁇ worker   ⊘ scratch (standalone)
- showing 2 ended sessions · X archives · . hides
- n new session   m message   i info   X archive   / filter   ␣␣ find                         ? help
+ ──────────────────────────────────────────────────────  │
+ Needs you  ! deploy prep   ⁇ worker   +1 more           │
+ showing 2 ended sessions · X archives · . hides         │
+ n new session     m message         i info              │
+ X archive         / filter          ␣␣ find             │
+ ? keys                                                  │

@@ -98,6 +98,10 @@ func TestStripNothingNeedsYouButAMessage(t *testing.T) {
 	h.Type("pairing")
 	h.Key("enter")
 	h.WaitFor("strip", 5*sec, func() bool { return h.Contains("✓ Nothing needs you · ✉ 1 message") })
+	// The owner's messages load with the Sessions view (the inbox panel
+	// and the session's message line read them).
+	h.WaitFor("message line", 5*sec, func() bool { return h.Contains("✉ message for you: ") })
+	h.Settle()
 	golden(t, "sessions-message-only-100", h.View())
 }
 

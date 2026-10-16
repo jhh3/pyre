@@ -16,6 +16,7 @@ import dev.jhh3.pyre.data.LocalSettings
 import dev.jhh3.pyre.data.Outbox
 import dev.jhh3.pyre.data.Repository
 import dev.jhh3.pyre.domain.ApprovalAnswerer
+import dev.jhh3.pyre.domain.AskAnswerer
 import dev.jhh3.pyre.model.PushRegistration
 import dev.jhh3.pyre.net.PyreApiException
 import dev.jhh3.pyre.notify.HubStreamService
@@ -35,6 +36,7 @@ import kotlinx.coroutines.launch
 /** Everything that exists only while a hub is paired. */
 class HubSession(val credentials: HubCredentials, val client: HubClient, val repo: Repository) {
     val answerer = ApprovalAnswerer(repo)
+    val askAnswerer = AskAnswerer(repo)
 }
 
 /**

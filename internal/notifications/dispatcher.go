@@ -107,6 +107,9 @@ type Dispatcher struct {
 	mu       sync.Mutex
 	tokens   float64
 	tokensAt time.Time
+	// lastPush is when a group with a RepeatWindow last pushed (in
+	// memory: a hub restart allows one more push).
+	lastPush map[string]time.Time
 }
 
 // NewDispatcher returns a Dispatcher over src.
@@ -216,6 +219,13 @@ func (d *Dispatcher) handle(ctx context.Context, j Job, now time.Time) error {
 		}
 		return d.src.FinishJob(ctx, j)
 	}
+	if !d.repeatAllowed(it, now) {
+		if err := d.src.RecordStatus(ctx, it.AttentionID, seq, contracts.NotificationStatus{Provider: ProviderNone, State: StateDisabled,
+			Detail: "already pushed for this session within " + RepeatWindow(it.Kind).String()}); err != nil {
+			return err
+		}
+		return d.src.FinishJob(ctx, j)
+	}
 	if ok, next := d.take(now); !ok {
 		if err := d.src.RecordStatus(ctx, it.AttentionID, seq, contracts.NotificationStatus{Provider: ProviderNone, State: StatePending, Detail: "rate limited; deferred"}); err != nil {
 			return err
@@ -223,6 +233,7 @@ func (d *Dispatcher) handle(ctx context.Context, j Job, now time.Time) error {
 		return d.src.RetryJob(ctx, j, next, false)
 	}
 
+	d.notePush(it, now)
 	why := "FCM not configured on hub"
 	if d.opts.FCM != nil {
 		targets, err := d.src.Targets(ctx, ProviderFCM)
@@ -337,6 +348,38 @@ func (d *Dispatcher) backoff(attempts int, retryAfter time.Duration) time.Durati
 		b = retryAfter
 	}
 	return min(b, d.opts.MaxBackoff)
+}
+
+// repeatAllowed reports whether it's group may push now (RepeatWindow).
+func (d *Dispatcher) repeatAllowed(it contracts.AttentionItem, now time.Time) bool {
+	w := RepeatWindow(it.Kind)
+	if w <= 0 {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	last, ok := d.lastPush[it.GroupKey]
+	return !ok || now.Sub(last) >= w
+}
+
+// notePush records a push for it's group when its kind has a
+// RepeatWindow, dropping entries past their window (bounded).
+func (d *Dispatcher) notePush(it contracts.AttentionItem, now time.Time) {
+	w := RepeatWindow(it.Kind)
+	if w <= 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastPush == nil {
+		d.lastPush = map[string]time.Time{}
+	}
+	for k, t := range d.lastPush {
+		if now.Sub(t) >= w {
+			delete(d.lastPush, k)
+		}
+	}
+	d.lastPush[it.GroupKey] = now
 }
 
 // take consumes one rate-limit token, or returns when the next is available.

@@ -120,6 +120,10 @@ type Adapter struct {
 	DeliverFunc func(p *Proc, in contracts.DeliveryInput) (contracts.DeliveryResult, error, bool)
 	// ReconcileUnknown makes Reconcile find no evidence even if delivered.
 	ReconcileUnknown bool
+	// ReachableOnly makes ResumeSpec resume natively only when the daemon
+	// says the previous thread is reachable (same account or a shared
+	// transcript store), as the Claude adapter does; else handoff.
+	ReachableOnly bool
 
 	mu          sync.Mutex
 	DeliverHits int
@@ -301,6 +305,11 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 func (a *Adapter) ResumeSpec(ctx context.Context, prev contracts.Run, sameAccount bool) (contracts.ContinuationKind, *contracts.NativeRef, error) {
 	if !contracts.HasCap(a.Caps, contracts.CapResumeNative) || prev.NativeRef == nil {
 		return "", nil, contracts.Errorf(contracts.ErrUnsupported, "fake: native resume unsupported")
+	}
+	if a.ReachableOnly && !sameAccount {
+		// Like the Claude adapter: the thread is not reachable from this
+		// binding (another account without a shared transcript store).
+		return contracts.ContinuationHandoff, nil, nil
 	}
 	return contracts.ContinuationNativeResume, prev.NativeRef, nil
 }

@@ -136,6 +136,13 @@ const (
 	// FlagAttention). It clears when the session clears it, the owner
 	// engages with the session, or the run ends.
 	AttnFlag AttentionKind = "flag"
+	// AttnWaiting (additive, owner request 2026-10-14) is raised when a
+	// top-level session ends its turn with an open question or decision for
+	// the owner in its own chat and filed no ask for it. Title is the
+	// question's first line. Handled when the owner engages with the session,
+	// the session files an ask, or its next turn starts. Never raised for
+	// sessions with a parent (they ask their parent).
+	AttnWaiting AttentionKind = "waiting"
 )
 
 type AttentionState string
@@ -206,8 +213,10 @@ const (
 // SessionFlag summarises why a session wants the owner (v1.3). Reason is
 // one of approval, question, asked (the session flagged itself), failed,
 // reauth, blocked, delivery, conflict for FlagNeedsYou; message, comment,
-// review for FlagMessage. Text is a short display line of the top item
-// with session IDs already resolved to titles.
+// review for FlagMessage (also failed and reauth when the session's current
+// run failed at launch: nothing runs there, so it is not "needs you").
+// Text is a short display line of the top item with session IDs already
+// resolved to titles.
 type SessionFlag struct {
 	Level       string    `json:"level"`
 	Reason      string    `json:"reason"`

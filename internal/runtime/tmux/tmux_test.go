@@ -1,3 +1,5 @@
+//go:build !windows
+
 package tmux
 
 import (
@@ -294,7 +296,7 @@ func TestUnsetInheritedEnv(t *testing.T) {
 		out, _ := s.CapturePane(ctx, "u", CaptureOptions{})
 		t.Fatalf("unset not applied:\n%s", out)
 	}
-	if err := (SessionSpec{Name: "x", Argv: []string{"a", "b"}, Unset: []string{"BAD-NAME"}}).validate(); err == nil {
+	if err := (SessionSpec{Name: "x", Argv: []string{"a", "b"}, Unset: []string{"BAD-NAME"}}).Validate(); err == nil {
 		t.Fatal("invalid unset name accepted")
 	}
 }

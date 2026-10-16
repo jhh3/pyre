@@ -106,7 +106,10 @@ func newTermView(sid, runID string, cols, rows int, poke func()) *termView {
 // mirrored for key encoding. Callbacks run inside em.Write, under t.mu.
 func (t *termView) newEmulator(cols, rows int) *vt.Emulator {
 	em := vt.NewEmulator(cols, rows)
-	em.SetScrollbackSize(0) // tmux keeps history; copy-mode scrolls it
+	// tmux keeps history (copy-mode scrolls it), so the emulator keeps
+	// none: one line, the least vt allows (a size of 0 leaves its default
+	// of 10,000 lines, ~130 MB for a busy 120-column pane).
+	em.SetScrollbackSize(1)
 	em.SetCallbacks(vt.Callbacks{
 		EnableMode:       func(m ansi.Mode) { t.setMode(m, true) },
 		DisableMode:      func(m ansi.Mode) { t.setMode(m, false) },
@@ -186,8 +189,22 @@ func (t *termView) setConn(c TermConn, mode termMode) {
 
 func (t *termView) readLoop(c TermConn, gen int) {
 	buf := make([]byte, 32*1024)
+	ws, fitted := c.(WindowSizer)
 	for {
 		n, err := c.Read(buf)
+		if fitted {
+			// The node resized a fitted stream to its window: resize the
+			// emulator before the bytes drawn for the new size.
+			if cols, rows, ok := ws.TakeWindowSize(); ok {
+				t.mu.Lock()
+				if t.gen == gen && (cols != t.cols || rows != t.rows) {
+					t.cols, t.rows = max(cols, 2), max(rows, 2)
+					t.em.Resize(t.cols, t.rows)
+				}
+				t.mu.Unlock()
+				t.poke()
+			}
+		}
 		if n > 0 {
 			t.mu.Lock()
 			if t.gen == gen {

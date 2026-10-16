@@ -2,13 +2,16 @@ package delivery
 
 import (
 	"strings"
+	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/header"
 )
 
-// Render produces the text injected into a runtime for a message:
+// Render produces the text injected into a runtime for a message, with the
+// send time in the node's local zone and its age at delivery:
 //
-//	[pyre-msg:<id>] from <sender>[ (thread <t>, reply to <m>)]:
+//	[pyre-msg:<id> · sent 3:05 PM PT (8h ago)] from <kind>:<title or id>[ (thread <t>, reply to <m>)]:
 //	<body>
 //	Attachments:
 //	- pyre artifact get <version_id>
@@ -16,8 +19,14 @@ import (
 // The marker comes first so adapters can match acceptance evidence
 // (UserPromptSubmit text, transcript records).
 func Render(e contracts.MessageEnvelope) string {
+	return RenderAt(e, time.Now(), time.Local)
+}
+
+// RenderAt is Render at a given delivery time and zone. A message without a
+// send time keeps the bare "[pyre-msg:<id>]" marker.
+func RenderAt(e contracts.MessageEnvelope, now time.Time, loc *time.Location) string {
 	var b strings.Builder
-	b.WriteString(contracts.MessageMarker(e.MessageID))
+	b.WriteString(header.Marker(e.MessageID, header.Sent(e.CreatedAt, now, loc)))
 	b.WriteString(" from ")
 	b.WriteString(SenderLabel(e.Sender))
 	var ctx []string
@@ -62,11 +71,12 @@ func Render(e contracts.MessageEnvelope) string {
 	return b.String()
 }
 
-// SenderLabel renders a principal as "<kind>:<id>" plus its display alias.
+// SenderLabel renders a principal as "<kind>:<title>", or "<kind>:<id>"
+// when it has no display name (the id stays available via get_message).
 func SenderLabel(p contracts.Principal) string {
 	s := string(p.Kind) + ":" + p.ID
 	if p.Name != "" {
-		s += " (" + p.Name + ")"
+		s = string(p.Kind) + ":" + p.Name
 	}
 	if p.OnBehalfOf != nil {
 		s += " on behalf of " + string(p.OnBehalfOf.Kind) + ":" + p.OnBehalfOf.ID

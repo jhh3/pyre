@@ -8,8 +8,9 @@ import (
 )
 
 // The tools the Claude adapter pre-approves exist, are the messaging tools
-// for fleet peers, and include nothing that launches, stops, interrupts,
-// answers approvals, duplicates work or publishes.
+// for fleet peers plus projects and self/child archiving (W-archive2), and
+// include nothing that launches, stops, interrupts, answers approvals,
+// duplicates work or publishes.
 func TestPreapprovedPyreToolsAreMessagingOnly(t *testing.T) {
 	byName := map[string]MCPTool{}
 	for _, tl := range MCPTools() {
@@ -21,7 +22,16 @@ func TestPreapprovedPyreToolsAreMessagingOnly(t *testing.T) {
 		"mcp__pyre__search":         true,                                     // read-only global search (W-search)
 		"mcp__pyre__audit_log":      true,                                     // read-only audit log (W-audit)
 		"mcp__pyre__rename_session": true,                                     // self-only rename (W-names; hub-enforced)
-		"mcp__pyre__flag_attention": true, "mcp__pyre__clear_attention": true} // self-only flag (W-attn; hub-enforced)
+		"mcp__pyre__flag_attention": true, "mcp__pyre__clear_attention": true, // self-only flag (W-attn; hub-enforced)
+		// W-archive2: projects and self/child archiving (hub-enforced)
+		"mcp__pyre__create_project": true, "mcp__pyre__associate_session_project": true,
+		"mcp__pyre__archive_session": true, "mcp__pyre__archive_project": true,
+		"mcp__pyre__set_session_icon": true, // W-archive2: a session's emoji (like rename)
+		"mcp__pyre__reparent_session": true, // W-reparent: hub-enforced permissions
+		// W-asks: owner questions (hub-enforced: children redirected, own asks only)
+		"mcp__pyre__ask_owner": true, "mcp__pyre__find_asks": true, "mcp__pyre__withdraw_ask": true,
+		// W-web-inbox: the lead's project page (hub-enforced)
+		"mcp__pyre__update_project_page": true, "mcp__pyre__get_project_page": true}
 	got := map[string]bool{}
 	for _, name := range claude.PyreMessagingAllowedTools {
 		got[name] = true
@@ -49,7 +59,7 @@ func TestPreapprovedPyreToolsAreMessagingOnly(t *testing.T) {
 			t.Errorf("doorbell tool %s missing from the messaging set", name)
 		}
 	}
-	for _, banned := range []string{"start_session", "stop_session", "interrupt_session", "answer_approval", "reissue_message", "resolve_delivery", "publish", "create_project", "associate_session_project", "archive_session"} {
+	for _, banned := range []string{"start_session", "stop_session", "interrupt_session", "answer_approval", "reissue_message", "resolve_delivery", "publish"} {
 		if got["mcp__pyre__"+banned] || strings.Contains(strings.Join(claude.PyreMessagingAllowedTools, ","), banned) {
 			t.Errorf("%s must not be pre-approved", banned)
 		}

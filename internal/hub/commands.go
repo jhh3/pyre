@@ -266,8 +266,22 @@ func (h *Hub) expireCommandTx(ctx context.Context, tx *sql.Tx, r commandRec) err
 // cancelDeliveriesTx withdraws outstanding deliver commands for a message.
 // Commands the node may hold get a cancel_delivery command.
 func (h *Hub) cancelDeliveriesTx(ctx context.Context, tx *sql.Tx, messageID string, actor contracts.Principal) error {
-	rows, err := tx.QueryContext(ctx, `SELECT `+cmdCols+` FROM commands WHERE ref_kind=? AND ref_id=? AND kind=? AND state IN (?,?,?)`,
-		string(contracts.KindMessage), messageID, string(contracts.CmdDeliver), cmdQueued, cmdSent, cmdAcked)
+	return h.withdrawDeliveriesTx(ctx, tx, messageID, actor, map[string]string{"message_id": messageID})
+}
+
+// withdrawDeliveriesTx is cancelDeliveriesTx with an explicit cancel_delivery
+// payload (a read withdrawal names the evidence and run, W-delivery).
+//
+// A node holds the message whenever its deliver command was sent, acked, or
+// completed successfully: a deliver command completes as soon as the node
+// commits the message to its inbox, long before any paste. Those nodes get
+// one cancel_delivery each (W-delivery2, incident 2026-10-07: a read only
+// looked at unfinished deliver commands, so a message the node had already
+// stored and was holding behind the owner's input lease was pasted 8 hours
+// after the recipient read it).
+func (h *Hub) withdrawDeliveriesTx(ctx context.Context, tx *sql.Tx, messageID string, actor contracts.Principal, payload any) error {
+	rows, err := tx.QueryContext(ctx, `SELECT `+cmdCols+` FROM commands WHERE ref_kind=? AND ref_id=? AND kind=? AND state IN (?,?,?,?)`,
+		string(contracts.KindMessage), messageID, string(contracts.CmdDeliver), cmdQueued, cmdSent, cmdAcked, cmdDone)
 	if err != nil {
 		return err
 	}
@@ -284,16 +298,23 @@ func (h *Hub) cancelDeliveriesTx(ctx context.Context, tx *sql.Tx, messageID stri
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	notify := map[string]bool{}
+	var nodes []string
 	for _, r := range recs {
 		if r.State == cmdQueued || r.State == cmdSent {
 			if _, err := tx.ExecContext(ctx, `UPDATE commands SET state=?, completed_at=? WHERE command_id=?`, cmdCancelled, persistence.Time(h.now()), r.CommandID); err != nil {
 				return err
 			}
 		}
-		if r.State == cmdSent || r.State == cmdAcked {
-			if _, err := h.enqueueTx(ctx, tx, r.NodeID, contracts.CmdCancelDelivery, actor, map[string]string{"message_id": messageID}, 0, contracts.ObjectRef{Kind: contracts.KindMessage, ID: messageID}); err != nil {
-				return err
-			}
+		held := r.State == cmdSent || r.State == cmdAcked || (r.State == cmdDone && r.Outcome == contracts.OutcomeSucceeded)
+		if held && !notify[r.NodeID] {
+			notify[r.NodeID] = true
+			nodes = append(nodes, r.NodeID)
+		}
+	}
+	for _, n := range nodes {
+		if _, err := h.enqueueTx(ctx, tx, n, contracts.CmdCancelDelivery, actor, payload, 0, contracts.ObjectRef{Kind: contracts.KindMessage, ID: messageID}); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -396,9 +417,22 @@ func (h *Hub) completeCommandTx(ctx context.Context, tx *sql.Tx, nodeID string, 
 	return h.emitCommandResult(ctx, tx, r, res, "node:"+nodeID, originSeq)
 }
 
+// maxEventResult bounds the command result carried in a command.result
+// event. Larger results (transcript reads for previews and tiles, action
+// outputs) stay only in the command record, where commands.get, the
+// synchronous call and the waiting caller read them; the event still says
+// that and how the command finished. Before (W-dbhygiene) every transcript
+// read was stored twice, the event copy averaging ~10KB, and pushed to every
+// event-stream client.
+const maxEventResult = 1024
+
 // emitCommandResult appends command.result; the payload is the
-// CommandResult (attach tickets already stripped).
+// CommandResult (attach tickets already stripped; a result larger than
+// maxEventResult omitted).
 func (h *Hub) emitCommandResult(ctx context.Context, tx *sql.Tx, r commandRec, res contracts.CommandResult, origin string, seq uint64) error {
+	if len(res.Result) > maxEventResult {
+		res.Result = nil
+	}
 	sessionID := ""
 	if r.RefKind == string(contracts.KindRun) {
 		if run, err := h.getRun(ctx, tx, r.RefID); err == nil {

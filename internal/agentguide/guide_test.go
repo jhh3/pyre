@@ -8,14 +8,20 @@ import (
 
 func TestGuideIsShortAndCoversTheEssentials(t *testing.T) {
 	g := Text(Options{})
-	if n := strings.Count(g, "\n"); n > 42 {
-		t.Fatalf("guide is %d lines; keep it short (<= ~40)", n)
+	if n := strings.Count(g, "\n"); n > 50 {
+		t.Fatalf("guide is %d lines; keep it short (<= ~50)", n)
 	}
 	for _, want := range []string{
 		"pyre --json nodes", "$PYRE_SESSION_ID", "[pyre-msg:<id>]", "--reply-to",
 		"existing related", "sharing a checkout", "Publish durable", "pointers",
 		"indeterminate", "Never blindly resend", "--accept-duplicate-risk", "ask",
 		"pyre project new", "create_project", "associate_session_project",
+		// the owner's slash commands (embedded Claude skills)
+		"/kickoff", "/open-items", "pyre commands <name>",
+		// I30 messaging rules, CLI variant
+		"Only top-level sessions contact the owner", "pyre ask new", "pyre ask find", "pyre ask withdraw",
+		"default you will take", "newcomer", "no progress pings", "final results once",
+		"question at the end of a turn never",
 	} {
 		if !strings.Contains(g, want) {
 			t.Errorf("guide lacks %q", want)
@@ -25,6 +31,23 @@ func TestGuideIsShortAndCoversTheEssentials(t *testing.T) {
 		if strings.Contains(g, banned) {
 			t.Errorf("guide prescribes ceremony: %q", banned)
 		}
+	}
+	if !strings.Contains(Text(Options{MCP: true}), "question at the end of a turn never") {
+		t.Error("MCP variant lacks the end-of-turn question rule")
+	}
+	// W-web-inbox: ask context, clarification replies, the lead's project page.
+	for _, g := range []string{Text(Options{}), Text(Options{MCP: true})} {
+		for _, want := range []string{"300+ characters", "each with a detail", "what happens by default", "asks for clarification", "self-contained", "project's page", "at milestones"} {
+			if !strings.Contains(g, want) {
+				t.Errorf("guide lacks %q", want)
+			}
+		}
+	}
+	if g := Text(Options{MCP: true}); !strings.Contains(g, "mcp__pyre__update_project_page") || !strings.Contains(g, "reply_to that message") {
+		t.Error("MCP variant lacks the project page tool or the reply_to rule")
+	}
+	if !strings.Contains(Text(Options{}), "pyre project page set") {
+		t.Error("CLI variant lacks pyre project page set")
 	}
 	if !strings.Contains(Text(Options{MCP: true}), "MCP tools") {
 		t.Error("MCP variant should mention the tools")
@@ -78,8 +101,15 @@ func TestMCPGuideSteersRepliesToMCPTools(t *testing.T) {
 	if !strings.Contains(para, "mcp__pyre__send_message") || strings.Contains(para, "pyre send --reply-to") {
 		t.Fatalf("reply paragraph should steer to the MCP tool:\n%s", para)
 	}
-	if !strings.Contains(g, `mcp__pyre__send_message (to: "owner"`) {
-		t.Error("asking the owner should use the MCP tool too")
+	// Decisions go to the owner as asks (I30), not owner mail.
+	for _, want := range []string{"mcp__pyre__ask_owner", "never send_message", "mcp__pyre__find_asks", "mcp__pyre__withdraw_ask",
+		"same topic_key", "Only top-level sessions contact the owner", "no progress pings", "Irreversible actions get no default"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("MCP guide lacks %q", want)
+		}
+	}
+	if strings.Contains(g, `to: "owner"`) || strings.Contains(Text(Options{}), "pyre send owner") {
+		t.Error("the guide must not steer decisions to plain owner mail")
 	}
 	// Without MCP (Codex) the shell commands stay.
 	if plain := Text(Options{}); !strings.Contains(plain, "pyre send --reply-to") || strings.Contains(plain, "mcp__pyre__") {
@@ -93,7 +123,7 @@ func TestParentNoteAndPeerReports(t *testing.T) {
 		t.Fatalf("parent-side line missing or child note without a parent:\n%s", g)
 	}
 	child := Text(Options{MCP: true, ParentSessionID: "ses_synth-parent", ReportsToParent: true})
-	for _, want := range []string{"## Started by another session", "ses_synth-parent", "$PYRE_PARENT_SESSION_ID", "reports back to it automatically", "owner only if you are explicitly told"} {
+	for _, want := range []string{"## Started by another session", "ses_synth-parent", "$PYRE_PARENT_SESSION_ID", "reports back to it automatically", "You do not contact the owner", "go to your parent"} {
 		if !strings.Contains(child, want) {
 			t.Errorf("child guide lacks %q", want)
 		}

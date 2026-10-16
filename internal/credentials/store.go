@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // Store keeps secret values in a node-local custody backend, addressed by Ref.
@@ -121,7 +123,7 @@ func storeEnv() []string {
 			env = append(env, k+"="+v)
 		}
 	}
-	return env
+	return append(env, winenv.SystemEnv()...)
 }
 
 func runCLI(ctx context.Context, path string, args []string, stdin []byte) (cliResult, error) {

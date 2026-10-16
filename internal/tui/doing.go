@@ -29,7 +29,7 @@ func sessionDoing(s contracts.SessionView, node *contracts.Node) (string, time.T
 // the same width w. The title keeps at least three fifths of the cell; the
 // suffix is dropped when too little room is left for it to read.
 func (m *Model) titleDoingCell(sel bool, s contracts.SessionView, w int) string {
-	title := s.Session.Title
+	title := iconTitle(s)
 	phrase, _, ok := sessionDoing(s, m.nodeOf(s))
 	if !ok {
 		return m.titleCell(sel, title, w)

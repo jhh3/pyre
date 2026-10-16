@@ -109,7 +109,7 @@ func TestReportDedupPruneUsesKeyAndKeepsWindow(t *testing.T) {
 	}
 	var detail string
 	var id, parent, unused int
-	if err := x.db.QueryRow("EXPLAIN QUERY PLAN "+pruneReportDedupQuery, nodeMac, 5).Scan(&id, &parent, &unused, &detail); err != nil {
+	if err := x.db.QueryRow("EXPLAIN QUERY PLAN "+pruneReportDedupQuery, nodeMac, nodeMac, 5, 500).Scan(&id, &parent, &unused, &detail); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(detail, "USING") || strings.HasPrefix(detail, "SCAN") {

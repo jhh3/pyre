@@ -52,8 +52,22 @@ func (r *Recorder) SessionWorktrees(ctx context.Context, req contracts.SessionWo
 // as dir.list, are reads and stay unrecorded).
 func (r *Recorder) InvokeNodeAction(ctx context.Context, req contracts.NodeActionRequest) (contracts.NodeActionResult, error) {
 	switch req.Action {
-	case contracts.ActionWorktreeCreate, contracts.ActionWorktreeRemove, contracts.ActionFsMkdir:
+	case contracts.ActionWorktreeCreate, contracts.ActionWorktreeRemove, contracts.ActionFsMkdir, contracts.ActionRepoClone:
 		r.rec("InvokeNodeAction:"+req.Action, req.OperationID, req)
 	}
 	return r.API.InvokeNodeAction(ctx, req)
+}
+
+func (e *Embeddable) RepoCatalog(ctx context.Context, req contracts.RepoCatalogRequest) (contracts.RepoCatalog, error) {
+	if r, ok := e.API.(contracts.RepoCatalogAPI); ok {
+		return r.RepoCatalog(ctx, req)
+	}
+	return contracts.RepoCatalog{}, contracts.Errorf(contracts.ErrUnsupported, "repo catalog not offered")
+}
+
+func (r *Recorder) RepoCatalog(ctx context.Context, req contracts.RepoCatalogRequest) (contracts.RepoCatalog, error) {
+	if a, ok := r.API.(contracts.RepoCatalogAPI); ok {
+		return a.RepoCatalog(ctx, req)
+	}
+	return contracts.RepoCatalog{}, contracts.Errorf(contracts.ErrUnsupported, "repo catalog not offered")
 }

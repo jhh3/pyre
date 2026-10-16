@@ -50,6 +50,9 @@ type Executor struct {
 	Command    string   `json:"command,omitempty" yaml:"command,omitempty"`
 	Args       []string `json:"args,omitempty" yaml:"args,omitempty"`
 	PrivateNet bool     `json:"privateNetwork,omitempty" yaml:"privateNetwork,omitempty"`
+	// Headers are fixed, non-secret request headers an HTTP provider requires
+	// on every call (for example Discord's mandatory User-Agent shape).
+	Headers map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 }
 
 type CredentialMethod struct {
@@ -135,8 +138,24 @@ type Operation struct {
 	HTTP         *HTTPOperation `json:"http,omitempty" yaml:"http,omitempty"`
 	CLI          *CLIOperation  `json:"cli,omitempty" yaml:"cli,omitempty"`
 	MCPTool      string         `json:"mcpTool,omitempty" yaml:"mcpTool,omitempty"`
+	Compose      []ComposeStep  `json:"compose,omitempty" yaml:"compose,omitempty"`
 	Pagination   *Pagination    `json:"pagination,omitempty" yaml:"pagination,omitempty"`
 	Output       Output         `json:"output,omitempty" yaml:"output,omitempty"`
+}
+
+// ComposeStep is one read of a composite read operation. A composite runs
+// its steps sequentially through the same mode and credential and returns one
+// object keyed by each step's As name. Arguments map a step argument to a
+// composite argument (or an "=literal"); without a mapping, composite
+// arguments the step declares are passed through unchanged. Fields optionally
+// project each item at ItemsPath (default: the whole result) to a compact
+// subset so change-detection reads stay small.
+type ComposeStep struct {
+	As        string            `json:"as" yaml:"as"`
+	Operation string            `json:"operation" yaml:"operation"`
+	Arguments map[string]string `json:"arguments,omitempty" yaml:"arguments,omitempty"`
+	ItemsPath string            `json:"itemsPath,omitempty" yaml:"itemsPath,omitempty"`
+	Fields    []string          `json:"fields,omitempty" yaml:"fields,omitempty"`
 }
 
 // Pagination describes a cursor-shaped provider contract. Outfit also knows
@@ -154,16 +173,58 @@ type Pagination struct {
 }
 
 type HTTPOperation struct {
-	Method       string            `json:"method" yaml:"method"`
-	Path         string            `json:"path" yaml:"path"`
-	Query        []string          `json:"query,omitempty" yaml:"query,omitempty"`
-	QueryNames   map[string]string `json:"queryNames,omitempty" yaml:"queryNames,omitempty"`
-	Body         []string          `json:"body,omitempty" yaml:"body,omitempty"`
-	BodyNames    map[string]string `json:"bodyNames,omitempty" yaml:"bodyNames,omitempty"`
-	BodyValues   map[string]any    `json:"bodyValues,omitempty" yaml:"bodyValues,omitempty"`
-	Headers      map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	SuccessField string            `json:"successField,omitempty" yaml:"successField,omitempty"`
-	ErrorField   string            `json:"errorField,omitempty" yaml:"errorField,omitempty"`
+	Method     string            `json:"method" yaml:"method"`
+	Path       string            `json:"path" yaml:"path"`
+	Query      []string          `json:"query,omitempty" yaml:"query,omitempty"`
+	QueryNames map[string]string `json:"queryNames,omitempty" yaml:"queryNames,omitempty"`
+	// QueryValues are fixed query parameters sent unless an argument of the
+	// same provider name overrides them.
+	QueryValues map[string]string `json:"queryValues,omitempty" yaml:"queryValues,omitempty"`
+	Body        []string          `json:"body,omitempty" yaml:"body,omitempty"`
+	BodyNames   map[string]string `json:"bodyNames,omitempty" yaml:"bodyNames,omitempty"`
+	BodyValues  map[string]any    `json:"bodyValues,omitempty" yaml:"bodyValues,omitempty"`
+	// StringArguments are sent as JSON strings exactly as given, never
+	// coerced into numbers, booleans, or objects (message text, snowflake IDs).
+	StringArguments []string          `json:"stringArguments,omitempty" yaml:"stringArguments,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	SuccessField    string            `json:"successField,omitempty" yaml:"successField,omitempty"`
+	ErrorField      string            `json:"errorField,omitempty" yaml:"errorField,omitempty"`
+	// ArgumentHeaders send an optional argument as a request header only
+	// when the caller supplies it (for example Discord's URL-encoded
+	// X-Audit-Log-Reason).
+	ArgumentHeaders []ArgumentHeader `json:"argumentHeaders,omitempty" yaml:"argumentHeaders,omitempty"`
+	// ItemTemplates expand plain-string items of a JSON-array argument into
+	// an object template whose "{{item}}" strings become the item; object
+	// items pass through unchanged (["Yes","No"] → poll answer objects).
+	ItemTemplates map[string]any `json:"itemTemplates,omitempty" yaml:"itemTemplates,omitempty"`
+	// RelativeTimeArguments accept an RFC 3339 time, a number of minutes or
+	// a duration (90m, 12h, 7d) from now, or 0/none/null for JSON null, and
+	// are sent as an RFC 3339 UTC timestamp.
+	RelativeTimeArguments []string `json:"relativeTimeArguments,omitempty" yaml:"relativeTimeArguments,omitempty"`
+	// PathArgument opts the operation into a caller-supplied path below the
+	// fixed base URL (a generic escape hatch). The value must start with "/"
+	// and may not contain a scheme, host, query, fragment, backslash, "//",
+	// or "." / ".." / empty segments; each segment is percent-encoded and
+	// appended to Path, so the origin and base path can never change.
+	PathArgument string `json:"pathArgument,omitempty" yaml:"pathArgument,omitempty"`
+	// QueryArgument names an argument holding extra query parameters as a
+	// JSON object (array values repeat the key) or an a=1&b=2 string.
+	QueryArgument string `json:"queryArgument,omitempty" yaml:"queryArgument,omitempty"`
+	// BodyArgument names an argument holding the entire JSON request body.
+	BodyArgument string `json:"bodyArgument,omitempty" yaml:"bodyArgument,omitempty"`
+	// MethodArgument names an argument that selects the request method from
+	// Methods; Method is not used when it is declared.
+	MethodArgument string   `json:"methodArgument,omitempty" yaml:"methodArgument,omitempty"`
+	Methods        []string `json:"methods,omitempty" yaml:"methods,omitempty"`
+}
+
+// ArgumentHeader binds an optional operation argument to a request header.
+// Encoding "url" percent-encodes the value; otherwise control characters
+// are rejected.
+type ArgumentHeader struct {
+	Name     string `json:"name" yaml:"name"`
+	Argument string `json:"argument" yaml:"argument"`
+	Encoding string `json:"encoding,omitempty" yaml:"encoding,omitempty"`
 }
 
 type CLIOperation struct {

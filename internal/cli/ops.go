@@ -267,6 +267,10 @@ func (o *Ops) projectPtr(ctx context.Context, ref string) (*string, error) {
 	if ref == "" {
 		return nil, nil
 	}
+	if ref == "none" { // explicitly no project (a child otherwise joins its parent's)
+		empty := ""
+		return &empty, nil
+	}
 	if c.ValidID(ref, c.PrefixProject) {
 		return &ref, nil
 	}
@@ -588,7 +592,11 @@ func (o *Ops) Send(ctx context.Context, p SendParams) (c.MessageView, error) {
 			return c.MessageView{}, err
 		}
 	}
-	return o.API.SendMessage(ctx, req)
+	mv, err := o.API.SendMessage(ctx, req)
+	if err == nil {
+		o.withDelivery(ctx, &mv, nil) // immediate snapshot (W-stuckmail)
+	}
+	return mv, err
 }
 
 func attachmentFor(id string) (c.Attachment, error) {
@@ -664,13 +672,52 @@ func (o *Ops) Inbox(ctx context.Context, p InboxParams) (c.Page[c.MessageView], 
 		if pg.Items == nil {
 			pg.Items = []c.MessageView{}
 		}
+		if err == nil {
+			o.markRead(ctx, "inbox", pg.Items...)
+		}
 		return pg, err
 	}
-	return listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.MessageView], error) {
+	pg, err := listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.MessageView], error) {
 		r := req
 		r.Cursor = cur
 		return o.API.ListMessages(ctx, r)
 	})
+	if err == nil {
+		o.markRead(ctx, "inbox", pg.Items...)
+	}
+	return pg, err
+}
+
+// markRead tells the hub that this session read these messages (their
+// bodies were just returned to it), so their pending paste deliveries are
+// withdrawn: read = delivered (W-delivery). Only the session's own pending
+// mail is reported; the hub verifies the principal. Best effort: a hub
+// without messages.mark_read leaves the paste path as before.
+func (o *Ops) markRead(ctx context.Context, via string, ms ...c.MessageView) {
+	if o.Self.SessionID == "" {
+		return
+	}
+	ra, ok := o.API.(c.MessageReadAPI)
+	if !ok {
+		return
+	}
+	var ids []string
+	for _, m := range ms {
+		e := m.Envelope
+		if e.Recipient.Kind != c.AddrSession || e.Recipient.ID != o.Self.SessionID || e.Mode == c.ModeInfo {
+			continue
+		}
+		if m.Status.Runtime == c.DeliveryQueued || m.Status.Runtime == c.DeliveryNodeReceived {
+			ids = append(ids, e.MessageID)
+		}
+	}
+	for len(ids) > 0 {
+		n := min(len(ids), 200)
+		if _, err := ra.MarkMessagesRead(ctx, c.MarkMessagesReadRequest{MessageIDs: ids[:n], Via: via}); err != nil {
+			return
+		}
+		ids = ids[n:]
+	}
 }
 
 // WaitReplyParams awaits a reply (MCP wait_reply input).
@@ -680,14 +727,21 @@ type WaitReplyParams struct {
 }
 
 // WaitReplyResult is the original message plus its reply, if one arrived.
+// Delivery is the original message's derived delivery status line
+// (W-stuckmail, additive), e.g. "queued: recipient's machine server is
+// disconnected".
 type WaitReplyResult struct {
-	Message c.MessageView  `json:"message"`
-	Reply   *c.MessageView `json:"reply,omitempty"`
+	Message  c.MessageView  `json:"message"`
+	Reply    *c.MessageView `json:"reply,omitempty"`
+	Delivery string         `json:"delivery,omitempty"`
 }
 
 // WaitReply polls the message until its acknowledgement state says it was
 // replied to, then returns the reply. A timeout is ErrUnavailable (retry
-// later) with the latest state of the original message in the result.
+// later) with the latest state of the original message in the result and
+// its delivery status in the error text. When no reply can arrive without
+// someone acting (the recipient ended or was archived, or delivery was
+// refused, expired or cancelled) it returns at once with ErrConflict.
 func (o *Ops) WaitReply(ctx context.Context, p WaitReplyParams) (WaitReplyResult, error) {
 	if p.MessageID == "" {
 		return WaitReplyResult{}, usagef("a message ID is required")
@@ -701,6 +755,7 @@ func (o *Ops) WaitReply(ctx context.Context, p WaitReplyParams) (WaitReplyResult
 		interval = time.Second
 	}
 	deadline := time.Now().Add(timeout)
+	var rc recipientCache
 	for {
 		m, err := o.API.GetMessage(ctx, c.GetRequest{ID: p.MessageID})
 		if err != nil {
@@ -712,14 +767,26 @@ func (o *Ops) WaitReply(ctx context.Context, p WaitReplyParams) (WaitReplyResult
 			if err != nil {
 				return res, err
 			}
+			o.markRead(ctx, "wait_reply", r)
 			res.Reply = &r
+			o.withDelivery(ctx, &res.Message, &rc)
+			res.Delivery = deliveryLine(res.Message)
 			return res, nil
 		}
+		o.withDelivery(ctx, &m, &rc)
+		res.Message, res.Delivery = m, deliveryLine(m)
 		if m.Status.Runtime == c.DeliveryRejected || m.Status.Runtime == c.DeliveryExpired || m.Status.Runtime == c.DeliveryCancelled || m.Status.Storage == c.StorageRejected {
 			return res, c.Errorf(c.ErrConflict, "message %s will not be answered: delivery %s (%s)", p.MessageID, m.Status.Runtime, m.Status.RuntimeReason).WithRef(c.KindMessage, p.MessageID)
 		}
+		if m.Delivery != nil && m.Delivery.Final {
+			// The recipient ended or was archived: waiting longer cannot help.
+			return res, c.Errorf(c.ErrConflict, "message %s will not be answered unless someone acts: %s", p.MessageID, m.Delivery.Summary).WithRef(c.KindMessage, p.MessageID)
+		}
 		left := time.Until(deadline)
 		if left <= 0 {
+			if res.Delivery != "" {
+				return res, c.Errorf(c.ErrUnavailable, "no reply to %s within %s; your message is %s", p.MessageID, timeout, stillPhrase(res.Delivery)).WithRef(c.KindMessage, p.MessageID)
+			}
 			return res, c.Errorf(c.ErrUnavailable, "no reply to %s within %s (delivery: %s, ack: %s)", p.MessageID, timeout, m.Status.Runtime, m.Status.Ack).WithRef(c.KindMessage, p.MessageID)
 		}
 		t := time.NewTimer(min(interval, left))
@@ -740,7 +807,11 @@ type MessageRef struct {
 }
 
 func (o *Ops) GetMessage(ctx context.Context, p MessageRef) (c.MessageView, error) {
-	return o.API.GetMessage(ctx, c.GetRequest{ID: p.MessageID})
+	m, err := o.API.GetMessage(ctx, c.GetRequest{ID: p.MessageID})
+	if err == nil {
+		o.markRead(ctx, "get_message", m)
+	}
+	return m, err
 }
 
 func (o *Ops) Ack(ctx context.Context, p MessageRef) (c.MessageView, error) {
