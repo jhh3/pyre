@@ -177,10 +177,15 @@ export async function create({ fail = false } = {}) {
       emit('inbox');
       return { results };
     }],
+    ['POST', /^\/uploads\/image\?/, (_, body) => {
+      if (fail) throw new ApiError(502, 'unavailable', "The hub didn't answer. The image was not uploaded.");
+      return { version_id: 'ver_fx_img' + ++seq, media_type: 'image/png', size: body.size ?? 0, filename: 'image.png' };
+    }],
     ['POST', /^\/threads\/([^/]+)\/reply$/, ([id], body) => {
       const t = byId(id)!;
       if (fail) throw new ApiError(502, 'unavailable', "The hub didn't answer. Your message was not sent.");
       const msg = ownerMessage(t, body.text);
+      if (body.attachments?.length) msg.attachments = body.attachments.length;
       t.thread.needs_reply = false;
       t.thread.preview = 'You: ' + body.text;
       deliverLater(t, msg);

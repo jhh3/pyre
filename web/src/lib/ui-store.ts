@@ -2,18 +2,20 @@
 // in-flight answers, optimistic replies, drafts, the answer mode, the
 // keyboard cursor. A tiny external store (no extra dependency).
 import { useSyncExternalStore } from 'react';
+import type { DraftImage } from './images';
 import { local } from './local';
 import type { AnswerMode } from './types';
 import type { Filter } from '@/hooks/route';
 
 export type Answering = { phase: 'sending' | 'error'; option_id: string; mode: AnswerMode; op: string; message?: string };
-export type PendingReply = { key: string; text: string; at: string; phase: 'sending' | 'error'; message?: string };
+export type PendingReply = { key: string; text: string; images?: DraftImage[]; at: string; phase: 'sending' | 'error'; message?: string };
 
 export type UI = {
   answering: Record<string, Answering>; // by ask_id
   fresh: Record<string, number>; // ask_id -> when answered from this tab
   pending: Record<string, PendingReply[]>; // by thread_id
   drafts: Record<string, string>; // by thread_id
+  images: Record<string, DraftImage[]>; // composer images by thread_id
   mode: AnswerMode;
   cursor: string | null;
   navOpen: boolean;
@@ -29,6 +31,7 @@ let state: UI = {
   fresh: {},
   pending: {},
   drafts: {},
+  images: {},
   mode: local.get('answerMode', 'now') === 'hold' ? 'hold' : 'now',
   cursor: null,
   navOpen: false,

@@ -61,6 +61,8 @@ type Msg struct {
 	ReplyTo   string    `json:"reply_to"`
 	Delivery  Delivery  `json:"delivery"`
 	AskID     string    `json:"ask_id,omitempty"`
+	// Attachments counts the published objects the message carries.
+	Attachments int `json:"attachments,omitempty"`
 }
 
 type Activity struct {
@@ -269,7 +271,7 @@ func sortCards(cards []SessionCard, at map[string]time.Time) {
 // msgView renders one message for the thread view.
 func (sn *snap) msgView(m c.MessageView, askID string) Msg {
 	e := m.Envelope
-	out := Msg{MessageID: e.MessageID, Text: e.Body.Text, At: msgTime(m), ReplyTo: e.InReplyTo, AskID: askID}
+	out := Msg{MessageID: e.MessageID, Text: e.Body.Text, At: msgTime(m), ReplyTo: e.InReplyTo, AskID: askID, Attachments: len(e.Attachments)}
 	switch {
 	case e.Sender.Kind == c.PrincipalOwner:
 		out.From = MsgFrom{Kind: "owner", ID: "owner", Label: "You"}

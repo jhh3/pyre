@@ -3,9 +3,10 @@
 // conversation with a reply composer.
 import {
   AlertCircle, Archive, ArrowDown, ArrowRight, ArrowUp, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronUp, Clock, CornerDownLeft,
-  FolderClosed, Loader2, MessageSquareText, Pause, Undo2, X, Zap,
+  FolderClosed, ImagePlus, Loader2, MessageSquareText, Paperclip, Pause, Undo2, X, Zap,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { toast } from 'sonner';
 import { Avatar, Chip, DeadlineChip, Dot, EmptyState, ErrorState, Markdown, Time } from '@/components/bits';
 import { Button } from '@/components/ui/button';
 import { Kbd } from '@/components/ui/kbd';
@@ -16,6 +17,7 @@ import {
 } from '@/hooks/data';
 import { useNow } from '@/hooks/now';
 import { listHref, navigate } from '@/hooks/route';
+import { dragHasFiles, filesOf, MAX_IMAGES, newImageKey, plural, rejectReason, toDraft, type DraftImage } from '@/lib/images';
 import { canArchive, heldItems, isOpenAsk, OPEN_ASK_ARCHIVE, optionLabel, projectHref, sessionState, threadHref } from '@/lib/model';
 import * as T from '@/lib/time';
 import type { Ask, AskOption, HeldAnswers, Msg, Thread } from '@/lib/types';
@@ -549,7 +551,12 @@ function MessageItem({ m, me, decision }: { m: Msg; me: string; decision: boolea
           {decision && <span className="rounded bg-card px-1.5 text-[11px] font-medium text-muted-foreground ring-1 ring-border">Decision</span>}
           <Time at={m.at} mode="long" className="ml-auto shrink-0 text-[12px] text-faint" />
         </div>
-        <Markdown text={m.text} className="mt-1 text-[14.5px] md:text-[14px]" />
+        {m.text && <Markdown text={m.text} className="mt-1 text-[14.5px] md:text-[14px]" />}
+        {!!m.attachments && (
+          <div className="mt-1.5 inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+            <Paperclip className="size-3.5" /> {plural(m.attachments, 'attachment')}
+          </div>
+        )}
         {owner && (
           <div className="mt-2 text-[12.5px]">
             <DeliveryLine msg={m} />
@@ -569,7 +576,8 @@ function PendingItem({ p, threadId, me }: { p: PendingReply; threadId: string; m
           <span className="font-semibold">You</span>
           <span className="ml-auto text-[12px] text-faint">{T.clock(p.at)}</span>
         </div>
-        <Markdown text={p.text} className="mt-1 text-[14.5px] md:text-[14px]" />
+        {p.text && <Markdown text={p.text} className="mt-1 text-[14.5px] md:text-[14px]" />}
+        {!!p.images?.length && <ImageStrip images={p.images} className="mt-2" />}
         <div className="mt-2 text-[12.5px]">
           {p.phase === 'sending' ? (
             <span className="inline-flex items-center gap-1.5 text-muted-foreground">
@@ -581,7 +589,7 @@ function PendingItem({ p, threadId, me }: { p: PendingReply; threadId: string; m
                 <AlertCircle className="size-3.5" /> Not sent. {p.message}
               </span>
               <span className="flex gap-1.5">
-                <Button size="xs" variant="destructive" onClick={() => sendReply(threadId, p.text, p.key)}>
+                <Button size="xs" variant="destructive" onClick={() => sendReply(threadId, p.text, p.key, p.images)}>
                   Retry
                 </Button>
                 <Button
@@ -589,7 +597,7 @@ function PendingItem({ p, threadId, me }: { p: PendingReply; threadId: string; m
                   variant="ghost"
                   onClick={() => {
                     discardReply(threadId, p.key);
-                    setUI((s) => ({ drafts: withKey(s.drafts, threadId, p.text) }));
+                    setUI((s) => ({ drafts: withKey(s.drafts, threadId, p.text), images: withKey(s.images, threadId, p.images?.length ? p.images : undefined) }));
                   }}
                 >
                   Edit
@@ -638,12 +646,40 @@ function Conversation({ thread, messages }: { thread: Thread; messages: Msg[] })
 
 // ---------- composer ----------
 
+/** Thumbnails of images on a draft or a pending reply (onRemove: chips). */
+function ImageStrip({ images, onRemove, className }: { images: DraftImage[]; onRemove?: (key: string) => void; className?: string }) {
+  return (
+    <ul className={cn('flex flex-wrap gap-2', className)} aria-label="Attached images">
+      {images.map((img) => (
+        <li key={img.key} className="group relative flex items-center gap-2 rounded-lg border bg-card py-1 pr-1 pl-1 text-[12.5px] shadow-card">
+          <img src={img.preview} alt="" className="size-10 rounded-md object-cover" />
+          <span className="max-w-[140px] truncate text-muted-foreground" title={img.name}>
+            {img.name}
+          </span>
+          {onRemove && (
+            <Button type="button" size="icon-xs" variant="ghost" aria-label={'Remove ' + img.name} onClick={() => onRemove(img.key)}>
+              <X />
+            </Button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Composer({ thread }: { thread: Thread }) {
   const id = thread.thread_id;
   const draft = useUI((s) => s.drafts[id]) ?? '';
+  const images = useUI((s) => s.images[id]) ?? [];
+  const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const session = thread.session?.title;
   const setDraft = (v: string) => setUI((s) => ({ drafts: withKey(s.drafts, id, v || undefined) }));
+  const setImages = (f: (list: DraftImage[]) => DraftImage[]) =>
+    setUI((s) => {
+      const next = f(s.images[id] ?? []);
+      return { images: withKey(s.images, id, next.length ? next : undefined) };
+    });
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -652,23 +688,78 @@ function Composer({ thread }: { thread: Thread }) {
     el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px';
   }, [draft]);
 
+  // add attaches pasted or dropped files: images within the limits become
+  // chips, anything else is refused with a toast saying why.
+  const add = async (files: File[]) => {
+    let room = MAX_IMAGES - (getUI().images[id]?.length ?? 0);
+    for (const f of files) {
+      const why = rejectReason(f);
+      if (why) {
+        toast.error('Image not attached', { description: why });
+        continue;
+      }
+      if (room <= 0) {
+        toast.error('Image not attached', { description: `A reply can carry at most ${MAX_IMAGES} images.` });
+        break;
+      }
+      room--;
+      try {
+        const img = await toDraft(f, newImageKey());
+        setImages((list) => [...list, img]);
+      } catch (e) {
+        toast.error('Image not attached', { description: (e as Error).message });
+      }
+    }
+  };
+
   const send = () => {
     const text = (getUI().drafts[id] ?? '').trim();
-    if (!text) return;
+    const imgs = getUI().images[id] ?? [];
+    if (!text && imgs.length === 0) return;
     setDraft('');
-    sendReply(id, text);
+    setImages(() => []);
+    sendReply(id, text, undefined, imgs);
   };
 
   if (!session) return null;
   return (
     <div className="shrink-0 border-t bg-card px-3 pt-3 pb-[max(env(safe-area-inset-bottom),12px)] md:px-6">
       <form
-        className="mx-auto flex max-w-[760px] items-end gap-1 rounded-[22px] border bg-background p-1 transition-[border-color,box-shadow] focus-within:border-ring/50 focus-within:shadow-[0_0_0_3px_color-mix(in_oklch,var(--ring)_14%,transparent)] md:block md:rounded-2xl md:p-0"
+        className={cn(
+          'relative mx-auto flex max-w-[760px] flex-wrap items-end gap-1 rounded-[22px] border bg-background p-1 transition-[border-color,box-shadow] focus-within:border-ring/50 focus-within:shadow-[0_0_0_3px_color-mix(in_oklch,var(--ring)_14%,transparent)] md:block md:rounded-2xl md:p-0',
+          dragging && 'border-primary/60 shadow-[0_0_0_3px_color-mix(in_oklch,var(--ring)_22%,transparent)]',
+        )}
         onSubmit={(e) => {
           e.preventDefault();
           send();
         }}
+        onDragEnter={(e) => {
+          if (!dragHasFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragOver={(e) => {
+          if (!dragHasFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          if (!dragging) setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+        }}
+        onDrop={(e) => {
+          if (!dragHasFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          setDragging(false);
+          add(filesOf(e.dataTransfer));
+        }}
       >
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-[inherit] bg-brand-soft/90 text-[13.5px] font-medium text-primary">
+            <ImagePlus className="size-4" /> Drop images to attach
+          </div>
+        )}
+        {images.length > 0 && <ImageStrip images={images} onRemove={(k) => setImages((list) => list.filter((x) => x.key !== k))} className="w-full px-2 pt-2 md:px-3" />}
         <label htmlFor="composer" className="sr-only">
           Reply to {session}
         </label>
@@ -678,6 +769,12 @@ function Composer({ thread }: { thread: Thread }) {
           rows={1}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => {
+            const files = filesOf(e.clipboardData);
+            if (files.length === 0) return; // plain text pastes as usual
+            e.preventDefault();
+            add(files);
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
@@ -691,9 +788,9 @@ function Composer({ thread }: { thread: Thread }) {
         />
         <div className="flex shrink-0 items-center gap-2 md:pr-2 md:pb-2 md:pl-4">
           <span className="hidden min-w-0 flex-1 truncate text-[12px] text-faint md:block">
-            To {session} · <Kbd className="h-[18px] text-[11px]">{isMac ? '⌘' : 'Ctrl'}</Kbd> <Kbd className="h-[18px] text-[11px]">↵</Kbd> to send
+            To {session} · <Kbd className="h-[18px] text-[11px]">{isMac ? '⌘' : 'Ctrl'}</Kbd> <Kbd className="h-[18px] text-[11px]">↵</Kbd> to send · paste or drop images
           </span>
-          <Button type="submit" disabled={!draft.trim()} aria-label="Send" className="size-10 rounded-full p-0 md:h-8 md:w-auto md:rounded-lg md:px-3.5">
+          <Button type="submit" disabled={!draft.trim() && images.length === 0} aria-label="Send" className="size-10 rounded-full p-0 md:h-8 md:w-auto md:rounded-lg md:px-3.5">
             <span className="hidden md:inline">Send</span> <ArrowUp className="size-[18px] md:size-4" />
           </Button>
         </div>
