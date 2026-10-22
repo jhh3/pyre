@@ -166,7 +166,7 @@ func New(cfg Config) (*Daemon, error) {
 		d.rep = nopReporter{}
 	}
 	d.engine = delivery.New(delivery.Config{NodeID: d.nodeID, Inbox: ib, Runs: (*deliveryRuns)(d), Reporter: d.rep,
-		Clock: cfg.Clock, HubClock: hubClock{d}, Facts: hubFacts{d}, Logger: cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
+		Clock: cfg.Clock, HubClock: hubClock{d}, Facts: hubFacts{d}, Files: attachmentFiles{d}, Logger: cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
 	d.registerBuiltinActions()
 	d.initSearch()
 	return d, nil
@@ -217,7 +217,7 @@ func (d *Daemon) SetReporter(r Reporter) {
 	}
 	d.rep = r
 	d.engine = delivery.New(delivery.Config{NodeID: d.nodeID, Inbox: d.inbox, Runs: (*deliveryRuns)(d), Reporter: r,
-		Clock: d.cfg.Clock, HubClock: hubClock{d}, Facts: hubFacts{d}, Logger: d.cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
+		Clock: d.cfg.Clock, HubClock: hubClock{d}, Facts: hubFacts{d}, Files: attachmentFiles{d}, Logger: d.cfg.Logger.With("component", "delivery"), OnAccepted: d.pollSoon})
 }
 
 // SocketPath returns the local API socket path.

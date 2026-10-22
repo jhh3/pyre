@@ -86,6 +86,8 @@ func Options() tui.Options {
 		StartTerm:       FakeTermStarter, // never run a real attach command
 		// Never open a browser: I copies the web inbox link instead.
 		OpenURL: func(string) error { return errors.New("tests open no browser") },
+		// Never read the real clipboard: ctrl+v finds it empty.
+		ReadClipboard: func(context.Context) (tui.ClipboardContent, error) { return tui.ClipboardContent{}, nil },
 		// A selection never counts as viewed by wall-clock time passing
 		// (lead signals, leads.go); tests that need it set a short dwell.
 		SeenDwell: time.Hour,

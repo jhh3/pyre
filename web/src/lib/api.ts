@@ -3,7 +3,7 @@
 // /fixtures/*.json (see fixtures.ts), so the UI can be developed and
 // screenshotted without a hub.
 import type {
-  AnswerMode, AnswerResult, ArchiveResult, Ask, Box, HeldAnswers, InboxResponse, Msg, ProjectCard, ProjectDetail, Thread, ThreadResponse,
+  AnswerMode, AnswerResult, ArchiveResult, Ask, Box, HeldAnswers, InboxResponse, Msg, ProjectCard, ProjectDetail, Thread, ThreadResponse, Upload,
 } from './types';
 
 export class ApiError extends Error {
@@ -54,6 +54,33 @@ async function call<R>(method: 'GET' | 'POST', path: string, body?: unknown): Pr
 
 const enc = encodeURIComponent;
 
+/** Upload raw bytes (the image route; every other POST is JSON). */
+async function upload<R>(path: string, body: Blob): Promise<R> {
+  if (FIXTURES) return (await fixtureBackend()).call('POST', path, { size: body.size }) as Promise<R>;
+  let res: Response;
+  try {
+    res = await fetch('/api' + path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/octet-stream', Accept: 'application/json' },
+      body,
+    });
+  } catch {
+    throw new ApiError(0, 'network', "Couldn't reach Pyre. Check your connection and try again.");
+  }
+  let data: any = null;
+  try {
+    data = await res.json();
+  } catch {
+    /* empty or non-JSON body */
+  }
+  if (!res.ok) {
+    const e = data?.error;
+    throw new ApiError(res.status, e?.code || 'http_' + res.status, e?.message || `Pyre answered with an error (${res.status}).`);
+  }
+  return (data ?? {}) as R;
+}
+
 /**
  * A fresh ID per user action. Mutations carry it as operation_id and a
  * retry of the same action reuses it, so the server never applies one
@@ -75,8 +102,15 @@ export const api = {
       '/inbox?box=' + box + (filter.project ? '&project=' + enc(filter.project) : '') + (filter.session ? '&session=' + enc(filter.session) : ''),
     ),
   thread: (id: string) => call<ThreadResponse>('GET', '/threads/' + enc(id)),
-  reply: (id: string, text: string, opId: string) =>
-    call<{ message: Msg }>('POST', '/threads/' + enc(id) + '/reply', { text, operation_id: opId }),
+  reply: (id: string, text: string, opId: string, attachments: string[] = []) =>
+    call<{ message: Msg }>('POST', '/threads/' + enc(id) + '/reply', {
+      text,
+      operation_id: opId,
+      ...(attachments.length ? { attachments } : {}),
+    }),
+  // Publishes one image; the reply then attaches its version_id.
+  uploadImage: (file: Blob, name: string, opId: string) =>
+    upload<Upload>('/uploads/image?filename=' + enc(name) + '&operation_id=' + enc(opId), file),
   read: (id: string) => call<object>('POST', '/threads/' + enc(id) + '/read', { operation_id: newOpId() }),
   archive: (id: string, opId: string) => call<{ thread: Thread }>('POST', '/threads/' + enc(id) + '/archive', { operation_id: opId }),
   archiveMany: (ids: string[], opId: string) =>

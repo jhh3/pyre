@@ -98,6 +98,18 @@ type DoorbellNotifier interface {
 	DoorbellNotifiedAt(h contracts.RunHandle, messageID string) (time.Time, bool)
 }
 
+// AttachmentFiles is optionally provided by the host (the daemon): it
+// fetches a message's attached images onto this node for the run before the
+// message is rendered, so the runtime can open them by path. It returns
+// absolute paths by artifact version ID; an attachment it skips (not an
+// image, fetch failed) is rendered as a reference only. It must respect ctx.
+type AttachmentFiles interface {
+	Fetch(ctx context.Context, t Target, e contracts.MessageEnvelope) map[string]string
+}
+
+// DefaultFilesTimeout bounds AttachmentFiles.Fetch for one message.
+const DefaultFilesTimeout = 30 * time.Second
+
 // DefaultStaleBacklog is Config.StaleBacklog's default.
 const DefaultStaleBacklog = 10 * time.Minute
 
@@ -163,6 +175,10 @@ type Config struct {
 	// FactsTimeout, default DefaultFactsTimeout).
 	Facts        MessageFacts
 	FactsTimeout time.Duration
+	// Files, if set, fetches attached images for the run before each
+	// attempt (bounded by FilesTimeout, default DefaultFilesTimeout).
+	Files        AttachmentFiles
+	FilesTimeout time.Duration
 
 	// OnAccepted, if set, is called after an accepted delivery is recorded
 	// (the runtime is now likely busy; the host should observe the run soon
@@ -220,6 +236,9 @@ func New(cfg Config) *Engine {
 	}
 	if cfg.FactsTimeout <= 0 {
 		cfg.FactsTimeout = DefaultFactsTimeout
+	}
+	if cfg.FilesTimeout <= 0 {
+		cfg.FilesTimeout = DefaultFilesTimeout
 	}
 	log := cfg.Logger
 	if log == nil {
@@ -694,12 +713,33 @@ func (e *Engine) deferMsg(ctx context.Context, m inbox.Message, reason string, b
 	}
 }
 
+// fetchFiles asks Config.Files for local copies of the message's attached
+// artifact versions (nil without Files or artifact attachments).
+func (e *Engine) fetchFiles(ctx context.Context, m inbox.Message, t Target) map[string]string {
+	if e.cfg.Files == nil {
+		return nil
+	}
+	has := false
+	for _, a := range m.Envelope.Attachments {
+		has = has || a.ArtifactVersionID != ""
+	}
+	if !has {
+		return nil
+	}
+	fctx, cancel := context.WithTimeout(ctx, e.cfg.FilesTimeout)
+	defer cancel()
+	return e.cfg.Files.Fetch(fctx, t, m.Envelope)
+}
+
 // attempt claims, delivers, and records one attempt.
 func (e *Engine) attempt(ctx context.Context, m inbox.Message, t Target) (blocked bool) {
 	if !e.beginAttempt() {
 		return true // pyred is shutting down: no new attempts
 	}
 	defer e.endAttempt()
+	// Fetch attached images before claiming, so a slow hub delays the
+	// attempt rather than holding it open.
+	files := e.fetchFiles(ctx, m, t)
 	attemptID := contracts.NewID(contracts.PrefixAttempt)
 	runID := t.Run.RunID
 	err := sqlitex.Tx(ctx, e.cfg.Inbox.DB(), func(tx *sql.Tx) error {
@@ -715,7 +755,7 @@ func (e *Engine) attempt(ctx context.Context, m inbox.Message, t Target) (blocke
 	}
 	e.kickReporter()
 
-	in := contracts.DeliveryInput{MessageID: m.Envelope.MessageID, AttemptID: attemptID, Mode: m.Envelope.Mode, Text: Render(m.Envelope)}
+	in := contracts.DeliveryInput{MessageID: m.Envelope.MessageID, AttemptID: attemptID, Mode: m.Envelope.Mode, Text: RenderFiles(m.Envelope, files)}
 	dctx, cancel := context.WithTimeout(ctx, e.cfg.DeliverTimeout)
 	res, derr := t.Adapter.Deliver(dctx, t.Handle, in)
 	cut := ctx.Err() != nil

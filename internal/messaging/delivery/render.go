@@ -15,16 +15,29 @@ import (
 //	<body>
 //	Attachments:
 //	- pyre artifact get <version_id>
+//	- image <absolute path> (pyre artifact get <version_id>)
 //
-// The marker comes first so adapters can match acceptance evidence
-// (UserPromptSubmit text, transcript records).
+// The second attachment form is an image the node fetched for the run
+// (Files): both harnesses open an image file by path. The marker comes first
+// so adapters can match acceptance evidence (UserPromptSubmit text,
+// transcript records).
 func Render(e contracts.MessageEnvelope) string {
-	return RenderAt(e, time.Now(), time.Local)
+	return RenderFiles(e, nil)
+}
+
+// RenderFiles is Render with local copies of attached artifact versions
+// (absolute paths by version ID, from AttachmentFiles).
+func RenderFiles(e contracts.MessageEnvelope, files map[string]string) string {
+	return renderAt(e, time.Now(), time.Local, files)
 }
 
 // RenderAt is Render at a given delivery time and zone. A message without a
 // send time keeps the bare "[pyre-msg:<id>]" marker.
 func RenderAt(e contracts.MessageEnvelope, now time.Time, loc *time.Location) string {
+	return renderAt(e, now, loc, nil)
+}
+
+func renderAt(e contracts.MessageEnvelope, now time.Time, loc *time.Location, files map[string]string) string {
 	var b strings.Builder
 	b.WriteString(header.Marker(e.MessageID, header.Sent(e.CreatedAt, now, loc)))
 	b.WriteString(" from ")
@@ -59,6 +72,8 @@ func RenderAt(e contracts.MessageEnvelope, now time.Time, loc *time.Location) st
 		b.WriteString("\nAttachments:")
 		for _, a := range e.Attachments {
 			switch {
+			case a.ArtifactVersionID != "" && files[a.ArtifactVersionID] != "":
+				b.WriteString("\n- image " + files[a.ArtifactVersionID] + " (pyre artifact get " + a.ArtifactVersionID + ")")
 			case a.ArtifactVersionID != "":
 				b.WriteString("\n- pyre artifact get " + a.ArtifactVersionID)
 			case a.DocumentRevisionID != "":

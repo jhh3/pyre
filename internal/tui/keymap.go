@@ -146,6 +146,8 @@ var actionDefs = []actionDef{
 	{id: "composer.newline", group: "Composer", desc: "new line", keys: []string{"shift+enter", "alt+enter", "ctrl+j"}, special: true},
 	{id: "composer.history", group: "Composer", desc: "reverse-search sent messages", keys: []string{"ctrl+r"}, special: true},
 	{id: "composer.mention", group: "Composer", desc: "mention a session or project", keys: []string{"@"}, special: true},
+	{id: "composer.image", group: "Composer", desc: "attach the clipboard's image (else paste its text); dropped image files attach too", keys: []string{"ctrl+v"}, special: true},
+	{id: "composer.unattach", group: "Composer", desc: "remove the last attached image (or backspace on an empty message)", keys: []string{"ctrl+x"}, special: true},
 	{id: "composer.leave", group: "Composer", desc: "leave without sending (draft kept)", keys: []string{"esc", "j k"}, special: true},
 	{id: "picker.move", group: "Pickers", desc: "move in finder / completion lists", keys: []string{"ctrl+j", "ctrl+k", "up", "down"}, special: true},
 	{id: "picker.attach", group: "Pickers", desc: "attach the session under the cursor (finder)", keys: []string{"ctrl+a"}, special: true},

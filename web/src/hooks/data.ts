@@ -8,7 +8,8 @@ import { api, ApiError, connectEvents, newOpId, type LiveStatus } from '@/lib/ap
 import { canArchive, isOpenAsk, OPEN_ASK_ARCHIVE, threadHref } from '@/lib/model';
 import { clock } from '@/lib/time';
 import type { AnswerMode, Ask, Box, HeldAnswers, Msg, Thread, ThreadResponse } from '@/lib/types';
-import { getUI, setUI, withKey } from '@/lib/ui-store';
+import type { DraftImage } from '@/lib/images';
+import { getUI, setUI, withKey, type PendingReply } from '@/lib/ui-store';
 import { filterKey, getRoute, listHref, navigate, type Filter } from './route';
 
 export const queryClient = new QueryClient({
@@ -184,16 +185,27 @@ export async function sendHeldNow() {
 /**
  * Send a reply into a thread, showing it at once with its delivery state.
  * The pending entry's key is the operation ID, so Retry cannot send twice.
+ * Images upload first (each under an operation ID derived from the key, and
+ * remembered once uploaded), then the reply attaches their versions.
  */
-export async function sendReply(threadId: string, text: string, retryKey?: string) {
+export async function sendReply(threadId: string, text: string, retryKey?: string, images: DraftImage[] = []) {
   const key = retryKey ?? newOpId();
-  const entry = { key, text, at: new Date().toISOString(), phase: 'sending' as const };
+  const entry: PendingReply = { key, text, images, at: new Date().toISOString(), phase: 'sending' };
+  const update = (f: (p: PendingReply) => PendingReply) =>
+    setUI((s) => ({ pending: withKey(s.pending, threadId, (s.pending[threadId] ?? []).map((p) => (p.key === key ? f(p) : p))) }));
   setUI((s) => {
     const list = (s.pending[threadId] ?? []).filter((p) => p.key !== key);
     return { pending: withKey(s.pending, threadId, [...list, entry]) };
   });
   try {
-    const r = await api.reply(threadId, text, key);
+    const uploaded = [...images];
+    for (const [i, img] of uploaded.entries()) {
+      if (img.version) continue;
+      const u = await api.uploadImage(img.file, img.name, `${key}-img${i}`);
+      uploaded[i] = { ...img, version: u.version_id };
+      update((p) => ({ ...p, images: [...uploaded] }));
+    }
+    const r = await api.reply(threadId, text, key, uploaded.map((img) => img.version!));
     queryClient.setQueryData<ThreadResponse>(['thread', threadId], (d) => {
       if (!d) return d;
       const msgs: Msg[] = d.messages ?? [];

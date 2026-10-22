@@ -123,6 +123,19 @@ trust boundary is the machine (the hub credential lives there anyway).
   the project page; the project view shows the page (markdown, maintained by
   the lead), sessions (leads first), asks (open, then the last 10 decided)
   and the 20 most recent artifacts.
+- **Images**: paste an image into the reply box or drop one onto it (PNG,
+  JPEG, GIF or WebP, up to 20 MB each, 10 per reply); each shows as a chip
+  with a thumbnail and a remove button. Send publishes each image as a
+  standalone artifact (`POST /api/uploads/image`: the type is sniffed from
+  the bytes, never taken from the header or name; it is the one POST that
+  is not JSON, and it still needs `application/octet-stream`, so a
+  cross-site form cannot send it) and then the reply attaches the versions.
+  The recipient's node fetches each attached image as the session, checks
+  its digest and type, writes it to
+  `<pyred state>/attachments/<run_id>/<version_id>.<ext>` and names that
+  absolute path in the delivered text (`- image <path> (pyre artifact get
+  <version>)`), for Claude Code and Codex alike; if the fetch fails, the
+  line is the `pyre artifact get` reference alone.
 - **Live updates**: the server keeps one hub event subscription for all
   browsers and fans out Server-Sent Events; browsers refetch on each.
 
@@ -137,7 +150,8 @@ not applied twice.
 | `GET /api/me` | | `{email}` |
 | `GET /api/inbox?box=open\|done[&project=<id>][&session=<id>]` | | `{threads:[Thread], held: HeldAnswers}`; `session` keeps that session and the sessions under it |
 | `GET /api/threads/{thread_id}` | | `{thread: Thread, messages:[Msg]}` |
-| `POST /api/threads/{thread_id}/reply` | `{text}` | `{message: Msg}` |
+| `POST /api/threads/{thread_id}/reply` | `{text, attachments?:[version_id]}` (text may be empty with attachments; at most 10) | `{message: Msg}` |
+| `POST /api/uploads/image?filename=<name>` | raw image bytes, `Content-Type: application/octet-stream` (at most 20 MB) | `{version_id, media_type, size, filename}` |
 | `POST /api/threads/{thread_id}/read` | `{}` | `{}` |
 | `POST /api/threads/{thread_id}/archive` | `{}` | `{thread: Thread}` (open ask: 409 `conflict`) |
 | `POST /api/inbox/archive` | `{thread_ids:[...]}` (at most 200) | `{results:[{thread_id, thread?, error?:{code,message}}]}` in request order |
@@ -152,9 +166,10 @@ not applied twice.
 Types:
 
 - `Thread {thread_id, kind:"ask"|"message", title, preview, project:{id,name}|null, session:{id,title,state,node}|null, ask|null, held|null, last_at, unread, message_count, needs_reply}`
-- `Msg {message_id, from:{kind:"owner"|"session",id,label}, text, at, reply_to, delivery:{state, summary}, ask_id?}`;
+- `Msg {message_id, from:{kind:"owner"|"session",id,label}, text, at, reply_to, delivery:{state, summary}, ask_id?, attachments?}`;
   delivery state is `stored|queued|delivered|read|replied|failed`; `ask_id`
-  marks an ask's carrying message and its decision.
+  marks an ask's carrying message and its decision; `attachments` counts
+  the published objects the message carries.
 - `ProjectCard {project_id, name, description, open_asks, waiting, leads:[SessionCard], page_updated_at|null, page_summary, last_activity_at}`
 - `SessionCard {id, title, state, node, is_lead, last_activity:{line,at}|null}`
 - Session `state`: `working`, `needs_you`, `idle`, `starting`, `ended`,

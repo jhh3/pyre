@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,17 +16,21 @@ import (
 
 func (c *composeOverlay) send(m *Model) tea.Cmd {
 	body := strings.TrimSpace(c.ta.Value())
-	if body == "" {
+	if body == "" && len(c.images) == 0 {
 		c.errLine = "nothing to send"
 		return nil
 	}
 	if c.sending {
 		return nil
 	}
-	sum := sha256.Sum256([]byte(string(c.mode) + "\x00" + body))
-	// Same compose + same text + same mode => same operation id: a retry
-	// after an unknown outcome is deduplicated by the hub, never a second
-	// message.
+	key := string(c.mode) + "\x00" + body
+	for _, img := range c.images {
+		key += "\x00" + img.sum
+	}
+	sum := sha256.Sum256([]byte(key))
+	// Same compose + same text + same mode + same images => same operation
+	// id: a retry after an unknown outcome is deduplicated by the hub, never
+	// a second message.
 	opID := m.opID("send:" + c.instance + ":" + hex.EncodeToString(sum[:8]))
 	req := contracts.SendMessageRequest{
 		Mutation:  contracts.Mutation{OperationID: opID},
@@ -36,10 +41,36 @@ func (c *composeOverlay) send(m *Model) tea.Cmd {
 	}
 	c.sending = true
 	c.errLine = ""
-	api := m.api
-	return m.do(func(ctx context.Context) (any, error) { return api.SendMessage(ctx, req) },
+	api, imgs := m.api, c.images
+	// Each image is published first (its own stable operation id: a retry
+	// resumes or replays the same upload), then the message attaches the
+	// versions; the recipient's node fetches them (daemon/attachments.go).
+	imgOp := map[string]string{}
+	for _, img := range imgs {
+		imgOp[img.sum] = m.opID("image:" + c.instance + ":" + img.sum)
+	}
+	send := func(ctx context.Context) (any, error) {
+		if len(imgs) > 0 {
+			atts, err := publishImages(ctx, api, imgs, func(img pendingImage) string { return imgOp[img.sum] })
+			if err != nil {
+				return nil, err
+			}
+			req.Attachments = atts
+		}
+		return api.SendMessage(ctx, req)
+	}
+	timeout := m.opts.LoadTimeout
+	if len(imgs) > 0 {
+		timeout = max(timeout, imageSendTimeout)
+	}
+	return m.doWithin(timeout, send,
 		func(m *Model, v any, err error) tea.Cmd {
 			c.sending = false
+			var ue uploadErr
+			if errors.As(err, &ue) {
+				c.errLine = "Not sent: " + ue.Error() + ". enter retries."
+				return nil
+			}
 			if err != nil {
 				if contracts.IsCode(err, contracts.ErrOutcomeIndeterminate) || retryable(err) {
 					c.uncertain = true
@@ -51,6 +82,7 @@ func (c *composeOverlay) send(m *Model) tea.Cmd {
 			}
 			mv := v.(contracts.MessageView)
 			delete(m.drafts(), c.sid)
+			delete(m.draftImages, c.sid)
 			m.rememberMessage(body)
 			if m.overlay == c {
 				m.overlay = nil

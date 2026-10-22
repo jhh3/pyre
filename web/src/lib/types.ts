@@ -98,6 +98,14 @@ export interface Msg {
   reply_to?: string;
   delivery: { state: DeliveryState; summary: string };
   ask_id?: string;
+  attachments?: number; // published objects attached (e.g. images)
+}
+
+export interface Upload {
+  version_id: string;
+  media_type: string;
+  size: number;
+  filename: string;
 }
 
 export interface SessionCard {

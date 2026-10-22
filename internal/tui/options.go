@@ -100,6 +100,10 @@ type Options struct {
 	Keymap *Keymap
 	// Clipboard copies text (y). Nil uses OSC 52 through the terminal.
 	Clipboard func(text string)
+	// ReadClipboard reads the system clipboard for the composer's ctrl+v
+	// (an image, else text). Nil uses DefaultReadClipboard (osascript,
+	// wl-paste or xclip for images).
+	ReadClipboard ReadClipboardFunc
 	// StartTerm starts the embedded terminal's attach command on a pty
 	// (default StartPTY). Tests substitute an in-memory terminal.
 	StartTerm TermStarter
@@ -182,6 +186,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.ExecFunc == nil {
 		o.ExecFunc = tea.Exec
+	}
+	if o.ReadClipboard == nil {
+		o.ReadClipboard = DefaultReadClipboard
 	}
 	return o
 }

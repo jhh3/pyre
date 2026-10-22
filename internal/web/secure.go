@@ -100,10 +100,15 @@ func loopback(remote string) bool {
 }
 
 // checkCSRF: a state-changing request must be JSON (a cross-site form
-// cannot send that without a preflight) from the app's own origin.
+// cannot send that without a preflight) from the app's own origin. The
+// image upload sends raw bytes as application/octet-stream, which needs a
+// preflight just the same.
 func (s *Server) checkCSRF(r *http.Request) error {
 	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mt != "application/json" {
+	switch {
+	case err == nil && mt == "application/json":
+	case err == nil && mt == "application/octet-stream" && r.URL.Path == uploadImagePath:
+	default:
 		return c.Errorf(c.ErrInvalid, "Send the request as JSON (Content-Type: application/json).")
 	}
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {

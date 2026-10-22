@@ -339,8 +339,10 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 }
 
 type replyBody struct {
-	Text        string `json:"text"`
-	OperationID string `json:"operation_id,omitempty"`
+	Text string `json:"text"`
+	// Attachments are artifact versions from POST /api/uploads/image.
+	Attachments []string `json:"attachments,omitempty"`
+	OperationID string   `json:"operation_id,omitempty"`
 }
 
 // handleReply sends the owner's reply to the thread's session: a queue
@@ -354,9 +356,21 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := strings.TrimSpace(body.Text)
-	if text == "" {
+	if text == "" && len(body.Attachments) == 0 {
 		writeErr(w, c.Errorf(c.ErrInvalid, "Write something to send."))
 		return
+	}
+	if len(body.Attachments) > maxReplyImages {
+		writeErr(w, c.Errorf(c.ErrPayloadTooLarge, "A reply can carry at most %d images.", maxReplyImages))
+		return
+	}
+	var atts []c.Attachment
+	for _, v := range body.Attachments {
+		if !c.ValidID(v, c.PrefixVersion) {
+			writeErr(w, c.Errorf(c.ErrInvalid, "Attachment %q is not an uploaded image.", v))
+			return
+		}
+		atts = append(atts, c.Attachment{ArtifactVersionID: v})
 	}
 	ctx, cancel := hubCtx(r)
 	defer cancel()
@@ -377,7 +391,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := rt.thread.Session.ID
 	req := c.SendMessageRequest{Mutation: c.Mutation{OperationID: opID(body.OperationID)},
-		Recipient: c.Address{Kind: c.AddrSession, ID: sid}, Mode: c.ModeQueue, Body: c.MessageBody{Text: text}}
+		Recipient: c.Address{Kind: c.AddrSession, ID: sid}, Mode: c.ModeQueue, Body: c.MessageBody{Text: text}, Attachments: atts}
 	if rt.thread.Project != nil {
 		p := rt.thread.Project.ID
 		req.ProjectID = &p

@@ -206,6 +206,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/inbox", s.handleInbox)
 	m.HandleFunc("GET /api/threads/{thread_id}", s.handleThread)
 	m.HandleFunc("POST /api/threads/{thread_id}/reply", s.handleReply)
+	m.HandleFunc("POST "+uploadImagePath, s.handleUploadImage)
 	m.HandleFunc("POST /api/threads/{thread_id}/read", s.handleRead)
 	m.HandleFunc("POST /api/threads/{thread_id}/archive", s.handleArchive)
 	m.HandleFunc("POST /api/inbox/archive", s.handleArchiveMany)
