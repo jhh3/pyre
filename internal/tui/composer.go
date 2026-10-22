@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -15,7 +18,9 @@ import (
 // shift+enter / alt+enter / ctrl+j insert a newline; ctrl+r searches sent
 // messages; @ completes session and project mentions; Esc (or jk) leaves
 // without sending and keeps the draft for that session. Pastes arrive as
-// one bracketed paste and are inserted verbatim.
+// one bracketed paste and are inserted verbatim, except dropped image files
+// and ctrl+v clipboard images, which become pending images
+// (compose_images.go); ctrl+x removes the last one.
 
 type composeOverlay struct {
 	sid, title, node string
@@ -30,6 +35,8 @@ type composeOverlay struct {
 	sending          bool
 	errLine          string
 	uncertain        bool
+	images           []pendingImage // published and attached on send
+	note             string         // why a pasted image was not attached
 
 	lastJ   time.Time
 	mention int  // selected @ completion
@@ -60,6 +67,7 @@ func (m *Model) openCompose(s contracts.SessionView) tea.Cmd {
 	if d, ok := m.drafts()[c.sid]; ok {
 		c.ta.SetValue(d)
 	}
+	c.images = m.draftImages[c.sid]
 	m.overlay = c
 	return c.ta.Focus()
 }
@@ -69,6 +77,16 @@ func (m *Model) drafts() map[string]string {
 		m.draftMap = map[string]string{}
 	}
 	return m.draftMap
+}
+
+// keepDraft stores the text and pending images for the next compose to
+// this session.
+func (c *composeOverlay) keepDraft(m *Model) {
+	m.drafts()[c.sid] = c.ta.Value()
+	if m.draftImages == nil {
+		m.draftImages = map[string][]pendingImage{}
+	}
+	m.draftImages[c.sid] = c.images
 }
 
 func (m *Model) rememberMessage(body string) {
@@ -85,7 +103,11 @@ func (c *composeOverlay) hints() []hint {
 	if c.rsearch {
 		return []hint{{"ctrl+r", "older"}, {"enter", "use"}, {"esc", "cancel"}}
 	}
-	h := []hint{{"enter", "send"}, {"shift+enter", "newline"}, {"ctrl+r", "history"}, {"@", "mention"}, {"esc", "close (draft kept)"}}
+	h := []hint{{"enter", "send"}, {"shift+enter", "newline"}, {"ctrl+r", "history"}, {"@", "mention"}, {"ctrl+v", "paste image"}}
+	if len(c.images) > 0 {
+		h = append(h, hint{"ctrl+x", "remove image"})
+	}
+	h = append(h, hint{"esc", "close (draft kept)"})
 	if c.steerOK {
 		h = append(h, hint{"tab", "queue/steer"})
 	}
@@ -93,9 +115,103 @@ func (c *composeOverlay) hints() []hint {
 }
 
 func (c *composeOverlay) updateMsg(m *Model, msg tea.Msg) tea.Cmd {
+	if p, ok := msg.(tea.PasteMsg); ok {
+		if c.sending {
+			return nil
+		}
+		return c.paste(p.Content)
+	}
 	var cmd tea.Cmd
-	c.ta, cmd = c.ta.Update(msg) // includes bracketed paste
+	c.ta, cmd = c.ta.Update(msg)
 	return cmd
+}
+
+// paste inserts pasted text, except dropped image files, which become
+// pending images.
+func (c *composeOverlay) paste(text string) tea.Cmd {
+	res := takeDropped(text)
+	c.addImages(res)
+	if res.text == "" {
+		return nil
+	}
+	var cmd tea.Cmd
+	c.ta, cmd = c.ta.Update(tea.PasteMsg{Content: res.text})
+	return cmd
+}
+
+// addImages adds dropped or pasted images (up to maxComposeImages) and
+// says why any could not be attached.
+func (c *composeOverlay) addImages(res dropResult) {
+	notes := res.notes
+	for _, img := range res.images {
+		if len(c.images) >= maxComposeImages {
+			notes = append(notes, fmt.Sprintf("%s not attached: a message can carry at most %d images", img.name, maxComposeImages))
+			continue
+		}
+		c.images = append(c.images, img)
+	}
+	if len(res.images) > 0 || len(notes) > 0 {
+		c.note = strings.Join(notes, "; ")
+	}
+}
+
+// typedImage turns a path the terminal typed as keys (a drop without
+// bracketed paste) into a pending image once the trailing space arrives.
+func (c *composeOverlay) typedImage() {
+	v := c.ta.Value()
+	lines := strings.Split(v, "\n")
+	if c.ta.Line() != len(lines)-1 || c.ta.Column() != len([]rune(lines[len(lines)-1])) {
+		return // typing in the middle of the text
+	}
+	i, res, ok := typedDrop(v)
+	if !ok {
+		return
+	}
+	if len(res.images) == 0 {
+		c.note = strings.Join(res.notes, "; ") // stays text
+		return
+	}
+	c.ta.SetValue(v[:i] + res.text)
+	c.ta.CursorEnd()
+	c.addImages(res)
+}
+
+// pasteClipboard (ctrl+v) attaches the clipboard's image, or pastes its
+// text the way the textarea always did.
+func (c *composeOverlay) pasteClipboard(m *Model) tea.Cmd {
+	read := m.opts.ReadClipboard
+	return m.do(func(ctx context.Context) (any, error) { return read(ctx) },
+		func(m *Model, v any, err error) tea.Cmd {
+			if m.overlay != c || c.sending {
+				return nil
+			}
+			cc, _ := v.(ClipboardContent)
+			switch {
+			case errors.Is(err, ErrNoClipboardTool):
+				c.note = err.Error()
+				return c.paste(cc.Text)
+			case err != nil:
+				c.note = "clipboard: " + errText(err)
+				return nil
+			case cc.Data == nil && cc.Path == "":
+				return c.paste(cc.Text)
+			}
+			img, err := clipboardPendingImage(cc)
+			if err != nil {
+				c.addImages(dropResult{notes: []string{err.Error()}})
+				return nil
+			}
+			c.addImages(dropResult{images: []pendingImage{img}})
+			return nil
+		})
+}
+
+// removeImage drops the last pending image.
+func (c *composeOverlay) removeImage() {
+	if n := len(c.images); n > 0 {
+		c.images = c.images[: n-1 : n-1]
+		c.note = ""
+	}
 }
 
 // mentionQuery returns the @word being typed at the end of the text.
@@ -208,7 +324,7 @@ func (c *composeOverlay) update(m *Model, k tea.KeyPressMsg) tea.Cmd {
 		c.lastJ = time.Time{}
 		var cmd tea.Cmd
 		c.ta, cmd = c.ta.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
-		m.drafts()[c.sid] = c.ta.Value()
+		c.keepDraft(m)
 		m.overlay = nil
 		return cmd
 	}
@@ -219,7 +335,7 @@ func (c *composeOverlay) update(m *Model, k tea.KeyPressMsg) tea.Cmd {
 	}
 	switch key {
 	case "esc":
-		m.drafts()[c.sid] = c.ta.Value()
+		c.keepDraft(m)
 		m.overlay = nil
 		return nil
 	case "tab":
@@ -245,9 +361,19 @@ func (c *composeOverlay) update(m *Model, k tea.KeyPressMsg) tea.Cmd {
 	if c.sending {
 		return nil
 	}
+	switch {
+	case key == "ctrl+v":
+		return c.pasteClipboard(m)
+	case key == "ctrl+x", key == "backspace" && c.ta.Value() == "" && len(c.images) > 0:
+		c.removeImage()
+		return nil
+	}
 	c.mention = 0
 	var cmd tea.Cmd
 	c.ta, cmd = c.ta.Update(k)
+	if k.Text == " " {
+		c.typedImage()
+	}
 	return cmd
 }
 
@@ -271,6 +397,14 @@ func (c *composeOverlay) view(m *Model, w, h int) []string {
 		lines = append(lines, m.th.tone(toneWarn, c.queueNote))
 	}
 	lines = append(lines, "")
+	for i, img := range c.images {
+		lines = append(lines, m.th.label.Render("Image")+" "+trunc(fmt.Sprintf("%d. %s · %s", i+1, img.name, humanBytes(int64(len(img.data)))), inner-6))
+	}
+	if c.note != "" {
+		for _, l := range wrap(c.note, inner) {
+			lines = append(lines, m.th.tone(toneWarn, l))
+		}
+	}
 	lines = append(lines, strings.Split(c.ta.View(), "\n")...)
 	if ms := c.mentions(m); len(ms) > 0 {
 		lines = append(lines, m.th.faint.Render(strings.Repeat("─", inner)))

@@ -149,6 +149,9 @@ type Model struct {
 	launch   *launchState
 	stats    Stats
 	draftMap map[string]string
+	// draftImages are the composer's pending images per session (kept with
+	// the draft text when the composer closes unsent).
+	draftImages map[string][]pendingImage
 
 	answerResult map[string]string
 	pendingFocus string // session to select once it appears (after launch)
@@ -566,7 +569,12 @@ func get[T any](m *Model, key string) (T, *loadState) {
 // do runs a mutation or one-off call asynchronously and hands the result
 // to then inside Update.
 func (m *Model) do(fn func(ctx context.Context) (any, error), then func(m *Model, val any, err error) tea.Cmd) tea.Cmd {
-	parent, timeout := m.ctx, m.opts.LoadTimeout
+	return m.doWithin(m.opts.LoadTimeout, fn, then)
+}
+
+// doWithin is do with its own timeout (an upload outlasts LoadTimeout).
+func (m *Model) doWithin(timeout time.Duration, fn func(ctx context.Context) (any, error), then func(m *Model, val any, err error) tea.Cmd) tea.Cmd {
+	parent := m.ctx
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()

@@ -13,7 +13,7 @@
  │  ctrl+d / pgdown    half page down                                                             │
  │  ctrl+u / pgup      half page up                                                               │
  │  l / tab            focus the next pane                                                        │
- │ ↓ 136 more lines · j/k or ctrl+d scroll                                                        │
+ │ ↓ 138 more lines · j/k or ctrl+d scroll                                                        │
  │ ────────────────────────────────────────────────────────────────────────────────────────────── │
  │ ● working  ○ idle  ! approval  ◌ offline/stale  ✗ failed  ? unknown  lead ▾N/+N  ├ child       │
  │ single (plain)  ▎ yours <1h  ▎ yours <24h                                                      │

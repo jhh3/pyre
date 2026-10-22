@@ -359,6 +359,19 @@ small live terminal. [light](screens/grid-240x65-light.png),
   show as names everywhere (titles, finder, error toasts).
 - **Finder.** `␣␣` still finds attention items by title (`attn` badge);
   `enter` opens what the item is about (the session, an artifact, a doc).
+- **Images in the composer.** Dropping PNG/JPEG/GIF/WebP files on the
+  composer (the terminal types or pastes their paths: escaped, quoted or
+  `file://`) adds them as `Image  1. name.png · 245.3 KiB` lines instead of
+  text; other paths and prose stay text. `ctrl+v` attaches the clipboard's
+  image (macOS osascript; Linux wl-paste or xclip) or a copied image file,
+  else pastes the clipboard's text. `ctrl+x` (or backspace on an empty
+  message) removes the last image. Too-large (over 20 MiB) and unsupported
+  images stay text with a warning. Send publishes each image to the hub's
+  artifact store and attaches the versions, as the web inbox does; the
+  session's node fetches them and the delivered text names the local path.
+  In an embedded terminal pane keys and pastes go to the harness unchanged
+  (Claude Code's own image paste reads the clipboard of the session's
+  machine).
 - Boxed overlays (answer, composer, help, prompts) float over the dimmed
   view they belong to, so the session stays in sight. Approval options no
   longer repeat their kind (`1 Allow`), and once answered the hints switch
@@ -1025,6 +1038,8 @@ Fixed keys inside inputs (listed in help, not remappable):
 | `shift+enter` / `alt+enter` / `ctrl+j` | `composer.newline` | new line (shift+enter needs a terminal with keyboard disambiguation: kitty, Ghostty, WezTerm, iTerm2 ≥ 3.5, foot) |
 | `ctrl+r` | `composer.history` | reverse-search sent messages |
 | `@` | `composer.mention` | complete a session or project mention (tab/enter accepts) |
+| `ctrl+v` | `composer.image` | attach the clipboard's image (macOS osascript, Linux wl-paste or xclip; a copied image file too), else paste its text; dropping PNG/JPEG/GIF/WebP files (their paths) attaches them as well |
+| `ctrl+x` | `composer.unattach` | remove the last attached image (backspace on an empty message does too) |
 | `esc` / `j k` | `composer.leave` | leave without sending; draft kept per session |
 | `ctrl+j` / `ctrl+k` / arrows | `picker.move` | move in finder and completion lists |
 | `ctrl+a` | `picker.attach` | finder: attach the session under the cursor |
