@@ -69,6 +69,13 @@ func (r runRegistry) projectDirs(ctx context.Context, projectID string) []string
 	return out
 }
 
+// launchGrantSource decides which connections a launch provisions into the
+// run's environment (plaintext credentials). It is the pushed-grant mirror,
+// deny by default, and deliberately NOT the hub check: the hub's owner
+// default (no grant needed to invoke a connection the machine holds) must
+// never put credentials into every session's environment.
+func launchGrantSource(in *integrations) configuration.GrantSource { return in.grants }
+
 // GrantedConnections implements configuration.GrantSource over the
 // pushed-grant mirror (deny by default).
 func (g *pushedGrants) GrantedConnections(ctx context.Context, scope configuration.GrantScope, requested []string) ([]string, error) {
@@ -121,7 +128,7 @@ func wireEnvironment(in *integrations, cfg *daemon.Config, o runOpts, hubURL, pi
 		return nil
 	}
 	copt := configuration.Options{StateDir: o.state, NodeID: cfg.NodeID, ProjectDirs: reg.projectDirs,
-		Runs: reg, Grants: in.grants, Versions: upd, Reporter: in.rep}
+		Runs: reg, Grants: launchGrantSource(in), Versions: upd, Reporter: in.rep}
 	if o.envHome != "" {
 		copt.Homes = extensions.DefaultHomes(o.envHome)
 		log.Info("environment manager uses an explicit config home", "env_home", o.envHome)
@@ -136,8 +143,9 @@ func wireEnvironment(in *integrations, cfg *daemon.Config, o runOpts, hubURL, pi
 	cfg.Environments = w
 	mcp := w.pyreBin != ""
 	cfg.AgentGuide = func(h contracts.Harness, s contracts.Session) string {
-		// Claude (--mcp-config) and Codex (per-thread config) get the MCP tools.
-		return agentguide.Text(agentguide.Options{CLI: w.pyreBin, MCP: mcp && h != contracts.HarnessShell, WorktreeRoot: cfg.WorktreeRoot})
+		// Claude (--mcp-config), Codex (per-thread config) and agy (the
+		// adapter's workspace mcp_config.json) get the MCP tools.
+		return agentguide.Text(agentguide.Options{CLI: w.pyreBin, MCP: mcp && h != contracts.HarnessShell, WorktreeRoot: cfg.WorktreeRoot, RunTmpDir: daemon.RunTmpRoot(*cfg) != "", Harness: string(h)})
 	}
 	return w
 }
@@ -193,11 +201,13 @@ func (w *envWiring) Resolve(ctx context.Context, req daemon.EnvRequest) (daemon.
 		if req.Profile != "" {
 			return res, contracts.Errorf(contracts.ErrUnsupported, "environment profiles apply to claude/codex runs, not %s", req.Harness)
 		}
-		if req.Harness == contracts.HarnessShell {
-			// No configuration overlay for a plain shell, but the default
-			// profile's granted connections still apply: LaunchPrep places
-			// credentials provisioned on this node in the shell's
-			// environment and records the names-only manifest.
+		if req.Harness == contracts.HarnessShell || req.Harness == contracts.HarnessAgy {
+			// No configuration overlay for a plain shell or agy (its MCP
+			// server and hooks travel in the adapter's per-session
+			// workspace folder), but the default profile's granted
+			// connections still apply: LaunchPrep places credentials
+			// provisioned on this node in the run's environment and records
+			// the names-only manifest.
 			sc := configuration.Scope{NodeID: req.NodeID, SessionID: req.SessionID, Harness: req.Harness}
 			if req.ProjectID != nil {
 				sc.ProjectID = *req.ProjectID

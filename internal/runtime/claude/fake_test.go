@@ -50,7 +50,8 @@ type fakeClaude struct {
 	output     []string
 	busy       bool
 	queue      []string
-	dialog     string // "", "trust", "perm", "ask"
+	dialog     string // "", "trust", "perm", "ask", "theme", "security", "firstrun", "login", "loginpicked"
+	prompt     string // initial prompt, submitted once the startup screens are answered
 	trustYes   bool
 	dialogCh   chan bool
 	interrupt  chan struct{}
@@ -62,6 +63,21 @@ func fakeClaudeMain(args []string) int {
 	f := &fakeClaude{hooks: map[string]string{}}
 	if p := os.Getenv("FAKE_ARGV_FILE"); p != "" {
 		_ = os.WriteFile(p, []byte(strings.Join(args, "\n")), 0o600)
+	}
+	if p := os.Getenv("FAKE_TMPDIR_FILE"); p != "" {
+		_ = os.WriteFile(p, []byte(os.Getenv(TmpDirEnv)), 0o600)
+	}
+	if p := os.Getenv("FAKE_ENV_FILE"); p != "" {
+		// FAKE_ENV_KEYS: KEY=VALUE or "KEY unset" per key, as Claude sees them.
+		var lines []string
+		for _, k := range strings.Split(os.Getenv("FAKE_ENV_KEYS"), ",") {
+			if v, ok := os.LookupEnv(k); ok {
+				lines = append(lines, k+"="+v)
+			} else {
+				lines = append(lines, k+" unset")
+			}
+		}
+		_ = os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o600)
 	}
 	var settings, prompt, resume, pluginDir string
 	for i := 0; i < len(args); i++ {
@@ -123,9 +139,20 @@ func fakeClaudeMain(args []string) int {
 	_ = stty.Run()
 	os.Stdout.WriteString("\x1b[?2004h") // enable bracketed paste like Ink does
 
-	if os.Getenv("FAKE_TRUST_DIALOG") == "1" {
+	switch {
+	case os.Getenv("FAKE_TRUST_DIALOG") == "1":
 		f.dialog = "trust"
-	} else {
+	case fakeOnboarding(os.Getenv("FAKE_THEME_PICKER"), cfg):
+		// Like Claude Code 2.1.304: onboarding (theme picker, then the
+		// security notes) when the config lacks hasCompletedOnboarding;
+		// "always" shows it regardless (a seed that did not land).
+		f.dialog, f.prompt = "theme", prompt
+	case os.Getenv("FAKE_FIRSTRUN_UNKNOWN") != "":
+		// A blocking screen Pyre does not recognise: no input box, no key
+		// hints, no numbered options, no hook event. "welcome" carries the
+		// onboarding banner; "blank" does not (a Claude that never starts).
+		f.dialog, f.prompt = "firstrun", prompt
+	default:
 		f.start(resume != "")
 	}
 	f.render()
@@ -137,6 +164,23 @@ func fakeClaudeMain(args []string) int {
 	}
 	f.readLoop()
 	return 0
+}
+
+// fakeOnboarding: FAKE_THEME_PICKER "always", or "gate" with no
+// hasCompletedOnboarding true in <cfg>/.claude.json.
+func fakeOnboarding(mode, cfg string) bool {
+	switch mode {
+	case "always":
+		return true
+	case "gate":
+		var c struct {
+			Done bool `json:"hasCompletedOnboarding"`
+		}
+		b, _ := os.ReadFile(filepath.Join(cfg, ".claude.json"))
+		_ = json.Unmarshal(b, &c)
+		return !c.Done
+	}
+	return false
 }
 
 func (f *fakeClaude) start(resumed bool) {
@@ -238,6 +282,21 @@ func (f *fakeClaude) render() {
 		b.WriteString(" ❯ 1. Exit and stop tasks\r\n   2. Move to background and exit\r\n   3. Stay\r\n\r\n Enter to confirm · Esc to cancel\r\n")
 	case "ask":
 		b.WriteString(rule + "\r\n Which option?\r\n ❯ 1. Red\r\n   2. Blue\r\n Enter to select · Esc to cancel\r\n")
+	case "theme": // Claude Code 2.1.304's onboarding theme picker
+		b.WriteString(" Let's get started.\r\n\r\n Choose the text style that looks best with your terminal\r\n To change this later, run /theme\r\n\r\n")
+		b.WriteString("     Auto (match terminal)\r\n ❯ ✔ Dark mode\r\n     Light mode\r\n\r\n")
+		b.WriteString(" " + strings.Repeat("╌", 40) + "\r\n  1  function greet() {\r\n " + strings.Repeat("╌", 40) + "\r\n")
+	case "security":
+		b.WriteString(" Security notes:\r\n\r\n 1. Claude can make mistakes.\r\n\r\n Press Enter to continue…\r\n")
+	case "firstrun":
+		if os.Getenv("FAKE_FIRSTRUN_UNKNOWN") == "welcome" {
+			b.WriteString(" Welcome to Claude Code v0.0.0-test\r\n\r\n")
+		}
+		b.WriteString(" Something new to set up\r\n\r\n   Pick a thing with the arrows\r\n")
+	case "login": // the onboarding's login step (a profile without a login)
+		b.WriteString(" Select login method:\r\n\r\n ❯ 1. Claude account with subscription\r\n   2. Anthropic Console account\r\n")
+	case "loginpicked":
+		b.WriteString(" Opening browser to sign in…\r\n")
 	default:
 		b.WriteString(rule + "\r\n")
 		if len(f.input) == 0 {
@@ -426,6 +485,49 @@ func (f *fakeClaude) key(k string) {
 			}
 			f.start(false)
 			f.render()
+		}
+		return
+	case "login":
+		if k == "enter" {
+			f.mu.Lock()
+			f.dialog = "loginpicked"
+			f.mu.Unlock()
+			f.render()
+		}
+		return
+	case "theme", "security", "firstrun":
+		if k != "enter" {
+			return
+		}
+		// FAKE_AFTER_ONBOARDING: "login" follows the theme picker (a
+		// profile without a login); "trust" follows the security notes
+		// (FAKE_TRUST_YES=1 preselects "Yes, I trust this folder").
+		after := os.Getenv("FAKE_AFTER_ONBOARDING")
+		f.mu.Lock()
+		next := ""
+		switch {
+		case dialog == "theme" && after == "login":
+			next = "login"
+		case dialog == "theme":
+			next = "security"
+		case dialog == "security" && after == "trust":
+			next, f.trustYes = "trust", os.Getenv("FAKE_TRUST_YES") == "1"
+		}
+		f.dialog = next
+		prompt := f.prompt
+		f.mu.Unlock()
+		if next == "" {
+			f.start(false)
+		}
+		// FAKE_ONBOARDING_REDRAW_MS: the key is taken at once but the next
+		// screen is drawn late (a slow Windows console).
+		if ms, _ := strconv.Atoi(os.Getenv("FAKE_ONBOARDING_REDRAW_MS")); ms > 0 {
+			time.AfterFunc(time.Duration(ms)*time.Millisecond, f.render)
+		} else {
+			f.render()
+		}
+		if next == "" && prompt != "" {
+			f.submit(prompt)
 		}
 		return
 	case "exitbg":

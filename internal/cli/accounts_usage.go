@@ -44,6 +44,9 @@ func cliReset(now time.Time, uw *c.UsageWindow) string {
 // cardNote is the NOTES cell: why, until when, who is using it.
 func cardNote(now time.Time, cd usage.Card, sessionTitle, nodeName func(string) string) string {
 	var notes []string
+	if cd.Account != nil && cd.Account.Reserve() {
+		notes = append(notes, "reserve") // used only when the others are near or at their limits
+	}
 	switch cd.State {
 	case usage.AtLimit:
 		if cd.Until != nil && cd.Obs != nil && resetShown(cd.Obs.Windows, *cd.Until) {

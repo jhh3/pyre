@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -199,3 +200,56 @@ func (m *Model) deadlineTone(a contracts.Ask) tone {
 
 // OpenAsks is the header's ask count and whether it reads red (for tests).
 func (m *Model) OpenAsks() (n int, hot bool) { return m.openAsks() }
+
+// askDetailLines shows an ask item's options and, for a batched ask, its
+// items (W-grants), from the loaded asks; nothing for other items or an
+// ask not loaded. Answering per item is done in the web inbox or with
+// `pyre ask answer --item`.
+func (m *Model) askDetailLines(it contracts.AttentionItem, w, tw int) []string {
+	if it.Kind != contracts.AttnAsk || it.Object.ID == "" {
+		return nil
+	}
+	var a *contracts.Ask
+	asks := m.asks()
+	for i := range asks {
+		if asks[i].AskID == it.Object.ID {
+			a = &asks[i]
+			break
+		}
+	}
+	if a == nil {
+		return nil
+	}
+	out := []string{"", m.sectionTitle("Options", w)}
+	for i, o := range a.Options {
+		l := itoa(i+1) + ". " + o.Label
+		if o.ID == a.DefaultOption {
+			l += " (default)"
+		}
+		if o.Detail != "" {
+			l += " — " + o.Detail
+		}
+		out = append(out, "  "+trunc(l, tw-2))
+	}
+	if len(a.Items) > 0 {
+		out = append(out, "", m.sectionTitle(fmt.Sprintf("Items (%d; the options apply to each)", len(a.Items)), w))
+		for _, x := range a.Items {
+			l := x.ID + "  " + x.Label
+			if x.Detail != "" {
+				l += " — " + x.Detail
+			}
+			out = append(out, "  "+trunc(l, tw-2))
+			if x.URL != "" {
+				out = append(out, "    "+m.th.dim.Render(trunc(x.URL, tw-4)))
+			}
+		}
+		out = append(out, m.th.dim.Render(trunc("Answer per item in the web inbox or: pyre ask answer "+a.AskID+" --item ID=OPTION", tw)))
+	}
+	if a.GrantID != "" {
+		out = append(out, m.th.dim.Render(trunc("Answered by standing grant "+a.GrantID+" (project Grants tab: x revokes)", tw)))
+	}
+	if a.Proposal != nil {
+		out = append(out, m.th.dim.Render(trunc("A proposal: approve records it with your answer text and this ask's ID; reject records nothing", tw)))
+	}
+	return out
+}

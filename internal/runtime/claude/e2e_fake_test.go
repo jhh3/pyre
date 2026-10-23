@@ -541,6 +541,20 @@ func TestFakeTrustDialog(t *testing.T) {
 	})
 }
 
+// A bypass run trusts its folder even outside every --trust-dir: Claude on
+// Windows asks again for each new worktree, and bypass already grants more.
+func TestFakeTrustDialogBypass(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o700)
+	_ = os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"skipDangerousModePermissionPrompt":true}`), 0o600)
+	f := newFakeEnv(t, func(o *Options) { o.OwnerHome = home; o.TrustWorkspace = func(string) bool { return false } })
+	h := f.launch("run_trust_bypass", map[string]string{"FAKE_TRUST_DIALOG": "1", PermissionsEnv: "bypass"}, nil)
+	f.waitObs(f.a, h, 6*time.Second, func(o contracts.Observation) bool {
+		return o.State == contracts.RunWaitingInput && strings.Contains(o.StateReason, "session started")
+	})
+}
+
 func TestFakeStopHookSteer(t *testing.T) {
 	t.Parallel()
 	f := newFakeEnv(t, func(o *Options) { o.StopHookSteer = true })

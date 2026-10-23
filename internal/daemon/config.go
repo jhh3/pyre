@@ -171,6 +171,10 @@ type Config struct {
 	Labels   map[string]string
 
 	Adapters []contracts.RuntimeAdapter
+	// ExecAdapters run headless runs the caller executes itself (pyre run;
+	// execrun.go), one per harness. They are not probed or offered for
+	// ordinary launches.
+	ExecAdapters []contracts.RuntimeAdapter
 	// Reporter is the hub link; nil = standalone (reports are dropped and
 	// local reads keep working).
 	Reporter Reporter
@@ -178,7 +182,10 @@ type Config struct {
 	Accounts AccountResolver // default AmbientAccounts
 	// OwnLogin identifies the machine's own login per harness for the
 	// inventory (HarnessInfo.Login); read-only, nil = not reported.
-	OwnLogin     func(contracts.Harness) *contracts.HarnessLogin
+	OwnLogin func(contracts.Harness) *contracts.HarnessLogin
+	// OwnUsage is the own login's usage as the harness reports it, for a
+	// harness Pyre does not manage logins of (agy; HarnessInfo.Usage).
+	OwnUsage     func(contracts.Harness) *contracts.HarnessUsage
 	Environments EnvResolver // nil: env profiles unsupported
 	AgentGuide   GuideFunc
 	LaunchPrep   LaunchPrepFunc // optional integration launch hook
@@ -195,6 +202,16 @@ type Config struct {
 	// RepoIndex configures repo discovery and session worktree tracking
 	// (repos.go).
 	RepoIndex RepoIndexConfig
+
+	// SweepTmpDirs are the harness temp roots the nightly sweep clears of
+	// session folders idle for three days (default StateDir/tmp/claude,
+	// Claude's CLAUDE_CODE_TMPDIR; lifecycle.go).
+	SweepTmpDirs []string
+	// RunTmpRoot holds each run's TMPDIR, <root>/<run_id> (0700; removed
+	// after the run is done; runtmp.go). Default StateDir/tmp/runs; "none"
+	// leaves runs the TMPDIR they inherit. A TMPDIR the run's environment
+	// sets (profile, env file) always wins.
+	RunTmpRoot string
 
 	// PyreBinDir is prepended to PATH in runs (pyre CLI for agent tools).
 	// Default: the directory of the running executable.
@@ -218,6 +235,10 @@ type Config struct {
 	// OwnerToken is the owner client credential used for local socket
 	// requests that carry no bearer (the socket is 0600: same user only).
 	OwnerToken string
+	// NodeToken is this node's own hub credential. With it (and Upstream)
+	// the local socket serves PathLocalExecStart: pyre run records a
+	// headless run without a hub login on this machine (execstart.go).
+	NodeToken string
 	// Terminal opens relayed web-terminal streams (terminal.NodeBridge);
 	// nil: terminal_open commands are unsupported on this node.
 	Terminal TerminalOpener

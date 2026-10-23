@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -406,4 +407,26 @@ func findOperation(mode kit.Mode, name string) (kit.Operation, bool) {
 		}
 	}
 	return kit.Operation{}, false
+}
+
+// A backup stores manifests as JSON; numeric defaults and examples come back
+// as float64. Every built-in must still validate after that round trip.
+func TestEveryBuiltinValidatesAfterJSONRoundTrip(t *testing.T) {
+	loaded, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range loaded {
+		raw, err := json.Marshal(item.Package)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded kit.Package
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if issues := kit.Validate(decoded); len(issues) > 0 {
+			t.Errorf("%s after JSON round trip: %s", item.Package.Key, strings.Join(issues, "; "))
+		}
+	}
 }

@@ -598,7 +598,7 @@ func (h *Hub) withNodeName(ctx context.Context, v *contracts.SessionView) {
 // domains (fleet names, attention counts) and must be false inside a write
 // transaction.
 func (h *Hub) sessionView(ctx context.Context, q queryer, s contracts.Session, external bool) (contracts.SessionView, error) {
-	v := contracts.SessionView{Session: s, Freshness: contracts.Freshness{ObservedAt: h.now(), Source: "hub"}}
+	v := contracts.SessionView{Session: s, Freshness: contracts.Freshness{ObservedAt: h.now(), Source: "hub"}, Monitor: s.IsMonitor()}
 	if s.CurrentRunID != "" {
 		r, ok := batchFrom(ctx).run(s.CurrentRunID)
 		var err error

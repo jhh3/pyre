@@ -61,7 +61,7 @@ func widenToolPath(ctx context.Context, explicit []string, log *slog.Logger) {
 		out = append(out, d)
 	}
 	os.Setenv("PATH", strings.Join(out, string(os.PathListSeparator)))
-	tools := []string{"tmux", "claude", "codex", "node"}
+	tools := []string{"tmux", "claude", "codex", "agy", "node"}
 	if runtime.GOOS == "windows" {
 		tools = []string{"claude", "codex", "node", "npm", "npx", "git"}
 		windowsToolEnv(log)

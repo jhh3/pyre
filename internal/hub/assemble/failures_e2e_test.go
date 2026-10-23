@@ -108,7 +108,9 @@ func TestChildCapacityLaunchFailuresReachParentNotOwner(t *testing.T) {
 		t.Fatalf("needs-you badge %d: %v", len(ny), ny)
 	}
 
-	// The lead hears of every failed launch, in plain words, once each.
+	// The lead hears of every failed launch, in plain words, once each:
+	// as lone reports or, the lead being mid-turn, parts of one digest
+	// (I33).
 	if _, err := e.st.Hub.ProcessChildReports(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -118,9 +120,12 @@ func TestChildCapacityLaunchFailuresReachParentNotOwner(t *testing.T) {
 	}
 	from := map[string]int{}
 	for _, m := range page.Items {
-		from[m.Envelope.Sender.ID]++
-		if !strings.Contains(m.Envelope.Body.Text, "could not start: no Codex account with capacity right now") {
-			t.Fatalf("report text:\n%s", m.Envelope.Body.Text)
+		text := m.Envelope.Body.Text
+		for _, id := range children {
+			from[id] += strings.Count(text, "("+id+"), which you started")
+		}
+		if want := strings.Count(text, "[pyre auto-report]"); want == 0 || strings.Count(text, "could not start: no Codex account with capacity right now") < want {
+			t.Fatalf("report text:\n%s", text)
 		}
 	}
 	for _, id := range children {

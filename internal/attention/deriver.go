@@ -388,6 +388,9 @@ func (a APISnapshot) IndeterminateMessages(ctx context.Context) ([]contracts.Mes
 	var out []contracts.MessageView
 	cursor := ""
 	for i := 0; i < a.maxPages(); i++ {
+		// The default list leaves monitors out on purpose: a message to a
+		// monitor (a shell) would run as a command, so its inbox is not
+		// the owner's concern.
 		sp, err := a.Sessions.ListSessions(ctx, contracts.ListSessionsRequest{PageRequest: contracts.PageRequest{Cursor: cursor, Limit: 200}})
 		if err != nil {
 			return nil, err
@@ -515,6 +518,12 @@ func (l *APILookup) SessionTitle(ctx context.Context, sessionID string) (string,
 func (l *APILookup) SessionParent(ctx context.Context, sessionID string) (string, error) {
 	s, err := l.session(ctx, sessionID)
 	return s.Parent(), err
+}
+
+// SessionTags returns a session's tags when Fleet also serves sessions.
+func (l *APILookup) SessionTags(ctx context.Context, sessionID string) ([]string, error) {
+	s, err := l.session(ctx, sessionID)
+	return s.Tags, err
 }
 
 // NodeName returns the display name of nodeID.

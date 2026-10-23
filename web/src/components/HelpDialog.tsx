@@ -3,7 +3,7 @@ import { Kbd } from '@/components/ui/kbd';
 import { setUI, useUI } from '@/lib/ui-store';
 
 const GROUPS: [string, [string[], string][]][] = [
-  ['Inbox', [[['J'], 'Next conversation'], [['K'], 'Previous conversation'], [['↵'], 'Open'], [['E'], 'Archive'], [['Esc'], 'Back to the list'], [['G', 'I'], 'Go to Inbox'], [['G', 'D'], 'Go to Done'], [['G', 'P'], 'Go to Projects']]],
+  ['Inbox', [[['J'], 'Next conversation'], [['K'], 'Previous conversation'], [['↵'], 'Open'], [['E'], 'Archive (dismiss an open question or a session item)'], [['Esc'], 'Back to the list'], [['G', 'I'], 'Go to Inbox'], [['G', 'D'], 'Go to Done'], [['G', 'P'], 'Go to Projects']]],
   ['Answering', [[['1', '–', '4'], 'Choose an option'], [['H'], 'Switch Send now / Hold & batch'], [['U'], 'Undo a held answer'], [['R'], 'Reply'], [['⌘', '↵'], 'Send reply'], [['Esc'], 'Leave the reply box']]],
 ];
 

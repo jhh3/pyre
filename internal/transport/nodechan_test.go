@@ -192,6 +192,45 @@ func TestExecutingCommandIsIndeterminateAfterRestart(t *testing.T) {
 	}
 }
 
+// RecoverCommand can establish a stuck command's outcome (a start_run
+// whose run provably never existed is failed, not indeterminate).
+func TestExecutingCommandRecoveredAfterRestart(t *testing.T) {
+	db := openDB(t, "node.db")
+	if err := sqlitex.Migrate(context.Background(), db, NodeLinkMigrations...); err != nil {
+		t.Fatal(err)
+	}
+	cmd := contracts.NodeCommand{CommandID: "cmd_stuck", Seq: 9, Kind: contracts.CmdStartRun, Payload: json.RawMessage(`{}`)}
+	raw, _ := json.Marshal(cmd)
+	if _, err := db.Exec(`INSERT INTO nodelink_commands(command_id, seq, kind, command, state, received_at) VALUES(?,?,?,?,?,?)`,
+		cmd.CommandID, cmd.Seq, string(cmd.Kind), raw, cmdExecuting, sqlitex.FormatTime(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	h := &countingHandler{}
+	l, err := NewNodeLink(NodeLinkConfig{HubURL: "https://127.0.0.1:1", NodeID: "node_x", Token: "pyn_synthetic-token-for-test", DB: db, Handler: h,
+		Backoff: BackoffConfig{Initial: time.Hour},
+		RecoverCommand: func(_ context.Context, c contracts.NodeCommand) (contracts.CommandResult, bool) {
+			return contracts.CommandResult{Outcome: contracts.OutcomeFailed, Error: contracts.Errorf(contracts.ErrUnavailable, "never started")}, c.Kind == contracts.CmdStartRun
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := runLink(t, l)
+	waitFor(t, "result queued", func() bool { n, _ := l.OutboxLen(context.Background()); return n == 1 })
+	stop()
+	var payload []byte
+	if err := db.QueryRow(`SELECT payload FROM nodelink_outbox`).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var res contracts.CommandResult
+	_ = json.Unmarshal(payload, &res)
+	if res.Outcome != contracts.OutcomeFailed || res.CommandID != "cmd_stuck" || res.Error == nil || res.Error.Message != "never started" {
+		t.Fatalf("result = %+v", res)
+	}
+	if h.count("cmd_stuck") != 0 {
+		t.Fatal("stuck command re-executed")
+	}
+}
+
 func TestRevokedNodeRejectedAndDisconnected(t *testing.T) {
 	e := newEnv(t)
 	e.start()

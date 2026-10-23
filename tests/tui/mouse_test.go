@@ -258,10 +258,7 @@ func TestTipsBarFirstLaunchDismissedAndRemembered(t *testing.T) {
 	if h.Contains("hide ✕") {
 		t.Fatal("esc did not hide the tips bar")
 	}
-	b, err := os.ReadFile(state)
-	if err != nil || !strings.Contains(string(b), `"tips_dismissed": true`) {
-		t.Fatalf("state not saved: %q %v", b, err)
-	}
+	stateHas(t, h, state, `"tips_dismissed": true`)
 	h2, _ := start(t, 160, 40, nil, mod)
 	if h2.Contains("hide ✕") {
 		t.Fatal("tips bar shown again after dismissal")

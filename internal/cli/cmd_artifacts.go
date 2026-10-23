@@ -159,10 +159,18 @@ printed version ID (in messages, comments, handoffs).`,
 
 	var out string
 	var noCache bool
+	var stall time.Duration
 	get := &cobra.Command{
-		Use:   "get <version_id|artifact_id|title> [-o FILE|-]",
+		Use:   "get <version_id|artifact_id|title> [-o FILE|-] [--stall-timeout 60s]",
 		Short: "Download a version's exact bytes (digest-verified; verified local cache when offline)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Download a version's exact bytes, verified against its size and sha256.
+
+Progress is printed to stderr (at most every 5s when stderr is not a
+terminal). If no bytes arrive for --stall-timeout, the attempt is aborted
+and retried (up to 3 times, with backoff), resuming with HTTP Range from
+<file>.part next to the destination; a failed get keeps <file>.part, and
+rerunning the same command resumes from it. There is no overall deadline.`,
+		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
 			if err != nil {
@@ -172,11 +180,12 @@ printed version ID (in messages, comments, handoffs).`,
 			if err != nil {
 				return err
 			}
-			return a.artifactGet(cmd.Context(), ops, vid, out, noCache)
+			return a.artifactGet(cmd.Context(), ops, vid, out, noCache, stall)
 		}),
 	}
 	get.Flags().StringVarP(&out, "output", "o", "", "output file, or - for stdout (default: the version's file name)")
 	get.Flags().BoolVar(&noCache, "no-cache", false, "do not read or fill the local verified cache")
+	get.Flags().DurationVar(&stall, "stall-timeout", defaultStallTimeout, "abort an attempt when no bytes arrive for this long (0 disables); it is retried, resuming from <file>.part")
 	art.AddCommand(get)
 
 	var previewTTL time.Duration
@@ -312,8 +321,9 @@ func safeFilename(name, fallback string) string {
 
 // artifactGet downloads exact published bytes. Bytes are verified against
 // the version digest while writing; a file is only put in place (renamed)
-// after verification succeeds.
-func (a *App) artifactGet(ctx context.Context, ops *Ops, versionID, out string, noCache bool) error {
+// after verification succeeds. Progress goes to stderr; an attempt with no
+// bytes for stall is aborted and resumed (artifact_download.go).
+func (a *App) artifactGet(ctx context.Context, ops *Ops, versionID, out string, noCache bool, stall time.Duration) error {
 	var ch *cache.Cache
 	if !noCache {
 		if cc, err := cache.Open(filepath.Join(DefaultStateDir(a.Getenv), "cache"), 512<<20); err == nil {
@@ -322,20 +332,48 @@ func (a *App) artifactGet(ctx context.Context, ops *Ops, versionID, out string, 
 			a.warnf("pyre: artifact cache unavailable: %v", err)
 		}
 	}
-	rc, ver, err := ops.API.OpenContent(ctx, versionID)
-	fromCache := false
+	ver, err := ops.API.GetVersion(ctx, c.GetRequest{ID: versionID})
 	if err != nil {
-		if ch == nil || !(c.IsCode(err, c.ErrUnavailable)) {
-			return err
+		return a.artifactGetCached(ch, versionID, out, err)
+	}
+	if out == "" {
+		out = safeFilename(ver.Filename, ver.VersionID)
+	}
+	if out == "-" {
+		if err := a.downloadToWriter(ctx, ops.API, ver, a.Stdout, stall); err != nil {
+			return fmt.Errorf("%w (bytes already written to stdout are NOT the verified published version)", err)
 		}
-		cv, crc, cerr := ch.GetVersion(versionID)
-		if cerr != nil {
-			return err
+		return nil
+	}
+	if err := a.downloadToFile(ctx, ops.API, ver, out, stall); err != nil {
+		if ch != nil && c.IsCode(err, c.ErrUnavailable) {
+			return a.artifactGetCached(ch, versionID, out, err)
 		}
-		a.warnf("pyre: hub unavailable (%v); serving verified bytes from the local cache", err)
-		rc, ver, fromCache = crc, cv, true
+		return err
+	}
+	if ch != nil {
+		if f, err := os.Open(out); err == nil {
+			if err := ch.PutVersion(ver, f); err != nil {
+				a.warnf("pyre: could not cache %s: %v", ver.VersionID, err)
+			}
+			f.Close()
+		}
+	}
+	return a.artifactWrote(ver, out)
+}
+
+// artifactGetCached serves a version from the verified local cache when
+// the hub is unavailable; any other hub error is returned as is.
+func (a *App) artifactGetCached(ch *cache.Cache, versionID, out string, hubErr error) error {
+	if ch == nil || !c.IsCode(hubErr, c.ErrUnavailable) {
+		return hubErr
+	}
+	ver, rc, err := ch.GetVersion(versionID)
+	if err != nil {
+		return hubErr
 	}
 	defer rc.Close()
+	a.warnf("pyre: hub unavailable (%v); serving verified bytes from the local cache", hubErr)
 	if out == "" {
 		out = safeFilename(ver.Filename, ver.VersionID)
 	}
@@ -351,8 +389,7 @@ func (a *App) artifactGet(ctx context.Context, ops *Ops, versionID, out string, 
 		}
 		return nil
 	}
-	dir := filepath.Dir(out)
-	tmp, err := os.CreateTemp(dir, ".pyre-get-*")
+	tmp, err := os.CreateTemp(filepath.Dir(out), ".pyre-get-*")
 	if err != nil {
 		return err
 	}
@@ -370,15 +407,11 @@ func (a *App) artifactGet(ctx context.Context, ops *Ops, versionID, out string, 
 	if err := os.Rename(tmp.Name(), out); err != nil {
 		return err
 	}
-	if ch != nil && !fromCache {
-		if f, err := os.Open(out); err == nil {
-			if err := ch.PutVersion(ver, f); err != nil {
-				a.warnf("pyre: could not cache %s: %v", ver.VersionID, err)
-			}
-			f.Close()
-		}
-	}
-	a.warnf("wrote %s (%d bytes, %s verified)", out, n, ver.Digest)
+	return a.artifactWrote(ver, out)
+}
+
+func (a *App) artifactWrote(ver c.ArtifactVersion, out string) error {
+	a.warnf("wrote %s (%d bytes, %s verified)", out, ver.Size, ver.Digest)
 	return a.emit(ver, func(w io.Writer) {
 		fmt.Fprintf(w, "%s\n", out)
 	})

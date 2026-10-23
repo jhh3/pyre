@@ -20,7 +20,7 @@ import (
 )
 
 // Quick launch by repository (W-quicklaunch): `pyre new <repo>[+<repo>…]
-// [@machine] [claude|codex|shell] [first prompt…]`. Repository names are
+// [@machine] [claude|codex|agy|shell] [first prompt…]`. Repository names are
 // fuzzy-matched against the fleet's repo index (repos.list); the machine
 // defaults to where the repository exists, preferring the one it was most
 // recently used on. The default working directory is the repository's
@@ -42,6 +42,8 @@ type QuickParams struct {
 	Account     string   `json:"account,omitempty"`
 	Ambient     bool     `json:"ambient,omitempty"`
 	Permissions string   `json:"permissions,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	Effort      string   `json:"effort,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	OperationID string   `json:"operation_id,omitempty"`
 	// NoClone refuses instead of cloning a repository the machine lacks
@@ -49,6 +51,8 @@ type QuickParams struct {
 	NoClone bool `json:"no_clone,omitempty"`
 	// Progress receives one-line progress notes (clone confirmations).
 	Progress func(string) `json:"-"`
+	// HarnessArgs: extra harness arguments (StartParams.HarnessArgs).
+	HarnessArgs []string `json:"harness_args,omitempty"`
 }
 
 // QuickLaunchResult is `pyre new --json` output: the start response plus
@@ -57,9 +61,10 @@ type QuickLaunchResult struct {
 	c.StartSessionResponse
 	Repos     []c.RepoEntry           `json:"repos"`
 	Worktrees *c.WorktreeCreateResult `json:"worktrees,omitempty"`
-	Folder    string                  `json:"folder,omitempty"`  // plain-folder launch: the folder
-	Created   bool                    `json:"created,omitempty"` // the folder was created for it
-	Cloned    []c.RepoCloneResult     `json:"cloned,omitempty"`  // repositories cloned onto the machine first
+	Folder    string                  `json:"folder,omitempty"`    // plain-folder launch: the folder
+	Created   bool                    `json:"created,omitempty"`   // the folder was created for it
+	Cloned    []c.RepoCloneResult     `json:"cloned,omitempty"`    // repositories cloned onto the machine first
+	Placement *Placement              `json:"placement,omitempty"` // machine chosen by load (placement.go)
 }
 
 // RepoPicker chooses among ambiguous matches (index into groups), or
@@ -239,8 +244,14 @@ func ambiguousError(spec string, groups [][]c.RepoEntry) error {
 
 // QuickLaunch resolves repositories and a machine, creates fresh
 // worktrees when asked, and starts the session.
-func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (QuickLaunchResult, error) {
-	var res QuickLaunchResult
+func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (res QuickLaunchResult, err error) {
+	var pl Placement
+	ctx = withPlacement(ctx, &pl)
+	defer func() {
+		if pl.NodeID != "" {
+			res.Placement = &pl
+		}
+	}()
 	if p.Path != "" {
 		return o.folderLaunch(ctx, p)
 	}
@@ -373,6 +384,12 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 			id, err := repoindex.ChooseMachine(chosen, connected, "")
 			if err == nil {
 				nodeID = id
+				// Several machines hold them all: the least loaded one
+				// (placement.go); recency only breaks ties.
+				if pl, perr := o.placeAmong(ctx, nodes.Items, p.Harness, p.Account, p.Ambient, false, repoindex.Machines(chosen, connected), p.Model != "" || p.Effort != ""); perr == nil {
+					nodeID = pl.NodeID
+					notePlacement(ctx, pl)
+				}
 			} else if p.NoClone {
 				_, err := chooseNode(chosen, connected, "")
 				return res, err
@@ -472,17 +489,45 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 		if slug == "" {
 			slug = p.Prompt
 		}
-		var wt c.WorktreeCreateResult
-		if _, err := o.NodeAction(ctx, nodeID, c.ActionWorktreeCreate, c.WorktreeCreateParams{Repos: paths, Branch: p.Branch, Slug: slug}, &wt, opID+".worktrees"); err != nil {
+		wctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		wt, err := repoindex.CreateVia(wctx, o.API, nodeID, c.WorktreeCreateParams{Repos: paths, Branch: p.Branch, Slug: slug}, opID+".worktrees")
+		cancel()
+		if err != nil {
 			return res, err
+		}
+		for _, w := range wt.Warnings {
+			if p.Progress != nil {
+				p.Progress("warning: " + w)
+			}
 		}
 		res.Worktrees = &wt
 		cwd = wt.Cwd
 	}
 	start, err := o.StartSession(ctx, StartParams{Node: nodeID, Harness: p.Harness, Cwd: cwd, Prompt: p.Prompt, Title: p.Title,
-		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Tags: p.Tags, OperationID: opID})
+		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags, OperationID: opID, HarnessArgs: p.HarnessArgs})
 	res.StartSessionResponse = start
+	if res.Worktrees != nil {
+		res.Warnings = append(res.Warnings, res.Worktrees.Warnings...) // start_session callers see them too
+	}
+	if err == nil && res.Worktrees != nil {
+		o.claimWorktrees(ctx, nodeID, *res.Worktrees, start.Session.Session.SessionID, opID+".claim")
+	}
 	return res, err
+}
+
+// claimWorktrees names the session started in fresh worktrees in their
+// markers, so its automatic cleanup may remove them (W-lifecycle). Best
+// effort: an unclaimed worktree is simply never removed automatically.
+func (o *Ops) claimWorktrees(ctx context.Context, nodeID string, wt c.WorktreeCreateResult, sessionID, opID string) {
+	if wt.ClaimToken == "" || sessionID == "" || len(wt.Worktrees) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(wt.Worktrees))
+	for _, w := range wt.Worktrees {
+		paths = append(paths, w.Path)
+	}
+	var res c.WorktreeClaimResult
+	_, _ = o.NodeAction(ctx, nodeID, c.ActionWorktreeClaim, c.WorktreeClaimParams{SessionID: sessionID, Token: wt.ClaimToken, Paths: paths}, &res, opID)
 }
 
 // folderLaunch starts a session in a plain folder (`pyre new ~/scratch`):
@@ -536,7 +581,7 @@ func (o *Ops) folderLaunch(ctx context.Context, p QuickParams) (QuickLaunchResul
 	}
 	res.Folder = folder
 	start, err := o.StartSession(ctx, StartParams{Node: nodeID, Harness: p.Harness, Cwd: folder, Prompt: p.Prompt, Title: p.Title,
-		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Tags: p.Tags, OperationID: opID})
+		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags, OperationID: opID, HarnessArgs: p.HarnessArgs})
 	res.StartSessionResponse = start
 	return res, err
 }
@@ -586,13 +631,14 @@ func parseNewArgs(args []string) (repos []string, node, harness, prompt string) 
 func (a *App) addQuickLaunchCommands(root *cobra.Command) {
 	var p QuickParams
 	cmd := &cobra.Command{
-		Use:   "new <repo>[+<repo>…] | <path>  [@machine] [claude|codex|shell] [first prompt…]",
+		Use:   "new <repo>[+<repo>…] | <path>  [@machine] [claude|codex|agy|shell] [first prompt…]",
 		Short: "Start a session in a repository by name (fuzzy), or in any folder",
 		Long: `Start a session in a repository found by name. Names are fuzzy-matched
 against the repositories every node indexes (pyre repos lists them); an
 ambiguous name asks you to choose (or lists the choices when not on a
-terminal). The machine defaults to where the repository exists, preferring
-the one you used it on most recently; @machine picks one. Claude is the
+terminal). The machine defaults to where the repository exists: the least
+loaded of those machines (CPU, memory, swap, live runs; recency breaks ties),
+named on stderr with the reason; @machine picks one. Claude is the
 default harness; the rest of the line is the first prompt.
 
 The session starts in the repository's main checkout: the agent decides
@@ -601,6 +647,10 @@ whether to make its own worktree (Claude Code makes them under
 named from the prompt or title (pyre/fix-share-link-redirect, deduplicated),
 in the repository's worktree folder (<repo>/.worktrees/, or an existing
 <repo>-worktrees/ next to it). --branch names that branch (implies --fresh).
+The new branch starts at origin's default branch, fetched first (never the
+main checkout's possibly stale local branch), and tracks nothing: push it
+with git push -u origin <branch>. A failed fetch stops the launch; a
+repository without an origin remote branches from its HEAD, with a warning.
 
 Any repository works on any machine: owner/name (one of your GitHub
 repositories, or any GitHub repository) or a repository another machine has
@@ -647,7 +697,7 @@ Examples:
 			}
 			if len(repos) == 0 && folder == "" {
 				if !a.IsTerminal() || a.jsonOut {
-					return usagef("name a repository: pyre new <repo> [@machine] [claude|codex|shell] [prompt…] (pyre repos lists them)")
+					return usagef("name a repository: pyre new <repo> [@machine] [claude|codex|agy|shell] [prompt…] (pyre repos lists them)")
 				}
 				spec, err := a.promptRepo(cmd.Context(), ops)
 				if err != nil {
@@ -681,6 +731,7 @@ Examples:
 			if err != nil {
 				return err
 			}
+			a.notePlaced(res.Placement)
 			if res.Worktrees == nil && res.Folder == "" {
 				a.warnSharedRepo(cmd.Context(), ops, res.StartSessionResponse)
 			}
@@ -695,6 +746,8 @@ Examples:
 	f.StringVar(&p.Account, "account", "", "explicit account: ID, label or rota name, or a unique prefix")
 	f.BoolVar(&p.Ambient, "ambient", false, "use the machine's existing login (no Pyre account assignment)")
 	f.StringVar(&p.Permissions, "permissions", "", "ask or bypass (default: the machine's pyred --permissions)")
+	f.StringVar(&p.Model, "model", "", "model (default: the harness's own; choices: pyre models)")
+	f.StringVar(&p.Effort, "effort", "", "reasoning effort: low, medium, high, xhigh, max (default: the harness's own)")
 	f.StringVar(&p.Title, "title", "", "session title (default: automatic)")
 	f.StringVar(&p.Prompt, "prompt", "", "first prompt (- reads stdin), instead of trailing words")
 	f.StringSliceVar(&p.Tags, "tag", nil, "tags")
@@ -886,7 +939,7 @@ func (o *Ops) startFromRepos(ctx context.Context, p StartParams) (c.StartSession
 		branch = p.Worktree
 	}
 	res, err := o.QuickLaunch(ctx, QuickParams{Repos: repos, Node: p.Node, Harness: p.Harness, Prompt: p.Prompt, Title: p.Title,
-		Fresh: p.Fresh, Branch: branch, Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Tags: p.Tags,
-		OperationID: p.OperationID}, nil)
+		Fresh: p.Fresh, Branch: branch, Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags,
+		OperationID: p.OperationID, HarnessArgs: p.HarnessArgs}, nil)
 	return res.StartSessionResponse, err
 }

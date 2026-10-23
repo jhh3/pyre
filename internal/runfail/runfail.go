@@ -39,6 +39,15 @@ func Summary(reason string, started bool, n Names) string {
 	case known:
 		return s
 	case strings.HasPrefix(s, "Couldn't start: "):
+		if key := CauseOf(reason, nil).Key; CauseLabel(key) != "" {
+			// A recognised cause reads in fixed words (its detail, a path
+			// or an ID, stays in the session).
+			on := ""
+			if n.Node != "" {
+				on = " on " + n.Node
+			}
+			return "Couldn't start" + on + ": " + CauseLabel(key) + ". " + CauseHint(key)
+		}
 		return "Couldn't start; open the session for the reason."
 	}
 	return ""
@@ -57,6 +66,8 @@ func describe(reason string, started bool, n Names) (string, bool) {
 	}
 	harness := "the"
 	switch {
+	case isAgy(l):
+		harness = "agy"
 	case strings.Contains(l, "openai") || strings.Contains(l, "codex"):
 		harness = "Codex"
 	case strings.Contains(l, "anthropic") || strings.Contains(l, "claude"):
@@ -139,3 +150,11 @@ func tail(reason string) string {
 	parts := strings.Split(reason, ": ")
 	return strings.TrimSpace(parts[len(parts)-1])
 }
+
+// isAgy reports a reason about Google Antigravity's CLI (agy), checked
+// before the others: agy also runs Claude and GPT models.
+func isAgy(l string) bool {
+	return agyWordRe.MatchString(l) || strings.Contains(l, "antigravity")
+}
+
+var agyWordRe = regexp.MustCompile(`\bagy\b`)

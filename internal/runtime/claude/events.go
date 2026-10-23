@@ -116,13 +116,30 @@ func appendJSONL(path string, v any) error {
 	return f.Sync()
 }
 
-// writeFileAtomic writes via a temp file and rename (0600).
+// writeFileAtomic writes via a unique temp file in the same directory,
+// synced before the rename (0600): concurrent writers of one path (two
+// launches on one profile) never share a temp file, and a crash never
+// leaves path empty or half-written.
 func writeFileAtomic(path string, b []byte) error {
-	tmp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp"+strconv.Itoa(os.Getpid()))
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }
 
 // readJSONLFrom reads complete lines starting at byte offset off. It returns

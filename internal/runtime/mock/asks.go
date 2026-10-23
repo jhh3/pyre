@@ -270,13 +270,14 @@ func (b *Backend) CreateAsk(ctx context.Context, req c.CreateAskRequest) (c.Crea
 			Title: strings.TrimSpace(req.Title), Context: strings.TrimSpace(req.Context),
 			Options: append([]c.AskOption(nil), req.Options...), DefaultOption: req.DefaultOption, Urgent: req.Urgent,
 			DeadlineAt: &deadline, DeadlineRule: rule, State: c.AskOpen, Count: 1, CreatedAt: now, UpdatedAt: now,
+			Items: append([]c.AskItem(nil), req.Items...), Action: req.Action, // W-grants: stored as given (no grants in the mock)
 		}
 		if sess != nil {
-			mv, err := b.sendLocked(p, c.SendMessageRequest{
+			mv, err := b.sendMailLocked(p, c.SendMessageRequest{
 				Mutation:  c.Mutation{OperationID: req.OperationID + ":ask"},
 				Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Mode: c.ModeInfo, ProjectID: projectID,
 				Body: c.MessageBody{Text: askMessageText(a)},
-			}, "")
+			}, "", true)
 			if err != nil {
 				return c.CreateAskResponse{}, err
 			}
@@ -421,7 +422,7 @@ func (b *Backend) answerAsksLocked(p c.Principal, opID string, items []c.AnswerA
 		case a.State != c.AskOpen:
 			res.Error = c.Errorf(c.ErrConflict, "ask is already %s", a.State).WithRef(c.KindAsk, a.AskID)
 			res.Ask = clonePtr(a)
-		case it.OptionID == "" && strings.TrimSpace(it.Text) == "":
+		case it.OptionID == "" && strings.TrimSpace(it.Text) == "" && len(it.Items) == 0:
 			res.Error = c.Errorf(c.ErrInvalid, "an answer needs an option or text")
 		default:
 			if _, ok := a.Option(it.OptionID); it.OptionID != "" && !ok {
@@ -429,9 +430,10 @@ func (b *Backend) answerAsksLocked(p c.Principal, opID string, items []c.AnswerA
 				break
 			}
 			a.State = c.AskAnswered
-			a.Answer = &c.AskAnswer{OptionID: it.OptionID, Text: strings.TrimSpace(it.Text), By: p, At: now}
+			a.Answer = &c.AskAnswer{OptionID: it.OptionID, Items: it.Items, Text: strings.TrimSpace(it.Text), By: p, At: now}
 			a.UpdatedAt = now
 			b.withdrawAttentionLocked("ask:"+a.AskID, c.AttnHandled)
+			b.ackAskMailLocked(a)
 			decided = append(decided, a)
 			res.Ask = a // cloned below, after the decision message
 		}
@@ -543,6 +545,7 @@ func (b *Backend) expireAsksLocked() {
 		}
 		a.UpdatedAt = now
 		b.withdrawAttentionLocked("ask:"+a.AskID, c.AttnHandled)
+		b.ackAskMailLocked(a)
 		decided = append(decided, a)
 	}
 	if len(decided) > 0 {
@@ -583,6 +586,7 @@ func (b *Backend) WithdrawAsk(ctx context.Context, req c.WithdrawAskRequest) (c.
 		}
 		a.UpdatedAt = b.now()
 		b.withdrawAttentionLocked("ask:"+a.AskID, c.AttnWithdrawn)
+		b.ackAskMailLocked(a)
 		b.dropHeldLocked(a.AskID)
 		b.emit(c.EvAskChanged, ref(c.KindAsk, a.AskID), a.SessionID, a.ProjectID, a)
 		return *a, nil

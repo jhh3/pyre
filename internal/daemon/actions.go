@@ -111,6 +111,7 @@ func (d *Daemon) registerBuiltinActions() {
 	d.RegisterSyncAction(contracts.ActionDiagnostics, d.actionDiagnostics)
 	d.RegisterSyncAction(contracts.ActionFsMkdir, d.actionFsMkdir) // W-qlpath
 	d.registerRepoActions()                                        // W-quicklaunch
+	d.registerLifecycleActions()                                   // W-lifecycle
 }
 
 func (d *Daemon) actionInventory(ctx context.Context, _ json.RawMessage) (any, error) {
@@ -123,7 +124,7 @@ func (d *Daemon) actionInventory(ctx context.Context, _ json.RawMessage) (any, e
 	for _, r := range []struct {
 		h   contracts.Harness
 		dir string
-	}{{contracts.HarnessClaude, ".claude"}, {contracts.HarnessCodex, ".codex"}} {
+	}{{contracts.HarnessClaude, ".claude"}, {contracts.HarnessCodex, ".codex"}, {contracts.HarnessAgy, ".gemini"}} {
 		p := filepath.Join(home, r.dir)
 		_, err := os.Stat(p)
 		inv.ConfigRoots = append(inv.ConfigRoots, contracts.ConfigRoot{Harness: r.h, Path: p, Exists: err == nil})
@@ -165,12 +166,18 @@ func (d *Daemon) actionDirList(ctx context.Context, raw json.RawMessage) (any, e
 	if err != nil {
 		return nil, contracts.Errorf(contracts.ErrInvalid, "cannot list %s: %v", dir, err)
 	}
-	res := contracts.DirListResult{Path: dir, Dirs: []string{}}
+	res := contracts.DirListResult{Path: dir, Dirs: []string{}, Hidden: p.Hidden}
+	if home, err := os.UserHomeDir(); err == nil {
+		res.Home = home
+	}
+	if d.cfg.WorktreeRoot != "" {
+		res.WorktreeRoot = expandHome(d.cfg.WorktreeRoot)
+	}
 	for _, e := range ents {
 		if e.Name() == ".git" {
 			res.IsGit = true
 		}
-		if strings.HasPrefix(e.Name(), ".") {
+		if strings.HasPrefix(e.Name(), ".") && (!p.Hidden || e.Name() == "." || e.Name() == ".." || e.Name() == ".git") {
 			continue
 		}
 		if e.IsDir() || e.Type()&os.ModeSymlink != 0 {

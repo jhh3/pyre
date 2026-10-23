@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -12,6 +13,41 @@ import (
 type startCapture struct {
 	c.API
 	req c.StartSessionRequest
+	sel *c.AccountSelection // account.select answer; nil: the node cannot answer
+	// Other nodes and their answers (codex preflight across nodes).
+	nodes []c.Node
+	sels  map[string]*c.AccountSelection
+	// harnesses: what an unlisted node reports (GetNode).
+	harnesses []c.HarnessInfo
+}
+
+func (s *startCapture) InvokeNodeAction(_ context.Context, r c.NodeActionRequest) (c.NodeActionResult, error) {
+	sel := s.sel
+	if v, ok := s.sels[r.NodeID]; ok {
+		sel = v
+	}
+	if sel == nil || r.Action != c.ActionAccountSelect {
+		return c.NodeActionResult{}, c.Errorf(c.ErrUnsupported, "synthetic: no node actions")
+	}
+	b, _ := json.Marshal(sel)
+	return c.NodeActionResult{Result: b}, nil
+}
+
+func (s *startCapture) GetNode(_ context.Context, r c.GetRequest) (c.Node, error) {
+	for _, n := range s.nodes {
+		if n.NodeID == r.ID {
+			return n, nil
+		}
+	}
+	return c.Node{NodeID: r.ID, Name: r.ID, Harnesses: s.harnesses}, nil
+}
+
+func (s *startCapture) ListSessions(context.Context, c.ListSessionsRequest) (c.Page[c.SessionView], error) {
+	return c.Page[c.SessionView]{}, nil
+}
+
+func (s *startCapture) ListNodes(context.Context, c.ListNodesRequest) (c.Page[c.Node], error) {
+	return c.Page[c.Node]{Items: s.nodes}, nil
 }
 
 func (s *startCapture) StartSession(_ context.Context, r c.StartSessionRequest) (c.StartSessionResponse, error) {

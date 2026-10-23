@@ -139,9 +139,19 @@ func MCPTools() []MCPTool {
 			}) (c.Page[c.Node], error) {
 				return o.ListNodes(ctx, p.IncludeRevoked)
 			}), renderNodes),
+		tool("list_models", "List models", "List the models and reasoning efforts each machine's agent harnesses offer, for start_session model and effort (any name the harness accepts also works).",
+			obj(props{"node": str("only this node (ID or name)"), "harness": str("only this harness: claude, codex or agy")}), hints("List models", readOnly, true),
+			func(ctx context.Context, o *Ops, p struct {
+				Node    string `json:"node"`
+				Harness string `json:"harness"`
+			}) (ModelsResult, error) {
+				l, err := o.Models(ctx, p.Node, p.Harness)
+				return ModelsResult{Harnesses: l}, err
+			}),
 		compactly(tool("list_sessions", "List sessions", "List sessions across the fleet: one line each with id, title, run state, machine (\"this machine\" shares your filesystem), age and project.",
-			obj(props{"node": node, "project": str("project ID/name, or \"none\" for standalone sessions"), "harness": str("claude, codex or shell"),
-				"query": str("text search"), "states": strs("run states, e.g. running, waiting_input"), "include_archived": boo("include archived")}),
+			obj(props{"node": node, "project": str("project ID/name, or \"none\" for standalone sessions"), "harness": str("claude, codex, agy or shell"),
+				"query": str("text search"), "states": strs("run states, e.g. running, waiting_input"), "include_archived": boo("include archived"),
+				"include_monitors": boo("include monitor sessions (pyre monitor add); by default each session shows only how many monitors watch for it")}),
 			hints("List sessions", readOnly, true),
 			func(ctx context.Context, o *Ops, p SessionFilter) (c.Page[c.SessionView], error) {
 				return o.ListSessions(ctx, p)
@@ -153,19 +163,36 @@ func MCPTools() []MCPTool {
 			}) (c.SessionView, error) {
 				return o.ResolveSession(ctx, p.Session)
 			}), renderSession),
-		tool("start_session", "Start session", "Start a peer session on a machine (no project needed; launch is asynchronous). It messages you automatically when it finishes a turn (with its last message), needs input, or exits; no need to ask it to.",
-			obj(props{"node": node, "harness": str("claude, codex or shell"), "cwd": str("absolute working directory on the node"),
+		tool("start_session", "Start session", "Start a peer session on a machine (no project needed). Waits up to 20 s; a failed launch is an error. It messages you automatically when it finishes a turn (with its last message), needs input, or exits; no need to ask it to.",
+			obj(props{"node": str("node ID (node_...) or name; default: the least loaded connected node with the harness (with project+repo: among nodes holding that checkout; with cwd: this session's node); the result's placement says which and why"), "harness": str("claude, codex, agy or shell (agy: Google Antigravity, on machines that have it)"), "cwd": str("absolute working directory on the node"),
 				"project": project, "worktree": str("branch for an isolated git worktree"), "repo": str("with project: project repo ID (its recorded checkout, or the worktree source); without project: a repository name from the repo index, fuzzy-matched (the machine defaults to where it exists, the harness to claude, the directory to its main checkout)"),
 				"repos": strs("several repository names from the repo index: fresh worktrees of each on one branch in ~/pyre-work/<slug>/"), "fresh": boo("start in a new worktree and branch of repo instead of its main checkout"),
-				"branch":  str("branch for the fresh worktree (default pyre/<slug of the prompt or title>)"),
-				"account": str("explicit account: ID, label or rota name, or a unique prefix"), "ambient": boo("use the node's existing login"), "prompt": str("initial prompt"),
+				"branch":           str("branch for the fresh worktree (default pyre/<slug of the prompt or title>)"),
+				"account":          str("explicit account: ID, label or rota name, or a unique prefix; at its limit the best eligible account is used instead (with a note) unless strict_account"),
+				"strict_account":   boo("keep account even when it is at its limit or ineligible (the launch fails)"),
+				"fallback_harness": str("claude: when no Codex (OpenAI) account is free, run on Claude instead; use for reviews and second opinions. Default: a Codex launch with no free account fails at once with the reason"),
+				"ambient":          boo("use the node's existing login"), "prompt": str("initial prompt"),
 				"permissions": str("ask (approval prompts) or bypass (no approval prompts, no sandbox); default: the node's setting"),
+				"model":       str("model (default: the harness's own); claude takes opus/sonnet/haiku/fable or a full name; choices per machine: list_models"),
+				"effort":      str("reasoning effort: low, medium, high, xhigh or max (codex also ultra); default: the harness's own"),
 				"title":       str("session title"), "include_context": boo("include the bounded project brief"), "tags": strs("tags"),
 				"report_to_parent": boo("report back to the starting session automatically (default true when a session starts it; false turns it off)"),
+				"harness_args":     strs("extra harness flags from an allowlist, e.g. claude --append-system-prompt-file=F, --plugin-dir=D, --dangerously-load-development-channels=plugin:N@M; kept across resumes; Pyre-controlled flags are refused"),
+				"native_resume":    str("claude: continue this existing conversation (session id) started outside Pyre; stop its process first"),
+				"env_file":         str("absolute path on the node to KEY=VALUE lines added to the harness environment at every launch (a private file: chmod 600; Pyre and login keys refused unless empty); only the path is recorded"),
 				"operation_id":     opIDProp}, "harness"),
 			hints("Start session", additive, false),
-			func(ctx context.Context, o *Ops, p StartParams) (c.StartSessionResponse, error) {
-				return o.StartSession(ctx, p)
+			func(ctx context.Context, o *Ops, p StartParams) (StartResult, error) {
+				var pl Placement
+				res, err := o.StartSession(withPlacement(ctx, &pl), p)
+				if err == nil {
+					err = o.awaitLaunch(ctx, &res, o.LaunchWait) // a failed launch is an error now, not a report later
+				}
+				out := StartResult{StartSessionResponse: res}
+				if pl.NodeID != "" {
+					out.Placement = &pl
+				}
+				return out, err
 			}),
 		compactly(tool("read_session", "Read transcript", "Read a session's bounded, redacted transcript. Use next_cursor to continue.",
 			obj(props{"session": sess, "run": str("run ID (default current)"), "tail": num("latest N entries"),
@@ -177,7 +204,7 @@ func MCPTools() []MCPTool {
 				}
 				return o.ReadSession(ctx, p)
 			}), renderTranscript),
-		tool("interrupt_session", "Interrupt session", "Interrupt a session's current turn. The receipt reports acceptance; the outcome is observed separately.",
+		tool("interrupt_session", "Interrupt session", "Interrupt a session's current turn (for an idle Codex session, also stop the background commands it left running). The receipt reports acceptance; the outcome is observed separately.",
 			obj(props{"session": sess, "reason": str("reason"), "operation_id": opIDProp}, "session"),
 			hints("Interrupt session", destructive, false),
 			func(ctx context.Context, o *Ops, p SessionCmdParams) (c.CommandReceipt, error) {
@@ -189,11 +216,11 @@ func MCPTools() []MCPTool {
 			func(ctx context.Context, o *Ops, p SessionCmdParams) (c.CommandReceipt, error) {
 				return receiptResult(o.Stop(ctx, p))
 			}),
-		withNote(tool("send_message", "Send message", "Send a durable message to a session, \"owner\", channel:<name> or project. With reply_to and no to, replies to the original sender. delivery_status.summary says whether it is getting through (e.g. recipient ended or its machine is offline).",
+		withNote(tool("send_message", "Send message", "Send a durable message to a session, \"owner\", channel:<name> or project; reply_to alone replies to its sender. delivery_status.summary says if it gets through. A report to the owner that asks nothing is an update, not in his inbox.",
 			obj(props{"to": str("session ID/title, \"owner\", channel:<name>, or project:<id>"), "text": str("message text"),
 				"thread": str("thread ID"), "reply_to": str("message ID this replies to"), "steer": boo("explicit immediate steering, where supported"),
 				"info": boo("store only; never inject into a runtime"), "attach": strs("published IDs: ver_..., rev_..., note_... (not file paths)"),
-				"request_ack": boo("ask the recipient to acknowledge"), "project": project, "ttl_seconds": num("retention for undelivered mail"),
+				"request_ack": boo("ask the recipient to acknowledge (to the owner: keeps a report in his inbox)"), "project": project, "ttl_seconds": num("retention for undelivered mail"),
 				"message_id": str("stable message ID for retries"), "operation_id": opIDProp}, "text"),
 			hints("Send message", additive, false),
 			func(ctx context.Context, o *Ops, p SendParams) (c.MessageView, error) { return o.Send(ctx, p) }),
@@ -262,12 +289,15 @@ func MCPTools() []MCPTool {
 			func(ctx context.Context, o *Ops, p CreateProjectParams) (c.Project, error) {
 				return o.CreateProject(ctx, p)
 			}),
-		tool("archive_session", "Archive session", "When your work is finished and reported, archive yourself with archive_session (no arguments). A live session (yours or one you started) archives when its turn ends; an ended one at once.",
+		tool("archive_session", "Archive session", "When your work is finished and reported, archive yourself with archive_session (no arguments); a live one archives when its turn ends; sessions under it go with it. Sessions outside your tree go to the owner for approval (approval_ask).",
 			obj(props{"session": str("session ID or exact title (default: yourself)"), "operation_id": opIDProp}),
 			hints("Archive session", idempotent, true),
 			func(ctx context.Context, o *Ops, p ArchiveParams) (ArchiveResult, error) {
 				p.WhenDone = true
 				sv, err := o.Archive(ctx, p)
+				if r, ok := approvalResult(sv, err); ok {
+					return r, nil
+				}
 				if err != nil {
 					return ArchiveResult{}, err
 				}

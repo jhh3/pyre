@@ -24,3 +24,4 @@ build/
 *.jks
 google-services.json
 accounts.export.json
+/pyred

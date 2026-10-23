@@ -15,6 +15,16 @@ type readState struct {
 	mu      sync.Mutex
 	path    string
 	Threads map[string]time.Time `json:"threads"`
+	// Replies are the owner's replies sent from a session item's thread
+	// (attention.go), by message ID: chat to the session carries no
+	// thread, so this is how the reply stays in the thread it was typed
+	// in.
+	Replies map[string]replyMark `json:"replies,omitempty"`
+}
+
+type replyMark struct {
+	Thread string    `json:"thread"`
+	At     time.Time `json:"at"`
 }
 
 // readKeep bounds the file: marks older than this are dropped on save
@@ -47,6 +57,25 @@ func loadReadState(dir string) (*readState, error) {
 	return r, nil
 }
 
+// replyThread is the session item thread message id was sent from ("" if
+// none).
+func (r *readState) replyThread(id string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Replies[id].Thread
+}
+
+// markReply records that message id was sent from thread at t and saves.
+func (r *readState) markReply(id, thread string, t time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Replies == nil {
+		r.Replies = map[string]replyMark{}
+	}
+	r.Replies[id] = replyMark{Thread: thread, At: t}
+	return r.saveLocked(t)
+}
+
 func (r *readState) readAt(thread string) time.Time {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -61,12 +90,22 @@ func (r *readState) mark(thread string, t time.Time) error {
 		return nil
 	}
 	r.Threads[thread] = t
+	return r.saveLocked(t)
+}
+
+// saveLocked drops marks older than readKeep and writes the file.
+func (r *readState) saveLocked(t time.Time) error {
 	if r.path == "" {
 		return nil
 	}
 	for k, v := range r.Threads {
 		if t.Sub(v) > readKeep {
 			delete(r.Threads, k)
+		}
+	}
+	for k, v := range r.Replies {
+		if t.Sub(v.At) > readKeep {
+			delete(r.Replies, k)
 		}
 	}
 	b, err := json.Marshal(r)

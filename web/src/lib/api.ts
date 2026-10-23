@@ -3,7 +3,7 @@
 // /fixtures/*.json (see fixtures.ts), so the UI can be developed and
 // screenshotted without a hub.
 import type {
-  AnswerMode, AnswerResult, ArchiveResult, Ask, Box, HeldAnswers, InboxResponse, Msg, ProjectCard, ProjectDetail, Thread, ThreadResponse,
+  AnswerMode, AnswerResult, ArchiveResult, Ask, Box, HeldAnswers, InboxResponse, Msg, ProjectCard, ProjectDetail, StandingGrant, Thread, ThreadResponse,
 } from './types';
 
 export class ApiError extends Error {
@@ -78,15 +78,18 @@ export const api = {
   reply: (id: string, text: string, opId: string) =>
     call<{ message: Msg }>('POST', '/threads/' + enc(id) + '/reply', { text, operation_id: opId }),
   read: (id: string) => call<object>('POST', '/threads/' + enc(id) + '/read', { operation_id: newOpId() }),
-  archive: (id: string, opId: string) => call<{ thread: Thread }>('POST', '/threads/' + enc(id) + '/archive', { operation_id: opId }),
+  // dismiss: archive an open ask by dismissing it (no option; its default never applies).
+  archive: (id: string, opId: string, dismiss = false) =>
+    call<{ thread: Thread }>('POST', '/threads/' + enc(id) + '/archive', dismiss ? { operation_id: opId, dismiss } : { operation_id: opId }),
   archiveMany: (ids: string[], opId: string) =>
     call<{ results: ArchiveResult[] | null }>('POST', '/inbox/archive', { thread_ids: ids, operation_id: opId }),
-  answer: (askId: string, body: { option_id?: string; text?: string; mode: AnswerMode }, opId: string) =>
+  answer: (askId: string, body: { option_id?: string; items?: Record<string, string>; text?: string; mode: AnswerMode }, opId: string) =>
     call<{ ask: Ask; held: HeldAnswers }>('POST', '/asks/' + enc(askId) + '/answer', { ...body, operation_id: opId }),
   undoHeld: (askId: string) => call<{ held: HeldAnswers }>('POST', '/held/' + enc(askId) + '/undo', { operation_id: newOpId() }),
   sendHeld: () => call<{ results: AnswerResult[] | null; held: HeldAnswers }>('POST', '/held/send', { operation_id: newOpId() }),
   projects: () => call<{ projects: ProjectCard[] | null }>('GET', '/projects'),
   project: (id: string) => call<ProjectDetail>('GET', '/projects/' + enc(id)),
+  revokeGrant: (id: string, opId: string) => call<{ grant: StandingGrant }>('POST', '/grants/' + enc(id) + '/revoke', { operation_id: opId }),
 };
 
 export type EventName = 'inbox' | 'held' | 'project' | 'thread';

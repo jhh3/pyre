@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -38,6 +39,25 @@ const (
 	CapApprovalsRaceTUI    = "approvals.race_with_tui" // native TUI may answer first; check effect
 	CapAttachCodexRemote   = "attach.codex_remote"     // codex resume --remote inside Pyre tmux
 	CapRequiresTrustDialog = "requires_trust_dialog"
+	// CapLaunchHarnessArgs (additive): the node checks a launch's extra
+	// harness arguments against the harness's allowlist, records them on the
+	// run and relaunches resumes with them (internal/harnessargs). A node
+	// without it (an older pyred) passed start args to the harness
+	// unchecked, so clients refuse extra arguments for it.
+	CapLaunchHarnessArgs = "launch.harness_args"
+	// CapResumeOutside (additive): a new session's first run can natively
+	// resume a conversation started outside Pyre (--pyre-native-resume).
+	CapResumeOutside = "resume.outside"
+	// CapLaunchEnvFile (additive): the node reads a session's environment
+	// file (--pyre-env-file=PATH, pyre start --env-file) at every launch of
+	// the session, applies its variables to the harness process and records
+	// only the path (run adapter data pyre.env_file). A node without it
+	// would hand the argument to the harness, so clients refuse it there.
+	CapLaunchEnvFile = "launch.env_file"
+	// StartArgEnvFile carries the environment file's path in start and
+	// resume args (daemon.EnvFileArg; pyre start/resume --env-file).
+	// StartArgEnvFile+"=none" on a resume drops the session's file.
+	StartArgEnvFile = "--pyre-env-file"
 	// CapInputMonitor (v1.6): queued mail reaches the agent while paste is
 	// refused (human attached, dialog or approval open) through a per-run
 	// Claude plugin monitor ("doorbell") plus the pyre inbox tool;
@@ -53,6 +73,11 @@ const (
 	// sandbox (pyred/pyre start --permissions bypass); the approval broker
 	// sees no requests.
 	CapPermissionsBypass = "permissions.bypass"
+	// CapWakeBackground (additive): a background command the agent left
+	// running when its turn ended (Codex unified exec) starts a new turn
+	// with its exit code and last output when it finishes; completions
+	// during a turn are delivered, coalesced, once the thread is idle.
+	CapWakeBackground = "wake.background_command"
 )
 
 // HandleCapsUnavailable (v1.6) is a RunHandle.Data key an adapter sets at
@@ -130,6 +155,48 @@ type ResolvedLaunch struct {
 	// AgentGuide is the short tool guide (and optional bounded brief) given
 	// to agent sessions, e.g. via an appended system prompt.
 	AgentGuide string `json:"agent_guide,omitempty"`
+	// Model and Effort (additive) select a non-default model and reasoning
+	// effort for the run ("" = the harness's own default, exactly as
+	// before). Each adapter maps them to its native mechanism (Claude and
+	// agy --model/--effort; Codex the thread's model and
+	// model_reasoning_effort).
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	// SessionEnv (additive) holds the variables of the session's
+	// environment file (internal/envfile), also present in Env. Adapters
+	// whose agent does not inherit the launch environment (Codex: one
+	// app-server per CODEX_HOME runs the agent's commands) apply them per
+	// thread. Values may be secrets; never serialized.
+	SessionEnv map[string]string `json:"-"`
+	// SessionUnset (additive) lists the variables the environment file
+	// clears (KEY= for a login key), also present in Unset. Codex clears
+	// them for the thread only, never on its shared app-server.
+	SessionUnset []string `json:"-"`
+}
+
+var (
+	modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]{0,127}$`)
+	effortRe    = regexp.MustCompile(`^[a-z]{1,16}$`)
+)
+
+// ValidModelName reports whether m can be passed to a harness as a model
+// (an alias such as "opus" or a full id; never a flag or shell text).
+func ValidModelName(m string) bool { return modelNameRe.MatchString(m) }
+
+// ValidEffort reports whether e is shaped like a reasoning effort level
+// ("low", "high", "xhigh", ...). Harnesses check the value itself.
+func ValidEffort(e string) bool { return effortRe.MatchString(e) }
+
+// ModelChoice is one model a harness offers on a node (HarnessInfo.Models),
+// for start forms to list. Free text stays allowed: a model missing from
+// the list (new, or an alias) is passed through to the harness.
+type ModelChoice struct {
+	ID    string `json:"id"`              // what --model takes
+	Label string `json:"label,omitempty"` // display name
+	// Efforts are the reasoning efforts the model supports, when known
+	// (empty: the harness-wide HarnessInfo.Efforts apply).
+	Efforts []string `json:"efforts,omitempty"`
+	Default bool     `json:"default,omitempty"` // the harness's default model
 }
 
 // ProbeResult reports an adapter's availability on this node.
@@ -141,6 +208,15 @@ type ProbeResult struct {
 	Available    bool     `json:"available"`
 	Reason       string   `json:"reason,omitempty"`
 	Capabilities []string `json:"capabilities"`
+	// Absent (additive): the harness is not installed on this node at all.
+	// The node then does not list it among its harnesses (an optional
+	// harness such as agy appears only where it is installed); launches
+	// still get the probe's reason.
+	Absent bool `json:"absent,omitempty"`
+	// Models and Efforts (additive) are the model choices and reasoning
+	// efforts the harness offers here (HarnessInfo.Models/Efforts).
+	Models  []ModelChoice `json:"models,omitempty"`
+	Efforts []string      `json:"efforts,omitempty"`
 }
 
 // Observation is a batch of adapter observations since a cursor.

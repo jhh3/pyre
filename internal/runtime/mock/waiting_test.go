@@ -69,14 +69,22 @@ func TestRaiseWaitingLikeTheHub(t *testing.T) {
 			}
 		}},
 	}
+	// Each new question after the last was resolved is a new item.
+	ids := map[string]bool{}
 	for i, r := range resolvers {
 		if i > 0 {
-			raise()
+			it = raise()
 		}
+		ids[it.AttentionID] = true
 		r.fn()
 		got := waiting()
-		if len(got) != 1 || got[0].AttentionID != it.AttentionID || got[0].State != r.state || got[0].Count != i+1 {
-			t.Fatalf("%s: %+v", r.name, got)
+		if len(got) != i+1 || len(ids) != i+1 || it.Count != 1 {
+			t.Fatalf("%s: %d items for %d questions: %+v", r.name, len(got), i+1, got)
+		}
+		for _, g := range got {
+			if g.AttentionID == it.AttentionID && g.State != r.state {
+				t.Fatalf("%s: %+v", r.name, g)
+			}
 		}
 	}
 }

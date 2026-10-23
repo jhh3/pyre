@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jhh3/outfit/internal/state"
 	keyring "github.com/zalando/go-keyring"
@@ -35,15 +36,157 @@ type Store interface {
 	Delete(context.Context, string) error
 }
 
+// ErrNotFound reports a secret reference with no stored value (a deleted
+// keychain item or a missing file-vault entry).
+var ErrNotFound = errors.New("vault secret not found")
+
+// IsNotFound reports whether err means the referenced secret does not exist.
+func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
+
+// backendMarker records, inside the vault directory, which backend new
+// secrets go to when OUTFIT_VAULT_BACKEND is unset. Only an explicit choice
+// (`outfit vault use`, SetBackend) writes it; nothing writes it implicitly.
+const backendMarker = "backend"
+
+// Backend names the backend new secrets go to: OUTFIT_VAULT_BACKEND when
+// set, else the choice recorded in the vault directory, else the OS
+// keychain.
+func Backend(paths state.Paths) string {
+	backend, _ := BackendSource(paths)
+	return backend
+}
+
+// BackendSource is Backend plus where the choice came from: "env",
+// "recorded" (vault/backend) or "default".
+func BackendSource(paths state.Paths) (string, string) {
+	if value := os.Getenv("OUTFIT_VAULT_BACKEND"); value != "" {
+		return value, "env"
+	}
+	if raw, err := os.ReadFile(filepath.Join(paths.Vault, backendMarker)); err == nil {
+		switch strings.TrimSpace(string(raw)) {
+		case "file":
+			return "file", "recorded"
+		case "keyring":
+			return "keyring", "recorded"
+		}
+	}
+	return "keyring", "default"
+}
+
+// SetBackend records the backend for runs without OUTFIT_VAULT_BACKEND.
+// Existing secrets stay where they are and remain readable: reads look in
+// the file vault for a ref it holds and in the keychain otherwise.
+func SetBackend(paths state.Paths, backend string) error {
+	if backend != "file" && backend != "keyring" {
+		return fmt.Errorf("vault backend must be file or keyring")
+	}
+	if err := os.MkdirAll(paths.Vault, 0o700); err != nil {
+		return err
+	}
+	if backend == "file" {
+		if _, err := openFile(paths.Vault); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(filepath.Join(paths.Vault, backendMarker), []byte(backend+"\n"), 0o600)
+}
+
+// Open returns the vault. New secrets go to the selected backend (Backend);
+// a secret is read from wherever it lives: the file vault when it holds the
+// ref, else the OS keychain. A backend choice therefore never hides secrets
+// stored under the other one.
 func Open(paths state.Paths) (Store, error) {
-	switch os.Getenv("OUTFIT_VAULT_BACKEND") {
-	case "", "keyring":
-		return &Keyring{}, nil
+	backend := Backend(paths)
+	dual := &Dual{backend: backend, keyring: &Keyring{}}
+	switch backend {
+	case "keyring":
+		if _, err := os.Stat(filepath.Join(paths.Vault, "master.key")); err == nil {
+			file, err := openFile(paths.Vault)
+			if err != nil {
+				return nil, err
+			}
+			dual.file = file
+		}
 	case "file":
-		return openFile(paths.Vault)
+		file, err := openFile(paths.Vault)
+		if err != nil {
+			return nil, err
+		}
+		dual.file = file
 	default:
 		return nil, fmt.Errorf("unsupported OUTFIT_VAULT_BACKEND; use keyring or explicit file")
 	}
+	return dual, nil
+}
+
+// Dual writes to one backend and reads from both (see Open).
+type Dual struct {
+	backend string
+	keyring *Keyring
+	file    *File // nil when this home has no file vault
+}
+
+// Backend is the backend new secrets go to.
+func (d *Dual) Backend() string { return d.backend }
+
+func (d *Dual) inFile(ref string) bool {
+	if d.file == nil {
+		return false
+	}
+	_, err := os.Stat(d.file.path(ref))
+	return err == nil
+}
+
+// WriteError is a failure to store a secret: the backend itself refused
+// (a locked or unavailable keychain, an unwritable file vault). Callers that
+// store many secrets treat it as systemic and stop.
+type WriteError struct{ Err error }
+
+func (e *WriteError) Error() string { return "store secret: " + e.Err.Error() }
+func (e *WriteError) Unwrap() error { return e.Err }
+
+// IsWriteError reports whether err is (or wraps) a WriteError.
+func IsWriteError(err error) bool {
+	var target *WriteError
+	return errors.As(err, &target)
+}
+
+func (d *Dual) Put(ctx context.Context, value map[string]string) (string, error) {
+	var ref string
+	var err error
+	if d.backend == "file" {
+		ref, err = d.file.Put(ctx, value)
+	} else {
+		ref, err = d.keyring.Put(ctx, value)
+	}
+	if err != nil {
+		return "", &WriteError{Err: err}
+	}
+	return ref, nil
+}
+
+func (d *Dual) Get(ctx context.Context, ref string) (map[string]string, error) {
+	if d.inFile(ref) {
+		return d.file.Get(ctx, ref)
+	}
+	value, err := d.keyring.Get(ctx, ref)
+	if err != nil && d.backend == "file" && !IsNotFound(err) {
+		// The selected vault does not hold it and the keychain cannot be
+		// asked (no secret service): the secret is missing here.
+		return nil, fmt.Errorf("file vault: %w: %s (keychain not available: %v)", ErrNotFound, ref, err)
+	}
+	return value, err
+}
+
+func (d *Dual) Delete(ctx context.Context, ref string) error {
+	if d.inFile(ref) {
+		return d.file.Delete(ctx, ref)
+	}
+	err := d.keyring.Delete(ctx, ref)
+	if err != nil && d.backend == "file" {
+		return nil // nothing in the file vault; the keychain is not available
+	}
+	return err
 }
 
 type Keyring struct{}
@@ -73,6 +216,9 @@ func (k *Keyring) Get(_ context.Context, ref string) (map[string]string, error) 
 			}
 			_ = keyringDelete(legacyService, ref)
 		}
+	}
+	if errors.Is(err, keyring.ErrNotFound) {
+		return nil, fmt.Errorf("OS keychain: %w: %s", ErrNotFound, ref)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("OS keychain: %w", err)
@@ -156,6 +302,9 @@ func (f *File) Put(_ context.Context, value map[string]string) (string, error) {
 
 func (f *File) Get(_ context.Context, ref string) (map[string]string, error) {
 	raw, err := os.ReadFile(f.path(ref))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("file vault: %w: %s", ErrNotFound, ref)
+	}
 	if err != nil {
 		return nil, err
 	}

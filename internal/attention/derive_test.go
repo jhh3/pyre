@@ -44,6 +44,8 @@ func TestDeriveTable(t *testing.T) {
 		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, ThreadID: "thr_synth-1", Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: secret}}}
 	infoMsg := ownerMsg
 	infoMsg.Envelope.Mode, infoMsg.Envelope.ThreadID = contracts.ModeInfo, ""
+	ownerUpdate := infoMsg
+	ownerUpdate.Status = contracts.DeliveryStatus{Ack: contracts.AckAcknowledged, AckRef: contracts.AckRefUpdate}
 	peerMsg := ownerMsg
 	peerMsg.Envelope.Recipient = contracts.Address{Kind: contracts.AddrSession, ID: "ses_synth-b"}
 	ownerReply := contracts.MessageView{Envelope: contracts.MessageEnvelope{MessageID: "msg_synth-2", Sender: contracts.Principal{Kind: contracts.PrincipalOwner, ID: "cli_synth"},
@@ -136,6 +138,9 @@ func TestDeriveTable(t *testing.T) {
 			[]want{{opRaise, contracts.AttnMessage, "message:thr_synth-1", "normal", contracts.KindThread}}},
 		{"info message to owner without thread", mkEvent(contracts.EvMessageStored, contracts.ObjectRef{}, "", infoMsg),
 			[]want{{opRaise, contracts.AttnMessage, "message:from:session:ses_synth-a", "info", contracts.KindMessage}}},
+		// An update (stored acknowledged: it asks nothing of the owner) is
+		// no inbox item.
+		{"update to owner", mkEvent(contracts.EvMessageStored, contracts.ObjectRef{}, "", ownerUpdate), nil},
 		{"bare envelope payload", mkEvent(contracts.EvMessageStored, contracts.ObjectRef{}, "", ownerMsg.Envelope),
 			[]want{{opRaise, contracts.AttnMessage, "message:thr_synth-1", "normal", contracts.KindThread}}},
 		{"agent-to-agent progress message", mkEvent(contracts.EvMessageStored, contracts.ObjectRef{}, "", peerMsg), nil},
@@ -178,7 +183,7 @@ func TestDeriveTable(t *testing.T) {
 		{"fallback native resume is not attention", mkEvent(contracts.EvFallbackPlanned, contracts.ObjectRef{}, "ses_synth-a",
 			contracts.FallbackPlan{SessionID: "ses_synth-a", Outcome: contracts.FallbackNativeResume}), nil},
 		{"run failed", mkEvent(contracts.EvRunEnded, contracts.ObjectRef{Kind: contracts.KindRun, ID: "run_synth-f"}, "ses_synth-a", failed),
-			[]want{{op: opWithdraw, group: "flag:session:ses_synth-a"}, {op: opWithdraw, group: ""}, {op: opWithdraw, group: "waiting:ses_synth-a"}, {opRaise, contracts.AttnFailure, "failure:ses_synth-a", "normal", contracts.KindSession}}},
+			[]want{{op: opWithdraw, group: "flag:session:ses_synth-a"}, {op: opWithdraw, group: ""}, {op: opWithdraw, group: "waiting:ses_synth-a"}, {opRaise, contracts.AttnFailure, "failed:-:run.exit-2", "normal", contracts.KindSession}}},
 		// Any run end withdraws the session's own flag, the account limits
 		// it hit (group "" = by session and kind) and its "waiting on you";
 		// only failure raises.

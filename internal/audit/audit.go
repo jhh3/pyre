@@ -206,6 +206,11 @@ func Summarize(e contracts.AuditEntry) string {
 		return "disabled account " + acct + By(e.Actor)
 	case contracts.AuditAccountEnabled:
 		return "enabled account " + acct + By(e.Actor)
+	case contracts.AuditAccountTierChanged:
+		if e.To == string(contracts.TierReserve) {
+			return "moved account " + acct + " to the reserve tier (used only when the others are near or at their limits)" + By(e.Actor)
+		}
+		return "moved account " + acct + " to the " + orDash(e.To) + " tier" + By(e.Actor)
 
 	case contracts.AuditSessionStarted:
 		s := "started " + title
@@ -266,7 +271,9 @@ func Summarize(e contracts.AuditEntry) string {
 	case contracts.AuditNodeEnrolled:
 		return "machine enrolled" + By(e.Actor)
 	case contracts.AuditNodeRevoked:
-		return "machine revoked" + By(e.Actor)
+		return "machine revoked" + By(e.Actor) + because(e.Reason)
+	case contracts.AuditNodeTicketCreated:
+		return "enrollment ticket created for " + quote(e.To) + By(e.Actor) + because(e.Reason)
 	case contracts.AuditNodeConnected:
 		if e.To != "" {
 			return "connected (pyred " + e.To + ")"
@@ -290,6 +297,12 @@ func Summarize(e contracts.AuditEntry) string {
 		return "confirmed Claude's exit dialog while stopping " + title + " (background tasks stopped)"
 	case contracts.AuditNodeCapacityRetry:
 		return "continued " + title + " after the model was at capacity" + because(e.Reason)
+	case contracts.AuditNodeDevChannelsAccepted:
+		return "confirmed Claude's development-channels warning for " + title + because(e.Reason)
+	case contracts.AuditNodeBackgroundWake:
+		return "woke " + title + " when its background command finished" + because(e.Reason)
+	case contracts.AuditNodeOnboardingAnswered:
+		return "answered Claude's first-run screen for " + title + because(e.Reason)
 	}
 	s := e.Action
 	if e.SessionTitle != "" {

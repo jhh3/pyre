@@ -261,7 +261,9 @@ func (n *simNode) hello() error {
 	}
 	n.mu.Unlock()
 	h := c.NodeHello{NodeID: n.nodeID, Protocol: 1, MinProtocol: 1, PyredVersion: "0.1.0-synth", LastCommandSeq: last, Hostname: "synth-mac", Platform: "darwin", Arch: "arm64",
-		Harnesses: []c.HarnessInfo{{Harness: c.HarnessMock, Version: "mock", Available: true, Capabilities: mockCaps, ProbedAt: n.clock.Now()}},
+		Harnesses: []c.HarnessInfo{{Harness: c.HarnessMock, Version: "mock", Available: true, Capabilities: mockCaps, ProbedAt: n.clock.Now()},
+			// claude: node-started headless runs (NodeStartHeadlessOnly) are claude or codex.
+			{Harness: c.HarnessClaude, Version: "2.1.299-synth", Available: true, Capabilities: mockCaps, ProbedAt: n.clock.Now()}},
 		Resources: c.NodeResources{CPUCount: 8, MaxRuns: 100}, LiveRuns: live}
 	if _, err := n.stack.Fleet.ObserveHello(n.ctx(), n.nodeID, transport.ConnInfo{ConnID: c.NewID("conn"), Protocol: 1, ConnectedAt: n.clock.Now()}, h); err != nil {
 		return err

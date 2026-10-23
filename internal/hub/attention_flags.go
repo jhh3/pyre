@@ -7,6 +7,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/attention/sessionflag"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/store"
 )
 
 // Session attention flags (v1.3, W-attn): the owner engaging with a session
@@ -38,17 +39,26 @@ type engageState struct {
 const engageTimeout = 15 * time.Second
 
 // ownerEngaged records, off the caller's path, that the owner engaged with
-// a session. Only a direct owner principal counts: a session acting on the
-// owner's behalf is not the owner looking at it.
+// a session (typing into it, messaging it): its items of kinds are
+// answered, and its chat-like mail to him so far is acknowledged, so every
+// surface agrees he has seen it (owner report 2026-10-19): mail sent
+// without a thread and without request_ack. Threads (asks' included) and
+// mail that asked to be acknowledged wait for him to open them. Only a
+// direct owner principal counts: a session acting on the owner's behalf is
+// not the owner looking at it.
 func (h *Hub) ownerEngaged(p contracts.Principal, sessionID, summary string, kinds ...contracts.AttentionKind) {
-	if p.Kind != contracts.PrincipalOwner || sessionID == "" || h.cfg.Attention == nil {
+	h.ownerEngagedMail(p, sessionID, summary, store.OwnerMail{FromSession: sessionID, SkipAsks: true, NoThread: true, SkipAckRequests: true}, kinds...)
+}
+
+// ownerEngagedMail is ownerEngaged acknowledging the mail sel selects
+// (zero: none) instead.
+func (h *Hub) ownerEngagedMail(p contracts.Principal, sessionID, summary string, sel store.OwnerMail, kinds ...contracts.AttentionKind) {
+	if p.Kind != contracts.PrincipalOwner || sessionID == "" {
 		return
 	}
-	e, ok := h.cfg.Attention.(ownerEngager)
-	if !ok {
-		return
-	}
-	key := sessionID + "|" + summary
+	e, _ := h.cfg.Attention.(ownerEngager)
+	through := h.now()
+	key := sessionID + "|" + summary + "|" + sel.MessageID
 	h.engage.mu.Lock()
 	if h.engage.inflight[key] {
 		h.engage.mu.Unlock()
@@ -76,7 +86,13 @@ func (h *Hub) ownerEngaged(p contracts.Principal, sessionID, summary string, kin
 			case <-ctx.Done():
 			}
 		}()
-		_, _ = e.OwnerEngaged(h.systemCtx(ctx), sessionID, summary, kinds...)
+		if e != nil {
+			_, _ = e.OwnerEngaged(h.systemCtx(ctx), sessionID, summary, kinds...)
+		}
+		if sel != (store.OwnerMail{}) {
+			sel.Through = through
+			_, _ = h.msgs.AckOwnerMail(ctx, sel, contracts.AckRefEngaged)
+		}
 	}()
 }
 

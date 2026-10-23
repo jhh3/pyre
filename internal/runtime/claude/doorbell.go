@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/osutil"
 	"github.com/jhh3/pyre/internal/runtime/claudeplugin"
 )
@@ -74,9 +75,22 @@ var PyreMessagingAllowedTools = []string{
 	// prompt here would itself need the owner. The hub redirects a child's
 	// ask to its parent and lets a session withdraw only its own asks.
 	"mcp__pyre__ask_owner", "mcp__pyre__find_asks", "mcp__pyre__withdraw_ask",
+	// W-grants: proposing a standing grant or a project fact only files an
+	// owner ask (the hub records it if he approves, with his own answer);
+	// listing is own project/tree only and revoking only narrows. Creating
+	// a grant or writing the fact sheet directly is never pre-approved (the
+	// hub refuses sessions anyway).
+	"mcp__pyre__propose_grant", "mcp__pyre__propose_fact", "mcp__pyre__list_grants", "mcp__pyre__revoke_grant",
 	// W-web-inbox: a lead keeps its project's page current (hub-enforced:
 	// owner or a top-level session in the project).
 	"mcp__pyre__update_project_page", "mcp__pyre__get_project_page",
+	// Setup review F5: a session marks its own turn as waiting on its own
+	// job (hub: itself only).
+	"mcp__pyre__waiting_on",
+	// Issues: reporting a Pyre or machine problem must never wait on a
+	// prompt; reading is harmless and updating is hub-limited to the owner
+	// and the triage session.
+	"mcp__pyre__report_issue", "mcp__pyre__list_issues", "mcp__pyre__get_issue", "mcp__pyre__update_issue",
 }
 
 // runAllowedTools is the permissions.allow list written to every run's
@@ -120,10 +134,7 @@ func pyreToolMessageIDs(tool string, p map[string]any, raw []byte) []string {
 
 // monitorBlockers are environment variables under which Claude Code does
 // not run plugin monitors (docs: Monitor tool availability).
-var monitorBlockers = []string{
-	"DISABLE_TELEMETRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-}
+var monitorBlockers = contracts.ClaudeMonitorBlockers
 
 // doorbellBlocked returns the first variable that disables monitors for a
 // run, looking at the launch env (explicit) and then the inherited one.

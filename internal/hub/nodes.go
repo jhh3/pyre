@@ -100,6 +100,9 @@ func (h *Hub) HandleHello(ctx context.Context, nodeID string, hello contracts.No
 		welcome = contracts.NodeWelcome{HubID: h.hubID, Protocol: proto, MinProtocol: contracts.MinProtocolVersion, ServerTime: now, CommittedReportSeq: uint64(committed), HeartbeatSeconds: h.opt.HeartbeatSeconds}
 		return h.emitConnection(ctx, tx, nodeID, contracts.NodeConnection{State: contracts.ConnConnected, LastSeenAt: &now, ConnectedSince: &now, Protocol: proto})
 	})
+	if err == nil {
+		h.noteInventory(nodeID, hello, h.now()) // unknownruns.go
+	}
 	// Not h.tx: queued commands go out with the Welcome (WelcomeCommands),
 	// never ahead of it.
 	h.events.Notify()

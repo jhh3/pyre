@@ -131,7 +131,7 @@ func (manager Manager) Install(ctx context.Context, requirement kit.ToolRequirem
 	}
 	defer os.RemoveAll(temporary)
 	binaryPath := filepath.Join(temporary, requirement.Binary)
-	if runtime.GOOS == "windows" {
+	if strings.HasPrefix(platform, "windows-") && !strings.HasSuffix(strings.ToLower(binaryPath), ".exe") {
 		binaryPath += ".exe"
 	}
 	if err := extractBinary(partialPath, asset, requirement.Source.BinaryPath, requirement.Binary, binaryPath); err != nil {
@@ -366,10 +366,26 @@ func verifyBinary(ctx context.Context, path string, args []string) (string, erro
 	return strings.TrimSpace(string(output)), nil
 }
 
+// extractBinary copies the declared binary out of the downloaded artifact.
+// A Windows destination (ending in .exe) also accepts the declared path with
+// .exe appended: manifests name the binary once ("stripe", "gws") while
+// Windows archives carry "stripe.exe" and "gws.exe".
 func extractBinary(archivePath, asset, declaredPath, binary, destination string) error {
 	wanted := declaredPath
 	if wanted == "" {
 		wanted = binary
+	}
+	candidates := []string{wanted}
+	if strings.HasSuffix(strings.ToLower(destination), ".exe") && !strings.HasSuffix(strings.ToLower(wanted), ".exe") {
+		candidates = append(candidates, wanted+".exe")
+	}
+	matches := func(name string) bool {
+		for _, candidate := range candidates {
+			if archiveMatch(name, candidate) {
+				return true
+			}
+		}
+		return false
 	}
 	if strings.HasSuffix(asset, ".tar.gz") || strings.HasSuffix(asset, ".tgz") {
 		file, err := os.Open(archivePath)
@@ -391,7 +407,7 @@ func extractBinary(archivePath, asset, declaredPath, binary, destination string)
 			if err != nil {
 				return err
 			}
-			if header.Typeflag != tar.TypeReg || !archiveMatch(header.Name, wanted) {
+			if header.Typeflag != tar.TypeReg || !matches(header.Name) {
 				continue
 			}
 			return writeExtracted(destination, reader)
@@ -405,7 +421,7 @@ func extractBinary(archivePath, asset, declaredPath, binary, destination string)
 		}
 		defer reader.Close()
 		for _, file := range reader.File {
-			if file.FileInfo().IsDir() || !archiveMatch(file.Name, wanted) {
+			if file.FileInfo().IsDir() || !matches(file.Name) {
 				continue
 			}
 			opened, err := file.Open()

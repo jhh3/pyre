@@ -438,12 +438,14 @@ func TestChildReportEndedCoalescesWithIdle(t *testing.T) {
 		t.Fatalf("replaced idle report not cancelled: %+v", v.Status)
 	}
 
-	// The parent already has the idle report (acked): an ended report
-	// within childReportCoalesce is not sent; a later one refers to it.
+	// The parent already has the idle report (acked): a clean exit is never
+	// sent on its own (folded); a failure within childReportCoalesce is not
+	// sent, a later one refers to it.
 	for _, tc := range []struct {
-		after time.Duration
-		sent  bool
-	}{{time.Minute, false}, {childReportCoalesce + time.Minute, true}} {
+		after  time.Duration
+		failed bool
+		sent   bool
+	}{{time.Minute, false, false}, {childReportCoalesce + time.Minute, false, false}, {time.Minute, true, false}, {childReportCoalesce + time.Minute, true, true}} {
 		h := newChildFixture(t, nil)
 		h.observe(contracts.RunRunning, "working")
 		h.observe(contracts.RunWaitingInput, "idle")
@@ -457,7 +459,11 @@ func TestChildReportEndedCoalescesWithIdle(t *testing.T) {
 			t.Fatal(err)
 		}
 		h.x.clock.Add(tc.after)
-		h.observe(contracts.RunExited, "process exited")
+		if tc.failed {
+			h.observe(contracts.RunFailed, "claude crashed")
+		} else {
+			h.observe(contracts.RunExited, "process exited")
+		}
 		h.process()
 		msgs := h.toParent()
 		switch {
@@ -555,11 +561,12 @@ func TestSessionPrincipalArchiveAndRenameScope(t *testing.T) {
 		_, err := x.h.UpdateSession(as(p), contracts.UpdateSessionRequest{Mutation: contracts.Mutation{OperationID: op}, SessionID: sid, Archived: archived, Title: title})
 		return err
 	}
-	// Refused: the child archiving its parent, a session archiving an unrelated one.
-	wantCode(t, upd(childP, "op_synth-a1", f.parent.Session.SessionID, &yes, nil), contracts.ErrForbidden)
-	wantCode(t, upd(parentP, "op_synth-a2", other.Session.SessionID, &yes, nil), contracts.ErrForbidden)
+	// Filed for the owner's approval (owneractions.go), not done: the child
+	// archiving its parent, a session archiving an unrelated one.
+	wantCode(t, upd(childP, "op_synth-a1", f.parent.Session.SessionID, &yes, nil), contracts.ErrApprovalRequested)
+	wantCode(t, upd(parentP, "op_synth-a2", other.Session.SessionID, &yes, nil), contracts.ErrApprovalRequested)
 	if x.session(other.Session.SessionID).Session.Archived || x.session(f.parent.Session.SessionID).Session.Archived {
-		t.Fatal("refused archive took effect")
+		t.Fatal("archive took effect without the owner's approval")
 	}
 	// Allowed: the parent archives (and unarchives) the session it started; a session archives itself.
 	if err := upd(parentP, "op_synth-a3", f.child.Session.SessionID, &yes, nil); err != nil || !x.session(f.child.Session.SessionID).Session.Archived {
@@ -571,10 +578,10 @@ func TestSessionPrincipalArchiveAndRenameScope(t *testing.T) {
 	if err := upd(childP, "op_synth-a5", f.child.Session.SessionID, &yes, nil); err != nil {
 		t.Fatalf("self archive: %v", err)
 	}
-	// Refused: a session the owner started archiving itself (an owner
-	// conversation; Codex agents archived owner chats after answering).
+	// Filed, not done: a session the owner started archiving itself (an
+	// owner conversation; Codex agents archived owner chats after answering).
 	if f.parent.Session.CreatedBy.Kind == contracts.PrincipalOwner {
-		wantCode(t, upd(parentP, "op_synth-a6", f.parent.Session.SessionID, &yes, nil), contracts.ErrForbidden)
+		wantCode(t, upd(parentP, "op_synth-a6", f.parent.Session.SessionID, &yes, nil), contracts.ErrApprovalRequested)
 		if x.session(f.parent.Session.SessionID).Session.Archived {
 			t.Fatal("owner-started session archived itself")
 		}

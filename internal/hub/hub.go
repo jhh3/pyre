@@ -187,6 +187,7 @@ type Hub struct {
 	// Automatic reports to parent sessions (childreport.go).
 	reportKick   atomic.Bool   // a committed write may have recorded a report
 	summaryFill  atomic.Bool   // message item summaries were backfilled (attention_sweep.go)
+	askMailAcked atomic.Bool   // closed asks' leftover owner mail was acknowledged (asks.go)
 	reportWake   chan struct{} // wakes the report worker
 	reportMu     sync.Mutex    // one report pass at a time
 	childSummary func(ctx context.Context, sessionID, runID string) (string, error)
@@ -195,7 +196,16 @@ type Hub struct {
 	ownerAct     ownerActiveState // owner activity marks (owner_activity.go)
 	awd          archiveWhenState // archive when done (archivewhen.go)
 	stuck        stuckMailState   // stuck-mail notices to senders (stuckmail.go)
+	life         lifecycleState   // automatic archive and nightly sweep (lifecycle.go)
+	inv          inventoryState   // nodes' latest run inventories (unknownruns.go)
 	heldMu       sync.Mutex       // one held-answer flush at a time (asks_hold.go)
+
+	// Answer in chat (asks_chat.go): its own worker; chatTranscript
+	// replaces transcriptTail in tests.
+	chatTranscript func(ctx context.Context, sessionID, runID string) ([]contracts.TranscriptEntry, error)
+	askChatMu      sync.Mutex
+	askChatKick    atomic.Bool
+	askChatWake    chan struct{}
 }
 
 var _ contracts.API = (*Hub)(nil)
@@ -241,15 +251,36 @@ func New(cfg Config) (*Hub, error) {
 	if err := sqlitex.Migrate(ctx, cfg.DB, askMigrations...); err != nil { // W-asks
 		return nil, err
 	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, waitingOnMigrations...); err != nil { // waiting on own job
+		return nil, err
+	}
 	if err := sqlitex.Migrate(ctx, cfg.DB, waitingMigrations...); err != nil { // waiting on you
 		return nil, err
 	}
 	if err := sqlitex.Migrate(ctx, cfg.DB, askHeldMigrations...); err != nil { // W-web-inbox: held answers
 		return nil, err
 	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, askChatMigrations...); err != nil { // answer in chat
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, askItemMigrations...); err != nil { // W-grants: batched asks, ask actions
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, grantMigrations...); err != nil { // W-grants: standing grants
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, ownerActionMigrations...); err != nil { // owner approvals
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, proposalMigrations...); err != nil { // proposed grants and facts
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, issueMigrations...); err != nil { // issues filed by sessions
+		return nil, err
+	}
 	h := &Hub{
 		cfg: cfg, db: cfg.DB, clock: cfg.Clock, opt: cfg.Options,
-		dirty: map[string]bool{}, nodeLocks: map[string]*sync.Mutex{}, stop: make(chan struct{}), reportWake: make(chan struct{}, 1),
+		dirty: map[string]bool{}, nodeLocks: map[string]*sync.Mutex{}, stop: make(chan struct{}), reportWake: make(chan struct{}, 1), askChatWake: make(chan struct{}, 1),
 		awd:    archiveWhenState{wake: make(chan struct{}, 1), stops: map[string]time.Time{}, scheduled: map[string]time.Time{}},
 		tokens: tokenVault{dir: cfg.DataDir},
 	}
@@ -316,7 +347,11 @@ func (h *Hub) Start() {
 	h.wg.Add(1)
 	go h.childReportLoop()
 	h.wg.Add(1)
+	go h.askChatLoop() // asks_chat.go
+	h.wg.Add(1)
 	go h.archiveWhenDoneLoop() // W-archive2
+	h.wg.Add(1)
+	go h.lifecycleLoop() // W-lifecycle
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -361,6 +396,7 @@ func (h *Hub) afterCommit() {
 		h.flushNode(context.Background(), n)
 	}
 	h.kickChildReports()
+	h.kickAskChats()        // asks_chat.go
 	h.kickArchiveWhenDone() // W-archive2
 }
 

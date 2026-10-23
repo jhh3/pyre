@@ -51,6 +51,21 @@ func (b *Backend) withdrawAttentionLocked(groupKey string, state c.AttentionStat
 // the owner engaged with the session (typed into it, messaged it, read its
 // message). Approvals and questions are never passed here.
 func (b *Backend) engageLocked(sessionID, summary string, kinds ...c.AttentionKind) {
+	// Its chat-like mail to the owner so far is seen: unthreaded, not asking
+	// to be acknowledged, not an ask's carrier (the hub's ownerEngaged).
+	carriers := map[string]bool{}
+	for _, a := range b.askMap() {
+		carriers[a.MessageID] = true
+	}
+	b.ackOwnerMailLocked(c.AckRefEngaged, func(m *c.MessageView) bool {
+		return m.Envelope.Sender.Kind == c.PrincipalSession && m.Envelope.Sender.ID == sessionID && !carriers[m.Envelope.MessageID] &&
+			m.Envelope.ThreadID == "" && !m.Envelope.RequestAck
+	})
+	b.engageItemsLocked(sessionID, summary, kinds...)
+}
+
+// engageItemsLocked answers the session's items of kinds.
+func (b *Backend) engageItemsLocked(sessionID, summary string, kinds ...c.AttentionKind) {
 	now := b.now()
 	for _, a := range b.attention {
 		if a.SessionID != sessionID || !hasKind(kinds, a.Kind) {
@@ -72,9 +87,10 @@ func waitingGroup(sessionID string) string { return "waiting:" + sessionID }
 
 // RaiseWaiting simulates the hub's turn-end detection: the session ended
 // its turn with question for the owner in its chat (contracts.AttnWaiting).
-// One item per session; a repeat updates it. The next turn starting, an
-// ask, the run ending, archiving and the owner engaging resolve it, as on
-// the hub.
+// An active item is updated; otherwise a new one is created (a new
+// question is a new conversation, as on the hub). The next turn starting,
+// an ask, the run ending, archiving and the owner engaging resolve it, as
+// on the hub.
 func (b *Backend) RaiseWaiting(sessionID, question, summary string) (c.AttentionItem, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -87,26 +103,7 @@ func (b *Backend) RaiseWaiting(sessionID, question, summary string) (c.Attention
 		q = "a question in its chat"
 	}
 	title, sum := "Waiting on you: "+q, truncate(strings.TrimSpace(summary), 300)
-	group := waitingGroup(sessionID)
-	var latest *c.AttentionItem
-	for _, a := range b.attention {
-		if a.GroupKey != group {
-			continue
-		}
-		if a.State == c.AttnOpen || a.State == c.AttnRead || a.State == c.AttnSnoozed {
-			latest = nil
-			break
-		}
-		if latest == nil || a.UpdatedAt.After(latest.UpdatedAt) {
-			latest = a
-		}
-	}
-	if latest != nil { // reopen the session's one item
-		latest.State, latest.Count, latest.UpdatedAt, latest.Title, latest.Summary = c.AttnOpen, latest.Count+1, b.now(), title, sum
-		b.emit(c.EvAttentionChanged, ref(c.KindAttention, latest.AttentionID), sessionID, latest.ProjectID, latest)
-		return *latest, nil
-	}
-	return *b.raiseAttentionLocked(c.AttnWaiting, "normal", group, ref(c.KindSession, sessionID), sessionID, s.ProjectID, title, sum), nil
+	return *b.raiseAttentionLocked(c.AttnWaiting, "normal", waitingGroup(sessionID), ref(c.KindSession, sessionID), sessionID, s.ProjectID, title, sum), nil
 }
 
 // FlagAttention raises or clears a session's own flag (v1.3).
@@ -241,6 +238,10 @@ func (b *Backend) UpdateAttention(ctx context.Context, req c.UpdateAttentionRequ
 		a.State = req.State
 		a.UpdatedAt = b.now()
 		b.emit(c.EvAttentionChanged, ref(c.KindAttention, a.AttentionID), a.SessionID, a.ProjectID, a)
+		if a.Kind == c.AttnMessage && a.State == c.AttnHandled && a.Object.Kind == c.KindMessage {
+			// Done with a message item: its message is acknowledged, as on the hub.
+			b.ackOwnerMailLocked(c.AckRefEngaged, func(m *c.MessageView) bool { return m.Envelope.MessageID == a.Object.ID })
+		}
 		return *a, nil
 	})
 }
@@ -347,7 +348,7 @@ func (b *Backend) UpsertAccount(ctx context.Context, req c.UpsertAccountRequest)
 		if err := requireOwner(p); err != nil {
 			return c.Account{}, err
 		}
-		if req.Provider != c.ProviderAnthropic && req.Provider != c.ProviderOpenAI {
+		if c.HarnessForProvider(req.Provider) == "" {
 			return c.Account{}, c.Errorf(c.ErrInvalid, "provider must be anthropic or openai")
 		}
 		if req.Label == "" {

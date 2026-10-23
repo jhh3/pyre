@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jhh3/outfit/internal/application"
+	"github.com/jhh3/outfit/internal/backup"
 	"github.com/jhh3/outfit/internal/hostmcp"
 	"github.com/jhh3/outfit/internal/linkcontext"
 	"github.com/jhh3/outfit/internal/state"
@@ -597,8 +598,17 @@ func (model Model) updateBackupWizard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	model.screen, model.status, model.err = busyScreen, "Processing encrypted backup…", ""
 	return model, tea.Batch(model.spinner.Tick, func() tea.Msg {
 		var err error
+		status := "Encrypted backup " + action + " completed: " + values["path"]
 		if action == "create" {
-			err = model.service.CreateBackup(model.ctx, values["path"], values["passphrase"])
+			var skipped []backup.SkippedConnection
+			skipped, err = model.service.CreateBackup(model.ctx, values["path"], values["passphrase"], backup.BuildOptions{})
+			if len(skipped) > 0 {
+				names := make([]string, 0, len(skipped))
+				for _, item := range skipped {
+					names = append(names, item.Name)
+				}
+				status += "; skipped (secret missing, reconnect them): " + strings.Join(names, ", ")
+			}
 		} else {
 			err = model.service.RestoreBackup(model.ctx, values["path"], values["passphrase"], strings.EqualFold(values["replace"], "yes"), nil)
 		}
@@ -606,7 +616,7 @@ func (model Model) updateBackupWizard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return actionResult{err: err, failure: backupWizardScreen}
 		}
 		snapshot, snapshotErr := model.service.Snapshot(model.ctx)
-		return actionResult{snapshot: snapshot, status: "Encrypted backup " + action + " completed: " + values["path"], err: snapshotErr}
+		return actionResult{snapshot: snapshot, status: status, err: snapshotErr}
 	})
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/resumenote"
 )
 
 // `pyre node drain <node>` and `pyre node resume <node>`: before a reboot,
@@ -82,29 +83,15 @@ func (o *Ops) setSessionTag(ctx context.Context, sessionID, tag string, present 
 
 // idPart is the body of an ID (after "prefix_"), reduced to the characters
 // a message ID allows.
-func idPart(id string) string {
-	if i := strings.IndexByte(id, '_'); i >= 0 {
-		id = id[i+1:]
-	}
-	b := []byte(id)
-	for i, ch := range b {
-		if !(ch >= '0' && ch <= '9' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || ch == '-' || ch == '.' || ch == ':') {
-			b[i] = '-'
-		}
-	}
-	if len(b) == 0 {
-		return "x"
-	}
-	return string(b)
-}
+func idPart(id string) string { return resumenote.IDPart(id) }
 
 func drainMessageID(nodeID, sessionID string, minute int64) string {
 	return "msg_drain-" + idPart(nodeID) + "-" + strconv.FormatInt(minute, 10) + "-" + idPart(sessionID)
 }
 
-func resumeNoteID(sessionID, runID string) string {
-	return "msg_resumed-" + idPart(sessionID) + "-" + idPart(runID)
-}
+// resumeNoteID is shared with pyred's own crash resume (resumenote), so a
+// session pyred already resumed and told is not told twice.
+func resumeNoteID(sessionID, runID string) string { return resumenote.MessageID(sessionID, runID) }
 
 // ---- texts ----
 
@@ -122,11 +109,7 @@ func drainStopText(nodeName string) string {
 		"You'll be resumed after the restart. No reply needed.", nodeName)
 }
 
-func restartNoteText(nodeName string) string {
-	return fmt.Sprintf("[from the owner] %s has restarted and you were resumed. Commands, background jobs and servers "+
-		"you had running were stopped by the reboot. If you were in the middle of work, check the state of your last "+
-		"step before continuing, then carry on. If you were waiting for input, keep waiting. No reply needed.", nodeName)
-}
+func restartNoteText(nodeName string) string { return resumenote.AfterReboot(nodeName) }
 
 // ---- selection ----
 
@@ -526,6 +509,12 @@ func (a *App) nodeResume(ctx context.Context, ops *Ops, ref string, all, dry boo
 	sendNote := func(it *nodeOpItem, runID string) bool {
 		it.MessageID = resumeNoteID(it.SessionID, runID)
 		m, err := ops.Send(ctx, SendParams{To: it.SessionID, Text: note, MessageID: it.MessageID})
+		if c.IsCode(err, c.ErrConflict) {
+			// The ID is taken by pyred's own crash-resume note for this run
+			// (resumenote): the session was already told.
+			it.Delivery = "already noted"
+			return true
+		}
 		if err != nil {
 			it.Error = "note: " + err.Error()
 			res.Failures++

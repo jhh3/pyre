@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"mime"
@@ -85,11 +86,26 @@ func (s *server) serveUpload(w http.ResponseWriter, r *http.Request) {
 
 // ---- content ----
 
+// ContentRanger is an optional extension of contracts.API: an
+// implementation that can fetch a byte range of a version itself (a node's
+// pyred forwarding to the hub) serves a Range request with it, instead of
+// streaming the whole version and discarding the prefix. A resumed download
+// through the node proxy then moves only the missing bytes over the hub
+// link. It returns ErrUnsupported when the range cannot be forwarded.
+type ContentRanger interface {
+	OpenContentRange(ctx context.Context, versionID string, offset, length int64) (io.ReadCloser, error)
+}
+
 func (s *server) serveContent(w http.ResponseWriter, r *http.Request) {
 	versionID := r.PathValue("version_id")
 	if !contracts.ValidID(versionID, contracts.PrefixVersion) {
 		WriteError(w, contracts.Errorf(contracts.ErrInvalid, "invalid version id"))
 		return
+	}
+	if cr, ok := s.api.(ContentRanger); ok && r.Method == http.MethodGet && r.Header.Get("Range") != "" {
+		if s.serveForwardedRange(w, r, cr, versionID) {
+			return
+		}
 	}
 	rc, ver, err := s.api.OpenContent(r.Context(), versionID)
 	if err != nil {
@@ -99,20 +115,68 @@ func (s *server) serveContent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 
-	h := w.Header()
+	setContentHeaders(w.Header(), ver)
+	if rs, ok := rc.(io.ReadSeeker); ok {
+		http.ServeContent(w, r, "", ver.CreatedAt, rs)
+		return
+	}
+	serveRangeStream(w, r, rc, ver.Size)
+}
+
+func contentETag(ver contracts.ArtifactVersion) string {
+	return `"` + strings.ReplaceAll(string(ver.Digest), `"`, "") + `"`
+}
+
+func setContentHeaders(h http.Header, ver contracts.ArtifactVersion) {
 	h.Set("Content-Type", SafeMediaType(ver.MediaType))
 	h.Set("Content-Disposition", ContentDisposition("attachment", ver.Filename))
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	h.Set("Cache-Control", "private, max-age=31536000, immutable")
 	if ver.Digest != "" {
-		h.Set("ETag", `"`+strings.ReplaceAll(string(ver.Digest), `"`, "")+`"`)
+		h.Set("ETag", contentETag(ver))
 	}
-	if rs, ok := rc.(io.ReadSeeker); ok {
-		http.ServeContent(w, r, "", ver.CreatedAt, rs)
-		return
+}
+
+// serveForwardedRange answers a single-range request through cr. It
+// reports false (nothing written) when the request is better served by the
+// normal path: a range covering everything or not satisfiable, an If-Range
+// that no longer matches, or an implementation that cannot forward ranges.
+func (s *server) serveForwardedRange(w http.ResponseWriter, r *http.Request, cr ContentRanger, versionID string) bool {
+	ver, err := s.api.GetVersion(r.Context(), contracts.GetRequest{ID: versionID})
+	if err != nil {
+		noteInternal(r, err)
+		WriteError(w, err)
+		return true
 	}
-	serveRangeStream(w, r, rc, ver.Size)
+	if ir := r.Header.Get("If-Range"); ir != "" && ir != contentETag(ver) {
+		return false
+	}
+	start, length, partial, ok := parseSingleRange(r.Header.Get("Range"), ver.Size)
+	if !ok || !partial {
+		return false
+	}
+	rc, err := cr.OpenContentRange(r.Context(), versionID, start, length)
+	if contracts.IsCode(err, contracts.ErrUnsupported) {
+		return false
+	}
+	if err != nil {
+		noteInternal(r, err)
+		WriteError(w, err)
+		return true
+	}
+	defer rc.Close()
+	h := w.Header()
+	setContentHeaders(h, ver)
+	h.Set("Accept-Ranges", "bytes")
+	h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, ver.Size))
+	h.Set("Content-Length", strconv.FormatInt(length, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush() // the client sees the answer even while the hub link is slow
+	}
+	_, _ = io.CopyN(w, rc, length)
+	return true
 }
 
 // serveRangeStream serves a forward-only reader honoring a single byte range.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,15 @@ type ResolveRequest struct {
 	LeaseHolder string
 	// Exclude lists accounts not to choose (fallback excludes the limited one).
 	Exclude []string
+	// observeBeforeReserve: rather than take a reserve account while a
+	// normal one's availability is unknown, choose answers "waiting" so the
+	// caller takes its one observation pass first (reserve.go). Set by
+	// ResolveFor and Select for their first attempt only.
+	observeBeforeReserve bool
+	// reserveUnlocked: a normal account already failed at checkout for
+	// this launch (ResolveFor); reserve accounts compete as usual for the
+	// remaining rounds, so failing normals cannot use them all up.
+	reserveUnlocked bool
 }
 
 // Resolution is the node-local launch binding. Env carries only nonsecret
@@ -43,11 +53,12 @@ type Resolution struct {
 
 // Variables removed from every Claude/Codex launch environment.
 var (
-	unsetClaude = []string{"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-		"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"}
-	unsetCodex   = []string{"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"}
+	// One source with the env-file refusals (contracts.ClaudeLoginEnv).
+	unsetClaude  = contracts.ClaudeLoginEnv
+	unsetCodex   = contracts.CodexLoginEnv
 	unsetAmbient = map[contracts.Harness][]string{
-		contracts.HarnessClaude: {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"},
+		// The ambient login keeps its own credential store.
+		contracts.HarnessClaude: slices.DeleteFunc(slices.Clone(contracts.ClaudeLoginEnv), func(k string) bool { return k == "CLAUDE_SECURESTORAGE_CONFIG_DIR" }),
 		contracts.HarnessCodex:  unsetCodex,
 	}
 )
@@ -117,6 +128,9 @@ type candidate struct {
 	// Config.SpreadRuns local runs, 2 5-hour window at/above
 	// Config.SpreadFivePercent.
 	crowd int
+	// reserve: the account is in the reserve tier (reserve.go), from the
+	// hub's fleet view when it lists the account, else the local copy.
+	reserve bool
 }
 
 type availClass int
@@ -282,6 +296,9 @@ func (s *Service) gather(ctx context.Context, req ResolveRequest) ([]*candidate,
 			c.fleet = f
 		}
 	}
+	for _, c := range out {
+		c.reserve = c.isReserve()
+	}
 	return out, notes, nil
 }
 
@@ -291,7 +308,10 @@ func noneEligible(provider contracts.Provider, cands []*candidate, notes []strin
 	waiting := false
 	reasons := append([]string{}, notes...)
 	for _, c := range cands {
-		r := c.acct.AccountID + ": "
+		r := acctRef(acctName(c.acct)) + " (" + c.acct.AccountID + "): "
+		if c.acct.Label == "" {
+			r = c.acct.AccountID + ": "
+		}
 		switch {
 		case !c.ver.OK:
 			r += c.ver.Reason
@@ -327,9 +347,10 @@ func noneEligible(provider contracts.Provider, cands []*candidate, notes []strin
 // rank orders candidates: preference order, then the local spread level
 // (spread.go: an account with room before one that already carries
 // SpreadRuns runs here, before one whose 5-hour window is at
-// SpreadFivePercent; among busy ones the fewest local runs), then the
-// machine-affinity tier (affinity.go: home, free, shared, rest), then most
-// fresh headroom (the lower 5-hour use, then the lower weekly use;
+// SpreadFivePercent or weekly window at HomeWeeklyPercent; among busy ones
+// the fewest local runs), then the machine-affinity tier (affinity.go: home,
+// free, shared, rest), then most fresh headroom (the lower binding window,
+// then the lower weekly use, then the lower 5-hour use;
 // usage.Headroom.Compare), then fewest active local assignments, then a
 // per-node hash and the id (deterministic).
 func rank(cs []*candidate) {
@@ -484,11 +505,23 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 	// A token account outranks the same person's other logins (token.go).
 	pt := preferTokens(fresh, fresh, verify, refresh, unknown)
 	fresh, verify, refresh, unknown = pt[0], pt[1], pt[2], pt[3]
+	explicit := req.Policy.Mode == contracts.AccountExplicit
+	// Reserve accounts wait while a normal one has room (reserve.go).
+	if !explicit && !req.reserveUnlocked {
+		rl := holdReserve(len(req.Policy.Prefer), fresh, verify, refresh, unknown)
+		fresh, verify, refresh, unknown = rl[0], rl[1], rl[2], rl[3]
+	}
 	rank(fresh)
 	rank(verify)
 	rank(refresh)
 	rank(unknown)
-	explicit := req.Policy.Mode == contracts.AccountExplicit
+	if !explicit {
+		unknown = normalFirst(len(req.Policy.Prefer), unknown) // AllowUnknown: reserve last among unknowns
+	}
+	if !explicit && req.observeBeforeReserve && reserveOverUnknown(len(req.Policy.Prefer), unknown, fresh, verify, refresh) {
+		return nil, contracts.Errorf(contracts.ErrCapacityExhausted, "a normal %s account's availability is unknown; observing before using a reserve account", provider).
+			WithDetail("outcome", string(contracts.FallbackWaiting))
+	}
 	switch {
 	case len(fresh) > 0:
 		// The reason the owner reads in the launch review and the
@@ -511,18 +544,22 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 			// as "only eligible account" for --account anthropic).
 			c.why = "explicit account (" + c.room.Numbers() + ")"
 		}
+		if n := reserveHomeNote(c, fresh, cands); n != "" && !explicit && !strings.Contains(c.why, n) {
+			c.why = n + "; " + c.why
+		}
+		c.why = reserveNote(c, provider, len(req.Policy.Prefer), explicit) + c.why
 		return c, nil
 	case len(verify) > 0:
 		// Not capacity yet: ResolveFor checks it out and admits the run only
 		// if the usage probe from the profile is fresh and eligible.
 		c := verify[0]
-		c.why = "checked in (usage not observable while checked in); verified from the profile at checkout; last: " + c.why
+		c.why = reserveNote(c, provider, len(req.Policy.Prefer), explicit) + "checked in (usage not observable while checked in); verified from the profile at checkout; last: " + c.why
 		return c, nil
 	case len(refresh) > 0:
 		// Eligible but unverified: the harness refreshes the expired login
 		// in the checked-out profile, then the probe decides (ResolveFor).
 		c := refresh[0]
-		c.why = "eligible, unverified (access token expired at rest); the harness refreshes it in the checked-out profile, then usage is verified; last: " + c.why
+		c.why = reserveNote(c, provider, len(req.Policy.Prefer), explicit) + "eligible, unverified (access token expired at rest); the harness refreshes it in the checked-out profile, then usage is verified; last: " + c.why
 		return c, nil
 	case len(unknown) > 0 && (explicit || s.cfg.AllowUnknown):
 		c := unknown[0]
@@ -531,11 +568,18 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 		} else {
 			c.why = "allowed by configuration (AllowUnknown); " + c.why
 		}
+		c.why = reserveNote(c, provider, len(req.Policy.Prefer), explicit) + c.why
 		return c, nil
 	}
 	extra := strings.Join(blocked, "; ")
 	if len(unknown) > 0 {
 		extra = strings.TrimPrefix(extra+"; unknown availability is not treated as capacity (AllowUnknown=false)", "; ")
+	}
+	if provider == contracts.ProviderOpenAI && !explicit {
+		// The fix, in the error the starter reads (104 Codex launches failed
+		// on one pooled account with only the account's state as the reason).
+		extra = strings.TrimPrefix(extra+"; no free OpenAI account for Codex on "+s.nodeName()+
+			": add one (pyre accounts login --node "+s.nodeName()+"), wait for the reset, or run the work on Claude (pyre start --fallback-harness claude for reviews)", "; ")
 	}
 	return nil, noneEligible(provider, cands, notes, extra)
 }
@@ -577,6 +621,16 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 			ambientReason = "credential_kind=ambient: " + why + "; never used for automatic fallback"
 		}
 	}
+	// pinNote: an explicit, non-strict account that could not take the run
+	// (unpin below); every later reason starts with it, the node's own
+	// login included.
+	pinNote := ""
+	noted := func(why string) string {
+		if pinNote == "" || strings.HasPrefix(why, pinNote) {
+			return why
+		}
+		return pinNote + "; " + why
+	}
 	// ambient binds the node's own login. acct is the account that login is
 	// (explicit own-login account); nil looks it up, so the assignment names
 	// the account usage and the audit log attribute the run to.
@@ -594,7 +648,7 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 		a := assignmentRow{AccountAssignment: contracts.AccountAssignment{
 			AssignmentID: contracts.NewID(contracts.PrefixAssignment), RunID: req.RunID, SessionID: req.SessionID,
 			NodeID: s.cfg.NodeID, AssignedAt: s.now(), AccountID: id,
-			Reason:    reason,
+			Reason:    noted(reason),
 			Freshness: contracts.Freshness{ObservedAt: s.now(), Source: "node:" + s.cfg.NodeID, Stale: true, Reason: "ambient login not observed"},
 		}, CredentialKind: contracts.CredAmbient}
 		if err := insertAssignment(ctx, s.db, a); err != nil {
@@ -614,12 +668,10 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 			return res, err
 		}
 		why, derr := s.defaultAmbient(ctx, req.Harness)
-		if derr == nil && why == "" && s.cfg.DefaultAccount != DefaultAccountSubscription {
-			// The node's own login is a registered account the hub counts as
-			// ready (ownaccount.go): run on it rather than wait or fail.
-			if oa, ok := s.ownLoginCandidate(ctx, req.Harness, req.Exclude); ok {
+		if derr == nil && why == "" {
+			if oa, reason, ok := s.ownLoginFallback(ctx, req.Harness, req.Exclude); ok {
 				s.log.Info("accounts: no Pyre login eligible; using the node's own login", "run", req.RunID, "account", oa.AccountID)
-				return ambient(fmt.Sprintf("credential_kind=ambient: no Pyre login on this node is eligible; %s is this node's own %s login", accountName(oa), req.Harness), &oa)
+				return ambient(reason, &oa)
 			}
 		}
 		if derr != nil || why == "" {
@@ -642,7 +694,7 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 		default:
 			local = &a
 		}
-		if local == nil || !s.hasGrant(ctx, a.AccountID, req.Harness) && MatchesOwnLogin(a, s.OwnLogin(req.Harness)) {
+		if local == nil || !contracts.ManagedLogins(req.Harness) || !s.hasGrant(ctx, a.AccountID, req.Harness) && MatchesOwnLogin(a, s.OwnLogin(req.Harness)) {
 			oa, oerr := s.explicitOwnLogin(ctx, req.Harness, req.Policy.AccountID, local)
 			if oerr != nil {
 				return res, oerr
@@ -657,8 +709,22 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 		holder = s.cfg.CodexLeaseHolder
 	}
 
+	// An explicit account that cannot take the run (at its limit, needs
+	// re-auth, lease busy, refused checkout) falls back once to the best
+	// eligible same-provider account unless the policy is strict; the
+	// assignment reason starts with pinNote so the starter sees the swap.
+	unpin := func(err error) bool {
+		if req.Policy.Mode != contracts.AccountExplicit || req.Policy.Strict || pinNote != "" {
+			return false
+		}
+		pinNote = s.pinFallbackNote(ctx, provider, req.Policy.AccountID, err)
+		req.Exclude = append(req.Exclude, req.Policy.AccountID)
+		req.Policy = contracts.AccountPolicy{Mode: contracts.AccountEligible}
+		s.log.Info("accounts: explicit account unavailable; falling back", "run", req.RunID, "note", pinNote)
+		return true
+	}
 	var lastCheckoutErr error
-	for round := 0; round < 4; round++ {
+	for round := 0; round < 5; round++ {
 		cands, notes, err := s.gather(ctx, req)
 		if err != nil {
 			return res, err
@@ -671,6 +737,7 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 				if err != nil {
 					return err
 				}
+				c.why = noted(c.why)
 				lease := ""
 				if c.grant.MaxProcs == 1 {
 					if err := acquireLease(ctx, tx, c.grant.GrantID, holder, s.now()); err != nil {
@@ -685,19 +752,36 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 					Reason: c.why, AssignedAt: s.now(), Freshness: c.fresh,
 				}, CredentialKind: c.grant.Kind}
 				chosen = c
-				return insertAssignment(ctx, tx, asg)
+				if err := insertAssignment(ctx, tx, asg); err != nil {
+					return err
+				}
+				if req.Policy.Mode == contracts.AccountExplicit || c.pref < len(req.Policy.Prefer) {
+					if err := markNamed(ctx, tx, asg.AssignmentID); err != nil {
+						return err
+					}
+				}
+				if req.Policy.Mode == contracts.AccountExplicit && req.Policy.Strict {
+					return markPinned(ctx, tx, asg.AssignmentID)
+				}
+				return nil
 			})
 		}
+		req.observeBeforeReserve = true
 		err = attempt()
 		if err != nil && s.shouldObserveAndRetry(err) {
 			// Nothing fresh: take one bounded observation pass (respects each
 			// account's poll schedule/back-off) and try once more.
 			s.ObserveDue(ctx, provider)
+			req.observeBeforeReserve = false
 			err = attempt()
 		}
+		req.observeBeforeReserve = false
 		if err != nil {
 			if a, aerr := s.assignmentForRun(ctx, s.db, req.RunID); aerr == nil && a.ReleasedAt == nil {
 				return s.resolutionFor(ctx, req.Harness, a) // a concurrent duplicate won
+			}
+			if e := contracts.AsError(err); e != nil && e.Details["outcome"] != nil && unpin(err) {
+				continue
 			}
 			if lastCheckoutErr != nil && contracts.IsCode(err, contracts.ErrCapacityExhausted) || lastCheckoutErr != nil && contracts.IsCode(err, contracts.ErrUnavailable) {
 				return fallThrough(lastCheckoutErr)
@@ -710,11 +794,15 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 			// assignment and, for eligible policy, tries the next account.
 			if cerr := s.ensureCheckout(ctx, chosen.acct, chosen.grant, req.RunID); cerr != nil {
 				s.abortAssignment(ctx, asg)
+				if unpin(cerr) {
+					continue
+				}
 				if req.Policy.Mode != contracts.AccountEligible {
 					return res, cerr
 				}
 				lastCheckoutErr = cerr
 				req.Exclude = append(req.Exclude, chosen.acct.AccountID)
+				req.reserveUnlocked = true
 				continue
 			}
 			if chosen.class == classVerify || chosen.class == classRefresh {
@@ -734,14 +822,18 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 					// to rota at once.
 					s.abortAssignment(ctx, asg)
 					s.maybeCheckin(ctx, chosen.grant.GrantID)
+					if unpin(verr) {
+						continue
+					}
 					if req.Policy.Mode != contracts.AccountEligible {
 						return res, verr
 					}
 					lastCheckoutErr = verr
 					req.Exclude = append(req.Exclude, chosen.acct.AccountID)
+					req.reserveUnlocked = true
 					continue
 				}
-				asg.Reason, asg.Freshness = chosen.why, chosen.fresh
+				asg.Reason, asg.Freshness = noted(chosen.why), chosen.fresh
 				s.updateAssignmentReason(ctx, asg)
 			}
 		}
@@ -916,7 +1008,8 @@ func (s *Service) Select(ctx context.Context, p contracts.AccountSelectParams) (
 	}
 	if p.Policy.Mode == contracts.AccountExplicit {
 		a, err := s.Account(ctx, p.Policy.AccountID)
-		if contracts.IsCode(err, contracts.ErrNotFound) || err == nil && a.Provider == p.Provider && !s.hasGrant(ctx, a.AccountID, h) && MatchesOwnLogin(a, s.OwnLogin(h)) {
+		if contracts.IsCode(err, contracts.ErrNotFound) || err == nil && a.Provider == p.Provider &&
+			(!contracts.ManagedLogins(h) || !s.hasGrant(ctx, a.AccountID, h) && MatchesOwnLogin(a, s.OwnLogin(h))) {
 			var local *contracts.Account
 			if err == nil {
 				local = &a
@@ -937,12 +1030,39 @@ func (s *Service) Select(ctx context.Context, p contracts.AccountSelectParams) (
 			return sel, contracts.Errorf(contracts.ErrInvalid, "account %s is %s, not %s (cross-provider use is never allowed)", a.AccountID, a.Provider, p.Provider)
 		}
 	}
-	req := ResolveRequest{Harness: h, Policy: p.Policy, RunID: "dry-run"}
+	req := ResolveRequest{Harness: h, Policy: p.Policy, RunID: "dry-run", observeBeforeReserve: true}
 	cands, notes, err := s.gather(ctx, req)
 	if err != nil {
 		return sel, err
 	}
 	c, err := s.choose(ctx, s.db, req, cands, notes, s.cfg.CodexLeaseHolder)
+	req.observeBeforeReserve = false
+	if err != nil && s.shouldObserveAndRetry(err) {
+		// As ResolveFor: nothing fresh, one bounded observation pass first
+		// (a launch preflight must not refuse what the launch would get).
+		s.ObserveDue(ctx, p.Provider)
+		c, err = s.choose(ctx, s.db, req, cands, notes, s.cfg.CodexLeaseHolder)
+	}
+	pinNote := ""
+	if e := contracts.AsError(err); e != nil && e.Details["outcome"] != nil && req.Policy.Mode == contracts.AccountExplicit && !req.Policy.Strict {
+		// As ResolveFor: a non-strict explicit account falls back.
+		pinNote = s.pinFallbackNote(ctx, p.Provider, req.Policy.AccountID, err)
+		req = ResolveRequest{Harness: h, Policy: contracts.AccountPolicy{Mode: contracts.AccountEligible}, RunID: "dry-run", Exclude: []string{req.Policy.AccountID}}
+		if cands, notes, err = s.gather(ctx, req); err != nil {
+			return sel, err
+		}
+		c, err = s.choose(ctx, s.db, req, cands, notes, s.cfg.CodexLeaseHolder)
+	}
+	if err != nil && req.Policy.Mode == contracts.AccountEligible && contracts.AsError(err).Details["outcome"] != nil {
+		if oa, reason, ok := s.ownLoginFallback(ctx, h, req.Exclude); ok {
+			sel.AccountID, sel.Reason = oa.AccountID, reason
+			if pinNote != "" {
+				sel.Reason = pinNote + "; " + reason
+			}
+			sel.Freshness = contracts.Freshness{ObservedAt: s.now(), Source: "node:" + s.cfg.NodeID, Stale: true, Reason: "ambient login not observed"}
+			return sel, nil
+		}
+	}
 	if err != nil {
 		e := contracts.AsError(err)
 		if o, ok := e.Details["outcome"].(string); ok {
@@ -954,7 +1074,50 @@ func (s *Service) Select(ctx context.Context, p contracts.AccountSelectParams) (
 		return sel, err
 	}
 	sel.AccountID, sel.GrantID, sel.Reason, sel.Freshness = c.acct.AccountID, c.grant.GrantID, c.why, c.fresh
+	sel.Reserve = req.Policy.Mode != contracts.AccountExplicit && c.gated(len(req.Policy.Prefer))
+	if pinNote != "" {
+		sel.Reason = pinNote + "; " + c.why
+	}
 	return sel, nil
+}
+
+// ownLoginFallback: when no Pyre login is eligible, the node's own login
+// that is a registered account the hub counts as ready (ownaccount.go) runs
+// the work rather than wait or fail (not under --default-account
+// subscription). ResolveFor and the Select dry run share it, so a launch
+// preflight never refuses what the launch would take.
+func (s *Service) ownLoginFallback(ctx context.Context, h contracts.Harness, exclude []string) (contracts.Account, string, bool) {
+	if s.cfg.DefaultAccount == DefaultAccountSubscription {
+		return contracts.Account{}, "", false
+	}
+	oa, ok := s.ownLoginCandidate(ctx, h, exclude)
+	if !ok {
+		return contracts.Account{}, "", false
+	}
+	return oa, fmt.Sprintf("credential_kind=ambient: no Pyre login on this node is eligible; %s is this node's own %s login", accountName(oa), h), true
+}
+
+// pinFallbackNote words why an explicit account was swapped:
+// `account "opus" is unavailable (cooldown until …); using the best
+// eligible anthropic account instead (pass strict to wait for it)`.
+func (s *Service) pinFallbackNote(ctx context.Context, provider contracts.Provider, accountID string, err error) string {
+	why := "not eligible"
+	if e := contracts.AsError(err); e != nil {
+		why = e.Message
+		reasons, _ := e.Details["reasons"].([]string)
+		for _, r := range reasons {
+			if _, rest, ok := strings.Cut(r, accountID+"): "); ok {
+				why = rest
+				break
+			}
+			if rest, ok := strings.CutPrefix(r, accountID+": "); ok {
+				why = rest
+				break
+			}
+		}
+	}
+	return fmt.Sprintf("%s is unavailable (%s); using the best eligible %s account instead (strict pinning would wait for it)",
+		acctRef(s.accountLabel(ctx, accountID)), redact(truncate(why, 200)), provider)
 }
 
 // Default account policies (pyred --default-account).
@@ -981,6 +1144,12 @@ func ValidDefaultAccount(v string) bool {
 // selection and waits when they are exhausted, never falling back to the
 // owner's login.
 func (s *Service) defaultAmbient(ctx context.Context, h contracts.Harness) (string, error) {
+	if !contracts.ManagedLogins(h) {
+		// agy: no isolated profiles, so there is nothing to select or
+		// balance; every run is the node's own login (whatever the default
+		// account policy).
+		return fmt.Sprintf("your own %s login on this node (Pyre does not manage %s logins)", h, h), nil
+	}
 	switch s.cfg.DefaultAccount {
 	case DefaultAccountSubscription:
 		return "", nil

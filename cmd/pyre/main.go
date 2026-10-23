@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	_ "time/tzdata" // Pacific times on hosts without a tz database (Windows)
 
 	"github.com/jhh3/pyre/internal/cli"
 )

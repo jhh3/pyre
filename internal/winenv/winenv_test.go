@@ -44,11 +44,11 @@ func TestToolDirsAndGitBash(t *testing.T) {
 	vars := map[string]string{"USERPROFILE": "/u", "APPDATA": "/u/AppData/Roaming", "ProgramFiles": "/pf", "LOCALAPPDATA": "/u/AppData/Local"}
 	files := map[string]bool{
 		"/u/.local/bin": true, "/u/AppData/Roaming/npm": true, "/pf/nodejs": true, "/pf/Git/cmd": true,
-		"/pf/Git/bin/bash.exe": false,
+		"/pf/Git/bin/bash.exe": false, "/u/AppData/Local/Programs/Pyre/tools/outfit/bin": true,
 	}
 	e := fakeEnv(vars, files)
 	got := e.ToolDirs()
-	want := []string{"/u/.local/bin", "/u/AppData/Roaming/npm", "/pf/nodejs", "/pf/Git/cmd"}
+	want := []string{"/u/.local/bin", "/u/AppData/Roaming/npm", "/pf/nodejs", "/pf/Git/cmd", "/u/AppData/Local/Programs/Pyre/tools/outfit/bin"}
 	if len(got) != len(want) {
 		t.Fatalf("ToolDirs = %v, want %v", got, want)
 	}

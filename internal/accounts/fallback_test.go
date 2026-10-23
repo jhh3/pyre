@@ -27,7 +27,7 @@ func (e *testEnv) startRun(sessionID, runID string, h contracts.Harness, pol con
 	if h == contracts.HarnessCodex {
 		ref = &contracts.NativeRef{Kind: "codex_thread", ID: "thr-synthetic"}
 	}
-	e.ctrl.runs[sessionID] = RunInfo{SessionID: sessionID, RunID: runID, Harness: h, Capabilities: caps, NativeRef: ref}
+	e.ctrl.runs[sessionID] = RunInfo{SessionID: sessionID, RunID: runID, Harness: h, Capabilities: caps, NativeRef: ref, Live: true}
 	return r.Assignment
 }
 
@@ -71,7 +71,7 @@ func TestFallbackNativeResume(t *testing.T) {
 		t.Fatalf("continuation %+v", k)
 	}
 	// The successor continues unattended; nothing of the interrupted turn is replayed.
-	if k.Prompt != "[pyre] Continue where you left off (account switched from A to B because of the usage limit)." {
+	if k.Prompt != "[pyre] Continue where you left off (switched from account \"A\" to account \"B\" because of the usage limit)." {
 		t.Fatalf("prompt %q", k.Prompt)
 	}
 	// Old assignment released (kept for audit), new one bound to B.

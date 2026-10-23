@@ -145,6 +145,12 @@ type NodeLinkConfig struct {
 	// restored from an older backup, or replaced). The daemon answers with a
 	// run snapshot report so the hub can reconcile runs and sessions.
 	OnHubBehind func(ctx context.Context, hubCommitted, nodeAcked uint64)
+	// RecoverCommand is consulted at startup for each command that was
+	// executing when the node stopped. ok=true replaces the indeterminate
+	// result with res (e.g. the daemon proves a start_run never created its
+	// run, or reports the run it did create); ok=false keeps the
+	// indeterminate result. The command is never re-executed either way.
+	RecoverCommand func(ctx context.Context, cmd contracts.NodeCommand) (res contracts.CommandResult, ok bool)
 }
 
 // NodeLink is the node side of the control channel.
@@ -1166,7 +1172,8 @@ func (l *NodeLink) finish(ctx context.Context, cmd contracts.NodeCommand, from s
 
 // recoverCommands runs at startup: commands that were executing when the
 // node stopped have an unknown outcome and are reported indeterminate (never
-// re-executed); old finished records are pruned.
+// re-executed) unless RecoverCommand establishes it; old finished records
+// are pruned.
 func (l *NodeLink) recoverCommands(ctx context.Context) error {
 	rs, err := l.cfg.DB.QueryContext(ctx, `SELECT command FROM nodelink_commands WHERE state=?`, cmdExecuting)
 	if err != nil {
@@ -1186,6 +1193,15 @@ func (l *NodeLink) recoverCommands(ctx context.Context) error {
 	}
 	rs.Close()
 	for _, cmd := range stuck {
+		if l.cfg.RecoverCommand != nil {
+			if res, ok := l.cfg.RecoverCommand(ctx, cmd); ok {
+				if err := l.finish(ctx, cmd, cmdExecuting, res); err != nil {
+					return err
+				}
+				l.log.Warn("command interrupted by restart; outcome recovered", "command", cmd.CommandID, "kind", cmd.Kind, "outcome", res.Outcome)
+				continue
+			}
+		}
 		res := contracts.CommandResult{Outcome: contracts.OutcomeIndeterminate,
 			Error: contracts.Errorf(contracts.ErrOutcomeIndeterminate, "node stopped while the command was executing; outcome unknown and the command was not re-executed")}
 		if err := l.finish(ctx, cmd, cmdExecuting, res); err != nil {

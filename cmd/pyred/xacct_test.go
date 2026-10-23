@@ -171,7 +171,7 @@ func TestAutoContinueOnLimitAcrossTokenAccounts(t *testing.T) {
 	if p2.Launch.ProfileDir != dirs["acct_synth-xb"] || p2.Launch.Resume == nil || p2.Launch.Resume.ID != p1.Handle.NativeRef.ID {
 		t.Fatalf("successor launch: profile %s resume %+v (want %s)", p2.Launch.ProfileDir, p2.Launch.Resume, p1.Handle.NativeRef.ID)
 	}
-	want := "Continue where you left off (account switched from synth-a to synth-b because of the usage limit)"
+	want := "Continue where you left off (switched from account \"synth-a\" to account \"synth-b\" because of the usage limit)"
 	if !strings.Contains(p2.Launch.InitialPrompt, want) || strings.Contains(p2.Launch.InitialPrompt, "handoff") {
 		t.Fatalf("successor prompt %q", p2.Launch.InitialPrompt)
 	}

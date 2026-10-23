@@ -1,6 +1,6 @@
 # Pyre build. Owned by the integration owner (WP00).
-# Uses ~/sdk/go1.27.1 when present; override with GO=...
-GO ?= $(shell test -x $(HOME)/sdk/go1.27.1/bin/go && echo $(HOME)/sdk/go1.27.1/bin/go || echo go)
+# Uses ~/sdk/go1.27.3 when present; override with GO=...
+GO ?= $(shell test -x $(HOME)/sdk/go1.27.3/bin/go && echo $(HOME)/sdk/go1.27.3/bin/go || echo go)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/jhh3/pyre/internal/buildinfo.Version=$(VERSION)
 BINS := pyre pyred pyre-hub pyre-mockhub
@@ -21,7 +21,7 @@ VERIFY_REPRO_ARGS ?=
 # Tools that shell out to `go` (golangci-lint) must find the same toolchain.
 GOROOT_BIN = $(shell $(GO) env GOROOT)/bin
 
-.PHONY: all help build test vet fmt fmt-check lint check fixtures schemas check-generated dist clean docs-check vuln verify-repro verify-repro-dist tools tools-test
+.PHONY: all help build test test-fast test-weights vet fmt fmt-check lint check fixtures schemas check-generated dist clean docs-check vuln verify-repro verify-repro-dist tools tools-test
 
 all: build ## Build the binaries into bin/ (default)
 
@@ -34,6 +34,15 @@ build: ## Build pyre, pyred, pyre-hub, pyre-mockhub into bin/
 
 test: ## Run the Go test suite
 	$(GO) test ./...
+
+# The fast CI check's tests: the short suite as many test processes at once
+# (tools/testshard). TESTSHARD_ARGS passes flags, e.g. "-j 8" or "-race".
+TESTSHARD_ARGS ?=
+test-fast: ## Short suite, sharded over parallel test processes (what CI runs)
+	$(GO) run ./tools/testshard -short $(TESTSHARD_ARGS) ./...
+
+test-weights: ## Re-record tools/testshard/weights.json from a sharded short run (no cached results)
+	$(GO) run ./tools/testshard -short -count 1 -record tools/testshard/weights.json $(TESTSHARD_ARGS) ./...
 
 # All analyzers run by default, including stdversion and tests. Do not pass
 # analyzer flags here: naming any analyzer disables the rest.
@@ -48,10 +57,18 @@ fmt-check: ## Fail if any Go file is not gofmt-clean
 	if [ -n "$$out" ]; then echo "gofmt needed:" >&2; echo "$$out" >&2; exit 1; fi
 
 # Gate (CI job "lint"): bug-finding analyzers per .golangci.yml, once per
-# target OS because build tags differ. The tool is built for the host.
+# target OS because build tags differ. The tool is built for the host, and
+# only when bin/tools lacks this version built with this Go; it builds in
+# throwaway module and build caches, so its ~150 dependencies stay out of
+# yours (and out of CI's lint cache, which keeps just the binary).
 lint: ## golangci-lint gate (pinned; linux and darwin build tags)
 	@mkdir -p $(TOOLSDIR)
-	@GOBIN=$(CURDIR)/$(TOOLSDIR) GOOS=$$($(GO) env GOHOSTOS) GOARCH=$$($(GO) env GOHOSTARCH) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@if ! $(TOOLSDIR)/golangci-lint version 2>/dev/null | grep -q "version $(GOLANGCI_LINT_VERSION:v%=%) built with $$($(GO) env GOVERSION) "; then \
+	  t=$$(mktemp -d) && \
+	  GOMODCACHE=$$t/mod GOCACHE=$$t/build GOFLAGS=-modcacherw GOTOOLCHAIN=local GOBIN=$(CURDIR)/$(TOOLSDIR) GOOS=$$($(GO) env GOHOSTOS) GOARCH=$$($(GO) env GOHOSTARCH) \
+	    $(GOROOT_BIN)/go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+	  rc=$$?; chmod -R u+w "$$t"; rm -rf "$$t"; exit $$rc; \
+	fi
 	@for os in $(LINT_GOOS); do echo "==> golangci-lint GOOS=$$os"; PATH="$(GOROOT_BIN):$$PATH" GOOS=$$os $(TOOLSDIR)/golangci-lint run ./... || exit 1; done
 
 check: fmt-check vet lint test ## Local pre-merge gate: fmt-check, vet, lint, test

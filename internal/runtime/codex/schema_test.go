@@ -195,3 +195,15 @@ func TestCodexSchemaCheckerFixture(t *testing.T) {
 		t.Fatalf("unexpected problems:\n%s", joined)
 	}
 }
+
+func TestParseCodexModels(t *testing.T) {
+	b := []byte(`{"models":[{"slug":"gpt-synthetic-1","display_name":"GPT Synthetic 1","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"xhigh"}]},` +
+		`{"slug":"hidden-one","visibility":"hide"},{"slug":"--bad","visibility":"list"}]}`)
+	ms := parseCodexModels(b)
+	if len(ms) != 1 || ms[0].ID != "gpt-synthetic-1" || ms[0].Label != "GPT Synthetic 1" || len(ms[0].Efforts) != 2 || ms[0].Efforts[1] != "xhigh" {
+		t.Fatalf("models %+v", ms)
+	}
+	if parseCodexModels([]byte("not json")) != nil {
+		t.Fatal("garbage parsed")
+	}
+}

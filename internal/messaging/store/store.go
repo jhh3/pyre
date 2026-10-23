@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/ownermail"
 	"github.com/jhh3/pyre/internal/persistence"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
@@ -524,11 +525,19 @@ func (s *Store) insertTx(ctx context.Context, tx *sql.Tx, p contracts.Principal,
 	if riskAccepted {
 		riskBy = persistence.JSON(p)
 	}
+	// Mail to the owner that asks nothing of him is stored acknowledged: an
+	// update, never unacked inbox mail (internal/messaging/ownermail).
+	ack, ackRef := contracts.AckNone, any(nil)
+	if req.Recipient.Kind == contracts.AddrOwner && ownermail.Update(env, func() bool {
+		return parent != nil && parent.view.Envelope.Sender.Kind == contracts.PrincipalOwner || s.ownerWaitsOnTx(ctx, tx, sk, sid, now)
+	}) {
+		ack, ackRef = contracts.AckAcknowledged, contracts.AckRefUpdate
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(message_id,recipient_kind,recipient_id,inbox_cursor,sender_kind,sender_id,thread_id,project_id,in_reply_to,reissues,risk_accepted_by,mode,content_digest,envelope,storage,stored_at,runtime,runtime_reason,bound_run_id,ack,ack_ref,outcome_ref,expires_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,NULL,NULL,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,NULL,?,?)`,
 		id, string(req.Recipient.Kind), req.Recipient.ID, cursor, sk, sid, persistence.NullStr(req.ThreadID), persistence.ProjectArg(projectID),
 		persistence.NullStr(req.InReplyTo), persistence.NullStr(reissues), riskBy, string(req.Mode), digest, persistence.JSON(env),
-		string(contracts.StorageStored), persistence.Time(now), string(runtime), nil, string(contracts.AckNone),
+		string(contracts.StorageStored), persistence.Time(now), string(runtime), nil, string(ack), ackRef,
 		persistence.TimePtr(expires), persistence.Time(now)); err != nil {
 		return contracts.MessageView{}, err
 	}
@@ -564,6 +573,26 @@ func (s *Store) insertTx(ctx context.Context, tx *sql.Tx, p contracts.Principal,
 		return s.GetTx(ctx, tx, id)
 	}
 	return v, nil
+}
+
+// ownerAnswerWindow bounds how long an owner message to a session makes
+// that session's next message to him an answer.
+const ownerAnswerWindow = 24 * time.Hour
+
+// ownerWaitsOnTx reports whether the owner wrote to session (sender kind
+// sk, id sid) within ownerAnswerWindow and after its last message to him:
+// what it sends him now answers him, even without reply_to.
+func (s *Store) ownerWaitsOnTx(ctx context.Context, tx *sql.Tx, sk, sid string, now time.Time) bool {
+	if sk != string(contracts.AddrSession) && sk != string(contracts.PrincipalSession) {
+		return false
+	}
+	var n int
+	// Both sides through messages_sender(sender_kind, sender_id, seq).
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages o WHERE o.sender_kind=? AND o.sender_id=? AND o.recipient_kind=? AND o.recipient_id=? AND o.stored_at>=?
+		AND o.seq > COALESCE((SELECT MAX(seq) FROM messages m WHERE m.sender_kind=? AND m.sender_id=? AND m.recipient_kind=?), 0))`,
+		string(contracts.AddrOwner), "owner", string(contracts.AddrSession), sid, persistence.Time(now.Add(-ownerAnswerWindow)),
+		sk, sid, string(contracts.AddrOwner)).Scan(&n)
+	return err == nil && n > 0
 }
 
 var pendingStates = []any{string(contracts.DeliveryQueued), string(contracts.DeliveryNodeReceived), string(contracts.DeliveryAttempting)}
@@ -773,6 +802,119 @@ func (s *Store) AckMessage(ctx context.Context, req contracts.AckMessageRequest)
 		s.committed()
 	}
 	return out, err
+}
+
+// OwnerMail selects unacknowledged mail to the owner for AckOwnerMailTx.
+// At least one of MessageID, ThreadID and FromSession is required.
+type OwnerMail struct {
+	MessageID       string    // this message
+	ThreadID        string    // in this thread
+	FromSession     string    // sent by this session
+	SkipAsks        bool      // leave ask threads alone (they close with their ask)
+	NoThread        bool      // only mail sent without a thread
+	SkipAckRequests bool      // leave mail whose sender asked for an acknowledgement
+	Through         time.Time // stored at or before this time (zero: any)
+}
+
+// AckOwnerMailTx acknowledges, on Pyre's behalf, the owner's unacknowledged
+// mail that sel selects (ref: a contracts.AckRef* value saying why) and
+// emits message.ack for each. It returns how many it acknowledged.
+func (s *Store) AckOwnerMailTx(ctx context.Context, tx *sql.Tx, sel OwnerMail, ref string) (int, error) {
+	where, args, err := sel.where()
+	if err != nil {
+		return 0, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT message_id FROM messages WHERE `+where+` ORDER BY seq LIMIT 500`, args...)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	now := persistence.Time(s.now())
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET ack=?, ack_ref=?, updated_at=? WHERE message_id=? AND ack=?`,
+			string(contracts.AckAcknowledged), ref, now, id, string(contracts.AckNone)); err != nil {
+			return 0, err
+		}
+		v, err := s.GetTx(ctx, tx, id)
+		if err != nil {
+			return 0, err
+		}
+		if err := s.emit(ctx, tx, contracts.EvMessageAck, v); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
+}
+
+// where is sel as an SQL condition on messages.
+func (sel OwnerMail) where() (string, []any, error) {
+	if sel.MessageID == "" && sel.ThreadID == "" && sel.FromSession == "" {
+		return "", nil, contracts.Errorf(contracts.ErrInvalid, "select owner mail by message, thread or sending session")
+	}
+	where := []string{"recipient_kind=?", "ack=?"}
+	args := []any{string(contracts.AddrOwner), string(contracts.AckNone)}
+	if sel.MessageID != "" {
+		where = append(where, "message_id=?")
+		args = append(args, sel.MessageID)
+	}
+	if sel.ThreadID != "" {
+		where = append(where, "thread_id=?")
+		args = append(args, sel.ThreadID)
+	}
+	if sel.FromSession != "" {
+		where = append(where, "sender_kind=?", "sender_id=?")
+		args = append(args, string(contracts.PrincipalSession), sel.FromSession)
+	}
+	if sel.SkipAsks {
+		where = append(where, "(thread_id IS NULL OR substr(thread_id,1,?)<>?)")
+		args = append(args, len(contracts.PrefixAsk)+1, contracts.PrefixAsk+"_")
+	}
+	if sel.NoThread {
+		where = append(where, "(thread_id IS NULL OR thread_id='')")
+	}
+	if sel.SkipAckRequests {
+		where = append(where, "COALESCE(json_extract(envelope,'$.request_ack'),0)=0")
+	}
+	if !sel.Through.IsZero() {
+		where = append(where, "stored_at<=?")
+		args = append(args, persistence.Time(sel.Through))
+	}
+	return strings.Join(where, " AND "), args, nil
+}
+
+// AckOwnerMail is AckOwnerMailTx in a transaction of its own, opened only
+// when something matches (the owner typing calls it every few seconds).
+func (s *Store) AckOwnerMail(ctx context.Context, sel OwnerMail, ref string) (int, error) {
+	where, args, err := sel.where()
+	if err != nil {
+		return 0, err
+	}
+	var found int
+	if err := s.cfg.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE `+where+`)`, args...).Scan(&found); err != nil || found == 0 {
+		return 0, err
+	}
+	n := 0
+	err = sqlitex.Tx(ctx, s.cfg.DB, func(tx *sql.Tx) error {
+		var err error
+		n, err = s.AckOwnerMailTx(ctx, tx, sel, ref)
+		return err
+	})
+	if err == nil && n > 0 {
+		s.committed()
+	}
+	return n, err
 }
 
 // ReissueMessage explicitly re-sends a message as a NEW message referencing

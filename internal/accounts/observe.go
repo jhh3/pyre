@@ -26,7 +26,7 @@ import (
 
 const probeExpiryMargin = 60 * time.Second
 
-// RunObserver polls due accounts until ctx ends.
+// RunObserver polls due accounts (and agy's own quota) until ctx ends.
 func (s *Service) RunObserver(ctx context.Context) {
 	tick := time.NewTicker(30 * time.Second)
 	if s.cfg.TestMode && s.cfg.PollInterval < time.Minute {
@@ -36,6 +36,7 @@ func (s *Service) RunObserver(ctx context.Context) {
 	go s.RunRotaSync(ctx) // no-op unless rota checkouts are enabled
 	for {
 		s.ObserveDue(ctx, "")
+		s.kickAgyUsage(ctx) // agy's own quota in the background, at most every 5 min (agyusage.go)
 		select {
 		case <-ctx.Done():
 			return

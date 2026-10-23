@@ -21,7 +21,9 @@ Pass them to the node service with `install.sh … --service node --pyred-arg <f
 
 | Flag | What it does |
 |---|---|
-| `--trust-dir DIR` (repeatable) | Claude and Codex may trust workspaces under `DIR` automatically, so a new folder does not stall on "Do you trust this folder?". Default: none. |
+| `--worktree-root DIR` | Where new Pyre worktrees go (`DIR/<repo>/<branch>`); exported to every run as `PYRE_WORKTREE_ROOT`. Default `~/worktrees`; `""` puts them next to the repo as `<repo>-worktrees`. |
+| `--run-tmp-root DIR\|none` | Where each run's `TMPDIR` goes (`DIR/<run_id>`, 0700, removed after the session is archived or a day after the run ended). Default `<state>/tmp/runs`; `none` leaves runs the TMPDIR they inherit. A TMPDIR set by the run's environment profile or env file wins. See [operations](operations.md#node-run-defaults-permissions-default-account-macos-profile-credentials). |
+| `--trust-dir DIR` (repeatable) | Claude and Codex may trust workspaces under `DIR` automatically, so a new folder does not stall on "Do you trust this folder?". Default: none. A Claude run with bypass permissions trusts its folder wherever it is. |
 | `--permissions ask\|bypass` | `ask` (default) relays approval prompts to the TUI and phone. `bypass` runs Claude with `--dangerously-skip-permissions` and Codex without approvals or sandbox. Override per launch with `pyre new/start --permissions`. |
 | `--default-account auto\|subscription\|ambient` | `auto` (default) uses a Pyre account when the node has one for that provider, else your own login. `subscription` always uses a Pyre account. `ambient` always uses your own login. |
 | `--repo-roots DIRS` | Comma-separated folders scanned for git repos (default `~/code,~/src,~/Documents/code,~/projects`). |

@@ -133,16 +133,40 @@ func (h Headroom) key() (int, int) {
 	return f, w
 }
 
-// Compare orders by most headroom: the lower 5-hour use first, then the
-// lower weekly use (whole percents, so a fraction does not override the
-// weekly window). It returns <0 when h has more headroom than o.
+// Compare orders by most headroom: the lower binding window first
+// (Pressure: an account at 97 % weekly never outranks one at 30 % because
+// its 5-hour window happens to be empty), then the lower weekly use (it
+// resets in days, not hours), then the lower 5-hour use. Whole percents, so
+// a fraction does not override the next key. It returns <0 when h has more
+// headroom than o.
 func (h Headroom) Compare(o Headroom) int {
+	if d := h.Pressure() - o.Pressure(); d != 0 {
+		return d
+	}
 	hf, hw := h.key()
 	of, ow := o.key()
-	if hf != of {
-		return hf - of
+	if hw != ow {
+		return hw - ow
 	}
-	return hw - ow
+	return hf - of
+}
+
+// Pressure is the binding window's used percent in whole percents: the
+// higher of the reported 5-hour and weekly windows, 100 when neither is
+// reported. A window that is not reported does not count when the other
+// is (the same rule as the accounts near-limit check), so an account that
+// reports only its weekly window is ranked by it.
+func (h Headroom) Pressure() int {
+	f, w := h.key()
+	switch {
+	case h.FiveOK && h.WeekOK:
+		return max(f, w)
+	case h.FiveOK:
+		return f
+	case h.WeekOK:
+		return w
+	}
+	return 100
 }
 
 // Numbers renders "5h 12% used, weekly 40%".
@@ -317,6 +341,18 @@ type Card struct {
 	// Own marks the machines' own login matched to this account
 	// (ownlogin.go): TokenNodes are those machines, no grant.
 	Own bool
+	// Login is an ambient card's login identity (nil when unknown).
+	Login *contracts.HarnessLogin
+}
+
+// harnessObs is a harness-reported reading of a node's own login
+// (HarnessInfo.Usage, agy) as an observation, nil when none.
+func harnessObs(p contracts.Provider, nodeID string, u *contracts.HarnessUsage) *contracts.AccountObservation {
+	if u == nil || len(u.Windows) == 0 {
+		return nil
+	}
+	return &contracts.AccountObservation{Provider: p, ReportingNode: nodeID, ObservedAt: u.ObservedAt, Source: u.Source,
+		Confidence: "high", Eligibility: contracts.EligibleYes, Windows: append([]contracts.UsageWindow(nil), u.Windows...)}
 }
 
 // Label is the account label, or "your own login (not managed)".
@@ -332,13 +368,7 @@ func (c Card) Label() string {
 
 // harnessFor maps a provider to the harness whose login it is.
 func harnessFor(p contracts.Provider) contracts.Harness {
-	switch p {
-	case contracts.ProviderAnthropic:
-		return contracts.HarnessClaude
-	case contracts.ProviderOpenAI:
-		return contracts.HarnessCodex
-	}
-	return ""
+	return contracts.HarnessForProvider(p)
 }
 
 // newestWindows is the windows of the account's newest observation that
@@ -436,21 +466,27 @@ func Cards(views []contracts.AccountView, nodes []contracts.Node, now time.Time)
 		}
 	}
 	for _, n := range nodes {
-		for _, p := range []contracts.Provider{contracts.ProviderAnthropic, contracts.ProviderOpenAI} {
+		for _, p := range []contracts.Provider{contracts.ProviderAnthropic, contracts.ProviderOpenAI, contracts.ProviderGoogle} {
 			if hasGrant[p][n.NodeID] || ownAt[p][n.NodeID] {
 				continue
 			}
-			avail := false
-			for _, h := range n.Harnesses {
-				if h.Harness == harnessFor(p) && h.Available {
-					avail = true
+			var hi *contracts.HarnessInfo
+			for i := range n.Harnesses {
+				if h := &n.Harnesses[i]; h.Harness == harnessFor(p) && h.Available {
+					hi = h
 				}
 			}
-			if !avail {
+			if hi == nil {
 				continue
 			}
-			out = append(out, Card{Provider: p, NodeID: n.NodeID,
-				Assessment: Assessment{State: Ambient, Why: "usage unknown; Pyre does not observe your own login"}})
+			c := Card{Provider: p, NodeID: n.NodeID, Login: hi.Login,
+				Assessment: Assessment{State: Ambient, Why: "usage unknown; Pyre does not observe your own login"}}
+			if o := harnessObs(p, n.NodeID, hi.Usage); o != nil {
+				// The harness reports its own login's usage (agy).
+				c.Obs, c.Why = o, "your own login; usage as "+string(hi.Harness)+" reports it"
+				c.LastKnown = o.Stale || now.Sub(o.ObservedAt) > FreshFor
+			}
+			out = append(out, c)
 		}
 	}
 	names := map[string]string{}

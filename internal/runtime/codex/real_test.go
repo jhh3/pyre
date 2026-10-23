@@ -233,3 +233,90 @@ func TestRealCodex(t *testing.T) {
 	rc, _ = a2.Stop(ctx, h2)
 	t.Logf("stop resumed run: %s %q; app-server processes=%d", rc.Outcome, rc.Detail, appServerProcs(sock))
 }
+
+// TestRealCodexBackgroundWake: a command the agent leaves running when its
+// turn ends wakes the thread with a new turn when it exits (bgwake.go).
+// Same gating and isolation as TestRealCodex (PYRE_REAL_HARNESS=1,
+// PYRE_REAL_CODEX_CWD scratch dir, the default login, no TUI).
+func TestRealCodexBackgroundWake(t *testing.T) {
+	if os.Getenv("PYRE_REAL_HARNESS") != "1" {
+		t.Skip("set PYRE_REAL_HARNESS=1 to run against the real codex")
+	}
+	cwd := os.Getenv("PYRE_REAL_CODEX_CWD")
+	if cwd == "" {
+		t.Fatal("PYRE_REAL_CODEX_CWD required (scratch dir)")
+	}
+	codex := os.Getenv("PYRE_REAL_CODEX")
+	if codex == "" {
+		codex, _ = exec.LookPath("codex")
+	}
+	dir, _ := os.MkdirTemp("", "pw")
+	defer os.RemoveAll(dir)
+	rec := &automations{}
+	o := Options{NodeID: "node_real", TmuxSocket: filepath.Join(dir, "tmux", "t.sock"), StateRoot: filepath.Join(dir, "st"),
+		CodexBin: codex, ApprovalPolicy: "never", Sandbox: "read-only", DisableTUI: true, OnAutomation: rec.add,
+		AppServerArgs: []string{"-c", `model_reasoning_effort="low"`}, DeliverTimeout: 30 * time.Second}
+	a, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	defer a.srv.KillServer(ctx)
+	if pr, _ := a.Probe(ctx); !pr.Available {
+		t.Fatalf("codex unavailable: %s", pr.Reason)
+	} else {
+		t.Logf("codex %s", pr.Version)
+	}
+	h, err := a.Launch(ctx, contracts.ResolvedLaunch{RunID: "run_rbw", SessionID: "ses_rbw", Harness: contracts.HarnessCodex, Cwd: cwd,
+		StateDir: filepath.Join(dir, "runs", "run_rbw"), Unset: []string{"OPENAI_API_KEY", "CODEX_API_KEY"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Stop(ctx, h)
+	t0 := time.Now()
+	waitState := func(label string, d time.Duration, want contracts.RunState) {
+		t.Helper()
+		end := time.Now().Add(d)
+		for time.Now().Before(end) {
+			if obs, _ := a.Observe(ctx, h, ""); obs.State == want {
+				t.Logf("%6.1fs %s: %s", time.Since(t0).Seconds(), label, want)
+				return
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		t.Fatalf("%s: never %s", label, want)
+	}
+	waitState("launched", 30*time.Second, contracts.RunWaitingInput)
+	r, err := a.Deliver(ctx, h, contracts.DeliveryInput{MessageID: "msg_rbw", AttemptID: "dlv_rbw",
+		Text: "Run this exact shell command once: `sleep 30; echo pyre-bg-done`. It yields back to you while still running: do not wait, poll or call any other tool; end your turn immediately by replying with the single word started."})
+	if err != nil || r.State != contracts.DeliveryAccepted {
+		t.Fatalf("deliver: %+v %v", r, err)
+	}
+	waitState("first turn ended", 120*time.Second, contracts.RunWaitingInput)
+	var notice string
+	end := time.Now().Add(150 * time.Second)
+	for notice == "" && time.Now().Before(end) {
+		ns, _ := wakeEntries(t, a, h)
+		if len(ns) > 0 {
+			notice = ns[0].Text
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if notice == "" {
+		t.Fatal("no wake turn after the background command finished")
+	}
+	t.Logf("%6.1fs wake notice:\n%s", time.Since(t0).Seconds(), notice)
+	if !strings.Contains(notice, "sleep 30; echo pyre-bg-done") || !strings.Contains(notice, "exit 0") || !strings.Contains(notice, "pyre-bg-done") {
+		t.Fatalf("unexpected notice")
+	}
+	waitState("wake turn ended", 120*time.Second, contracts.RunWaitingInput)
+	_, all := wakeEntries(t, a, h)
+	for _, e := range all {
+		t.Logf("transcript %-12s %s", e.Kind, oneLine(e.Text, 200))
+	}
+	time.Sleep(5 * time.Second)
+	if ns, _ := wakeEntries(t, a, h); len(ns) != 1 || rec.wakes() != 1 {
+		t.Fatalf("want exactly one wake (got %d notices, %d automation reports)", len(ns), rec.wakes())
+	}
+}

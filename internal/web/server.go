@@ -214,6 +214,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/held/{ask_id}/undo", s.handleHeldUndo)
 	m.HandleFunc("GET /api/projects", s.handleProjects)
 	m.HandleFunc("GET /api/projects/{project_id}", s.handleProject)
+	m.HandleFunc("POST /api/grants/{grant_id}/revoke", s.handleRevokeGrant)
 	m.HandleFunc("GET /api/artifacts/{artifact_id}/content", s.handleArtifactContent)
 	m.HandleFunc("GET /api/events", s.handleEvents)
 	m.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

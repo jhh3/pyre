@@ -93,7 +93,7 @@ func TestWithRunBlocked(t *testing.T) {
 
 func TestResolveTitle(t *testing.T) {
 	cases := []struct{ title, sid, st, want string }{
-		{"Message from ses_01M49FMAXZGB21V7ZSHN3GA2H2", "ses_01M49FMAXZGB21V7ZSHN3GA2H2", "atlas-wt-retry", "Message from atlas-wt-retry"},
+		{"Message from ses_01JSYNTH0000000000000000FL", "ses_01JSYNTH0000000000000000FL", "atlas-wt-retry", "Message from atlas-wt-retry"},
 		{"Message from ses_x", "ses_x", "", "Message from ses_x"},
 		{"Message from ses_x", "", "t", "Message from ses_x"},
 		{"Approve: run tests", "ses_x", "t", "Approve: run tests"},

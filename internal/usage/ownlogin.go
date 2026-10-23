@@ -79,6 +79,24 @@ func ownCard(v *contracts.AccountView, ids []string, nodes []contracts.Node, now
 			obs = o
 		}
 	}
+	if obs == nil {
+		// A harness that reports its own login's usage (agy).
+		for _, n := range nodes {
+			if !in[n.NodeID] {
+				continue
+			}
+			for i := range n.Harnesses {
+				h := &n.Harnesses[i]
+				if h.Harness != harnessFor(v.Account.Provider) || !h.Available {
+					continue
+				}
+				if o := harnessObs(v.Account.Provider, n.NodeID, h.Usage); o != nil && (obs == nil || o.ObservedAt.After(obs.ObservedAt)) {
+					o.AccountID = v.Account.AccountID
+					obs = o
+				}
+			}
+		}
+	}
 	c := Card{Provider: v.Account.Provider, Account: &v.Account, Obs: obs, TokenNodes: ids, Own: true,
 		Machines: machinesText(ids, nodes, v.Account.Provider)}
 	switch {

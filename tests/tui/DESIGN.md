@@ -425,11 +425,13 @@ synthetic labels on the shapes of a real pool via `demo -fixtures`.)
   (`▏▎▍▌▋▊▉█`, accent below 60 %, amber to 85 %, red above; empty cells on
   a subtle track in 256/truecolor, faint `░` otherwise), `% used`, the
   reset as `in 2h 19m` with the absolute time faint (dropped first when
-  short of room), and `1 session` in use. Below ~118 columns the bars go on
+  short of room), a dim `reserve` for an account in the reserve tier
+  (`pyre accounts tier`), and `1 session` in use. Below ~118 columns the bars go on
   a second line. The row's state is its best login's (as `usage.Pools`
   counts it). The selected row expands: machines with by-machine
   readings, the sessions on it (`<session> on <machine> · since 30m ago`),
-  model-scoped/extra windows and a note on the state.
+  model-scoped/extra windows, the tier of a reserve account and a note on
+  the state.
 - State in plain words (`internal/usage`, shared with the CLI, the
   selector and Android): healthy, near limit (5h or weekly ≥ 80 %, amber),
   at limit (red, until the reset), needs re-auth (grant expired/dead, or
@@ -545,90 +547,134 @@ where it ran and the full snippet.
 
 `n` opens the **New session** panel: a centered form over the dimmed view
 (owner: "still pretty clunky; scrolling through the list resets machine and
-everything; … you shouldn't have to use shortcuts to toggle machine and
-harness — a different selection mechanism is needed"). Every field is
-labeled and stacked; the focused one is marked `›` and highlighted.
+everything; … a different selection mechanism is needed", then: "you should
+select the machine first and repo or folder (the folder selection is really
+bad)"). Every field is labeled and stacked; the focused one is marked `›`.
+The machine comes first, because Where, the agents and the model choices
+all depend on it.
 
 ```
-╭─ New session ──────────────────────────────────────────────────────────────╮
-│ › Where      orbit▏                                                        │
-│              GitHub                                                        │
-│              › orbit             demo/orbit         not cloned   contributed 5h ago │
-│   Machine    ● synth-linux · will clone   ○ synth-mac · will clone   auto  │
-│   Agent      ● Claude   ○ Codex   ○ Shell   auto                           │
-│   Workspace  ● main checkout   ○ fresh worktree   ○ new branch   auto      │
-│   Account    ● auto   ○ claude-personal-a   ○ claude-work-c                │
-│   Prompt     optional first prompt (shift+enter: new line)                 │
-│   Title      auto (named from the prompt)                                  │
-│ ────────────────────────────────────────────────────────────────────────── │
-│ Claude on synth-linux · demo/orbit (clone first) · main checkout · account auto │
-│ enter: next field · ^s or ^⏎: start · esc: cancel   [ Start ^s ]  [ Cancel ] │
-╰────────────────────────────────────────────────────────────────────────────╯
+╭─ New session ────────────────────────────────────────────────────────────────╮
+│ › Machine    ● synth-linux  1/16 runs · cpu 7% · mem 40%    claude shell  auto │
+│              ○ synth-mac    2/8 runs · cpu 18% · mem 63%    claude codex shell │
+│   Where      (atlas)                                                         │
+│              Repositories on synth-linux                                     │
+│              › atlas          ~/src/atlas         demo/atlas   contributed 26h ago │
+│              Recent folders on synth-linux                                   │
+│                ses_synth-b    ~/work/ses_synth-b               used 30m ago  │
+│                ⇣ Clone a GitHub repo here…        any repository not on synth-linux │
+│                📁 Browse folders…                 any folder on synth-linux, or a new one │
+│   Agent      ● Claude   ○ Shell   auto                                       │
+│   Model      ● default                                                       │
+│   Effort     ● default                                                       │
+│   Workspace  ● main checkout   ○ fresh worktree   ○ new branch   auto        │
+│   Account    ● auto   ○ claude-personal-a   ○ claude-work-c                  │
+│   Prompt     optional first prompt (shift+enter: new line)                   │
+│   Title      auto (named from the prompt)                                    │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│ Claude on synth-linux · demo/atlas · main checkout · account auto            │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-- **Where** is a type-to-filter list (fuzzy) over the global repo catalog
-  (`repos.catalog`: every machine's index plus your GitHub repositories,
-  deduplicated by remote), grouped *Recent* (where sessions ran lately) ·
-  *On <machine>* (the panel's machine) · *Other machines* · *GitHub* (not
-  cloned anywhere) · *Folders* (`home`). A new filter highlights the best
-  match wherever its group is. ↑/↓ (and the wheel, anywhere over the panel)
-  move the highlight and **never change another field**: each field keeps
-  its own state, and the highlight is kept by identity across refreshes.
-  `owner/name` that the catalog lacks is offered as a GitHub clone. A path
-  (`/…`, `~/…`, `./…`, `../…`) lists the machine's folders (`dir.list`; Tab
-  or → completes the next segment; spaces need no quoting, a pasted escaped
-  path is unescaped); a missing folder is offered as **create** (`fs.mkdir`).
+- **Machine** lists every node, one row each, with its load as the Machines
+  list shows it (runs, CPU or load per core, memory) and the agents it can
+  run; disconnected nodes are faint (`offline · seen 3h ago`) and cannot be
+  chosen. ↑/↓ (←/→, space, a click) choose; ↓ past the last machine moves
+  on to Where; typing a letter there filters Where. The automatic machine
+  (`auto`, fixed when the panel opens) is this machine when it is a node,
+  else the machine last used from the panel, else the least loaded.
+- **Where** is a type-to-filter list (fuzzy) scoped to the chosen machine:
+  *Repositories on <machine>* (its checkouts in `repos.catalog`), then
+  *Recent folders on <machine>* (where sessions ran there lately, and
+  `home`), then two rows pinned under the list: "⇣ Clone a GitHub repo
+  here…" and "📁 Browse folders…". Other machines' repositories are not
+  mixed in; changing the machine re-scopes the list and keeps the filter
+  text (a folder chosen on the old machine and added repositories are
+  dropped). A filter that matches a repository only on other machines adds
+  *On other machines* rows ("notes-app · on synth-mac · enter: switch
+  there", the machine last used with it, else one that has it): Enter or
+  `^s` switches the machine (and `^s` starts there) instead of cloning a
+  second copy. A filter matching nothing anywhere highlights Clone when
+  repositories elsewhere or on GitHub match (its row says how many), else
+  Browse. ↑/↓
+  (and the wheel) move the highlight and **never change another field**.
   `+` adds the highlighted repository and starts a new filter: several
   repositories get fresh worktrees in `~/pyre-work/<slug>/`.
-- **Browse folders (W-browse).** "📁 Browse folders…" is pinned as the last
-  row of the Where list, also while filtering (and highlighted when a
-  non-path filter matches nothing); a faint hint under an empty or short
-  Where reads "type a repo name, or a path like ~/scratch · ↓ Browse
-  folders". Enter or a click opens an inline browser in the list's place on
-  the chosen machine, at ~ or the typed path (`dir.list`): ↑/↓ move, → or
-  Enter opens a folder, ← or Backspace goes up (the folder you came from
-  stays highlighted), typing filters the listing, "✓ Use this folder"
-  (Enter, or ^s anywhere) chooses, "＋ New folder…" takes a name inline and
-  creates it (`fs.mkdir`, one operation id per path) then opens it, Esc
-  returns to the list. Choosing sets Where to the folder and fixes Machine
-  to the browsed one; agent, workspace and the rest are untouched. Golden:
-  `newsession-browse-120`. Recent folders (non-repository working
-  directories) show under Recent by folder name, path dim.
-- **Machine, Agent, Workspace, Account** are segmented pickers: every
-  option visible, ←/→ (space) or a click changes them; `^o`/`^t` remain
-  optional accelerators. Machine options say whether the chosen repository
-  is there (`· has it`, `· will clone`, `· offline`; `· has all` / `· clones
-  N` for several). A field you have not set shows its automatic value,
-  marked `auto`: the Recent row's machine, else the machine last used with
-  that repository from this panel, else the panel's machine when it has
-  the repository, else the best machine that has it, else the panel's
-  machine (which clones). Agent and Workspace default to what was last used
-  with the repository (remembered per repository in the TUI state file).
-  Workspace: main checkout / fresh worktree / new branch (type the name);
-  not shown for folders. Account: auto (eligible) or a specific account of
-  the agent's provider.
+- **Clone a GitHub repo here…** (Enter or a click) turns the list into the
+  repositories the machine lacks and can clone (GitHub, or present
+  elsewhere with a remote), filtered by the same text; `owner/name` the
+  catalog lacks is offered too. Starting clones it first (`repo.clone`);
+  Esc returns to the machine's list.
+- **Folder picker** ("📁 Browse folders…", or any path typed in Where:
+  `/…`, `~…`, `./…`, `../…`, `C:\…`; a lone `.` or `..` stays a filter
+  until its slash) replaces the list with the chosen machine's
+  filesystem (`dir.list`). The input is a path; the current folder is the
+  header (`in ~/src on synth-linux (~ is /home/demo)`). Tab completes the
+  last segment: a unique prefix is entered, several extend to their common
+  prefix and are listed ("2 folders: api  apps"). `~` at the start of a
+  segment goes to the machine's home, `/` to the root. ↑/↓ move, → or Enter
+  on a folder goes in, ← (or Backspace on an empty segment) goes up with the
+  folder left highlighted. With an empty segment the list also offers `⌂
+  home`, `⑂ worktrees` (the node's `--worktree-root`) and up to three
+  recent folders there. Only folders show; dot-folders only when the
+  segment starts with `.` (a separate `hidden` listing, asked for only
+  then). "✓ Use this folder" (Enter) chooses it; a typed name that does
+  not exist reads "✓ Use ~/src/new · new folder, created first"
+  (`fs.mkdir` when starting). "New" needs evidence: the listing lacks the
+  name, or the node says the folder does not exist; Use waits while the
+  listing loads; a listing that timed out or was refused leaves the folder
+  "not verified" (Use starts there) and a transient failure is retried.
+  `^s`/`^⏎` and `[ Start ^s ]` use the picker, never Where's rows: the
+  highlighted folder when you moved to it (or it is exactly what you
+  typed), else the typed path. `./x` and `../x` resolve against the TUI's
+  directory on this machine; another machine has none, so they start at
+  its home. On a Windows node (its platform, or a drive-letter home) paths
+  keep forward slashes, `\` is a separator, `/` goes to the drive root,
+  `C:` to that drive, and ← stops at the root. Each listing is fetched
+  once per panel (cached for its lifetime; a spinner while it loads); an
+  offline machine is named and polled, and listed again when it returns. Choosing fixes Machine to the browsed one and leaves
+  agent, workspace and the rest untouched; Esc returns to the list.
+  `dir.list` gained `hidden` and returns `home` and `worktree_root`; an
+  older pyred ignores them: no dot-folders (the picker says so), no
+  worktrees shortcut, home taken from its listing of `~`.
+- **Agent, Model, Effort, Workspace, Account** are segmented pickers: every
+  option visible, ←/→ (space) or a click changes them; `^o`/`^t` cycle
+  machine and agent from anywhere. Agent offers only what the machine can
+  run (an unavailable harness is not offered; a node reporting none offers
+  Claude, Codex and Shell); a choice the new machine lacks falls back to
+  `auto`. Model and Effort list the machine's choices for that agent. A
+  field you have not set shows its automatic value, marked `auto`: Agent
+  and Workspace default to what was last used with the repository
+  (remembered per repository in the TUI state file, with the last machine
+  and agent overall). Workspace: main checkout / fresh worktree / new
+  branch (type the name); not shown for folders. Account: auto (eligible)
+  or a specific account of the agent's provider.
 - **Prompt** is multi-line (shift+enter, alt+enter or ctrl+j for a new
   line); **Title** is optional (auto from the prompt).
-- **Keys:** Tab/Shift-Tab move between fields (↑/↓ too outside the list);
+- **Keys:** Tab/Shift-Tab move between fields (↑/↓ too outside the lists);
   Enter moves on and on Title starts; `^s` or `^⏎` starts from anywhere;
-  Esc cancels; `^a` opens the step-by-step launch. Mouse: click a field,
-  an option, a row, `[ Start ^s ]` or `[ Cancel ]`.
+  Esc cancels (in the clone list or the picker it goes back first); `^a`
+  opens the step-by-step launch. Mouse: click a field, an option, a machine,
+  a row, `[ Start ^s ]` or `[ Cancel ]`.
 - **Summary and validation:** one line says exactly what starts ("Claude on
   server · acme/atlas · fresh worktree pyre/fix-cache · account auto");
   problems show inline (`!` by the field, the reason at the bottom) and
-  starting is refused: no match, offline machine, a repository without a
-  remote that the machine lacks, an empty or invalid branch name.
+  starting is refused: nothing chosen, offline machine, a machine with no
+  agent, a repository without a remote that the machine lacks, an empty or
+  invalid branch name.
 - **Starting** runs the steps in the panel with progress ("◌ cloning
   demo/orbit on synth-linux (not there yet)… 12s", then the worktree, then
   the session); each step has its own operation id, so a retry after an
   unknown outcome never clones, creates or starts twice. A clone never
   overwrites a directory (`repo.clone`).
 
-Goldens: `newsession-open-120` (empty: Recent first), `newsession-120`
-(typed repo), `newsession-fields-120` (Codex, fresh worktree, multi-line
-prompt, title), `newsession-clone-120` (GitHub-only repo: will clone),
-`newsession-path-120` (folder completion). The screenshots below predate
-the form and need regenerating with `screenshot.py`.
+Goldens: `newsession-open-120` (Machine first, the machine's repositories
+and recent folders), `newsession-120` (typed repo), `newsession-fields-120`
+(synth-mac, Codex, fresh worktree, multi-line prompt, title),
+`newsession-clone-120` (the clone list: will clone), `newsession-picker-home-120`
+(picker at ~ with its shortcuts), `newsession-picker-120` (Tab on an
+ambiguous prefix). The screenshots below predate the form and need
+regenerating with `screenshot.py`.
 
 | | |
 |---|---|
@@ -953,7 +999,7 @@ and ignored; a syntax error falls back to the defaults.
 | `alt+s` / `␣s` | `global.switcher` | quick switcher (tmux `prefix s`): type to fuzzy-filter, recent first, `enter` switches (keeps typing focus when opened in the terminal), `esc` closes |
 | `a` | `sessions.answer` | approve / answer the selected session's pending request |
 | `m` | `sessions.message` | message (queue or steer); while the session has a message for you, the composer replies to it (threaded) |
-| `d` | `sessions.dismiss` | dismiss the session's message for you (acknowledge without a reply; clears its `✉ message` flag) |
+| `d` | `sessions.dismiss` | dismiss what the session has for you: its message (acknowledge without a reply; clears its `✉ message` flag), else what its flag shows: its open asks (confirm `y`: withdrawn by the owner, no option, the default never applies), its "waiting on you" or its own flag (handled); each `d` takes the next. A dismissable flag shows as `! <why> — m reply · d dismiss` under the session's header |
 | `H` | `sessions.history` | message history & reconcile: delivery states of messages to/from this session |
 | `!` | `sessions.interrupt` | interrupt (confirms) |
 | `x` | `sessions.stop` | stop (confirms) |
@@ -966,7 +1012,7 @@ and ignored; a syntax error falls back to the defaults.
 | `R` | `sessions.rename` | rename: a one-line editor prefilled with the title (`enter` saves, `esc` cancels); also `:rename <title>` and a click on the title in the pane header. A person's name stays: automatic naming stops for that session. On a session whose launch never started (pyred restarted before the harness started; failed, nothing ran) `R` relaunches it instead (confirms; same harness, directory, prompt, account policy, title, parent) |
 | `p` | `sessions.project` | open or associate a project |
 | `*` | `sessions.pin` | pin / unpin the session (also `:pin`). Pinned sessions sit in a "Pinned" group on top in every grouping, ordered by pin time, and lead the Grid. Stored as the reserved session tags `pinned` + `pinned_at:<unix>` via sessions.update, so pins sync to every TUI and the phone. (In Sessions `*` pins; `2` / `␣p` open Projects) |
-| `n` | `sessions.new` | launch a new session (when no filter is active): the New session form (Where, Machine, Agent, Workspace, Account, Prompt, Title; `^s` starts); `^a` in it opens the step-by-step launch |
+| `n` | `sessions.new` | launch a new session (when no filter is active): the New session form (Machine, Where, Agent, Model, Effort, Workspace, Account, Prompt, Title; `^s` starts); `^a` in it opens the step-by-step launch |
 | `g b` | `sessions.group` | group the Sessions list by project (default) → attention (Needs you / Message for you / Working / Idle / Ended) → machine → repo → none (a flat list: needs you, then recent activity); also `:group <mode>`; an explicit choice is remembered in tui-state.json (`group_version` 2). Repo comes from the run's directory: worktrees (`<repo>/.claude/worktrees/x`, `<repo>/.worktrees/x`, `<repo>-worktrees/x`) map to their repo. Headers are quiet: faint name, count, a status summary (project) or health dot (machine), an amber `•` when the group needs you |
 | `g s` | `sessions.sort` | sort inside groups: name (machine, then title; default) → attention (needs you, then message for you, then the rest) → activity (most recent first) → yours (you messaged or typed most recently first; never: last); also `:sort <mode>`; remembered as `sort` in tui-state.json. The flat list (`none`) sorts by attention, then activity, unless a sort is chosen |
 | `v` | `sessions.view` | Sessions view: sidenav (list + terminal, default) → table → grid; also `:view <mode>`; remembered as `sessions_view` in tui-state.json |

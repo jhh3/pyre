@@ -102,7 +102,7 @@ func (b *Backend) CreateEnrollment(ctx context.Context, req c.EnrollmentRequest)
 		}
 		b.nodes[n.NodeID] = n
 		b.emit(c.EvNodeEnrolled, ref(c.KindNode, n.NodeID), "", nil, n)
-		return c.EnrollmentTicket{NodeID: n.NodeID, Secret: "mock-enroll-" + randomSecret(), ExpiresAt: now.Add(ttl), HubURL: b.opts.HubURL, HubCertSHA256: b.opts.HubCertSHA256}, nil
+		return c.EnrollmentTicket{NodeID: n.NodeID, Secret: "pye_mock-enroll-" + randomSecret(), ExpiresAt: now.Add(ttl), HubURL: b.opts.HubURL, HubCertSHA256: b.opts.HubCertSHA256}, nil
 	})
 }
 

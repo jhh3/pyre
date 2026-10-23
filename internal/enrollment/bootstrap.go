@@ -1,7 +1,10 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net/url"
@@ -9,23 +12,38 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/transport"
 )
 
-// DefaultRemoteDir is where the bootstrap installs pyred on the target, in
-// a user-owned directory (no root, no service installation; WP20 owns
-// service install).
+// DefaultRemoteDir is where the bootstrap installs pyred on a macOS or
+// Linux target, in a user-owned directory (no root, no service
+// installation; WP20 owns service install). It is install.sh's prefix.
 const DefaultRemoteDir = "~/.local/share/pyre"
+
+// DefaultWindowsRemoteDir is the Windows equivalent: install.ps1's prefix
+// (%LOCALAPPDATA%\Programs\Pyre for a standard profile), where install.ps1
+// finds bin\pyred.exe and node-credential.json from a bootstrap.
+const DefaultWindowsRemoteDir = "~/AppData/Local/Programs/Pyre"
+
+// Target operating systems a bootstrap plan is built for.
+const (
+	TargetUnix    = "unix"    // macOS, Linux: POSIX shell steps
+	TargetWindows = "windows" // PowerShell steps (Windows OpenSSH, any login shell)
+)
 
 // Step is one local command of a bootstrap plan. Stdin carries secret
 // material (the enrollment secret) so it never appears in argv, remote
-// process listings, or printed plans.
+// process listings, or printed plans. Display, when set, is what a printed
+// plan shows instead of Argv (a readable form of an encoded PowerShell
+// script).
 type Step struct {
-	Name  string
-	Argv  []string
-	Stdin string
+	Name    string
+	Argv    []string
+	Stdin   string
+	Display string `json:",omitempty"`
 }
 
 // Plan is the exact sequence of scp/ssh invocations that installs pyred on a
@@ -34,6 +52,7 @@ type Step struct {
 // StrictHostKeyChecking or UserKnownHostsFile options.
 type Plan struct {
 	Alias          string
+	Target         string
 	HubURL         string
 	NodeID         string
 	RemoteDir      string
@@ -43,11 +62,12 @@ type Plan struct {
 }
 
 var (
-	aliasRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
-	remoteDirRe = regexp.MustCompile(`^(~/|/)[A-Za-z0-9._/-]*$`)
+	aliasRe        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
+	remoteDirRe    = regexp.MustCompile(`^(~/|/)[A-Za-z0-9._/-]*$`)
+	winRemoteDirRe = regexp.MustCompile(`^~/[A-Za-z0-9._/-]*$`)
 )
 
-// SSHBootstrapPlan builds the plan:
+// SSHBootstrapPlan builds the plan for a macOS or Linux target:
 //
 //  1. ssh <alias> 'umask 077 && mkdir -p <dir>/bin'
 //  2. scp <localBinaryPath> <alias>:<dir>/bin/.pyred.new
@@ -60,6 +80,28 @@ var (
 // hubURL and pin override the ticket's fields when non-empty. remoteDir must
 // be absolute or start with "~/"; empty uses DefaultRemoteDir.
 func SSHBootstrapPlan(alias, localBinaryPath, hubURL, pin string, ticket contracts.EnrollmentTicket, remoteDir string) (Plan, error) {
+	return SSHBootstrapPlanFor(TargetUnix, alias, localBinaryPath, hubURL, pin, ticket, remoteDir)
+}
+
+// SSHBootstrapPlanFor builds the plan for target (TargetUnix or
+// TargetWindows). A Windows plan runs every remote step as
+// `powershell -NoProfile -NonInteractive -EncodedCommand <script>`, so it
+// works whether the target's OpenSSH login shell is cmd.exe or PowerShell:
+//
+//  1. create <dir>\bin under %USERPROFILE%
+//  2. scp <localBinaryPath> <alias>:<dir>/bin/.pyred.new
+//  3. Move-Item it to <dir>\bin\pyred.exe, then `pyred.exe version`
+//  4. read the secret from stdin and pipe it to `pyred.exe enroll ...
+//     --credential-file <dir>\node-credential.json --secret-stdin`
+//
+// On Windows remoteDir must start with "~/" (relative to %USERPROFILE%,
+// which is also where scp puts relative paths); empty uses
+// DefaultWindowsRemoteDir. localBinaryPath must be a pyred.exe built for
+// the target's architecture.
+func SSHBootstrapPlanFor(target, alias, localBinaryPath, hubURL, pin string, ticket contracts.EnrollmentTicket, remoteDir string) (Plan, error) {
+	if target != TargetUnix && target != TargetWindows {
+		return Plan{}, contracts.Errorf(contracts.ErrInvalid, "bootstrap target must be %q or %q (got %q)", TargetUnix, TargetWindows, target)
+	}
 	if !aliasRe.MatchString(alias) {
 		return Plan{}, contracts.Errorf(contracts.ErrInvalid, "ssh alias %q must be a plain host alias from your ssh config", alias)
 	}
@@ -84,6 +126,9 @@ func SSHBootstrapPlan(alias, localBinaryPath, hubURL, pin string, ticket contrac
 	if !contracts.ValidID(ticket.NodeID, contracts.PrefixNode) || !strings.HasPrefix(ticket.Secret, transport.PrefixEnrollSecret) {
 		return Plan{}, contracts.Errorf(contracts.ErrInvalid, "enrollment ticket is missing its node id or secret")
 	}
+	if target == TargetWindows {
+		return windowsPlan(alias, localBinaryPath, hubURL, pin, ticket, remoteDir)
+	}
 	if remoteDir == "" {
 		remoteDir = DefaultRemoteDir
 	}
@@ -94,12 +139,6 @@ func SSHBootstrapPlan(alias, localBinaryPath, hubURL, pin string, ticket contrac
 	shellPath := func(p string) string { // for the remote shell
 		if rest, ok := strings.CutPrefix(p, "~/"); ok {
 			return `"$HOME"/` + rest
-		}
-		return p
-	}
-	scpPath := func(p string) string { // scp: relative paths are relative to $HOME
-		if rest, ok := strings.CutPrefix(p, "~/"); ok {
-			return rest
 		}
 		return p
 	}
@@ -115,7 +154,7 @@ func SSHBootstrapPlan(alias, localBinaryPath, hubURL, pin string, ticket contrac
 	enroll = append(enroll, "--node-id", ticket.NodeID, "--credential-file", shellPath(cred), "--secret-stdin")
 
 	return Plan{
-		Alias: alias, HubURL: hubURL, NodeID: ticket.NodeID, RemoteDir: remoteDir, RemoteBinary: bin, CredentialFile: cred,
+		Alias: alias, Target: TargetUnix, HubURL: hubURL, NodeID: ticket.NodeID, RemoteDir: remoteDir, RemoteBinary: bin, CredentialFile: cred,
 		Steps: []Step{
 			{Name: "prepare remote directory", Argv: []string{"ssh", alias, "umask 077 && mkdir -p " + shellPath(binDir)}},
 			{Name: "copy pyred", Argv: []string{"scp", "-q", localBinaryPath, alias + ":" + scpPath(tmp)}},
@@ -125,6 +164,119 @@ func SSHBootstrapPlan(alias, localBinaryPath, hubURL, pin string, ticket contrac
 	}, nil
 }
 
+// scpPath: scp resolves relative paths against the remote home (on Windows
+// OpenSSH too, %USERPROFILE%).
+func scpPath(p string) string {
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		return rest
+	}
+	return p
+}
+
+func windowsPlan(alias, localBinaryPath, hubURL, pin string, ticket contracts.EnrollmentTicket, remoteDir string) (Plan, error) {
+	if remoteDir == "" {
+		remoteDir = DefaultWindowsRemoteDir
+	}
+	remoteDir = strings.TrimSuffix(remoteDir, "/")
+	if !winRemoteDirRe.MatchString(remoteDir+"/") || strings.Contains(remoteDir, "..") || remoteDir == "~" {
+		return Plan{}, contracts.Errorf(contracts.ErrInvalid, "on Windows the remote dir must be ~/relative (to %%USERPROFILE%%) and use only [A-Za-z0-9._/-]")
+	}
+	rel := strings.ReplaceAll(strings.TrimPrefix(remoteDir, "~/"), "/", `\`)
+	// $r is the install directory on the target; every script starts there.
+	head := "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $r = Join-Path $env:USERPROFILE " + psQuote(rel) + "; "
+	prepare := head + "New-Item -ItemType Directory -Force -Path (Join-Path $r 'bin') | Out-Null; " +
+		"$la = Join-Path $env:USERPROFILE 'AppData\\Local'; if ($env:LOCALAPPDATA -and $env:LOCALAPPDATA.TrimEnd('\\') -ne $la) { [Console]::Error.WriteLine(\"note: LOCALAPPDATA is $env:LOCALAPPDATA, not $la; pass install.ps1 -Credential $r\\node-credential.json\") }"
+	// A running pyred.exe cannot be replaced but can be renamed: move it
+	// aside first (re-bootstrapping a live node), like mv -f on unix.
+	install := head + "$b = Join-Path $r 'bin\\pyred.exe'; if (Test-Path -LiteralPath $b) { Remove-Item -Force -LiteralPath \"$b.old\" -ErrorAction SilentlyContinue; Move-Item -Force -LiteralPath $b -Destination \"$b.old\" }; " +
+		"Move-Item -Force -LiteralPath (Join-Path $r 'bin\\.pyred.new') -Destination $b; & $b version; exit $LASTEXITCODE"
+	enrollCmd := "& (Join-Path $r 'bin\\pyred.exe') enroll --hub " + psQuote(hubURL)
+	if pin != "" {
+		enrollCmd += " --pin " + pin
+	}
+	enrollCmd += " --node-id " + ticket.NodeID + " --credential-file (Join-Path $r 'node-credential.json') --secret-stdin"
+	// The secret arrives on ssh stdin and is piped to pyred's stdin; it is
+	// never in argv or the encoded script.
+	enroll := head + "$s = [Console]::In.ReadLine(); $s | " + enrollCmd + "; $c = $LASTEXITCODE; $s = $null; exit $c"
+	bin := remoteDir + "/bin/pyred.exe"
+	ps := func(name, script string) Step {
+		return Step{Name: name, Argv: []string{"ssh", alias, "powershell -NoProfile -NonInteractive -EncodedCommand " + EncodePowerShell(script)}, Display: "ssh " + alias + " powershell: " + script}
+	}
+	steps := []Step{
+		ps("prepare remote directory", prepare),
+		{Name: "copy pyred", Argv: []string{"scp", "-q", localBinaryPath, alias + ":" + scpPath(remoteDir+"/bin/.pyred.new")}},
+		ps("install pyred", install),
+		ps("enroll node", enroll),
+	}
+	steps[3].Stdin = ticket.Secret + "\n"
+	return Plan{Alias: alias, Target: TargetWindows, HubURL: hubURL, NodeID: ticket.NodeID, RemoteDir: remoteDir, RemoteBinary: bin,
+		CredentialFile: remoteDir + "/node-credential.json", Steps: steps}, nil
+}
+
+// EncodePowerShell encodes script for powershell -EncodedCommand (base64 of
+// UTF-16LE), which survives cmd.exe and PowerShell as the remote login
+// shell without any quoting.
+func EncodePowerShell(script string) string {
+	u := utf16.Encode([]rune(script))
+	b := make([]byte, 2*len(u))
+	for i, r := range u {
+		binary.LittleEndian.PutUint16(b[2*i:], r)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// ProbeTarget learns whether alias is a Windows or a POSIX host: `uname -s`
+// naming Linux, Darwin or a BSD -> TargetUnix; MINGW/MSYS/CYGWIN, Windows_NT
+// (busybox-w32, uutils) or any *_NT -> TargetWindows. Anything else, or no
+// uname, is settled by a PowerShell probe ([Environment]::OSVersion.Platform
+// = Win32NT -> TargetWindows); an unrecognised uname that PowerShell does not
+// answer stays unix. It runs read-only commands only.
+func ProbeTarget(ctx context.Context, runner Runner, alias string) (string, error) {
+	if !aliasRe.MatchString(alias) {
+		return "", contracts.Errorf(contracts.ErrInvalid, "ssh alias %q must be a plain host alias from your ssh config", alias)
+	}
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	var out, errb bytes.Buffer
+	unameErr := runner.Run(ctx, []string{"ssh", alias, "uname -s"}, strings.NewReader(""), &out, &errb)
+	other := false // uname answered, but with no OS we know
+	if unameErr == nil {
+		switch u := strings.ToUpper(strings.TrimSpace(out.String())); {
+		case strings.HasPrefix(u, "MINGW"), strings.HasPrefix(u, "MSYS"), strings.HasPrefix(u, "CYGWIN"),
+			strings.HasPrefix(u, "WINDOWS"), strings.Contains(u, "_NT"):
+			return TargetWindows, nil
+		case u == "LINUX", u == "DARWIN", strings.HasSuffix(u, "BSD"), u == "DRAGONFLY", u == "SUNOS":
+			return TargetUnix, nil
+		case u != "":
+			other = true
+		}
+	}
+	out.Reset()
+	errb.Reset()
+	psErr := runner.Run(ctx, []string{"ssh", alias, "powershell -NoProfile -NonInteractive -Command [Environment]::OSVersion.Platform"}, strings.NewReader(""), &out, &errb)
+	if psErr == nil && strings.Contains(out.String(), "Win32NT") {
+		return TargetWindows, nil
+	}
+	if other {
+		return TargetUnix, nil
+	}
+	detail := strings.TrimSpace(errb.String())
+	if unameErr != nil && detail == "" {
+		detail = unameErr.Error()
+	}
+	return "", contracts.Errorf(contracts.ErrUnavailable, "could not tell the operating system of %s (neither `uname -s` nor a PowerShell probe answered: %s); pass --target-os", alias, transport.Redact(credentialsBounded(detail)))
+}
+
+func credentialsBounded(s string) string {
+	if len(s) > 300 {
+		return s[:300] + "..."
+	}
+	return s
+}
+
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // String renders the plan for display (dry run); secrets are never shown.
@@ -132,7 +284,11 @@ func (p Plan) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "bootstrap %s (node %s) -> %s\n", p.Alias, p.NodeID, p.HubURL)
 	for i, s := range p.Steps {
-		fmt.Fprintf(&b, "  %d. %s: %s", i+1, s.Name, transport.Redact(strings.Join(s.Argv, " ")))
+		shown := s.Display
+		if shown == "" {
+			shown = strings.Join(s.Argv, " ")
+		}
+		fmt.Fprintf(&b, "  %d. %s: %s", i+1, s.Name, transport.Redact(shown))
 		if s.Stdin != "" {
 			b.WriteString("  (enrollment secret on stdin)")
 		}

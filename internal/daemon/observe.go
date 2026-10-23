@@ -308,6 +308,12 @@ func (d *Daemon) observeRun(ctx context.Context, lr *liveRun) {
 	d.applyLimit(ctx, lr, obs.LimitEvent)
 
 	if obs.State.Terminal() {
+		if obs.NativeRef != nil {
+			// Known only at the end for a headless run (pyre run).
+			lr.mu.Lock()
+			lr.rec.Run.NativeRef = obs.NativeRef
+			lr.mu.Unlock()
+		}
 		d.endRun(ctx, lr, obs.State, obs.StateReason, obs.ExitCode)
 		return
 	}

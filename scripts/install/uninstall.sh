@@ -31,6 +31,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 STOP_RUNS=0 PURGE=0 PROFILES=0 YES=0
 while [ $# -gt 0 ]; do
+  case "$1" in --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;; esac # --flag=value
   parse_common_flag "$@"
   if [ "$SHIFT_N" -gt 0 ]; then shift "$SHIFT_N"; continue; fi
   case "$1" in
@@ -181,6 +182,8 @@ for t in hive outfit rota; do # bundled tools (install.sh --with-tools); other i
   s=$(r "$SHIM_DIR/$t")
   if [ -L "$s" ] && [ "$(readlink "$s")" = "../share/pyre/tools/$t/bin/$t" ]; then act rm -f "$s"; note "removed shim $SHIM_DIR/$t"; fi
 done
+s=$(r "$SHIM_DIR/outfit-core") # install.sh links the Outfit plugin's command to the bundled outfit
+if [ -L "$s" ] && [ "$(readlink "$s")" = "../share/pyre/tools/outfit/bin/outfit" ]; then act rm -f "${s:?}"; note "removed shim $SHIM_DIR/outfit-core"; fi
 
 # ---- version directories ----
 P=$(r "$PREFIX")

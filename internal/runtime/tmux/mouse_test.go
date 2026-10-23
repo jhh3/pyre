@@ -35,7 +35,8 @@ func TestMouseThroughAttach(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	old := filepath.Join(t.TempDir(), "old.conf")
-	if err := os.WriteFile(old, []byte("set-option -g exit-empty off\nset-option -wg remain-on-exit on\n"), 0o600); err != nil {
+	// mouse off explicitly: tmux 3.8 defaults it on.
+	if err := os.WriteFile(old, []byte("set-option -g exit-empty off\nset-option -wg remain-on-exit on\nset-option -g mouse off\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s.Config = old

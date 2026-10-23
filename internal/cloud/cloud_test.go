@@ -788,7 +788,10 @@ func TestBootScripts(t *testing.T) {
 		dir := t.TempDir()
 		p := filepath.Join(dir, "startup.ps1")
 		_ = os.WriteFile(p, []byte(WindowsStartupScript), 0o600)
-		cmd := exec.Command(pwsh, "-NoProfile", "-Command", "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$null, [ref]$e); if ($e.Count) { $e | % { $_.ToString() }; exit 1 }", p)
+		// -Command joins trailing arguments into the command text (they
+		// never reach $args), so the path goes in as a quoted literal.
+		lit := "'" + strings.ReplaceAll(p, "'", "''") + "'"
+		cmd := exec.Command(pwsh, "-NoProfile", "-Command", "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("+lit+", [ref]$null, [ref]$e); if ($e.Count) { $e | % { $_.ToString() }; exit 1 }")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("startup.ps1 parse: %v\n%s", err, out)
 		}

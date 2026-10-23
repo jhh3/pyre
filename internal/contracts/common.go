@@ -99,8 +99,12 @@ type Harness string
 const (
 	HarnessClaude Harness = "claude"
 	HarnessCodex  Harness = "codex"
-	HarnessShell  Harness = "shell"
-	HarnessMock   Harness = "mock" // deterministic mock runtime; never runtime evidence
+	// HarnessAgy is Google Antigravity's CLI (agy). Pyre runs it on the
+	// node's own login only: agy has no config-dir switch, so there is no
+	// isolated per-account profile (account.isolated_profile unsupported).
+	HarnessAgy   Harness = "agy"
+	HarnessShell Harness = "shell"
+	HarnessMock  Harness = "mock" // deterministic mock runtime; never runtime evidence
 )
 
 // Provider identifies a subscription provider. Fallback never crosses providers.
@@ -109,6 +113,7 @@ type Provider string
 const (
 	ProviderAnthropic Provider = "anthropic" // Claude subscriptions
 	ProviderOpenAI    Provider = "openai"    // Codex/ChatGPT subscriptions
+	ProviderGoogle    Provider = "google"    // Antigravity (agy) Google subscriptions
 )
 
 // ProviderFor returns the subscription provider of an agent harness.
@@ -118,8 +123,33 @@ func ProviderFor(h Harness) Provider {
 		return ProviderAnthropic
 	case HarnessCodex:
 		return ProviderOpenAI
+	case HarnessAgy:
+		return ProviderGoogle
 	}
 	return ""
+}
+
+// HarnessForProvider is the agent harness whose login a provider's
+// accounts are ("" for an unknown provider).
+func HarnessForProvider(p Provider) Harness {
+	switch p {
+	case ProviderAnthropic:
+		return HarnessClaude
+	case ProviderOpenAI:
+		return HarnessCodex
+	case ProviderGoogle:
+		return HarnessAgy
+	}
+	return ""
+}
+
+// ManagedLogins reports whether Pyre can bind a harness's runs to its own
+// per-account logins (isolated profiles: Claude config dirs, Codex homes).
+// A harness with a provider but without managed logins (agy) always runs on
+// the node's own login: account selection never balances it across
+// accounts, and an explicit account must be that own login.
+func ManagedLogins(h Harness) bool {
+	return h == HarnessClaude || h == HarnessCodex
 }
 
 // RawJSON is an opaque, versioned adapter/namespace payload.

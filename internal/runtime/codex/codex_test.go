@@ -3,17 +3,20 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jhh3/pyre/internal/accounts"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
 )
 
@@ -518,9 +521,8 @@ func TestCodexTUIAttach(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if obs, _ := e.a.Observe(ctx, h, ""); obs.State != contracts.RunWaitingInput {
-		t.Fatalf("thread affected by TUI exit: %+v", obs)
-	}
+	// (The first observation may report the unseen turn as working.)
+	e.wait(e.a, h, 2*time.Second, idle) // the thread is not affected by the TUI exit
 	if _, err := e.a.Attach(ctx, h, contracts.AttachCommand{RunID: h.RunID}); err != nil {
 		t.Fatal(err)
 	}
@@ -792,5 +794,52 @@ func TestCodexReadKeepsSettledPages(t *testing.T) {
 	rr.readMu.Unlock()
 	if got2 := read(contracts.ReadSessionRequest{Limit: 500}); !reflect.DeepEqual(got2, got) {
 		t.Fatalf("after an unknown cursor: %+v, want %+v", got2, got)
+	}
+}
+
+// Starting an app-server makes its socket directory and <StateRoot>/codex
+// private to the user through fileperm.UserOnlyDir, also when they already
+// exist with looser permissions (Windows installs whose socket dir inherited
+// user+SYSTEM, which codex refuses; 0700 on Unix).
+func TestCodexSocketDirUserOnly(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, nil)
+	root := filepath.Join(e.o.StateRoot, "codex")
+	sockDir := filepath.Join(root, homeKey(e.home))
+	if err := os.MkdirAll(sockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(root, 0o755)
+	_ = os.Chmod(sockDir, 0o755)
+	var mu sync.Mutex
+	var calls []string
+	e.a.userOnlyDir = func(dir string) error {
+		mu.Lock()
+		calls = append(calls, dir)
+		mu.Unlock()
+		return fileperm.UserOnlyDir(dir)
+	}
+	h := e.launch(e.a, "run_ud", e.home, nil, nil)
+	e.wait(e.a, h, 5*time.Second, idle)
+	mu.Lock()
+	got := append([]string(nil), calls...)
+	mu.Unlock()
+	if want := []string{root, sockDir}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("userOnlyDir calls %q, want %q", got, want)
+	}
+	for _, d := range []string{root, sockDir} {
+		if st, err := os.Stat(d); err != nil || st.Mode().Perm() != 0o700 {
+			t.Fatalf("%s: %v %v, want 0700", d, st.Mode(), err)
+		}
+	}
+
+	// A start that cannot secure the directory fails instead of launching
+	// an app-server that would refuse its socket.
+	e2 := newEnv(t, nil)
+	e2.a.userOnlyDir = func(string) error { return errors.New("acl denied") }
+	_, err := e2.a.Launch(context.Background(), contracts.ResolvedLaunch{RunID: "run_ud2", SessionID: "ses_x", Harness: contracts.HarnessCodex,
+		Cwd: e2.dir, StateDir: filepath.Join(e2.dir, "runs", "run_ud2"), ProfileDir: e2.home})
+	if err == nil || !strings.Contains(err.Error(), "acl denied") {
+		t.Fatalf("launch err %v, want acl denied", err)
 	}
 }

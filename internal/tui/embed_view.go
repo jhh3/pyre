@@ -34,6 +34,8 @@ func (m *Model) viewSessionTerm(w, h int) []string {
 	out := []string{m.termHeader(s, w, focused)}
 	if line := m.messageLine(s, w); line != "" && h >= 8 {
 		out = append(out, line)
+	} else if line := m.dismissLine(s, w); line != "" && h >= 8 {
+		out = append(out, line)
 	}
 	th := h - len(out)
 	if th < 1 {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/harnessargs"
 	"github.com/jhh3/pyre/internal/sysstats"
 	"github.com/jhh3/pyre/internal/terminal"
 )
@@ -26,12 +28,13 @@ func (a *App) addSessionCommands(root *cobra.Command) {
 		fl.StringVar(&f.Node, "node", "", "only sessions whose current run is on this node")
 		fl.StringVar(&f.Project, "project", "", "only sessions in this project")
 		fl.BoolVar(&standalone, "standalone", false, "only sessions without a project")
-		fl.StringVar(&f.Harness, "harness", "", "claude, codex or shell")
+		fl.StringVar(&f.Harness, "harness", "", "claude, codex, agy or shell")
 		fl.StringVar(&f.Query, "query", "", "text search")
 		fl.StringSliceVar(&f.States, "state", nil, "run states (running, waiting_input, waiting_approval, exited, unknown, ...)")
 		fl.BoolVar(&f.IncludeArchived, "archived", false, "include archived sessions")
 		fl.BoolVar(&endedOnly, "ended", false, "only ended sessions (exited, failed or without a run; not archived)")
 		fl.BoolVar(&all, "all", false, "every session, archived ones included (same as --archived)")
+		fl.BoolVar(&f.IncludeMonitors, "monitors", false, "include monitor sessions (pyre monitor add); by default they are left out and counted on the session they wake")
 	}
 	ls := func(cmd *cobra.Command, args []string) error {
 		ops, err := a.connect()
@@ -89,7 +92,11 @@ func (a *App) addSessionCommands(root *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			if err := a.emit(sv, func(w io.Writer) { printSession(w, sv) }); err != nil {
+			acct := ""
+			if sv.Run != nil && sv.Run.AccountID != "" {
+				acct = ops.accountDisplay(cmd.Context(), sv.Run.AccountID)
+			}
+			if err := a.emit(sv, func(w io.Writer) { printSessionAcct(w, sv, acct) }); err != nil {
 				return err
 			}
 			a.showWorktrees(cmd.Context(), ops, sv) // W-quicklaunch
@@ -130,8 +137,14 @@ archived sessions too. --json prints the sessions as an array.`,
 			}
 			done := []c.SessionView{}
 			var firstErr error
+			filed := 0
 			for _, ref := range args {
 				sv, err := ops.Archive(cmd.Context(), ArchiveParams{Session: ref, OperationID: a.opID, Force: force, WhenDone: whenDone})
+				if r, ok := approvalResult(sv, err); ok { // owner actions: filed, not refused
+					a.warnf("pyre: archive %s: %s", ref, r.Note)
+					filed++
+					continue
+				}
 				if err != nil {
 					a.warnf("pyre: archive %s: %v", ref, err)
 					if firstErr == nil {
@@ -159,6 +172,9 @@ archived sessions too. --json prints the sessions as an array.`,
 				}
 			}
 			a.afterArchive(cmd.Context(), ops, now, archiveWT) // W-quicklaunch
+			if firstErr == nil && filed > 0 {
+				return withStatus(ExitPending, fmt.Errorf("%d archive(s) filed for the owner's approval; Pyre archives when he approves and messages you", filed))
+			}
 			return firstErr
 		}),
 	}
@@ -234,12 +250,16 @@ pyre sessions unarchive restores one.`,
 	root.AddCommand(rootLs)
 
 	var sp StartParams
+	var dryRun bool
+	var launchWait time.Duration
 	start := &cobra.Command{
-		Use:   "start --node NODE --harness claude|codex|shell [--cwd DIR | --project P --repo R [--worktree B]] [--prompt TEXT]",
+		Use:   "start --node NODE --harness claude|codex|agy|shell [--cwd DIR | --project P --repo R [--worktree B]] [--prompt TEXT] [-- HARNESS_ARGS...]",
 		Short: "Start a session on a machine (no project required)",
 		Long: `Start a new session and its first run. The launch is asynchronous: the
-response means the session is recorded and the launch command queued; watch
-the run state (pyre sessions show) for the launch outcome.
+hub records the session and queues the launch command; start then waits up to
+--wait (default 20s) for the run to leave "starting". A launch that fails in
+that time is printed with its reason and exits 1 (the session exists, with
+the failed run); one still starting is left running (watch pyre sessions show).
 
 The account policy defaults to an eligible configured subscription for the
 harness's provider; --account pins one, --ambient uses the node's existing
@@ -249,9 +269,63 @@ accounts for the provider uses your own login there (pyred --default-account).
 --permissions bypass runs the harness without approval prompts or sandbox
 (the node's pyred --permissions is the default); --permissions ask keeps them.
 
+--model and --effort pick a non-default model and reasoning effort (default:
+the harness's own). Claude takes aliases (opus, sonnet, haiku, fable) or full
+model names; Codex and agy take the ids their nodes list (pyre models). A
+resume keeps the run's model.
+
+agy (Google Antigravity's CLI) runs on the node's own agy login, on machines
+where agy is installed and signed in.
+
 Run from an agent session, the new session reports back to it automatically:
 a Pyre message when it finishes a turn (with its last message), needs input,
 or exits. --no-report turns that off.
+
+Extra harness arguments go after "--" (or one per --harness-arg). They are
+checked against the harness's allowlist (Claude: --append-system-prompt-file,
+--append-system-prompt, --system-prompt-file, --channels,
+--dangerously-load-development-channels, --plugin-dir, --add-dir, --mcp-config,
+--settings, --agents, --agent; Codex: none). Flags Pyre controls (--resume,
+--session-id, permission and model flags, -p) are refused. The run records
+them; pyre resume and account switches relaunch with the same arguments.
+  pyre start --node laptop --harness claude --cwd ~/work -- \
+    --dangerously-load-development-channels plugin:NAME@MARKETPLACE \
+    --append-system-prompt-file ~/prompts/agent.md
+
+--native-resume ID continues an existing Claude conversation started outside
+Pyre (its session id; the transcript must be on the node, e.g. under
+~/.claude). Stop the original process first: two Claude processes must never
+write one conversation.
+
+--env-file PATH (absolute, on the node) gives the harness process extra
+environment variables: dotenv lines, KEY=VALUE ('quoted' or "quoted" values,
+# comments, optional "export"). The node reads the file at every launch,
+resumes and account switches included, and records only the path; the
+values never leave the node and are never logged. The file must be a
+regular file owned by the node's user and private to it (chmod 600). Keys
+Pyre sets (PYRE_*, HOME, PATH, CLAUDE_CONFIG_DIR, USERPROFILE and the other
+Windows homes, TMUX, CLAUDE_CODE_TMPDIR) are refused in any letter case, and
+so are login, provider and config-home variables (ANTHROPIC_*,
+CLAUDE_CODE_OAUTH_*, CLAUDE_CODE_USE_*, CODEX_*, OPENAI_API_KEY, GEMINI_*,
+GOOGLE_API_KEY, ...) unless empty: ANTHROPIC_API_KEY= unsets it.
+pyre resume --env-file PATH replaces the session's file; --env-file none
+drops it.
+
+--dry-run checks everything that can be checked locally and prints the start
+request (with the canonical harness arguments) instead of starting; an env
+file readable here is checked and shown with its values redacted.
+
+Lineage: started by an agent session (its PYRE_SESSION_TOKEN), the new
+session is that session's child, reports to it and joins its project when no
+--project is given. With the owner's credential (client config or
+PYRE_TOKEN) the new session is top-level even when PYRE_SESSION_ID is still
+set from an enclosing session; --parent SESSION makes it a child explicitly.
+
+Retries: an answer lost after the hub may have stored the start (hub
+restart, timeout) is retried with the same operation ID, which returns the
+stored session instead of starting another. If the hub stays silent the
+command exits 7 and names the operation ID; re-running with
+--operation-id ID is then safe.
 
 Projects and checkouts (all optional):
   --project P --repo R            run in P's recorded checkout of R on the node
@@ -264,8 +338,17 @@ Projects and checkouts (all optional):
 Record checkouts with ` + "`pyre project update P --checkout node:/abs/path:R:shared`" + `.
 When a shared checkout is already in use, the other sessions are listed so you
 can tell them what you will change.`,
-		Args: cobra.NoArgs,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {
+				return usagef("unexpected argument %q (harness arguments go after \"--\"; the prompt goes in --prompt)", args[0])
+			}
+			return nil
+		},
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
+			sp.HarnessArgs = append(sp.HarnessArgs, args...)
+			if dryRun {
+				return a.startDryRun(sp)
+			}
 			ops, err := a.connect()
 			if err != nil {
 				return err
@@ -277,12 +360,15 @@ can tell them what you will change.`,
 			if sp.Prompt, err = a.readArg(sp.Prompt); err != nil {
 				return err
 			}
-			res, err := ops.StartSession(cmd.Context(), sp)
+			var pl Placement
+			res, err := ops.StartSession(withPlacement(cmd.Context(), &pl), sp)
 			if err != nil {
 				return err
 			}
+			a.notePlaced(&pl)
 			a.warnSharedCheckout(cmd.Context(), ops, res, sp.Worktree != "")
-			return a.emit(res, func(w io.Writer) {
+			launchErr := ops.awaitLaunch(cmd.Context(), &res, launchWait)
+			if err := a.emit(res, func(w io.Writer) {
 				s := res.Session
 				fmt.Fprintf(w, "started session %s", s.Session.SessionID)
 				if s.Session.Title != "" {
@@ -292,31 +378,47 @@ can tell them what you will change.`,
 				if s.Run != nil {
 					fmt.Fprintf(w, " on %s, run %s: %s", orDash(s.NodeName), s.Run.RunID, s.Run.State)
 					if s.Run.AccountID != "" {
-						fmt.Fprintf(w, ", account %s", s.Run.AccountID)
+						fmt.Fprintf(w, ", account %s", ops.accountDisplay(cmd.Context(), s.Run.AccountID))
 					}
 				}
 				fmt.Fprintln(w)
-				if res.CommandID != "" {
+				switch {
+				case launchErr != nil:
+					return // the error says why (stderr, nonzero exit)
+				case s.Run != nil && s.Run.State == c.RunStarting && res.CommandID != "":
 					fmt.Fprintf(w, "launch command %s queued; the run state shows the outcome\n", res.CommandID)
 				}
 				fmt.Fprintf(w, "next: pyre read %s --tail 40 | pyre attach %s | pyre send %s \"...\"\n", s.Session.SessionID, s.Session.SessionID, s.Session.SessionID)
-			})
+			}); err != nil {
+				return err
+			}
+			return launchErr
 		}),
 	}
 	sf := start.Flags()
-	sf.StringVar(&sp.Node, "node", "", "node ID or name (default: this session's node, or the only connected node)")
-	sf.StringVar(&sp.Harness, "harness", "", "claude, codex or shell")
+	sf.StringVar(&sp.Node, "node", "", "node ID or name (default: the least loaded connected node with the harness, or with --project/--repo the checkout; --cwd stays on this machine)")
+	sf.StringVar(&sp.Harness, "harness", "", "claude, codex, agy or shell")
 	sf.StringVar(&sp.Cwd, "cwd", "", "absolute working directory on the node")
 	sf.StringVar(&sp.Project, "project", "", "optional project ID or name")
+	sf.StringVar(&sp.Parent, "parent", "", "make it a child of this session (ID or title); default: the calling agent session, none with the owner's credential")
 	sf.StringVar(&sp.Worktree, "worktree", "", "create/use an isolated git worktree on this branch")
 	sf.StringVar(&sp.Repo, "repo", "", "project repo ID: run in the project's recorded checkout of it on the node (shared), or the --worktree source")
-	sf.StringVar(&sp.Account, "account", "", "explicit account: ID, label or rota name, or a unique prefix (fails if ineligible)")
+	sf.StringVar(&sp.Account, "account", "", "explicit account: ID, label or rota name, or a unique prefix (at its limit: the best eligible account instead, unless --strict-account)")
+	sf.BoolVar(&sp.StrictAccount, "strict-account", false, "keep --account even when it is at its limit or ineligible (the launch fails)")
+	sf.StringVar(&sp.FallbackHarness, "fallback-harness", "", "claude: when no Codex (OpenAI) account is free, run on Claude instead (reviews, second opinions); default: fail at once")
 	sf.BoolVar(&sp.Ambient, "ambient", false, "use the node's existing default login (no Pyre account assignment)")
 	sf.StringVar(&sp.Permissions, "permissions", "", "ask (harness approval prompts) or bypass (Claude --dangerously-skip-permissions, Codex no approvals and no sandbox); default: the node's pyred --permissions")
+	sf.StringVar(&sp.Model, "model", "", "model for the session (default: the harness's own; choices: pyre models)")
+	sf.StringVar(&sp.Effort, "effort", "", "reasoning effort: low, medium, high, xhigh, max (Codex also ultra); default: the harness's own")
 	sf.StringVar(&sp.Prompt, "prompt", "", "initial prompt (- reads stdin)")
 	sf.StringVar(&sp.Title, "title", "", "session title")
 	sf.BoolVar(&sp.IncludeContext, "context", false, "include the bounded project brief at launch")
 	sf.StringSliceVar(&sp.Tags, "tag", nil, "tags")
+	sf.StringArrayVar(&sp.HarnessArgs, "harness-arg", nil, "extra harness argument (repeatable; or put them after --); allowlisted per harness, kept across resumes")
+	sf.StringVar(&sp.NativeResume, "native-resume", "", "continue this existing Claude conversation (session id) started outside Pyre")
+	sf.StringVar(&sp.EnvFile, "env-file", "", "absolute path on the node to KEY=VALUE lines for the harness environment (read on the node at every launch; only the path is recorded)")
+	sf.BoolVar(&dryRun, "dry-run", false, "check the request and print it (canonical harness arguments) without starting")
+	sf.DurationVar(&launchWait, "wait", a.LaunchWait, "wait up to this long for the launch outcome; a launch that fails exits 1 with the reason (0: return once the launch is queued)")
 	var noReport bool
 	sf.BoolVar(&noReport, "no-report", false, "do not report back to the starting session (turn finished, needs input, exited)")
 	start.PreRun = func(cmd *cobra.Command, args []string) {
@@ -436,9 +538,11 @@ uses the relay even when ssh would work.`,
 		}),
 	}
 	resume.Flags().StringVar(&rsp.Node, "node", "", "node for the new run (default: the previous run's)")
-	resume.Flags().StringVar(&rsp.Account, "account", "", "explicit account: ID, label or rota name, or a unique prefix")
+	resume.Flags().StringVar(&rsp.Account, "account", "", "explicit account: ID, label or rota name, or a unique prefix (at its limit: the best eligible account instead, unless --strict-account)")
+	resume.Flags().BoolVar(&rsp.StrictAccount, "strict-account", false, "keep --account even when it is at its limit or ineligible")
 	resume.Flags().BoolVar(&rsp.Ambient, "ambient", false, "use the node's existing login")
 	resume.Flags().BoolVar(&rsp.AllowHandoff, "allow-handoff", false, "permit a reconstructed continuation when native resume is unsupported")
+	resume.Flags().StringVar(&rsp.EnvFile, "env-file", "", "replace the session's environment file (absolute path on the node), or none to drop it; default: keep the previous run's")
 	root.AddCommand(resume)
 
 	var ap AssociateParams
@@ -677,12 +781,20 @@ func printSessions(w io.Writer, ss []c.SessionView) {
 		if s.Attention > 0 {
 			attn = fmt.Sprintf("%d", s.Attention)
 		}
-		rows = append(rows, []string{s.Session.SessionID, clip(orDash(s.Session.Title), 32), string(s.Session.Harness), node, runStateText(s), updated, strPtr(s.Session.ProjectID), attn})
+		state := runStateText(s)
+		if n := len(s.Monitors); n > 0 {
+			state += fmt.Sprintf(" (watching %d)", n)
+		}
+		rows = append(rows, []string{s.Session.SessionID, clip(orDash(s.Session.Title), 32), string(s.Session.Harness), node, state, updated, strPtr(s.Session.ProjectID), attn})
 	}
 	table(w, "ID\tTITLE\tHARNESS\tNODE\tSTATE\tUPDATED\tPROJECT\tATTN", rows)
 }
 
-func printSession(w io.Writer, sv c.SessionView) {
+func printSession(w io.Writer, sv c.SessionView) { printSessionAcct(w, sv, "") }
+
+// printSessionAcct is printSession with the run's account named
+// (accountDisplay); "" prints the bare ID.
+func printSessionAcct(w io.Writer, sv c.SessionView, acct string) {
 	s := sv.Session
 	fmt.Fprintf(w, "%s  %s\n", s.SessionID, orDash(s.Title))
 	fmt.Fprintf(w, "  harness:   %s   project: %s   created %s by %s %s\n", s.Harness, strPtr(s.ProjectID), ago(s.CreatedAt), s.CreatedBy.Kind, s.CreatedBy.ID)
@@ -694,6 +806,12 @@ func printSession(w io.Writer, sv c.SessionView) {
 	}
 	if sv.Attention > 0 {
 		fmt.Fprintf(w, "  attention: %d open item(s) (pyre attention --session %s)\n", sv.Attention, s.SessionID)
+	}
+	if t := s.MonitorTarget(); t != "" {
+		fmt.Fprintf(w, "  monitor:   wakes %s (pyre monitor rm %s)\n", t, s.SessionID)
+	}
+	for _, m := range sv.Monitors {
+		fmt.Fprintf(w, "  watching:  %s %s (%s)\n", m.SessionID, clip(m.Title, 60), orDash(string(m.State)))
 	}
 	r := sv.Run
 	if r == nil {
@@ -710,6 +828,12 @@ func printSession(w io.Writer, sv c.SessionView) {
 		fmt.Fprintf(w, " STALE: %s (not a failure; the observer lost contact)", orDash(r.Freshness.Reason))
 	}
 	fmt.Fprintln(w)
+	if r.ExitCode != nil {
+		fmt.Fprintf(w, "  exit code: %d\n", *r.ExitCode)
+	}
+	if r.NativeRef != nil && r.AdapterData["pyre.mode"] == "headless" {
+		fmt.Fprintf(w, "  native:    %s %s (headless pyre run)\n", r.NativeRef.Kind, r.NativeRef.ID)
+	}
 	if a := r.Activity; a != nil && a.Text != "" && r.State == c.RunRunning && !r.Freshness.Stale {
 		fmt.Fprintf(w, "  doing:     %s (started %s)\n", a.Text, ago(a.Since))
 	}
@@ -722,7 +846,10 @@ func printSession(w io.Writer, sv c.SessionView) {
 	}
 	fmt.Fprintf(w, "  runtime:   %s %s\n", r.Runtime.Harness, orDash(r.Runtime.Version))
 	if r.AccountID != "" {
-		fmt.Fprintf(w, "  account:   %s (assignment %s)\n", r.AccountID, orDash(r.AssignmentID))
+		if acct == "" {
+			acct = r.AccountID
+		}
+		fmt.Fprintf(w, "  account:   %s (assignment %s)\n", acct, orDash(r.AssignmentID))
 	}
 	if r.ContinuationKind != "" {
 		fmt.Fprintf(w, "  continues: %s from run %s\n", r.ContinuationKind, orDash(r.PreviousRunID))
@@ -736,12 +863,27 @@ func printSession(w io.Writer, sv c.SessionView) {
 	for _, sa := range r.Subagents {
 		fmt.Fprintf(w, "  subagent:  %s %s %s %s\n", sa.ID, orDash(sa.Kind), sa.State, clip(sa.Summary, 60))
 	}
+	if m, e := r.AdapterData["pyre.model"], r.AdapterData["pyre.effort"]; m != "" || e != "" {
+		fmt.Fprintf(w, "  model:     %s\n", modelDesc(m, e))
+	}
 	if p := r.AdapterData["pyre.permissions"]; p != "" {
 		desc := p
 		if p == "bypass" {
 			desc += " (no approval prompts, no sandbox)"
 		}
+		if c := r.AdapterData["pyre.permissions_custom"]; c != "" {
+			desc += " + custom (" + c + " may allow tools or add hooks)"
+		}
 		fmt.Fprintf(w, "  perms:     %s\n", desc)
+	}
+	if p := r.AdapterData["pyre.env_file"]; p != "" {
+		fmt.Fprintf(w, "  env file:  %s (read on the node at launch)\n", p)
+	}
+	if raw := r.AdapterData["pyre.harness_args"]; raw != "" {
+		var hargs []string
+		if json.Unmarshal([]byte(raw), &hargs) == nil && len(hargs) > 0 {
+			fmt.Fprintf(w, "  args:      %s\n", clip(harnessargs.String(hargs), 200))
+		}
 	}
 	if len(r.Capabilities) > 0 {
 		fmt.Fprintf(w, "  caps:      %s\n", strings.Join(r.Capabilities, ", "))

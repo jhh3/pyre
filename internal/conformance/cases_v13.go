@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,4 +76,37 @@ func testAccountLease(t *testing.T, s *suite) {
 	if _, err := s.api.AcquireAccountLease(nodeB, c.AcquireAccountLeaseRequest{Mutation: newOp(), AccountID: ind.AccountID, Holder: "rota-checkout:grant_ib"}); err != nil {
 		t.Fatalf("independent B: %v", err)
 	}
+}
+
+// Node-started sessions: a node credential starts only a headless pyre run
+// on itself (claude or codex, the exec claim argument, nothing else; tags forced)
+// and resumes nothing (contracts.CheckNodeStart).
+func testNodeStart(t *testing.T, s *suite) {
+	node := s.tg.As(s.ctx, c.Principal{Kind: c.PrincipalNode, ID: s.tg.NodeID})
+	exec := c.ArgPyreExec + "=" + strings.Repeat("ab", 32)
+	cwd := s.tg.Cwd
+	ok := func() c.StartSessionRequest {
+		return c.StartSessionRequest{Mutation: newOp(), NodeID: s.tg.NodeID, Harness: c.HarnessClaude, Title: "node start (conformance)",
+			Cwd: cwd, Args: []string{exec}, Tags: []string{c.TagReportParent}}
+	}
+	for name, mod := range map[string]func(r *c.StartSessionRequest){
+		"other node":  func(r *c.StartSessionRequest) { r.NodeID = "node_conformance-other" },
+		"harness":     func(r *c.StartSessionRequest) { r.Harness = c.HarnessShell },
+		"no exec arg": func(r *c.StartSessionRequest) { r.Args = nil },
+		"extra arg":   func(r *c.StartSessionRequest) { r.Args = append(r.Args, "--dangerously-skip-permissions") },
+		"prompt":      func(r *c.StartSessionRequest) { r.InitialPrompt = "synthetic" },
+	} {
+		r := ok()
+		mod(&r)
+		_, err := s.api.StartSession(node, r)
+		s.wantCode(err, c.ErrForbidden, "node start: "+name)
+	}
+	resp, err := s.api.StartSession(node, ok())
+	s.must(err, "node start, allowed shape")
+	got := resp.Session.Session
+	if !slices.Equal(got.Tags, c.NodeStartTags) || got.Parent() != "" || got.CreatedBy.Kind != c.PrincipalNode {
+		t.Fatalf("node-started session %+v", got)
+	}
+	_, err = s.api.ResumeSession(node, c.ResumeRequest{Mutation: newOp(), SessionID: got.SessionID})
+	s.wantCode(err, c.ErrForbidden, "node resume")
 }

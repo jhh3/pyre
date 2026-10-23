@@ -445,10 +445,11 @@ func (s *Server) runArgv(ctx context.Context, argv []string) (string, error) {
 	return stderr.String(), err
 }
 
-// NewSession starts a detached session running spec.Argv. spec.Env and
-// spec.Unset are applied by the pane launcher from a private file
-// (paneCommand); no command line carries an environment value, and the
-// command is never interpreted by a shell.
+// NewSession starts a detached session running spec.Argv. spec.Env,
+// spec.Unset and the argv itself reach the pane through the launcher's
+// private file (paneCommand): no command line carries an environment value
+// or a prompt (tmux refuses a client command over 16 KiB), and the command
+// is never interpreted by a shell.
 func (s *Server) NewSession(ctx context.Context, spec SessionSpec) error {
 	if err := spec.Validate(); err != nil {
 		return err

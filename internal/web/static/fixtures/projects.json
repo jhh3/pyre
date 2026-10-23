@@ -12,7 +12,10 @@
    "page_summary": "",
    "last_activity_at": "2026-10-15T15:59:00Z",
    "live_sessions": 1,
-   "active": true
+   "active": true,
+   "progress": null,
+   "phase": "",
+   "stale": false
   },
   {
    "project_id": "prj_fx_pyreweb",
@@ -37,13 +40,16 @@
    "page_summary": "Status — building. Server runs on server behind ngrok, Google sign-in limited to example.org. Web app: inbox, threads with options, held answers, project pages.",
    "last_activity_at": "2026-10-15T16:39:00Z",
    "live_sessions": 3,
-   "active": true
+   "active": true,
+   "progress": 40,
+   "phase": "Building the inbox and project pages",
+   "stale": true
   },
   {
    "project_id": "prj_fx_studio",
    "name": "Studio billing v2",
    "description": "Usage-based invoices on billing_v2 for every customer.",
-   "open_asks": 2,
+   "open_asks": 3,
    "waiting": true,
    "leads": [
     {
@@ -62,7 +68,10 @@
    "page_summary": "Status — on track, one decision pending. Schema and backfill are done and verified against prod snapshots. Waiting on you: merge before Friday’s freeze, or wait until Monday.",
    "last_activity_at": "2026-10-15T16:37:00Z",
    "live_sessions": 3,
-   "active": true
+   "active": true,
+   "progress": 65,
+   "phase": "Migrating live customers to billing_v2 in batches",
+   "stale": false
   },
   {
    "project_id": "prj_fx_vortex",
@@ -87,7 +96,10 @@
    "page_summary": "Status — needs a decision. Conversion slipped to 6.4%. Users activate but don’t reach a second project before the 7-day trial ends.",
    "last_activity_at": "2026-10-15T15:52:00Z",
    "live_sessions": 2,
-   "active": true
+   "active": true,
+   "progress": null,
+   "phase": "",
+   "stale": false
   }
  ]
 }

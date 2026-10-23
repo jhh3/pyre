@@ -1,4 +1,4 @@
- Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts             /linux  ○ synced
+ Pyre  [S Sessions 3] · P Projects · M Machines · A Accounts  /linux   cl 41%~!1   cx —!   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────
   STATUS       SESSION · 4 of 10       MACHINE      AGE  │ outfit API client · ● working · Claude
   Synthetic Outfit 1 · ◌ 1 working                       │ read-only snapshot · MOCK backend: there…

@@ -1,7 +1,7 @@
  Pyre S 3 · [P Projects] · M · A › Project         ○ synced
 ────────────────────────────────────────────────────────────
 Synthetic Outfit
-[Overview]  Docs   Artifacts   Discussion   Sessions
+[Overview]  Docs   Artifacts   Discussion   Sessions   Gran…
 
 Repos        none (a project needs no repository)
 Updated      8h ago

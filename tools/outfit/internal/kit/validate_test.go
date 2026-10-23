@@ -184,18 +184,40 @@ func TestValidateArgumentDrivenHTTPStaysHonest(t *testing.T) {
 	pkg := validPackage()
 	mode := &pkg.Modes[0]
 	mode.Operations = append(mode.Operations,
-		NormalizeOperation(Operation{Name: "api_get", Description: "Any GET", Class: "read", HTTP: &HTTPOperation{Method: "GET", Path: "/", PathArgument: "path"}}),
+		NormalizeOperation(Operation{Name: "api_get", Description: "Any GET", Class: "read", HTTP: &HTTPOperation{Method: "GET", Path: "/", PathArgument: "path", QueryArgument: "query"}}),
 		NormalizeOperation(Operation{Name: "api_call", Description: "Any call", Class: "destructive", HTTP: &HTTPOperation{Path: "/", MethodArgument: "method", Methods: []string{"POST", "DELETE"}, PathArgument: "path", BodyArgument: "body", ArgumentHeaders: []ArgumentHeader{{Name: "X-Audit-Log-Reason", Argument: "reason", Encoding: "url"}}}}),
 	)
 	if issues := Validate(pkg); len(issues) != 0 {
 		t.Fatalf("valid raw-path operations rejected: %#v", issues)
 	}
+	for _, name := range []string{"path", "method"} {
+		if !requiredSet(mode.Operations[2].Input["required"])[name] {
+			t.Errorf("api_call does not require %s: %#v", name, mode.Operations[2].Input["required"])
+		}
+	}
 	mode.Operations = append(mode.Operations,
 		NormalizeOperation(Operation{Name: "sneaky_read", Description: "Read that posts", Class: "read", HTTP: &HTTPOperation{Path: "/", MethodArgument: "method", Methods: []string{"GET", "POST"}, PathArgument: "path"}}),
+		NormalizeOperation(Operation{Name: "mixed_body", Description: "Raw and declared body", Class: "write", HTTP: &HTTPOperation{Method: "POST", Path: "/x", Body: []string{"name"}, BodyArgument: "body"}}),
+		NormalizeOperation(Operation{Name: "loose_methods", Description: "Methods without an argument", Class: "write", HTTP: &HTTPOperation{Method: "POST", Path: "/x", Methods: []string{"PUT"}}}),
+		NormalizeOperation(Operation{Name: "odd_method", Description: "Unsupported method", Class: "write", HTTP: &HTTPOperation{Path: "/", MethodArgument: "method", Methods: []string{"TRACE"}, PathArgument: "path"}}),
 		NormalizeOperation(Operation{Name: "header_swap", Description: "Credential header", Class: "write", HTTP: &HTTPOperation{Method: "POST", Path: "/x", ArgumentHeaders: []ArgumentHeader{{Name: "Authorization", Argument: "token"}}}}),
 	)
 	joined := strings.Join(Validate(pkg), "\n")
-	if !strings.Contains(joined, "must use GET") || !strings.Contains(joined, "Authorization needs a token name that is not reserved") {
-		t.Fatalf("dishonest argument-driven HTTP accepted: %s", joined)
+	for _, want := range []string{"sneaky_read: a read operation with an argument-chosen path or method must use GET", "mixed_body: bodyArgument cannot be combined", "loose_methods: methods need a methodArgument", "odd_method: unsupported argument-chosen HTTP method TRACE", "header_swap: argument header Authorization needs a token name that is not reserved"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing finding %q in:\n%s", want, joined)
+		}
+	}
+}
+
+func TestValidateAcceptsFixedHeadAndOptionsOperations(t *testing.T) {
+	pkg := validPackage()
+	mode := &pkg.Modes[0]
+	mode.Operations = append(mode.Operations,
+		NormalizeOperation(Operation{Name: "widget_head", Description: "Probe", Class: "read", HTTP: &HTTPOperation{Method: "HEAD", Path: "/widgets"}}),
+		NormalizeOperation(Operation{Name: "widget_options", Description: "Options", Class: "read", HTTP: &HTTPOperation{Method: "OPTIONS", Path: "/widgets"}}),
+	)
+	if issues := Validate(pkg); len(issues) != 0 {
+		t.Fatalf("imported HEAD/OPTIONS operations rejected: %#v", issues)
 	}
 }

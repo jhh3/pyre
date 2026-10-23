@@ -26,7 +26,7 @@ type SessionRef struct {
 
 type Thread struct {
 	ThreadID     string        `json:"thread_id"`
-	Kind         string        `json:"kind"` // "ask" | "message"
+	Kind         string        `json:"kind"` // "ask" | "message" | "attention"
 	Title        string        `json:"title"`
 	Preview      string        `json:"preview"`
 	Project      *ProjectRef   `json:"project"`
@@ -37,6 +37,9 @@ type Thread struct {
 	Unread       bool          `json:"unread"`
 	MessageCount int           `json:"message_count"`
 	NeedsReply   bool          `json:"needs_reply"`
+	// Attention is the session item a kind "attention" thread shows
+	// ("waiting on you", the session's own flag; attention.go).
+	Attention *c.AttentionItem `json:"attention,omitempty"`
 
 	open bool // belongs in the open box
 }
@@ -75,6 +78,10 @@ type SessionCard struct {
 	Node         string    `json:"node"`
 	IsLead       bool      `json:"is_lead"`
 	LastActivity *Activity `json:"last_activity"`
+	// Watching are the titles of the live monitors that wake the session
+	// (contracts/monitors.go; "monitor: " dropped); the app shows a
+	// "watching N" badge. Absent when none.
+	Watching []string `json:"watching,omitempty"`
 }
 
 type ProjectCard struct {
@@ -92,6 +99,31 @@ type ProjectCard struct {
 	// or an open ask: the app hides inactive projects by default.
 	LiveSessions int  `json:"live_sessions"`
 	Active       bool `json:"active"`
+	// From the status card: the lead's progress and phase, and Stale when
+	// work is running but the lead has not updated the page or card in
+	// StatusStaleAfter.
+	Progress *int   `json:"progress"`
+	Phase    string `json:"phase"`
+	Stale    bool   `json:"stale"`
+}
+
+// StatusCard is the project view's live status: the lead's card
+// (contracts.ProjectStatus) plus what Pyre knows itself.
+type StatusCard struct {
+	Lead *c.ProjectStatus `json:"lead"`
+	// UpdatedAt is the lead's last update of the page or card; Stale is
+	// set when sessions are working and UpdatedAt is older than
+	// StaleAfterMinutes (or missing).
+	UpdatedAt         *time.Time `json:"updated_at"`
+	Stale             bool       `json:"stale"`
+	StaleAfterMinutes int        `json:"stale_after_minutes"`
+	// Working: sessions starting or working. NeedsYou: sessions waiting on
+	// the owner (approval, flag). Idle: sessions other than the lead waiting
+	// for input. Stuck: working with no activity in StuckAfter, or failed.
+	Working  []SessionCard `json:"working"`
+	NeedsYou []SessionCard `json:"needs_you"`
+	Idle     []SessionCard `json:"idle"`
+	Stuck    []SessionCard `json:"stuck"`
 }
 
 type ArtifactRef struct {
@@ -251,7 +283,11 @@ func activeAt(v c.SessionView) time.Time {
 
 func sessionCard(v c.SessionView) SessionCard {
 	id := v.Session.SessionID
-	return SessionCard{ID: id, Title: sessionTitle(v, id), State: sessionState(v), Node: nodeName(v), IsLead: isLead(v), LastActivity: lastActivity(v)}
+	card := SessionCard{ID: id, Title: sessionTitle(v, id), State: sessionState(v), Node: nodeName(v), IsLead: isLead(v), LastActivity: lastActivity(v)}
+	for _, m := range v.Monitors {
+		card.Watching = append(card.Watching, strings.TrimPrefix(m.Title, c.MonitorTitlePrefix))
+	}
+	return card
 }
 
 // sortCards puts leads first, then the most recently active.

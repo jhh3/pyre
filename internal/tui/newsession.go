@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,29 +18,36 @@ import (
 )
 
 // The new-session panel (n), W-newsession: a form, not a command line.
-// Fields stacked vertically, each labeled: Where (a repository or folder,
-// a type-to-filter list grouped Recent · On <machine> · Other machines ·
-// GitHub · Folders), Machine, Agent, Workspace, Account (segmented pickers:
-// every option visible, ←/→ or a click changes them), Prompt (multi-line)
-// and Title. Tab/Shift-Tab (or ↑/↓ outside the list) move between fields;
-// Enter moves on, and on the last field starts; ^s or ^⏎ starts from
-// anywhere; Esc cancels.
+// The machine comes first, since everything else depends on it: Machine
+// (every node with its load and agents; offline ones greyed out), Where
+// (that machine's repositories, then its recent folders, then "Clone a
+// GitHub repo here…" and "📁 Browse folders…", a type-to-filter list),
+// Agent (what the machine has), Model and Effort (its choices for the
+// agent), Workspace, Account (segmented pickers: every option visible,
+// ←/→ or a click changes them), Prompt (multi-line) and Title. Tab /
+// Shift-Tab (or ↑/↓ outside the lists) move between fields; Enter moves
+// on, and on the last field starts; ^s or ^⏎ starts from anywhere; Esc
+// cancels. Typing on Machine filters Where.
 //
-// Each field keeps its own state: moving through the Where list never
-// changes another field's value. A field the owner has not set shows its
-// automatic value, marked "auto": the machine where the highlighted
-// repository is (or was last used from this panel), the agent and
-// workspace last used with it. A machine without the repository clones it
-// first (repo.clone), shown in the panel while it runs.
+// Each field keeps its own state: moving through a list never changes
+// another field's value; changing the machine re-scopes Where and keeps
+// its filter text. A field the owner has not set shows its automatic
+// value, marked "auto": this machine (else the last one used, else the
+// least loaded), the agent and workspace last used with the repository.
+// A repository chosen from "Clone … here" is cloned onto the machine
+// first (repo.clone), shown in the panel while it runs. A path typed in
+// Where opens the folder picker there (newsession_picker.go).
 
 const catalogKey = "repos:catalog"
 
 type nsField int
 
 const (
-	nsWhere nsField = iota
-	nsMachine
+	nsMachine nsField = iota
+	nsWhere
 	nsAgent
+	nsModel
+	nsEffort
 	nsWorkspace
 	nsAccount
 	nsPrompt
@@ -47,7 +55,7 @@ const (
 	nsFieldCount
 )
 
-var nsFieldLabels = [nsFieldCount]string{"Where", "Machine", "Agent", "Workspace", "Account", "Prompt", "Title"}
+var nsFieldLabels = [nsFieldCount]string{"Machine", "Where", "Agent", "Model", "Effort", "Workspace", "Account", "Prompt", "Title"}
 
 // Workspace choices.
 const (
@@ -63,7 +71,14 @@ const (
 	nsRepo = iota
 	nsFolder
 	nsCreate
-	nsBrowseRow // "📁 Browse folders…": opens the folder browser
+	nsBrowseRow // "📁 Browse folders…": opens the folder picker
+	nsCloneRow  // "Clone a GitHub repo here…": lists repositories to clone
+	nsSwitchRow // a repository on another machine: choosing it switches there
+)
+
+const (
+	cloneKey    = "clone"
+	nsPickedKey = "picked" // the folder chosen in the picker
 )
 
 // nsRow is one entry of the Where list.
@@ -72,12 +87,12 @@ type nsRow struct {
 	group  string
 	kind   int
 	name   string
-	detail string // owner/name or path
-	where  string // machines column
+	detail string // a path, or owner/name
+	where  string
 	note   string
 	repo   *contracts.CatalogRepo // repository rows
-	nodeID string                 // Recent rows: where it ran; folders: the machine listed
 	path   string                 // folder rows
+	nodeID string                 // switch rows: the machine that has it
 	pos    []int
 }
 
@@ -91,19 +106,22 @@ type nsPref struct {
 
 // nsMemory is the panel's remembered choices (persisted in the TUI state file).
 type nsMemory struct {
-	Agent string            `json:"agent,omitempty"` // last agent overall
-	Repos map[string]nsPref `json:"repos,omitempty"` // by catalog key
+	Machine string            `json:"machine,omitempty"` // last machine overall
+	Agent   string            `json:"agent,omitempty"`   // last agent overall
+	Repos   map[string]nsPref `json:"repos,omitempty"`   // by catalog key
 }
 
 const nsMemMax = 200
 
 func (n nsMemory) clone() nsMemory {
-	out := nsMemory{Agent: n.Agent, Repos: make(map[string]nsPref, len(n.Repos))}
+	out := nsMemory{Machine: n.Machine, Agent: n.Agent, Repos: make(map[string]nsPref, len(n.Repos))}
 	for k, v := range n.Repos {
 		out.Repos[k] = v
 	}
 	return out
 }
+
+func (n nsMemory) empty() bool { return n.Machine == "" && n.Agent == "" && len(n.Repos) == 0 }
 
 func (n *nsMemory) remember(key string, p nsPref) {
 	if n.Repos == nil {
@@ -124,9 +142,13 @@ func (n *nsMemory) remember(key string, p nsPref) {
 type nsPanel struct {
 	instance string
 	focus    nsField
-	query    string // Where filter (or a path)
+	query    string // Where filter
 	hlKey    string // highlighted row ("" = the best match)
 	extra    []contracts.CatalogRepo
+	cloning  bool   // Where lists repositories to clone onto the machine
+	folder   string // the folder chosen in the picker ("" = none)
+	// folderNew: the chosen folder does not exist yet (created first).
+	folderNew bool
 	// Explicit choices ("" / unset = automatic).
 	machine string
 	agent   contracts.Harness
@@ -134,10 +156,14 @@ type nsPanel struct {
 	wsSet   bool
 	branch  string
 	account string
+	model   string // "" = the harness default
+	effort  string // "" = the harness default
 	prompt  string
 	title   string
 
-	browse *nsBrowse // the inline folder browser, when open (newsession_browse.go)
+	autoNode string    // the automatic machine, fixed when the panel opens
+	picker   *nsPicker // the folder picker, when open (newsession_picker.go)
+	spinning bool      // a spinner tick is scheduled
 
 	starting bool
 	step     string
@@ -156,11 +182,12 @@ func (m *Model) QuickLaunchOpen() bool {
 }
 
 func (m *Model) openQuickLaunch() tea.Cmd {
-	q := &nsPanel{instance: contracts.NewID(contracts.PrefixOperation)}
+	q := &nsPanel{instance: contracts.NewID(contracts.PrefixOperation), focus: nsMachine}
 	q.cwd, _ = os.Getwd()
 	q.home, _ = os.UserHomeDir()
+	m.dropPickerCache(q.instance)
 	m.overlay = q
-	return q.load(m, q.plan(m))
+	return q.load(m)
 }
 
 // loadCatalog loads the global repo catalog; an older hub without
@@ -198,39 +225,17 @@ func (m *Model) catalog() ([]contracts.CatalogRepo, *loadState) {
 	return c.Items, st
 }
 
-// nsHomeNode is the machine the panel starts on: this machine when it is a
-// connected node, else the selected session's, else the first connected.
-func (m *Model) nsHomeNode(connected map[string]bool) string {
-	if id := m.opts.ClientNodeID; id != "" && connected[id] {
-		return id
-	}
-	if s, ok := m.selectedSession(); ok && s.Run != nil && connected[s.Run.NodeID] {
-		return s.Run.NodeID
-	}
-	ns := m.sortedNodes()
-	for _, n := range ns {
-		if connected[n.NodeID] {
-			return n.NodeID
-		}
-	}
-	if len(ns) > 0 {
-		return ns[0].NodeID
-	}
-	return ""
-}
-
-func qlDirKey(nodeID, dir string) string { return "qldir:" + nodeID + ":" + dir }
-
-// nsRecent lists where sessions ran lately: one row per machine and
-// folder, most recent first, a repository's checkout named after it.
-func (m *Model) nsRecent(items []contracts.CatalogRepo) []nsRow {
+// nsRecent lists the folders sessions ran in lately on machine nodeID,
+// most recent first; a repository's checkout (one of items) is a
+// repository row.
+func (m *Model) nsRecent(items []contracts.CatalogRepo, nodeID string) []nsRow {
 	type rc struct {
 		s  contracts.SessionView
 		at time.Time
 	}
 	var all []rc
 	for _, s := range m.sessions() {
-		if s.Run == nil || s.Run.Cwd == "" || s.Run.NodeID == "" {
+		if s.Run == nil || s.Run.Cwd == "" || s.Run.NodeID != nodeID {
 			continue
 		}
 		all = append(all, rc{s, m.lastActivity(s)})
@@ -239,24 +244,27 @@ func (m *Model) nsRecent(items []contracts.CatalogRepo) []nsRow {
 	byPath := map[string]int{}
 	for i, c := range items {
 		for _, e := range c.Present {
-			byPath[e.NodeID+"\x00"+e.Path] = i
+			if e.NodeID == nodeID {
+				byPath[e.Path] = i
+			}
 		}
 	}
 	seen := map[string]bool{}
 	var out []nsRow
 	for _, r := range all {
-		k := r.s.Run.NodeID + "\x00" + r.s.Run.Cwd
-		if seen[k] {
+		if seen[r.s.Run.Cwd] {
 			continue
 		}
-		seen[k] = true
+		seen[r.s.Run.Cwd] = true
+		// The path stays as the node reported it (tildePath compresses any
+		// /home/<user>, which on that node may not be its own home).
 		p := tildePath(r.s.Run.Cwd)
-		row := nsRow{key: "recent:" + k, group: "Recent", kind: nsFolder, name: path.Base(p), detail: p, path: p,
-			nodeID: r.s.Run.NodeID, where: m.nodeName(r.s.Run.NodeID), note: "used " + ago(m.now(), r.at)}
+		row := nsRow{key: "recent:" + r.s.Run.Cwd, kind: nsFolder, name: path.Base(p), detail: p, path: r.s.Run.Cwd,
+			note: "used " + ago(m.now(), r.at)}
 		if p == "~" {
 			row.name = "home"
 		}
-		if i, ok := byPath[k]; ok {
+		if i, ok := byPath[r.s.Run.Cwd]; ok {
 			row.kind, row.repo, row.name = nsRepo, &items[i], items[i].Name
 		}
 		out = append(out, row)
@@ -267,8 +275,8 @@ func (m *Model) nsRecent(items []contracts.CatalogRepo) []nsRow {
 	return out
 }
 
-// whereQuery is the Where text as a filter or a path (a pasted, escaped
-// or quoted path is unescaped).
+// whereQuery is the Where text as a filter (a pasted, escaped or quoted
+// path is unescaped).
 func (q *nsPanel) whereQuery() string {
 	s := strings.TrimLeft(q.query, " \t")
 	if strings.ContainsAny(s, `\'"`) {
@@ -278,20 +286,18 @@ func (q *nsPanel) whereQuery() string {
 	return s
 }
 
-func (q *nsPanel) isPathMode(items []contracts.CatalogRepo) bool {
+// pathTyped is the Where text when it is a path the folder picker should
+// take ("" when not): ~…, /…, ./…, ../… or a drive path (C:\…). A lone
+// "." or ".." waits for its slash, so ./x and ../x resolve as typed.
+func (q *nsPanel) pathTyped() string {
+	if raw := strings.TrimSpace(q.query); isDrive(raw) && len(raw) >= 3 {
+		return raw // backslashes are separators here, not escapes
+	}
 	s := strings.TrimSpace(q.whereQuery())
-	if repoindex.IsPathSpec(s) {
-		return true
+	if s == "." || s == ".." || !repoindex.IsPathSpec(s) {
+		return ""
 	}
-	if strings.EqualFold(s, "home") {
-		for _, c := range items {
-			if strings.EqualFold(c.Name, "home") {
-				return false
-			}
-		}
-		return true
-	}
-	return false
+	return s
 }
 
 func catalogNote(m *Model, c contracts.CatalogRepo) string {
@@ -308,157 +314,194 @@ func catalogNote(m *Model, c contracts.CatalogRepo) string {
 	return ""
 }
 
-// rows builds the Where list for the current text; base is the machine
-// the groups and folder listings are relative to.
-func (q *nsPanel) rows(m *Model, items []contracts.CatalogRepo, base string) (rows []nsRow, pathMode bool, dirNode, dirPath string) {
+// rows builds the Where list on machine node for the current text: its
+// repositories, its recent folders, then the Clone and Browse rows (last,
+// pinned under the list). In clone mode: the repositories it lacks.
+func (q *nsPanel) rows(m *Model, items []contracts.CatalogRepo, node string) []nsRow {
 	query := strings.TrimSpace(q.whereQuery())
-	if q.isPathMode(items) {
-		return q.folderRows(m, items, base)
+	if q.cloning {
+		return q.cloneRows(m, items, node, query)
 	}
-	shown := map[string]bool{}
-	limR := 3
-	if query == "" {
-		limR = 4
-	}
-	n := 0
-	for _, r := range m.nsRecent(items) {
-		if n >= limR {
-			break
+	var rows []nsRow
+	if q.folder != "" {
+		r := nsRow{key: nsPickedKey, group: "Folder", kind: nsFolder, name: path.Base(q.folder), detail: q.folder, path: q.folder, note: "chosen"}
+		if q.folder == "~" {
+			r.name = "home"
 		}
-		_, pos, ok := matchTerms(query, r.name, r.detail, r.where)
+		if q.folderNew {
+			r.kind, r.note = nsCreate, "new folder"
+		}
+		rows = append(rows, r)
+	}
+	nodeName := m.nodeName(node)
+	shown := map[string]bool{}
+	for _, c := range repoindex.RankCatalog(items, query) {
+		e, ok := repoindex.EntryOn(c.Present, node)
 		if !ok {
 			continue
 		}
-		r.pos = pos
-		rows = append(rows, r)
-		if r.repo != nil {
-			shown[r.repo.Key] = true
+		c := c
+		row := nsRow{key: "repo:" + c.Key, group: "Repositories on " + nodeName, kind: nsRepo, repo: &c, name: c.Name,
+			detail: tildePath(e.Path), where: c.FullName, note: catalogNote(m, c)}
+		if row.where == "" {
+			row.where = "no remote"
 		}
+		_, row.pos, _ = matchTerms(query, c.Name)
+		shown[c.Key] = true
+		rows = append(rows, row)
+		if len(shown) >= 60 {
+			break
+		}
+	}
+	// A filter matching a repository only on other machines offers going
+	// there (the machine last used with it, else the best that has it)
+	// before cloning a second copy here.
+	if query != "" {
+		n := 0
+		for _, c := range repoindex.RankCatalog(items, query) {
+			if n >= 3 {
+				break
+			}
+			if shown[c.Key] {
+				continue
+			}
+			if _, ok := repoindex.EntryOn(c.Present, node); ok {
+				continue
+			}
+			to := m.nsRepoMachine(c, node)
+			if to == "" {
+				continue
+			}
+			c := c
+			e, _ := repoindex.EntryOn(c.Present, to)
+			row := nsRow{key: "switch:" + c.Key, group: "On other machines", kind: nsSwitchRow, repo: &c, name: c.Name,
+				detail: tildePath(e.Path), where: "on " + m.nodeName(to), note: "enter: switch there", nodeID: to}
+			_, row.pos, _ = matchTerms(query, c.Name)
+			rows = append(rows, row)
+			n++
+		}
+	}
+	lim := 5
+	n := 0
+	for _, r := range m.nsRecent(items, node) {
+		if n >= lim {
+			break
+		}
+		if r.repo != nil && shown[r.repo.Key] {
+			continue
+		}
+		_, pos, ok := matchTerms(query, r.name, r.detail)
+		if !ok {
+			continue
+		}
+		r.group, r.pos = "Recent folders on "+nodeName, pos
+		if r.repo != nil {
+			r.where = r.repo.FullName
+		}
+		rows = append(rows, r)
 		n++
 	}
-	ranked := repoindex.RankCatalog(items, query)
-	if repoindex.IsGitHubSpec(query) {
-		found := false
-		for _, c := range ranked {
-			found = found || strings.EqualFold(c.FullName, query)
-		}
-		if !found {
-			remote := repoindex.GitHubRemote(query)
-			_, name, _ := strings.Cut(query, "/")
-			ranked = append(ranked, contracts.CatalogRepo{Key: repoindex.CatalogKey(contracts.Repo{RemoteURL: remote}), Name: name,
-				FullName: query, RemoteURL: remote, Present: []contracts.RepoEntry{}, GitHub: true})
+	if _, pos, ok := matchTerms(query, "home"); ok && !q.hasHome(rows) {
+		rows = append(rows, nsRow{key: "home", group: "Recent folders on " + nodeName, kind: nsFolder, name: "home", detail: "~", path: "~", pos: pos, note: "scratch · no project"})
+	}
+	clone := nsRow{key: cloneKey, kind: nsCloneRow, name: "⇣ Clone a GitHub repo here…", detail: "any repository not on " + nodeName}
+	if query != "" {
+		if k := len(q.cloneCandidates(items, node, query)); k > 0 {
+			clone.detail = strconv.Itoa(k) + " not on " + nodeName + " match “" + query + "”"
 		}
 	}
-	var here, other, gh []nsRow
-	const capGroup = 60
-	baseName := m.nodeName(base)
-	for i := range ranked {
-		c := &ranked[i]
-		if shown[c.Key] {
+	browse := nsRow{key: browseKey, kind: nsBrowseRow, name: "📁 Browse folders…", detail: "any folder on " + nodeName + ", or a new one"}
+	return append(rows, clone, browse)
+}
+
+// nsRepoMachine is the connected machine (not except) to go to for
+// repository c: the one last used with it, else the first that has it.
+func (m *Model) nsRepoMachine(c contracts.CatalogRepo, except string) string {
+	ok := func(id string) bool {
+		if id == "" || id == except {
+			return false
+		}
+		if _, has := repoindex.EntryOn(c.Present, id); !has {
+			return false
+		}
+		n := m.node(id)
+		return n != nil && n.Connection.State == contracts.ConnConnected
+	}
+	if p, has := m.nsMem.Repos[c.Key]; has && ok(p.Machine) {
+		return p.Machine
+	}
+	for _, e := range c.Present {
+		if ok(e.NodeID) {
+			return e.NodeID
+		}
+	}
+	return ""
+}
+
+// switchTo chooses a switch row: its machine, the repository highlighted
+// there (the filter kept).
+func (q *nsPanel) switchTo(r nsRow) {
+	q.setOpt(nsMachine, r.nodeID)
+	q.hlKey = "repo:" + r.repo.Key
+}
+
+func (q *nsPanel) hasHome(rows []nsRow) bool {
+	for _, r := range rows {
+		if r.kind != nsRepo && r.detail == "~" {
+			return true
+		}
+	}
+	return false
+}
+
+// cloneCandidates are the repositories machine node lacks that it can
+// clone (a remote), best match first; owner/name typed is one even when
+// the catalog does not list it.
+func (q *nsPanel) cloneCandidates(items []contracts.CatalogRepo, node, query string) []contracts.CatalogRepo {
+	var out []contracts.CatalogRepo
+	found := false
+	for _, c := range repoindex.RankCatalog(items, query) {
+		found = found || strings.EqualFold(c.FullName, query)
+		if _, ok := repoindex.EntryOn(c.Present, node); ok || c.RemoteURL == "" {
 			continue
 		}
-		row := nsRow{key: "repo:" + c.Key, kind: nsRepo, repo: c, name: c.Name, detail: c.FullName, note: catalogNote(m, *c)}
-		_, row.pos, _ = matchTerms(query, c.Name)
-		var names []string
-		for _, e := range c.Present {
-			names = append(names, e.NodeName)
-		}
-		if e, ok := repoindex.EntryOn(c.Present, base); ok {
-			row.group = "On " + baseName
-			if row.detail == "" {
-				row.detail = tildePath(e.Path)
-			}
-			row.where = baseName
-			if len(c.Present) > 1 {
-				row.where += " +" + strconv.Itoa(len(c.Present)-1)
-			}
-			if len(here) < capGroup {
-				here = append(here, row)
-			}
-			continue
-		}
+		out = append(out, c)
+	}
+	if repoindex.IsGitHubSpec(query) && !found {
+		remote := repoindex.GitHubRemote(query)
+		_, name, _ := strings.Cut(query, "/")
+		out = append([]contracts.CatalogRepo{{Key: repoindex.CatalogKey(contracts.Repo{RemoteURL: remote}), Name: name,
+			FullName: query, RemoteURL: remote, Present: []contracts.RepoEntry{}, GitHub: true}}, out...)
+	}
+	return out
+}
+
+// cloneRows is the Where list in clone mode.
+func (q *nsPanel) cloneRows(m *Model, items []contracts.CatalogRepo, node, query string) []nsRow {
+	var rows []nsRow
+	group := "Clone onto " + m.nodeName(node)
+	for _, c := range q.cloneCandidates(items, node, query) {
+		c := c
+		where := "GitHub"
 		if len(c.Present) > 0 {
-			row.group = "Other machines"
-			if row.detail == "" {
-				row.detail = tildePath(c.Present[0].Path)
+			var names []string
+			for _, e := range c.Present {
+				names = append(names, e.NodeName)
 			}
-			row.where = strings.Join(names, ", ")
-			if len(other) < capGroup {
-				other = append(other, row)
-			}
-			continue
+			where = "on " + strings.Join(names, ", ")
 		}
-		row.group, row.where = "GitHub", "not cloned"
-		if len(gh) < capGroup {
-			gh = append(gh, row)
+		detail := c.FullName
+		if detail == "" {
+			detail = c.RemoteURL
 		}
-	}
-	rows = append(append(append(rows, here...), other...), gh...)
-	if _, pos, ok := matchTerms(query, "home"); ok {
-		rows = append(rows, nsRow{key: "home", group: "Folders", kind: nsFolder, name: "home", detail: "~", path: "~", pos: pos, note: "scratch · no project"})
-	}
-	return append(rows, browseRow(m, base)), false, "", ""
-}
-
-// folderRows: a path lists the machine's folders that complete it; a
-// missing one is offered for creation.
-func (q *nsPanel) folderRows(m *Model, items []contracts.CatalogRepo, base string) (rows []nsRow, pathMode bool, dirNode, dirPath string) {
-	pth, dir := repoindex.NormPath(strings.TrimSpace(q.whereQuery()), q.cwd, q.home)
-	parent, name := repoindex.SplitPath(pth, dir)
-	res, st := get[contracts.DirListResult](m, qlDirKey(base, parent))
-	loaded := st != nil && st.have && st.err == nil
-	failed := st != nil && st.err != nil && !st.inflight
-	exists := name == "" || strings.HasPrefix(name, ".")
-	if loaded {
-		for _, d := range res.Dirs {
-			if d == name {
-				exists = true
-			}
+		row := nsRow{key: "clone:" + c.Key, group: group, kind: nsRepo, repo: &c, name: c.Name, detail: detail, where: where, note: catalogNote(m, c)}
+		_, row.pos, _ = matchTerms(query, c.Name)
+		rows = append(rows, row)
+		if len(rows) >= 60 {
+			break
 		}
 	}
-	self := nsRow{key: "dir:" + pth, group: "Folders", kind: nsFolder, name: path.Base(pth), detail: pth, path: pth, nodeID: base, note: "folder"}
-	switch {
-	case pth == "~":
-		self.name, self.note = "home", "scratch · no project"
-	case failed || (loaded && !exists):
-		self.kind, self.key, self.note = nsCreate, "create:"+pth, "new folder"
-	case !loaded:
-		self.note = "checking…"
-	}
-	var kids []nsRow
-	if loaded {
-		lname := strings.ToLower(name)
-		for _, d := range res.Dirs {
-			if (name == "" || strings.HasPrefix(strings.ToLower(d), lname)) && d != name {
-				var pos []int
-				for i := range []rune(name) {
-					pos = append(pos, i)
-				}
-				p := repoindex.JoinPath(parent, d)
-				kids = append(kids, nsRow{key: "dir:" + p, group: "Folders", kind: nsFolder, name: d, detail: p, path: p, nodeID: base, pos: pos, note: "folder"})
-				if len(kids) >= 30 {
-					break
-				}
-			}
-		}
-	}
-	var rec []nsRow
-	for _, r := range m.nsRecent(items) {
-		if r.nodeID == base && strings.HasPrefix(strings.ToLower(r.path), strings.ToLower(pth)) && r.path != pth && len(rec) < 3 {
-			rec = append(rec, r)
-		}
-	}
-	if self.kind == nsCreate {
-		rows = append(append(rows, kids...), self)
-	} else {
-		rows = append(append(rows, self), kids...)
-	}
-	return append(append(rows, rec...), browseRow(m, base)), true, base, parent
-}
-
-// browseRow is the always-present last row of the Where list.
-func browseRow(m *Model, base string) nsRow {
-	return nsRow{key: browseKey, group: "Folders", kind: nsBrowseRow, name: "📁 Browse folders…", detail: "any folder, or a new one", where: m.nodeName(base)}
+	return rows
 }
 
 // nsPlan is what the form says right now.
@@ -466,21 +509,20 @@ type nsPlan struct {
 	rows      []nsRow
 	sel       int
 	target    *nsRow
-	pathMode  bool
-	dirNode   string
-	dirPath   string
-	base      string
 	repos     []contracts.CatalogRepo
 	folder    string
 	create    bool
 	nodeID    string
 	nodeAuto  bool
+	agents    []contracts.Harness // what the machine can run
 	harness   contracts.Harness
 	agentAuto bool
 	ws        int
 	wsAuto    bool
 	multi     bool
 	account   string
+	model     string
+	effort    string
 	clones    []contracts.CatalogRepo
 	nodes     []contracts.Node
 	connected map[string]bool
@@ -501,12 +543,19 @@ func (q *nsPanel) plan(m *Model) nsPlan {
 			}
 		}
 	}
-	p.base = q.machine
-	if p.base == "" || m.node(p.base) == nil {
-		p.base = m.nsHomeNode(p.connected)
+
+	// Machine: first, everything below depends on it.
+	if q.machine != "" && m.node(q.machine) != nil {
+		p.nodeID = q.machine
+	} else {
+		if q.autoNode == "" || !p.connected[q.autoNode] {
+			q.autoNode = m.nsDefaultMachine(p.connected)
+		}
+		p.nodeAuto, p.nodeID = true, q.autoNode
 	}
+
 	items, _ := m.catalog()
-	p.rows, p.pathMode, p.dirNode, p.dirPath = q.rows(m, items, p.base)
+	p.rows = q.rows(m, items, p.nodeID)
 	if q.hlKey != "" {
 		for i, r := range p.rows {
 			if r.key == q.hlKey {
@@ -532,7 +581,7 @@ func (q *nsPanel) plan(m *Model) nsPlan {
 		p.repos = append(p.repos, *t.repo)
 	}
 	p.multi = len(p.repos) > 1
-	if t := p.target; t != nil && t.kind != nsRepo && t.kind != nsBrowseRow && len(q.extra) == 0 {
+	if t := p.target; t != nil && (t.kind == nsFolder || t.kind == nsCreate) && len(q.extra) == 0 {
 		p.folder, p.create = t.path, t.kind == nsCreate
 	}
 	key := ""
@@ -541,23 +590,24 @@ func (q *nsPanel) plan(m *Model) nsPlan {
 	}
 	pref, hasPref := m.nsMem.Repos[key]
 
-	// Machine.
-	if q.machine != "" && m.node(q.machine) != nil {
-		p.nodeID = q.machine
-	} else {
-		p.nodeAuto = true
-		p.nodeID = q.autoMachine(m, p, pref, hasPref)
-	}
-	// Agent.
-	if q.agent != "" {
+	// Agent: only what the machine has.
+	p.agents = m.nodeAgents(p.nodeID)
+	if q.agent != "" && hasAgent(p.agents, q.agent) {
 		p.harness = q.agent
 	} else {
-		p.agentAuto, p.harness = true, contracts.HarnessClaude
-		switch {
-		case hasPref && pref.Agent != "":
-			p.harness = contracts.Harness(pref.Agent)
-		case m.nsMem.Agent != "":
-			p.harness = contracts.Harness(m.nsMem.Agent)
+		p.agentAuto = true
+		var cands []contracts.Harness
+		if hasPref {
+			cands = append(cands, contracts.Harness(pref.Agent))
+		}
+		for _, h := range append(cands, contracts.Harness(m.nsMem.Agent), contracts.HarnessClaude) {
+			if h != "" && hasAgent(p.agents, h) {
+				p.harness = h
+				break
+			}
+		}
+		if p.harness == "" && len(p.agents) > 0 {
+			p.harness = p.agents[0]
 		}
 	}
 	// Workspace.
@@ -576,113 +626,126 @@ func (q *nsPanel) plan(m *Model) nsPlan {
 	if a := m.account(q.account); a != nil && p.harness != contracts.HarnessShell && a.Account.Provider == contracts.ProviderFor(p.harness) {
 		p.account = q.account
 	}
+	// Model and effort: only choices the machine lists for the agent.
+	if hi, ok := m.harnessOn(p.nodeID, p.harness); ok && p.harness != contracts.HarnessShell {
+		for _, mc := range hi.Models {
+			if mc.ID == q.model {
+				p.model = q.model
+			}
+		}
+		for _, e := range hi.Efforts {
+			if e == q.effort {
+				p.effort = q.effort
+			}
+		}
+	}
 	for _, r := range p.repos {
 		if _, ok := repoindex.EntryOn(r.Present, p.nodeID); !ok {
 			p.clones = append(p.clones, r)
 		}
 	}
-	q.validate(m, &p, items)
+	q.validate(m, &p)
 	return p
 }
 
-// bestRow is the row a new filter highlights: the best-matching
-// repository wherever its group is (the first on a tie), else the first.
+// bestRow is the row a new filter highlights: a name typed in full ("home"
+// is the home folder, not every repository under /home); else the
+// best-matching repository here (the first on a tie), then one on another
+// machine (switching there), then a folder; with none, Clone when
+// repositories elsewhere match, else Browse. No filter: the first row.
 func bestRow(rows []nsRow, query string) int {
 	if query == "" {
 		return 0
 	}
-	best, at := -1, 0
-	for i, r := range rows {
-		if r.repo == nil {
-			continue
-		}
-		if s, ok := repoindex.CatalogScore(query, *r.repo); ok && s > best {
-			best, at = s, i
-		}
-	}
-	if best < 0 {
-		// Nothing matches a name that is not a path: browse for a folder.
+	for _, kinds := range [][]int{{nsRepo}, {nsSwitchRow}, {nsFolder, nsCreate}} {
 		for i, r := range rows {
-			if r.kind == nsBrowseRow && !repoindex.IsPathSpec(query) {
-				only := true
-				for _, o := range rows {
-					only = only && (o.kind == nsBrowseRow || o.key == "home")
-				}
-				if only {
-					return i
-				}
+			if strings.EqualFold(r.name, query) && slices.Contains(kinds, r.kind) {
+				return i
 			}
 		}
 	}
-	return at
-}
-
-// autoMachine: a Recent row's machine; the machine last used with the
-// repository; the panel's machine when it has every repository; else the
-// best machine that has them; else the panel's machine (it clones).
-func (q *nsPanel) autoMachine(m *Model, p nsPlan, pref nsPref, hasPref bool) string {
-	if t := p.target; t != nil && t.group == "Recent" && t.nodeID != "" && m.node(t.nodeID) != nil && len(q.extra) == 0 {
-		return t.nodeID
-	}
-	if len(p.repos) == 0 {
-		return p.base
-	}
-	if hasPref && pref.Machine != "" && p.connected[pref.Machine] {
-		return pref.Machine
-	}
-	var groups [][]contracts.RepoEntry
-	all := true
-	for _, r := range p.repos {
-		if _, ok := repoindex.EntryOn(r.Present, p.base); !ok {
-			all = false
+	for _, kind := range []int{nsRepo, nsSwitchRow} {
+		best, at := -1, 0
+		for i, r := range rows {
+			if r.kind != kind || r.repo == nil {
+				continue
+			}
+			if s, ok := repoindex.CatalogScore(query, *r.repo); ok && s > best {
+				best, at = s, i
+			}
 		}
-		groups = append(groups, r.Present)
+		if best >= 0 {
+			return at
+		}
 	}
-	if all {
-		return p.base
+	for i, r := range rows {
+		if r.kind == nsFolder || r.kind == nsCreate {
+			return i
+		}
 	}
-	if ms := repoindex.Machines(groups, p.connected); len(ms) > 0 && p.connected[ms[0]] {
-		return ms[0]
+	for i, r := range rows {
+		if r.kind == nsCloneRow && !strings.HasPrefix(r.detail, "any ") {
+			return i
+		}
 	}
-	return p.base
+	for i, r := range rows {
+		if r.kind == nsBrowseRow {
+			return i
+		}
+	}
+	return 0
 }
 
-func (q *nsPanel) validate(m *Model, p *nsPlan, items []contracts.CatalogRepo) {
+func (q *nsPanel) validate(m *Model, p *nsPlan) {
 	bad := func(f nsField, s string) {
 		if p.problem == "" {
 			p.problem, p.problemAt = s, f
 		}
 	}
-	query := strings.TrimSpace(q.whereQuery())
-	switch {
-	case p.target == nil && len(q.extra) == 0:
-		_, st := m.catalog()
-		switch {
-		case st == nil || (!st.have && st.err == nil):
-			bad(nsWhere, "loading repositories…")
-		case query != "":
-			bad(nsWhere, "no repository matches “"+query+"” — owner/name clones one from GitHub; a folder? type it as ~/"+query)
-		default:
-			bad(nsWhere, "choose a repository or a folder")
-		}
-	case p.target != nil && p.target.kind == nsBrowseRow && len(q.extra) == 0:
-		if query != "" && !p.pathMode {
-			bad(nsWhere, "no repository matches “"+query+"”: Enter browses folders (or owner/name clones from GitHub)")
-		} else {
-			bad(nsWhere, "Enter opens the folder browser")
-		}
-	case p.target != nil && p.target.kind != nsRepo && len(q.extra) > 0:
-		bad(nsWhere, "a folder cannot join repositories: highlight a repository, or remove the added ones")
-	}
 	switch {
 	case p.nodeID == "":
 		bad(nsMachine, "no machines (pair one with pyre nodes pair)")
 	case !p.connected[p.nodeID]:
-		bad(nsMachine, m.nodeName(p.nodeID)+" is offline")
+		bad(nsMachine, m.nodeName(p.nodeID)+" is offline: choose another machine")
+	}
+	query := strings.TrimSpace(q.whereQuery())
+	name := m.nodeName(p.nodeID)
+	switch t := p.target; {
+	case t == nil && len(q.extra) == 0:
+		_, st := m.catalog()
+		switch {
+		case q.cloning && query != "":
+			bad(nsWhere, "nothing to clone matches “"+query+"”: type owner/name for any GitHub repository")
+		case q.cloning:
+			bad(nsWhere, "every repository is on "+name+" already")
+		case st == nil || (!st.have && st.err == nil):
+			bad(nsWhere, "loading repositories…")
+		default:
+			bad(nsWhere, "choose a repository or a folder")
+		}
+	case t != nil && t.kind == nsBrowseRow && len(q.extra) == 0:
+		if query != "" {
+			bad(nsWhere, "nothing on "+name+" matches “"+query+"”: Enter browses its folders")
+		} else {
+			bad(nsWhere, "Enter browses "+name+"'s folders")
+		}
+	case t != nil && t.kind == nsCloneRow && len(q.extra) == 0:
+		if query != "" {
+			bad(nsWhere, "no repository on "+name+" matches “"+query+"”: Enter lists the ones to clone here")
+		} else {
+			bad(nsWhere, "Enter lists repositories to clone onto "+name)
+		}
+	case t != nil && t.kind == nsSwitchRow && len(q.extra) == 0:
+		bad(nsWhere, t.name+" is on "+m.nodeName(t.nodeID)+": Enter (or ^s) switches there")
+	case t != nil && t.kind != nsRepo && len(q.extra) > 0:
+		bad(nsWhere, "a folder cannot join repositories: highlight a repository, or remove the added ones")
+	}
+	if len(p.agents) == 0 && p.nodeID != "" {
+		bad(nsAgent, name+" reports no agent it can run")
 	}
 	for _, c := range p.clones {
 		if c.RemoteURL == "" {
-			bad(nsMachine, c.Name+" has no remote, so it cannot be cloned onto "+m.nodeName(p.nodeID)+": choose a machine that has it")
+			bad(nsWhere, c.Name+" has no remote, so it cannot be cloned onto "+name)
 		}
 	}
 	if p.folder == "" && p.ws == wsBranch {
@@ -696,20 +759,9 @@ func (q *nsPanel) validate(m *Model, p *nsPlan, items []contracts.CatalogRepo) {
 	}
 }
 
-// load fetches what the plan needs: the catalog, and a folder listing.
-func (q *nsPanel) load(m *Model, p nsPlan) tea.Cmd {
-	cmds := []tea.Cmd{m.loadCatalog(false)}
-	if p.pathMode && p.dirNode != "" {
-		if n := m.node(p.dirNode); n != nil && n.Connection.State == contracts.ConnConnected {
-			api, nid, dir := m.api, p.dirNode, p.dirPath
-			cmds = append(cmds, m.ensure(qlDirKey(nid, dir), 15*time.Second, func(ctx context.Context) (any, error) {
-				var out contracts.DirListResult
-				err := nsInvoke(ctx, api, nid, contracts.NewID(contracts.PrefixOperation), contracts.ActionDirList, contracts.DirListParams{Path: dir}, &out, 5)
-				return out, err
-			}))
-		}
-	}
-	return tea.Batch(cmds...)
+// load fetches what the panel needs: the catalog (and the picker's listing).
+func (q *nsPanel) load(m *Model) tea.Cmd {
+	return tea.Batch(m.loadCatalog(false), q.loadPicker(m))
 }
 
 func nsInvoke(ctx context.Context, api contracts.API, nodeID, op, action string, params, out any, timeout int) error {
@@ -728,7 +780,7 @@ func nsInvoke(ctx context.Context, api contracts.API, nodeID, op, action string,
 	return json.Unmarshal(res.Result, out)
 }
 
-// ---- options of the segmented fields ----
+// ---- options of the pickers ----
 
 type nsOpt struct {
 	val, label string
@@ -741,34 +793,30 @@ func (q *nsPanel) options(m *Model, p nsPlan, f nsField) []nsOpt {
 	switch f {
 	case nsMachine:
 		for _, n := range p.nodes {
-			l := m.nodeName(n.NodeID)
-			switch {
-			case !p.connected[n.NodeID]:
-				l += " · offline"
-			case len(p.repos) == 1:
-				if _, ok := repoindex.EntryOn(p.repos[0].Present, n.NodeID); ok {
-					l += " · has it"
-				} else {
-					l += " · will clone"
-				}
-			case len(p.repos) > 1:
-				miss := 0
-				for _, r := range p.repos {
-					if _, ok := repoindex.EntryOn(r.Present, n.NodeID); !ok {
-						miss++
-					}
-				}
-				if miss == 0 {
-					l += " · has all"
-				} else {
-					l += " · clones " + strconv.Itoa(miss)
-				}
-			}
-			out = append(out, nsOpt{val: n.NodeID, label: l, on: n.NodeID == p.nodeID})
+			out = append(out, nsOpt{val: n.NodeID, label: m.nodeName(n.NodeID), on: n.NodeID == p.nodeID, disabled: !p.connected[n.NodeID]})
 		}
 	case nsAgent:
-		for _, h := range []contracts.Harness{contracts.HarnessClaude, contracts.HarnessCodex, contracts.HarnessShell} {
+		for _, h := range p.agents {
 			out = append(out, nsOpt{val: string(h), label: titleCase(string(h)), on: h == p.harness})
+		}
+	case nsModel, nsEffort:
+		if p.harness == contracts.HarnessShell {
+			return nil
+		}
+		cur := p.model
+		if f == nsEffort {
+			cur = p.effort
+		}
+		out = append(out, nsOpt{val: "", label: "default", on: cur == ""})
+		hi, _ := m.harnessOn(p.nodeID, p.harness)
+		if f == nsModel {
+			for _, mc := range hi.Models {
+				out = append(out, nsOpt{val: mc.ID, label: mc.ID, on: cur == mc.ID})
+			}
+		} else {
+			for _, e := range hi.Efforts {
+				out = append(out, nsOpt{val: e, label: e, on: cur == e})
+			}
 		}
 	case nsWorkspace:
 		if p.folder != "" {
@@ -804,6 +852,11 @@ func (q *nsPanel) options(m *Model, p nsPlan, f nsField) []nsOpt {
 func (q *nsPanel) setOpt(f nsField, val string) {
 	switch f {
 	case nsMachine:
+		if cur := q.machine; val != cur && (cur != "" || val != q.autoNode) {
+			// Where is the machine's: a folder chosen on another one, or
+			// repositories added there, do not carry over; the filter does.
+			q.folder, q.folderNew, q.extra, q.hlKey = "", false, nil, ""
+		}
 		q.machine = val
 	case nsAgent:
 		q.agent = contracts.Harness(val)
@@ -815,15 +868,25 @@ func (q *nsPanel) setOpt(f nsField, val string) {
 		}
 	case nsAccount:
 		q.account = val
+	case nsModel:
+		q.model = val
+	case nsEffort:
+		q.effort = val
 	}
 }
 
-// cycle moves a segmented field's choice by d (wrapping, skipping
-// disabled options).
-func (q *nsPanel) cycle(m *Model, p nsPlan, f nsField, d int) {
+// cycle moves a picker's choice by d (wrapping, skipping disabled
+// options).
+func (q *nsPanel) cycle(m *Model, p nsPlan, f nsField, d int) bool {
+	return q.stepOpt(m, p, f, d, true)
+}
+
+// stepOpt is cycle; without wrap it stops at the ends (the machine list's
+// arrows: ↓ past the last machine moves on to Where).
+func (q *nsPanel) stepOpt(m *Model, p nsPlan, f nsField, d int, wrap bool) bool {
 	opts := q.options(m, p, f)
 	if len(opts) == 0 {
-		return
+		return false
 	}
 	cur := 0
 	for i, o := range opts {
@@ -831,27 +894,39 @@ func (q *nsPanel) cycle(m *Model, p nsPlan, f nsField, d int) {
 			cur = i
 		}
 	}
-	for n := 1; n <= len(opts); n++ {
-		o := opts[((cur+d*n)%len(opts)+len(opts))%len(opts)]
+	for n := 1; n < len(opts)+1; n++ {
+		i := cur + d*n
+		if !wrap && (i < 0 || i >= len(opts)) {
+			return false
+		}
+		o := opts[(i%len(opts)+len(opts))%len(opts)]
 		if !o.disabled {
+			if o.val == opts[cur].val {
+				return false
+			}
 			q.setOpt(f, o.val)
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func isSegmented(f nsField) bool {
-	return f == nsMachine || f == nsAgent || f == nsWorkspace || f == nsAccount
+	return f == nsAgent || f == nsWorkspace || f == nsAccount || f == nsModel || f == nsEffort
 }
 
 // ---- keys, clicks, paste ----
 
 func (q *nsPanel) hintsFor(m *Model) []hint {
-	if q.browse != nil && q.focus == nsWhere {
-		return q.browseHints()
+	if q.picker != nil && q.focus == nsWhere {
+		return q.pickerHints()
 	}
 	tail := []hint{{"^s", "start"}, {"esc", "cancel"}, {"^a", "step-by-step"}}
 	switch {
+	case q.focus == nsMachine:
+		return append([]hint{{"↑↓", "machine"}, {"enter", "next"}, {"type", "filter Where"}}, tail...)
+	case q.focus == nsWhere && q.cloning:
+		return append([]hint{{"↑↓", "choose"}, {"tab", "next field"}, {"esc", "back to " + "the list"}}, tail[:1]...)
 	case q.focus == nsWhere:
 		return append([]hint{{"↑↓", "choose"}, {"tab", "next field"}, {"+", "add repo"}}, tail...)
 	case isSegmented(q.focus):
@@ -882,13 +957,19 @@ func (q *nsPanel) update(m *Model, k tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
-	if q.browse != nil && q.focus == nsWhere {
-		cmd := q.browseKey(m, k)
-		return tea.Batch(cmd, q.loadBrowse(m))
+	if q.picker != nil && q.focus == nsWhere {
+		return q.pickerKeyMsg(m, k)
 	}
 	p := q.plan(m)
 	switch key {
-	case "esc", "ctrl+c":
+	case "esc":
+		if q.cloning && q.focus == nsWhere {
+			q.cloning, q.hlKey = false, ""
+			break
+		}
+		m.overlay = nil
+		return nil
+	case "ctrl+c":
 		m.overlay = nil
 		return nil
 	case "ctrl+a":
@@ -903,47 +984,69 @@ func (q *nsPanel) update(m *Model, k tea.KeyPressMsg) tea.Cmd {
 	case "shift+tab":
 		q.move(-1)
 	case "tab":
-		if q.focus != nsWhere || !q.complete(p) {
-			q.move(1)
-		}
+		q.move(1)
 	default:
 		if cmd, done := q.fieldKey(m, p, k); done {
 			return cmd
 		}
 	}
 	q.errLine = ""
-	return q.load(m, q.plan(m))
+	return q.load(m)
 }
 
 // fieldKey handles a key for the focused field; done means the key ended
-// the update (a start).
+// the update (a start, or the picker opening).
 func (q *nsPanel) fieldKey(m *Model, p nsPlan, k tea.KeyPressMsg) (tea.Cmd, bool) {
 	key := k.String()
 	switch q.focus {
+	case nsMachine:
+		switch key {
+		case "up", "left":
+			q.stepOpt(m, p, nsMachine, -1, false)
+		case "down", "right", "space":
+			if !q.stepOpt(m, p, nsMachine, 1, false) && key == "down" {
+				q.move(1)
+			}
+		case "enter":
+			q.move(1)
+		default:
+			// Typing on Machine filters Where.
+			if k.Text != "" && k.Mod&^tea.ModShift == 0 {
+				q.focus = nsWhere
+				return q.fieldKey(m, p, k)
+			}
+		}
 	case nsWhere:
 		switch key {
 		case "up", "ctrl+p", "ctrl+k":
-			q.moveHighlight(p, -1)
+			if p.sel == 0 {
+				q.move(-1)
+			} else {
+				q.moveHighlight(p, -1)
+			}
 		case "down", "ctrl+n", "ctrl+j":
 			q.moveHighlight(p, 1)
 		case "pgup":
 			q.moveHighlight(p, -8)
 		case "pgdown":
 			q.moveHighlight(p, 8)
-		case "right":
-			q.complete(p)
 		case "enter":
-			if p.target != nil && p.target.kind == nsBrowseRow {
-				return q.openBrowse(m, p), true
-			}
-			if p.target == nil && len(q.extra) == 0 {
+			switch t := p.target; {
+			case t != nil && t.kind == nsBrowseRow:
+				return q.openPicker(m, p, ""), true
+			case t != nil && t.kind == nsCloneRow:
+				q.cloning, q.hlKey = true, ""
+			case t != nil && t.kind == nsSwitchRow:
+				q.switchTo(*t)
+			case t == nil && len(q.extra) == 0:
 				q.errLine = p.problem
 				return nil, true
+			default:
+				q.move(1)
 			}
-			q.move(1)
 		case "+":
-			if p.target != nil && p.target.kind == nsRepo && !p.pathMode {
-				q.extra = append(q.extra, *p.target.repo)
+			if t := p.target; t != nil && t.kind == nsRepo && !q.cloning {
+				q.extra = append(q.extra, *t.repo)
 				q.query, q.hlKey = "", ""
 			} else if q.editText(&q.query, k) {
 				q.hlKey = ""
@@ -953,14 +1056,23 @@ func (q *nsPanel) fieldKey(m *Model, p nsPlan, k tea.KeyPressMsg) (tea.Cmd, bool
 				q.extra = q.extra[:len(q.extra)-1]
 				break
 			}
+			if q.query == "" && q.folder != "" {
+				q.folder, q.folderNew, q.hlKey = "", false, ""
+				break
+			}
 			q.editText(&q.query, k)
 			q.hlKey = ""
 		default:
 			if q.editText(&q.query, k) {
 				q.hlKey = "" // a new filter: the best match
+				if s := q.pathTyped(); s != "" && !q.cloning {
+					// A path: the folder picker takes it from here.
+					q.query = ""
+					return q.openPicker(m, p, s), true
+				}
 			}
 		}
-	case nsMachine, nsAgent, nsWorkspace, nsAccount:
+	case nsAgent, nsWorkspace, nsAccount, nsModel, nsEffort:
 		branchTyping := q.focus == nsWorkspace && p.ws == wsBranch
 		switch key {
 		case "left":
@@ -970,6 +1082,8 @@ func (q *nsPanel) fieldKey(m *Model, p nsPlan, k tea.KeyPressMsg) (tea.Cmd, bool
 		case "space":
 			if !branchTyping {
 				q.cycle(m, p, q.focus, 1)
+			} else {
+				q.editText(&q.branch, k)
 			}
 		case "up":
 			q.move(-1)
@@ -1033,34 +1147,13 @@ func (q *nsPanel) editText(s *string, k tea.KeyPressMsg) bool {
 	return true
 }
 
-// complete fills in the highlighted folder (path mode): the next segment.
-func (q *nsPanel) complete(p nsPlan) bool {
-	t := p.target
-	if !p.pathMode || t == nil || t.kind != nsFolder {
-		return false
-	}
-	pth, dir := repoindex.NormPath(strings.TrimSpace(q.whereQuery()), q.cwd, q.home)
-	if t.path == pth && dir {
-		return false
-	}
-	next := t.path + "/"
-	if t.path == "~" {
-		next = "~/"
-	}
-	if next == q.query {
-		return false
-	}
-	q.query, q.hlKey = next, ""
-	return true
-}
-
 // wheel scrolls the Where list (whatever field has the keyboard).
 func (q *nsPanel) wheel(m *Model, dir string) tea.Cmd {
 	if q.starting {
 		return nil
 	}
-	if q.browse != nil {
-		return q.browseKey(m, keyFor(dir))
+	if q.picker != nil {
+		return q.pickerKeyMsg(m, keyFor(dir))
 	}
 	d := 1
 	if dir == "up" {
@@ -1078,24 +1171,30 @@ func (q *nsPanel) click(m *Model, name string) tea.Cmd {
 	switch kind {
 	case "row":
 		q.hlKey, q.focus = val, nsWhere
-		if val == browseKey {
-			return q.openBrowse(m, q.plan(m))
+		switch {
+		case val == browseKey:
+			return q.openPicker(m, q.plan(m), "")
+		case val == cloneKey:
+			q.cloning, q.hlKey = true, ""
+		case strings.HasPrefix(val, "switch:"):
+			if p := q.plan(m); p.target != nil && p.target.kind == nsSwitchRow {
+				q.switchTo(*p.target)
+			}
 		}
-	case "browse":
-		return q.openBrowse(m, q.plan(m))
-	case "brow":
-		return q.browseClick(m, val)
+	case "pick":
+		q.focus = nsWhere
+		return q.pickerClick(m, val)
 	case "field":
 		i, _ := strconv.Atoi(val)
 		q.focus = nsField(i)
 		if q.focus != nsWhere {
-			q.browse = nil
+			q.picker = nil
 		}
 	case "opt":
 		f, v, _ := strings.Cut(val, ":")
 		i, _ := strconv.Atoi(f)
 		q.focus = nsField(i)
-		q.browse = nil
+		q.picker = nil
 		for _, o := range q.options(m, q.plan(m), q.focus) {
 			if o.val == v && !o.disabled {
 				q.setOpt(q.focus, v)
@@ -1116,7 +1215,7 @@ func (q *nsPanel) click(m *Model, name string) tea.Cmd {
 		return m.openLaunch()
 	}
 	q.errLine = ""
-	return q.load(m, q.plan(m))
+	return q.load(m)
 }
 
 func (q *nsPanel) updateMsg(m *Model, msg tea.Msg) tea.Cmd {
@@ -1125,20 +1224,18 @@ func (q *nsPanel) updateMsg(m *Model, msg tea.Msg) tea.Cmd {
 		if msg.q == q && q.starting {
 			return q.tick()
 		}
+	case nsSpinMsg:
+		if msg.q == q {
+			return q.onSpin(m)
+		}
 	case tea.PasteMsg:
 		if q.starting {
 			return nil
 		}
 		text := msg.Content
-		if q.browse != nil && q.focus == nsWhere {
-			line := strings.Join(strings.Fields(text), " ")
-			if q.browse.naming {
-				q.browse.name += line
-			} else {
-				q.browse.filter += line
-				q.browseFirstMatch(m)
-			}
-			return q.loadBrowse(m)
+		if q.picker != nil && q.focus == nsWhere {
+			q.pickerPaste(m, text)
+			return q.loadPicker(m)
 		}
 		switch q.focus {
 		case nsPrompt:
@@ -1151,8 +1248,12 @@ func (q *nsPanel) updateMsg(m *Model, msg tea.Msg) tea.Cmd {
 			q.focus = nsWhere
 			q.query += strings.NewReplacer("\r", "", "\n", "").Replace(text)
 			q.hlKey = ""
+			if s := q.pathTyped(); s != "" && !q.cloning {
+				q.query = ""
+				return q.openPicker(m, q.plan(m), s)
+			}
 		}
-		return q.load(m, q.plan(m))
+		return q.load(m)
 	}
 	return nil
 }
@@ -1177,9 +1278,11 @@ type nsJob struct {
 	ws               int
 	branch           string
 	account          string
+	model, effort    string
 	cwd              string
 	cloned           []string
 	wtBranch         string
+	wt               *contracts.WorktreeCreateResult // fresh worktrees (claimed for the session once it starts)
 }
 
 func (m *Model) doLong(d time.Duration, fn func(ctx context.Context) (any, error), then func(m *Model, val any, err error) tea.Cmd) tea.Cmd {
@@ -1196,8 +1299,25 @@ func (q *nsPanel) start(m *Model, p nsPlan) tea.Cmd {
 	if q.starting {
 		return nil
 	}
-	if p.target != nil && p.target.kind == nsBrowseRow && len(q.extra) == 0 && p.problemAt == nsWhere {
-		return q.openBrowse(m, p)
+	if q.picker != nil {
+		// Browsing: the picker's folder, never Where's highlighted row.
+		return q.pickerStart(m)
+	}
+	if t := p.target; t != nil && t.kind == nsSwitchRow {
+		q.switchTo(*t)
+		if p = q.plan(m); p.target != nil && p.target.kind == nsSwitchRow {
+			return q.load(m) // never loops: the repository is here now
+		}
+		return q.start(m, p)
+	}
+	if t := p.target; t != nil && len(q.extra) == 0 && p.problemAt == nsWhere && p.problem != "" {
+		switch t.kind {
+		case nsBrowseRow:
+			return q.openPicker(m, p, "")
+		case nsCloneRow:
+			q.cloning, q.hlKey, q.focus = true, "", nsWhere
+			return q.load(m)
+		}
 	}
 	if p.problem != "" {
 		q.errLine, q.focus = p.problem, p.problemAt
@@ -1205,7 +1325,7 @@ func (q *nsPanel) start(m *Model, p nsPlan) tea.Cmd {
 	}
 	j := &nsJob{nodeID: p.nodeID, nodeName: m.nodeName(p.nodeID), harness: p.harness, prompt: strings.TrimSpace(q.prompt),
 		title: strings.TrimSpace(q.title), folder: p.folder, create: p.create, repos: p.repos, ws: p.ws,
-		branch: strings.TrimSpace(q.branch), account: p.account}
+		branch: strings.TrimSpace(q.branch), account: p.account, model: p.model, effort: p.effort}
 	for _, r := range p.repos {
 		e, _ := repoindex.EntryOn(r.Present, p.nodeID)
 		j.paths = append(j.paths, e.Path)
@@ -1298,16 +1418,14 @@ func (q *nsPanel) next(m *Model, j *nsJob) tea.Cmd {
 		if j.ws == wsBranch {
 			params.Branch = j.branch
 		}
-		return m.doLong(time.Minute, func(ctx context.Context) (any, error) {
-			var wt contracts.WorktreeCreateResult
-			err := nsInvoke(ctx, api, j.nodeID, op, contracts.ActionWorktreeCreate, params, &wt, 30)
-			return wt, err
+		return m.doLong(3*time.Minute, func(ctx context.Context) (any, error) {
+			return repoindex.CreateVia(ctx, api, j.nodeID, params, op) // fetches origin first
 		}, func(m *Model, v any, err error) tea.Cmd {
 			if err != nil {
 				return q.fail(m, err)
 			}
 			wt := v.(contracts.WorktreeCreateResult)
-			j.cwd, j.wtBranch = wt.Cwd, wt.Branch
+			j.cwd, j.wtBranch, j.wt = wt.Cwd, wt.Branch, &wt
 			return q.next(m, j)
 		})
 	}
@@ -1320,12 +1438,24 @@ func (q *nsPanel) startSession(m *Model, j *nsJob) tea.Cmd {
 	op := m.opID("ns:" + q.instance + ":start")
 	policy := contracts.AccountPolicy{Mode: contracts.AccountEligible}
 	if j.account != "" {
-		policy = contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: j.account}
+		policy = contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: j.account, Strict: true} // the owner's own pick
 	}
 	req := contracts.StartSessionRequest{Mutation: contracts.Mutation{OperationID: op}, NodeID: j.nodeID, Harness: j.harness,
-		Cwd: j.cwd, Title: j.title, InitialPrompt: j.prompt, AccountPolicy: policy}
+		Cwd: j.cwd, Title: j.title, InitialPrompt: j.prompt, AccountPolicy: policy, Args: nsModelArgs(j.model, j.effort)}
+	claimOp := m.opID("ns:" + q.instance + ":claim")
 	return m.doLong(time.Minute, func(ctx context.Context) (any, error) {
-		return api.StartSession(ctx, req)
+		resp, err := api.StartSession(ctx, req)
+		if err == nil && j.wt != nil && j.wt.ClaimToken != "" {
+			// W-lifecycle: the fresh worktrees now name their session, so its
+			// automatic cleanup may remove them (best effort).
+			params := contracts.WorktreeClaimParams{SessionID: resp.Session.Session.SessionID, Token: j.wt.ClaimToken}
+			for _, w := range j.wt.Worktrees {
+				params.Paths = append(params.Paths, w.Path)
+			}
+			var res contracts.WorktreeClaimResult
+			_ = nsInvoke(ctx, api, j.nodeID, claimOp, contracts.ActionWorktreeClaim, params, &res, 10)
+		}
+		return resp, err
 	}, func(m *Model, v any, err error) tea.Cmd {
 		if err != nil {
 			return q.fail(m, err)
@@ -1340,7 +1470,7 @@ func (q *nsPanel) startSession(m *Model, j *nsJob) tea.Cmd {
 		for _, r := range j.repos {
 			m.nsMem.remember(r.Key, nsPref{Machine: j.nodeID, Agent: string(j.harness), Workspace: ws, At: m.now()})
 		}
-		m.nsMem.Agent = string(j.harness)
+		m.nsMem.Agent, m.nsMem.Machine = string(j.harness), j.nodeID
 		if m.overlay == q {
 			m.overlay = nil
 		}
@@ -1438,7 +1568,23 @@ func (q *nsPanel) summary(m *Model, p nsPlan) string {
 	default:
 		out += sep + "account auto"
 	}
+	if p.model != "" || p.effort != "" {
+		out += sep + strings.TrimSpace(p.model+" "+p.effort)
+	}
 	return out
+}
+
+// nsModelArgs is a launch's model and effort as the node's start args
+// (daemon.ModelArg/EffortArg; nothing chosen: none, the harness default).
+func nsModelArgs(model, effort string) []string {
+	var args []string
+	if model != "" {
+		args = append(args, "--pyre-model="+model)
+	}
+	if effort != "" {
+		args = append(args, "--pyre-effort="+effort)
+	}
+	return args
 }
 
 const nsLabelW = 13
@@ -1504,28 +1650,36 @@ func (q *nsPanel) view(m *Model, w, h int) []string {
 	avail := max(10, inner-nsLabelW)
 	indent := strings.Repeat(" ", nsLabelW)
 	caret := m.th.accent.Render("▏")
+	field := func(out []string, f nsField, ls []string) []string {
+		out = append(out, q.label(m, p, f)+ls[0])
+		for _, l := range ls[1:] {
+			out = append(out, indent+l)
+		}
+		return out
+	}
 
-	// Where: the input.
+	// Machine, then the Where input.
+	top := field(nil, nsMachine, q.machineLines(m, p, avail))
 	in := q.query
 	switch {
+	case q.picker != nil:
+		in = q.pickerInput(m)
 	case q.focus == nsWhere:
 		in += caret
-		if q.query == "" {
-			in += m.th.dim.Render(trunc("repo, owner/name or path", avail-1))
+		if q.query == "" && q.cloning {
+			in += m.th.dim.Render(trunc("search, or owner/name for any GitHub repository", avail-1))
+		} else if q.query == "" {
+			in += m.th.dim.Render(trunc("filter, or a path like ~/scratch", avail-1))
 		}
-	case q.query == "" && p.target != nil:
+	case q.query == "" && p.target != nil && p.target.kind != nsBrowseRow && p.target.kind != nsCloneRow:
 		in = m.th.dim.Render("(" + p.target.name + ")")
 	case q.query == "":
-		in = m.th.dim.Render("type a repo, owner/name, or a path like ~/scratch")
+		in = m.th.dim.Render("type a repo, or a path like ~/scratch")
 	}
-	if q.browse != nil {
-		in = m.th.dim.Render("📁 ") + q.browse.path + m.th.dim.Render(" — browsing")
+	if q.cloning && q.picker == nil {
+		in = m.th.dim.Render("clone: ") + in
 	}
-	top := []string{q.label(m, p, nsWhere) + trunc(in, avail)}
-	if q.browse == nil && len([]rune(strings.TrimSpace(q.query))) < 3 {
-		top = append(top, indent+m.th.faint.Render("type a repo name, or a path like ~/scratch · ")+
-			m.mark(zoneDef{kind: zoneOverlay, name: "browse"}, m.th.dim.Render("↓ Browse folders")))
-	}
+	top = append(top, q.label(m, p, nsWhere)+trunc(in, avail))
 	if len(q.extra) > 0 {
 		parts := []string{m.th.dim.Render("with")}
 		for i, c := range q.extra {
@@ -1536,23 +1690,13 @@ func (q *nsPanel) view(m *Model, w, h int) []string {
 
 	// The fields under the list.
 	var bottom []string
-	bottom = append(bottom, "")
-	ml := q.segLines(m, p, nsMachine, avail, p.nodeAuto, "no machines")
-	bottom = append(bottom, q.label(m, p, nsMachine)+ml[0])
-	for _, l := range ml[1:] {
-		bottom = append(bottom, indent+l)
+	agentEmpty := "— " + m.nodeName(p.nodeID) + " has no agent it can run"
+	bottom = field(bottom, nsAgent, q.segLines(m, p, nsAgent, avail, p.agentAuto, agentEmpty))
+	for _, f := range []nsField{nsModel, nsEffort} {
+		bottom = field(bottom, f, q.segLines(m, p, f, avail, false, "— a shell has no model"))
 	}
-	bottom = append(bottom, q.label(m, p, nsAgent)+q.segLines(m, p, nsAgent, avail, p.agentAuto, "")[0])
-	wl := q.segLines(m, p, nsWorkspace, avail, p.wsAuto && p.folder == "" && !p.multi, "— a folder: no git workspace")
-	bottom = append(bottom, q.label(m, p, nsWorkspace)+wl[0])
-	for _, l := range wl[1:] {
-		bottom = append(bottom, indent+l)
-	}
-	al := q.segLines(m, p, nsAccount, avail, false, "— a shell needs no account")
-	bottom = append(bottom, q.label(m, p, nsAccount)+al[0])
-	for _, l := range al[1:] {
-		bottom = append(bottom, indent+l)
-	}
+	bottom = field(bottom, nsWorkspace, q.segLines(m, p, nsWorkspace, avail, p.wsAuto && p.folder == "" && !p.multi, "— a folder: no git workspace"))
+	bottom = field(bottom, nsAccount, q.segLines(m, p, nsAccount, avail, false, "— a shell needs no account"))
 	// Prompt (multi-line: the last three lines show).
 	pl := strings.Split(q.prompt, "\n")
 	if len(pl) > 3 {
@@ -1567,10 +1711,7 @@ func (q *nsPanel) view(m *Model, w, h int) []string {
 	if q.prompt == "" {
 		pl = []string{pl[0] + m.th.dim.Render("optional first prompt (shift+enter: new line)")}
 	}
-	bottom = append(bottom, q.label(m, p, nsPrompt)+pl[0])
-	for _, l := range pl[1:] {
-		bottom = append(bottom, indent+l)
-	}
+	bottom = field(bottom, nsPrompt, pl)
 	tl := trunc(q.title, avail-1)
 	if q.focus == nsTitle {
 		tl += caret
@@ -1580,9 +1721,13 @@ func (q *nsPanel) view(m *Model, w, h int) []string {
 	}
 	bottom = append(bottom, q.label(m, p, nsTitle)+tl)
 	bottom = append(bottom, m.th.faint.Render(strings.Repeat("─", inner)))
-	if b := q.browse; b != nil {
+	if b := q.picker; b != nil {
 		sep := m.th.dim.Render(" · ")
-		bottom = append(bottom, trunc(m.th.key.Render(titleCase(string(p.harness)))+" on "+m.th.key.Render(m.nodeName(b.node))+sep+b.path+m.th.dim.Render(" (browsing)")+sep+"folder", inner))
+		dir, seg := pickerSplit(b.input)
+		if seg != "" {
+			dir = repoindex.JoinPath(dir, seg)
+		}
+		bottom = append(bottom, trunc(m.th.key.Render(titleCase(string(p.harness)))+" on "+m.th.key.Render(m.nodeName(b.node))+sep+dir+m.th.dim.Render(" (browsing)")+sep+"folder", inner))
 	} else {
 		bottom = append(bottom, trunc(q.summary(m, p), inner))
 	}
@@ -1599,8 +1744,8 @@ func (q *nsPanel) view(m *Model, w, h int) []string {
 			}
 		}
 		status = m.th.key.Render("◌ " + q.step + "…" + el)
-	case q.browse != nil:
-		status = m.th.dim.Render("enter on ✓ Use this folder, or ^s, chooses " + q.browse.path + " · esc: back to the list")
+	case q.picker != nil:
+		status = m.th.dim.Render("enter on ✓ Use chooses the folder · ^s: use it and start · esc: back to the list")
 	case q.errLine != "":
 		status = m.th.tone(toneWarn, q.errLine)
 	case p.problem != "":
@@ -1627,8 +1772,8 @@ func (q *nsPanel) view(m *Model, w, h int) []string {
 	// The list gets the rest (a stable height: the panel does not jump).
 	listH := max(3, min(12, h-4-len(top)-len(bottom)))
 	var list []string
-	if q.browse != nil {
-		list = q.browseLines(m, avail, listH)
+	if q.picker != nil {
+		list = q.pickerLines(m, avail, listH)
 	} else {
 		list = q.listLines(m, p, avail, listH)
 	}
@@ -1639,30 +1784,30 @@ func (q *nsPanel) view(m *Model, w, h int) []string {
 	return m.box("New session", lines, bw, w, h)
 }
 
-// listLines renders the Where list, grouped, the highlighted row in sight.
+// listLines renders the Where list, grouped, the highlighted row in
+// sight; the Clone and Browse rows are pinned under it.
 func (q *nsPanel) listLines(m *Model, p nsPlan, width_, listH int) []string {
-	var list []string
+	var list, pinned []string
 	selLine := 0
 	group := ""
 	nameW := min(26, max(12, width_/4))
 	whereW := min(22, max(10, width_/5))
 	noteW := 20
 	detW := max(6, width_-2-nameW-whereW-noteW-3)
-	pinned := ""
+	focused := q.focus == nsWhere
 	for i, r := range p.rows {
-		if r.kind == nsBrowseRow {
+		sel := i == p.sel
+		if r.kind == nsBrowseRow || r.kind == nsCloneRow {
 			// Always in sight: pinned under the list, never scrolled away.
-			sel := i == p.sel
-			row := m.cursor(sel) + pad(styleIf(sel, m.th.selText).Render(r.name), nameW) + " " +
-				m.th.faint.Render(trunc(r.detail+" on "+r.where, width_-nameW-3))
-			pinned = m.mark(zoneDef{kind: zoneOverlay, name: "row:" + r.key}, m.rowSel(sel && q.focus == nsWhere, trunc(row, width_), width_))
+			row := m.cursor(sel) + pad(styleIf(sel, m.th.selText).Render(r.name), nameW+detW+1) + " " +
+				m.th.faint.Render(trunc(r.detail, width_-nameW-detW-4))
+			pinned = append(pinned, m.mark(zoneDef{kind: zoneOverlay, name: "row:" + r.key}, m.rowSel(sel && focused, trunc(row, width_), width_)))
 			continue
 		}
 		if r.group != group {
 			group = r.group
 			list = append(list, m.th.faint.Render(group))
 		}
-		sel := i == p.sel
 		if sel {
 			selLine = len(list)
 		}
@@ -1675,37 +1820,32 @@ func (q *nsPanel) listLines(m *Model, p nsPlan, width_, listH int) []string {
 		if r.kind == nsCreate {
 			note = m.th.tone(toneWarn, trunc(r.note, noteW))
 		}
-		whereS := r.where
-		if whereS == "" && r.kind != nsRepo {
-			whereS = m.nodeName(p.base)
-		}
 		row := m.cursor(sel) + pad(m.highlight(trunc(name, nameW-1), pos, styleIf(sel, m.th.selText)), nameW) + " " +
 			m.th.faint.Render(pad(trunc(r.detail, detW-1), detW)) + " " +
-			m.th.dim.Render(pad(trunc(whereS, whereW-1), whereW)) + " " + note
-		list = append(list, m.mark(zoneDef{kind: zoneOverlay, name: "row:" + r.key}, m.rowSel(sel && q.focus == nsWhere, trunc(row, width_), width_)))
+			m.th.dim.Render(pad(trunc(r.where, whereW-1), whereW)) + " " + note
+		list = append(list, m.mark(zoneDef{kind: zoneOverlay, name: "row:" + r.key}, m.rowSel(sel && focused, trunc(row, width_), width_)))
 	}
-	if !p.pathMode {
-		items, st := m.catalog()
-		var why string
-		switch {
-		case st != nil && st.err != nil && !st.have:
-			why = errText(st.err)
-		case st == nil || !st.have:
-			why = "loading repositories…"
-		case len(items) == 0:
-			why = "no repositories yet (machines scan ~/code, ~/src, ~/Documents/code, ~/projects; GitHub through gh)"
-		}
-		if why != "" {
-			list = append(list, m.th.dim.Render(trunc(why, width_)))
-		}
-		if strings.TrimSpace(q.query) == "" {
-			list = append(list, m.th.faint.Render(trunc("type / or ~/ for any folder · owner/name for any GitHub repository", width_)))
-		}
+	items, st := m.catalog()
+	var why string
+	switch {
+	case st != nil && st.err != nil && !st.have:
+		why = errText(st.err)
+	case st == nil || !st.have:
+		why = "loading repositories…"
+	case q.cloning && len(p.rows) == 0:
+		why = "nothing to clone matches: type owner/name for any GitHub repository · esc: back"
+	case !q.cloning && len(items) == 0:
+		why = "no repositories yet (machines scan ~/code, ~/src, ~/Documents/code, ~/projects; GitHub through gh)"
+	case !q.cloning && len(list) == 0 && strings.TrimSpace(q.query) == "":
+		why = "no repositories or recent folders on " + m.nodeName(p.nodeID) + " yet"
+	case !q.cloning && len(list) == 0:
+		why = "nothing on " + m.nodeName(p.nodeID) + " (or another connected machine) matches"
+	}
+	if why != "" {
+		list = append(list, m.th.dim.Render(trunc(why, width_)))
 	}
 	full := listH
-	if pinned != "" {
-		listH--
-	}
+	listH -= len(pinned)
 	if len(list) > listH {
 		top := 0
 		if selLine >= listH-1 {
@@ -1721,8 +1861,5 @@ func (q *nsPanel) listLines(m *Model, p nsPlan, width_, listH int) []string {
 	for len(list) < listH {
 		list = append(list, "")
 	}
-	if pinned != "" {
-		list = append(list, pinned)
-	}
-	return list[:full]
+	return append(list, pinned...)[:full]
 }

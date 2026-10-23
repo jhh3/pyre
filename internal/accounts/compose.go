@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/osutil"
@@ -263,6 +264,9 @@ func (s *Service) mirror(info *ProfileInfo, rel, p, src string, spec *mirrorSpec
 // refreshComposition re-applies the profile composition before a launch so
 // copies are current and the owner is never written. Problems are logged;
 // the launch proceeds with the profile as it is.
+// composeLocks serializes compositions per profile directory.
+var composeLocks sync.Map // profile dir -> *sync.Mutex
+
 func (s *Service) refreshComposition(dir string, h contracts.Harness) {
 	if dir == "" {
 		return
@@ -279,6 +283,12 @@ func (s *Service) refreshComposition(dir string, h contracts.Harness) {
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 		return
 	}
+	// Launches binding one account at once (pyre run bursts) compose its
+	// profile one at a time: concurrent rewrites of its settings copies
+	// could leave a half-composed file for a running session to reload.
+	mu, _ := composeLocks.LoadOrStore(dir, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
 	var info ProfileInfo
 	s.composeFromOwner(&info, dir, userDir, h)
 	if h == contracts.HarnessClaude {

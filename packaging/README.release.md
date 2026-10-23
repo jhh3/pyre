@@ -51,7 +51,9 @@ scripts/install/install.sh --tarball $T --allowed-signers $A --with-tools     # 
 
 `--with-tools` needs `pyre-tools-@VERSION@-@PLATFORM@.tar.gz` beside the Pyre tarball
 (checked against the same signed `SHA256SUMS`). It installs each tool into
-`~/.local/share/pyre/tools/<tool>` with a shim in `~/.local/bin`, and skips any tool
+`~/.local/share/pyre/tools/<tool>` with a shim in `~/.local/bin` (Outfit also as
+`outfit-core`, the command the Outfit plugin's MCP server and hooks run, unless one
+exists), and skips any tool
 that is already installed (another `hive`, `outfit` or `rota` on `PATH` or in
 `~/.local/bin`, or Hive as a Claude plugin); `--tools-alongside` adds the bundled copy
 for Pyre without a shim. Hive's hooks and crons are only set up by `hive install`.

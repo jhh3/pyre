@@ -12,32 +12,44 @@ import (
 // shorter values would cause destructive false positives in ordinary text.
 const minKnownLen = 6
 
-// tokenPatterns match common provider credential shapes. They are applied to
-// diagnostic text (tool stderr, error messages), not to provider payloads.
-var tokenPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`),
-	regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}\b`),
-	regexp.MustCompile(`\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}\b`),
-	regexp.MustCompile(`\blin_(?:api|oauth)_[A-Za-z0-9]{20,}\b`),
-	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
-	regexp.MustCompile(`\bya29\.[A-Za-z0-9_-]{20,}\b`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`), // JWT
-	regexp.MustCompile(`(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{12,}`),
-	regexp.MustCompile(`(?i)\b((?:access|refresh|api|client)?_?(?:token|secret|password|key))(["']?\s*[:=]\s*["']?)[^\s"',;]{6,}`),
+// tokenPatterns match common credential shapes, each with its
+// replacement. They are applied to diagnostic and agent-written text (tool
+// stderr, error messages, issue reports), not to provider payloads. Order
+// matters: whole blocks and URLs first, then token shapes, then the
+// name=value and header forms. Distinct prefixes carry no leading \b so a
+// token glued to an identifier (MY_ghp_…) is still caught.
+var tokenPatterns = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	// PEM private keys, through END or the end of the text.
+	{regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)`), Redacted},
+	// URL userinfo: scheme://user:password@host keeps scheme and host.
+	{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`), "${1}" + Redacted + "@"},
+	{regexp.MustCompile(`(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}`), Redacted},
+	{regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`), Redacted},
+	{regexp.MustCompile(`xox[abprse]-[A-Za-z0-9-]{10,}`), Redacted}, // Slack bot/user/app tokens
+	{regexp.MustCompile(`xapp-[A-Za-z0-9-]{10,}`), Redacted},
+	// Anthropic, OpenAI keys; sk- must start a token (not "di-sk-…", "ask-…").
+	{regexp.MustCompile(`(^|[^A-Za-z0-9_-])sk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}`), "${1}" + Redacted},
+	{regexp.MustCompile(`\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}`), Redacted},
+	{regexp.MustCompile(`lin_(?:api|oauth)_[A-Za-z0-9]{20,}`), Redacted},
+	{regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`), Redacted}, // AWS access key IDs
+	{regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`), Redacted},     // Google API keys
+	{regexp.MustCompile(`\bya29\.[A-Za-z0-9_-]{20,}`), Redacted},
+	{regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`), Redacted}, // JWT
+	{regexp.MustCompile(`(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{12,}`), "$1 " + Redacted},
+	// NAME=value / "name": "value" where the name is a secret word or ends
+	// in one after _ . or - (ANTHROPIC_API_KEY=…, GITHUB_TOKEN: …,
+	// db_password=…, "client_secret": …). Not bare key/credentials, nor
+	// counts like input_tokens: topic_key, sort_key, idempotency_key stay.
+	{regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_.-])((?:[A-Za-z0-9_.-]*[_.-])?(?:api[_-]?key|apikey|secret|token|password|passwd|access[_-]?key|private[_-]?key|secret[_-]?key))(["']?\s*[:=]\s*["']?)[^\s"',;]{6,}`), "${1}${2}${3}" + Redacted},
 }
 
 // RedactPatterns replaces credential-shaped substrings in diagnostic text.
 func RedactPatterns(s string) string {
-	for i, re := range tokenPatterns {
-		switch i {
-		case len(tokenPatterns) - 2:
-			s = re.ReplaceAllString(s, "$1 "+Redacted)
-		case len(tokenPatterns) - 1:
-			s = re.ReplaceAllString(s, "$1$2"+Redacted)
-		default:
-			s = re.ReplaceAllString(s, Redacted)
-		}
+	for _, p := range tokenPatterns {
+		s = p.re.ReplaceAllString(s, p.repl)
 	}
 	return s
 }

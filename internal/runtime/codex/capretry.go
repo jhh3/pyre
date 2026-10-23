@@ -87,6 +87,7 @@ func (a *Adapter) continueAfterCapacity(h contracts.RunHandle, rr *runRef, n int
 	if err := c.call(ctx, "turn/start", turnStartParams{ThreadID: rr.meta.ThreadID, Input: []userInput{{Type: "text", Text: text}}, ClientUserMessageID: id}, &tr); err != nil {
 		return
 	}
+	a.awaitTurnVisible(rr, id) // a wake or delivery right after sees the thread busy
 	if a.o.OnAutomation != nil {
 		go a.o.OnAutomation(contracts.NodeAutomation{RunID: rr.meta.RunID, SessionID: rr.meta.SessionID, Harness: contracts.HarnessCodex,
 			Action: contracts.AutomationCapacityRetry, Detail: fmt.Sprintf("retry %d of %d", n, len(capBackoff))})

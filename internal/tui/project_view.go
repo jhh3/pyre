@@ -38,6 +38,8 @@ func (m *Model) viewProjectHome(w, h int) []string {
 		body = m.projectDiscussion(*p, w, bh)
 	case tabSessions:
 		body = m.projectSessionsView(*p, w, bh)
+	case tabGrants:
+		body = m.projectGrantsView(*p, w, bh)
 	}
 	return append(out, body...)
 }

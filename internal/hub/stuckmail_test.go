@@ -83,8 +83,15 @@ func TestDeliveryStatusAndStuckNotice(t *testing.T) {
 
 	// Owner mail is stored, never "delivered".
 	om, err := x.h.SendMessage(leadCtx, contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: "op_synth-owner"},
-		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: "fyi"}})
+		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: "fyi"}, RequestAck: true})
 	if err != nil || om.Delivery == nil || om.Delivery.State != contracts.SummaryStored {
 		t.Fatalf("owner mail: %v %+v", err, om.Delivery)
+	}
+	// A report that asks nothing is an update: the sender is told it is
+	// not in his inbox.
+	up, err := x.h.SendMessage(leadCtx, contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: "op_synth-owner-update"},
+		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: "fyi"}})
+	if err != nil || up.Status.AckRef != contracts.AckRefUpdate || up.Delivery == nil || !strings.Contains(up.Delivery.Summary, "not in his inbox") {
+		t.Fatalf("owner update: %v %+v", err, up.Delivery)
 	}
 }

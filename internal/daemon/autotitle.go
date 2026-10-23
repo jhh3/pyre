@@ -69,8 +69,11 @@ func (d *Daemon) maybeAutoTitle(ctx context.Context, rec runRecord, enteredIdle 
 		format, paths := f.TranscriptFiles(*rec.Handle)
 		if format == "" {
 			format = autotitle.FormatClaude
-			if rec.Run.Harness == contracts.HarnessCodex {
+			switch rec.Run.Harness {
+			case contracts.HarnessCodex:
 				format = autotitle.FormatCodex
+			case contracts.HarnessAgy:
+				format = autotitle.FormatAgy
 			}
 		}
 		if rt.sc == nil {

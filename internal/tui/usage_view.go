@@ -422,6 +422,14 @@ func (m *Model) rowLines(r acctRow, sel bool, c acctCols, w, idx int) []string {
 	five, week, obs := r.windows()
 	bars := obs != nil && (five != nil || week != nil) && b.State != usage.Disabled && b.State != usage.NeedsReauth
 	inUse := m.inUseText(len(r.assignments()))
+	if b.Account != nil && b.Account.Reserve() {
+		// Reserve tier (pyre accounts tier): used only after the others.
+		tag := m.th.dim.Render("reserve")
+		if inUse != "" {
+			tag += m.th.dim.Render(" · ")
+		}
+		inUse = tag + inUse
+	}
 	var out []string
 	switch {
 	case c.two:
@@ -540,6 +548,9 @@ func (m *Model) rowDetails(r acctRow, w int) []string {
 			add("windows", m.th.dim.Render(strings.Join(extra, " · ")))
 		}
 	}
+	if b.Account != nil && b.Account.Reserve() {
+		add("tier", "reserve"+m.th.dim.Render(fmt.Sprintf(" · new work only when every normal account is near (%.0f%%) or at its limit", usage.NearPercent)))
+	}
 	if note := m.detailNote(b); note != "" {
 		add("note", note)
 	}
@@ -619,6 +630,46 @@ func (m *Model) poolTitle(prov contracts.Provider, p usage.Pool, ok bool) string
 	return s
 }
 
+// ownReading is the line of an own login whose harness reports its usage
+// (agy): "your own login on server (not managed) · 5h 10% · week 40% · read
+// 2m ago via agy:/usage", faint when last known.
+func (m *Model) ownReading(c usage.Card) string {
+	parts := []string{"your own login on " + m.nodeName(c.NodeID) + " (not managed)"}
+	sp := usage.Split(c.Obs.Windows)
+	now := m.now()
+	pct := func(label string, uw *contracts.UsageWindow) {
+		if uw == nil {
+			return
+		}
+		used := uw.UsedPercent
+		if uw.ResetAt != nil && !uw.ResetAt.After(now) {
+			used = 0 // reset since the reading (as usage.Judge reads it)
+		}
+		v := fmt.Sprintf("%.0f%%", used)
+		if c.LastKnown {
+			v = "(" + v + ")"
+		} else if used >= 60 {
+			v = m.th.tone(barTone(used), v)
+		}
+		parts = append(parts, m.th.dim.Render(label+" ")+v)
+	}
+	pct("5h", sp.FiveHour)
+	pct("week", sp.Weekly)
+	src := "read " + ago(now, c.Obs.ObservedAt)
+	if c.Obs.Source != "" {
+		src += " via " + c.Obs.Source
+	}
+	if c.LastKnown {
+		src += " (last known)"
+	}
+	sep := m.th.faint.Render(" · ")
+	out := m.th.dim.Render(parts[0])
+	for _, p := range parts[1:] {
+		out += sep + p
+	}
+	return out + sep + m.th.faint.Render(src)
+}
+
 // acctColHeader is the faint column header under a provider's summary.
 func (m *Model) acctColHeader(c acctCols) string {
 	if c.two {
@@ -636,9 +687,14 @@ func (m *Model) viewAccounts(w, h int) []string {
 	all := m.usageCards()
 	rows := accountRows(all)
 	ambient := map[contracts.Provider][]string{}
+	read := map[contracts.Provider][]usage.Card{} // own logins whose harness reports usage (agy)
 	var cards []usage.Card
 	for _, c := range all {
 		if c.Account == nil {
+			if c.Obs != nil {
+				read[c.Provider] = append(read[c.Provider], c)
+				continue
+			}
 			ambient[c.Provider] = append(ambient[c.Provider], c.NodeID)
 			continue
 		}
@@ -691,6 +747,12 @@ func (m *Model) viewAccounts(w, h int) []string {
 			}
 			lines = append(lines, rl...)
 		}
+		if rs := read[prov]; len(rs) > 0 {
+			lines = append(lines, "")
+			for _, c := range rs {
+				lines = append(lines, trunc("  "+m.th.dim.Render("○")+" "+m.ownReading(c), w))
+			}
+		}
 		if ns := ambient[prov]; len(ns) > 0 {
 			var names []string
 			for _, id := range ns {
@@ -719,6 +781,16 @@ func (m *Model) viewAccounts(w, h int) []string {
 		lines = append(lines, sw...)
 	}
 	lines = append(lines, "", m.th.faint.Render(trunc(foot, w)))
+	legend := "Top bar: mean 5-hour and weekly use per provider, each account weighted equally: 5-hour readings up to 15 minutes old, weekly up to 3 hours; (n/m) or ~ when some accounts are left out; !N accounts at their limit; — not reported."
+	for _, c := range all {
+		if c.Provider == contracts.ProviderGoogle {
+			legend += " agy: its own report (agy /usage, every 5 minutes where agy was used in the last week), each window the most used of its model groups."
+			break
+		}
+	}
+	for _, l := range wrap(legend, max(20, w-4)) {
+		lines = append(lines, "  "+m.th.faint.Render(l))
+	}
 	// Scroll so the selected row is in view (mgmtList.top is the line offset here).
 	room := h - len(head)
 	top := m.mgmtList.top
@@ -734,31 +806,124 @@ func (m *Model) viewAccounts(w, h int) []string {
 	return append(head, lines[top:end]...)
 }
 
-// ---- header pool summary ----
+// ---- header utilization ----
 
-// poolSummary is the compact header indicator: "anthropic 3 ready · 1 at
-// limit   openai 1 ready". The ready count is calm; the limit part is
-// amber only when an account is near or at its limit, and the count red
-// only when nothing is available. Clicking it opens Accounts.
-func (m *Model) poolSummary() string {
-	pools := usage.Pools(m.usageCards())
-	if len(pools) == 0 {
-		return ""
+// utilName is a provider as the header names it: by its harness.
+func utilName(p contracts.Provider) string {
+	switch p {
+	case contracts.ProviderAnthropic:
+		return "claude"
+	case contracts.ProviderOpenAI:
+		return "codex"
+	case contracts.ProviderGoogle:
+		return "agy"
 	}
+	return string(p)
+}
+
+// utilAbbrev is the narrow form of utilName.
+func utilAbbrev(p contracts.Provider) string {
+	switch p {
+	case contracts.ProviderAnthropic:
+		return "cl"
+	case contracts.ProviderOpenAI:
+		return "cx"
+	}
+	return utilName(p)
+}
+
+// utilPct is a window's fleet mean, toned like the Accounts view's
+// percentages (amber from 60, red above 85), or a faint "—" when no
+// account has a current reading of it.
+func (m *Model) utilPct(wu usage.WindowUse) string {
+	if wu.N == 0 {
+		return m.th.faint.Render("—")
+	}
+	s := fmt.Sprintf("%.0f%%", wu.Percent)
+	if wu.Percent >= 60 {
+		return m.th.tone(barTone(wu.Percent), s)
+	}
+	return s
+}
+
+// Header utilization levels, widest first: narrow terminals drop the
+// 5-hour window, then abbreviate.
+const (
+	utilFull = iota
+	utilWeek
+	utilShort
+	utilLevels
+)
+
+// utilSummaries is the header's fleet utilization at a level (usage.
+// Utilizations): "claude 5h 18% · wk 47% (8/10)   codex wk 30%   agy wk —",
+// then without the 5-hour window, then "cl 47%~   cx 30%   agy —". (n/m),
+// or ~ after an abbreviated number, says only n of the provider's m
+// accounts have a current reading; a provider with nothing available adds "none ready"
+// (a red ! when abbreviated). Not clickable here: viewHeader marks the
+// level it shows.
+func (m *Model) utilSummaries() [utilLevels]string {
+	var out [utilLevels]string
+	cards := m.usageCards()
+	utils := usage.Utilizations(cards, m.now())
+	if len(utils) == 0 {
+		return out
+	}
+	pools := map[contracts.Provider]usage.Pool{}
+	for _, p := range usage.Pools(cards) {
+		pools[p.Provider] = p
+	}
+	for lv := range out {
+		out[lv] = m.utilSummary(utils, pools, lv)
+	}
+	return out
+}
+
+func (m *Model) utilSummary(utils []usage.Utilization, pools map[contracts.Provider]usage.Pool, level int) string {
+	sep := m.th.faint.Render(" · ")
 	var parts []string
-	for _, p := range pools {
-		ready := fmt.Sprintf("%d ready", p.Ready)
+	for _, u := range utils {
+		p := pools[u.Provider]
+		// !N: N accounts at their limit (amber), red when none is ready.
+		var mark string
 		switch {
+		case p.Tight() && p.AtLimit > 0:
+			mark = m.th.tone(toneBad, fmt.Sprintf("!%d", p.AtLimit))
 		case p.Tight():
-			ready = m.th.tone(toneBad, ready)
-		case p.Ready == 0:
-			ready = m.th.dim.Render(ready)
+			mark = m.th.tone(toneBad, "!")
+		case p.AtLimit > 0:
+			mark = m.th.tone(toneWarn, fmt.Sprintf("!%d", p.AtLimit))
 		}
-		s := m.th.dim.Render(string(p.Provider)+" ") + ready
-		if bp := strings.Split(p.Brief(), " · "); len(bp) > 1 {
-			s += m.th.faint.Render(" · ") + m.th.tone(toneWarn, bp[1])
+		var s string
+		switch level {
+		case utilShort:
+			s = m.th.dim.Render(utilAbbrev(u.Provider)+" ") + m.utilPct(u.Weekly)
+			if u.Partial() && u.Weekly.N > 0 {
+				s += m.th.dim.Render("~")
+			}
+			s += mark
+		default:
+			var ws []string
+			if level == utilFull && u.FiveHour.Has {
+				f := m.th.dim.Render("5h ") + m.utilPct(u.FiveHour)
+				if u.FiveHour.N > 0 && u.FiveHour.Partial() {
+					f += m.th.dim.Render("~") // fewer fresh 5-hour readings than counted accounts
+				}
+				ws = append(ws, f)
+			}
+			ws = append(ws, m.th.dim.Render("wk ")+m.utilPct(u.Weekly))
+			s = m.th.dim.Render(utilName(u.Provider)+" ") + strings.Join(ws, sep)
+			if u.Partial() {
+				s += m.th.dim.Render(fmt.Sprintf(" (%d/%d)", u.Current, u.Total))
+			}
+			if mark != "" {
+				s += " " + mark
+			}
+			if p.Tight() {
+				s += sep + m.th.tone(toneBad, "none ready")
+			}
 		}
 		parts = append(parts, s)
 	}
-	return m.mark(zoneDef{kind: zoneTab, view: viewAccounts}, strings.Join(parts, "   "))
+	return strings.Join(parts, "   ")
 }

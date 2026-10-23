@@ -255,7 +255,7 @@ func (h *Hub) validateAccountPolicy(ctx context.Context, hn contracts.Harness, p
 		if prov == "" || acct.Provider != prov {
 			return contracts.Errorf(contracts.ErrInvalid, "account %s is a %s account; harness %s never uses another provider's account", id, acct.Provider, hn).WithRef(contracts.KindAccount, id)
 		}
-		if id == pol.AccountID && acct.Disabled {
+		if id == pol.AccountID && acct.Disabled && pol.Strict { // non-strict: the node falls back
 			return contracts.Errorf(contracts.ErrConflict, "account %s is disabled", id).WithRef(contracts.KindAccount, id)
 		}
 	}
@@ -278,6 +278,12 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 	}
 	if p.Kind == contracts.PrincipalSession {
 		req.ParentSessionID = p.ID // set automatically; cannot be spoofed
+	}
+	byNode := nodeStarter(p)
+	if byNode {
+		if err := checkNodeStart(p, &req); err != nil { // nodestart.go
+			return contracts.StartSessionResponse{}, err
+		}
 	}
 	var ni nodeInfo
 	var hi contracts.HarnessInfo
@@ -302,6 +308,12 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 	if req.AccountPolicy.Mode == "" {
 		req.AccountPolicy.Mode = contracts.AccountEligible
 	}
+	// The operation records the request as sent: the first execution
+	// below fills in the parent's project and resolves account aliases, a
+	// replay skips that, and both must hash to the same body (a retried
+	// child start conflicted with itself).
+	sent := req
+	sent.AccountPolicy.Prefer = slices.Clone(req.AccountPolicy.Prefer)
 	if !replay {
 		if err := h.validateAccountPolicy(ctx, req.Harness, &req.AccountPolicy); err != nil {
 			return contracts.StartSessionResponse{}, err
@@ -325,9 +337,15 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 				launchCtx = &lc
 			}
 		}
+		// Every session: the project's fact sheet and the standing grants
+		// it holds (launchfacts.go).
+		if !byNode { // a headless run injects nothing
+			text, refs := h.standingContext(ctx, req.ProjectID, req.ParentSessionID)
+			launchCtx = withStandingContext(launchCtx, text, refs)
+		}
 	}
 	var out contracts.StartSessionResponse
-	err = h.mutate(ctx, req.OperationID, contracts.OpStartSession, p, req, &out, func(tx *sql.Tx) (any, error) {
+	err = h.mutate(ctx, req.OperationID, contracts.OpStartSession, p, sent, &out, func(tx *sql.Tx) (any, error) {
 		if req.ParentSessionID != "" {
 			if _, err := h.getSession(ctx, tx, req.ParentSessionID); err != nil {
 				return nil, contracts.Errorf(contracts.ErrInvalid, "parent session %s not found", req.ParentSessionID)
@@ -348,6 +366,9 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 		}
 		tags = autotitle.LaunchTags(p, req.Title, req.Harness, tags)                                           // W-names
 		tags = reportTags(tags, req.ParentSessionID, req.ReportToParent, p.Kind == contracts.PrincipalSession) // W-childnotify
+		if byNode {
+			tags = forceNodeStartTags(tags)
+		}
 		sess := contracts.Session{
 			SessionID: contracts.NewID(contracts.PrefixSession), Harness: req.Harness, Title: title, ProjectID: projectID,
 			CreatedBy: p, CreatedAt: now, Lineage: contracts.Lineage{ParentSessionID: req.ParentSessionID}, Tags: tags,
@@ -420,15 +441,34 @@ func (h *Hub) GetSession(ctx context.Context, req contracts.GetRequest) (contrac
 	if err != nil {
 		return contracts.SessionView{}, err
 	}
-	return h.sessionView(ctx, h.db, s, true)
+	v, err := h.sessionView(ctx, h.db, s, true)
+	if err == nil {
+		views := []contracts.SessionView{v}
+		h.attachMonitors(ctx, h.db, views)
+		v = views[0]
+	}
+	return v, err
 }
 
 // ListSessions lists sessions newest first. State filters apply to the
-// presented (freshness-adjusted) state.
+// presented (freshness-adjusted) state. Monitor sessions are left out
+// unless req.IncludeMonitors; each view lists the live monitors that wake
+// its session.
 func (h *Hub) ListSessions(ctx context.Context, req contracts.ListSessionsRequest) (contracts.Page[contracts.SessionView], error) {
 	if _, err := principal(ctx); err != nil {
 		return contracts.Page[contracts.SessionView]{}, err
 	}
+	page, err := h.listSessions(ctx, req)
+	if err == nil {
+		h.attachMonitors(ctx, h.db, page.Items)
+	}
+	return page, err
+}
+
+func (h *Hub) listSessions(ctx context.Context, req contracts.ListSessionsRequest) (contracts.Page[contracts.SessionView], error) {
+	// A list of shell sessions alone is how CLIs before include_monitors
+	// list monitors (pyre monitor ls/rm): it keeps them.
+	includeMonitors := req.IncludeMonitors || req.Harness == contracts.HarnessShell
 	pc, err := persistence.DecodeCursor(req.Cursor)
 	if err != nil {
 		return contracts.Page[contracts.SessionView]{}, err
@@ -499,6 +539,9 @@ func (h *Hub) ListSessions(ctx context.Context, req contracts.ListSessionsReques
 		h.prefetchList(ctx, h.db, batchSessions, bodies) // W-dbhygiene: no per-session run/approval/lease queries
 		for _, s := range batchSessions {
 			curK, curI = persistence.Time(s.CreatedAt), s.SessionID
+			if !includeMonitors && s.IsMonitor() {
+				continue
+			}
 			v, err := h.sessionView(ctx, h.db, s, true)
 			if err != nil {
 				return page, err
@@ -665,6 +708,9 @@ func (h *Hub) ResumeSession(ctx context.Context, req contracts.ResumeRequest) (c
 	if err := requireOp(req.Mutation); err != nil {
 		return contracts.StartSessionResponse{}, err
 	}
+	if nodeStarter(p) { // nodestart.go: a resume is a start on any node, of any harness
+		return contracts.StartSessionResponse{}, contracts.Errorf(contracts.ErrForbidden, "a node credential cannot resume sessions").WithRef(contracts.KindNode, p.ID)
+	}
 	var prev contracts.Run
 	var ni nodeInfo
 	var hi contracts.HarnessInfo
@@ -676,6 +722,15 @@ func (h *Hub) ResumeSession(ctx context.Context, req contracts.ResumeRequest) (c
 		if prev, ni, hi, kind, err = h.planResume(ctx, &req); err != nil {
 			return contracts.StartSessionResponse{}, err
 		}
+	}
+	var resumeArgs []string
+	if req.EnvFile != "" {
+		// Only the path (or "none") travels; the node reads and checks it.
+		if !h.opExists(ctx, req.OperationID) && !contracts.HasCap(hi.Capabilities, contracts.CapLaunchEnvFile) {
+			return contracts.StartSessionResponse{}, contracts.Errorf(contracts.ErrUnsupported,
+				"the node's pyred cannot apply an environment file for %s (an older version); upgrade it", hi.Harness)
+		}
+		resumeArgs = []string{contracts.StartArgEnvFile + "=" + req.EnvFile}
 	}
 	var out contracts.StartSessionResponse
 	err = h.mutate(ctx, req.OperationID, contracts.OpResumeSession, p, req, &out, func(tx *sql.Tx) (any, error) {
@@ -704,6 +759,7 @@ func (h *Hub) ResumeSession(ctx context.Context, req contracts.ResumeRequest) (c
 		}
 		cmd, err := h.enqueueTx(ctx, tx, ni.ID, contracts.CmdResume, p, contracts.ResumeCommand{StartRunCommand: contracts.StartRunCommand{
 			Session: sess, RunID: run.RunID, Cwd: cur.Cwd, Checkout: nil, AccountPolicy: req.AccountPolicy, PreviousRun: &cur, AllowHandoff: req.AllowHandoff,
+			Args: resumeArgs,
 		}}, h.opt.StartCommandTTL, contracts.ObjectRef{Kind: contracts.KindRun, ID: run.RunID})
 		if err != nil {
 			return nil, err
@@ -797,6 +853,9 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 		if err := h.checkReparent(ctx, p, req); err != nil { // W-reparent
 			return contracts.SessionView{}, err
 		}
+		if err := h.checkNodeRetag(ctx, p, req); err != nil { // nodestart.go
+			return contracts.SessionView{}, err
+		}
 	}
 	var reparented *contracts.Session // W-reparent: the session before a parent change made by this call
 	if req.Icon != nil {              // W-archive2: any principal may set any session's icon
@@ -886,6 +945,14 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 	if err == nil && reparented != nil {
 		h.reparentNotices(ctx, p, req.OperationID, v.Session, reparented.Parent())
 	}
+	if err == nil && req.Archived != nil && *req.Archived && (isOwner(p) || p.Kind == contracts.PrincipalSession) {
+		// Its live descendants are archived with it (archivecascade.go); a
+		// scheduled archive cascades when it completes.
+		if v.Session.Archived {
+			h.cascadeArchive(ctx, req.SessionID, req.SessionID)
+		}
+		v.ArchiveCascade = h.archiveCascadeSummary(ctx, req.SessionID)
+	}
 	if err == nil && schedule {
 		h.noteArchiveScheduled(req.SessionID)
 		return v, nil // its run keeps its tokens until the turn ends
@@ -899,8 +966,10 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 }
 
 // checkArchive lets a session principal archive (or unarchive) only itself
-// and the sessions it started, and never archive itself when the owner
-// started it; other principals are unaffected.
+// and the sessions under it (it started them, or is an ancestor within
+// archiveTreeDepth levels), and never archive itself when the owner
+// started it; other principals are unaffected. An archive it may not do is
+// filed for the owner's approval (approval_requested, owneractions.go).
 func (h *Hub) checkArchive(ctx context.Context, p contracts.Principal, req contracts.UpdateSessionRequest) error {
 	if req.Archived == nil || p.Kind != contracts.PrincipalSession {
 		return nil
@@ -917,9 +986,8 @@ func (h *Hub) checkArchive(ctx context.Context, p contracts.Principal, req contr
 		if err != nil {
 			return err
 		}
-		if s.CreatedBy.Kind == contracts.PrincipalOwner && s.Parent() == "" {
-			return contracts.Errorf(contracts.ErrForbidden, "this session was started by the owner, so only the owner archives it; tell the owner you are done instead").
-				WithRef(contracts.KindSession, req.SessionID)
+		if s.CreatedBy.Kind == contracts.PrincipalOwner && s.Parent() == "" && !s.Archived {
+			return h.archiveApproval(ctx, p, s) // owneractions.go: filed for the owner's approval
 		}
 		return nil
 	}
@@ -927,11 +995,14 @@ func (h *Hub) checkArchive(ctx context.Context, p contracts.Principal, req contr
 	if err != nil {
 		return err
 	}
-	if !s.StartedBy(p.ID) {
-		return contracts.Errorf(contracts.ErrForbidden, "an agent may archive only its own session and the sessions it started; ask the owner to archive %s", req.SessionID).
-			WithRef(contracts.KindSession, req.SessionID)
+	if s.StartedBy(p.ID) || h.isAncestor(ctx, p.ID, s) || s.Archived && *req.Archived {
+		return nil // archiving an archived session changes nothing
 	}
-	return nil
+	if *req.Archived {
+		return h.archiveApproval(ctx, p, s) // owneractions.go: filed for the owner's approval
+	}
+	return contracts.Errorf(contracts.ErrForbidden, "an agent may unarchive only its own session and the sessions under it; the owner can restore %s", req.SessionID).
+		WithRef(contracts.KindSession, req.SessionID)
 }
 
 // editSession applies edit in a mutation; auditEdit (optional) records the

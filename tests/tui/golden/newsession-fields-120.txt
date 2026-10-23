@@ -1,10 +1,12 @@
- Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                         ○ synced
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     cl 41%~!1   cx —!   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ╭─ New session ────────────────────────────────────────────────────────────────────────────────────────────────╮
     │                                                                                                              │
+    │   Machine    ○ synth-linux  1/16 runs · cpu 7% · mem 40%    claude shell                                     │
+    │              ● synth-mac    2/8 runs · cpu 18% · mem 63%    claude codex shell                               │
     │   Where      atlas                                                                                           │
-    │              On synth-mac                                                                                    │
-    │              › atlas                   demo/atlas                   synth-mac +1        contributed 26h ago  │
+    │              Repositories on synth-mac                                                                       │
+    │              › atlas                   ~/code/atlas                 demo/atlas          contributed 26h ago  │
     │                                                                                                              │
     │                                                                                                              │
     │                                                                                                              │
@@ -13,11 +15,11 @@
     │                                                                                                              │
     │                                                                                                              │
     │                                                                                                              │
-    │                                                                                                              │
-    │                📁 Browse folders…      any folder, or a new one on synth-mac                                 │
-    │                                                                                                              │
-    │   Machine    ○ synth-linux · has it   ● synth-mac · has it                                                   │
+    │                ⇣ Clone a GitHub repo here…                          any repository not on synth-mac          │
+    │                📁 Browse folders…                                   any folder on synth-mac, or a new one    │
     │   Agent      ○ Claude   ● Codex   ○ Shell                                                                    │
+    │   Model      ● default                                                                                       │
+    │   Effort     ● default                                                                                       │
     │   Workspace  ○ main checkout   ● fresh worktree   ○ new branch                                               │
     │   Account    ● auto   ○ codex-personal-a                                                                     │
     │   Prompt     fix the tile cache                                                                              │
@@ -28,7 +30,5 @@
     │ enter: next field · ^s or ^⏎: start · esc: cancel · ^a step-by-step                 [ Start ^s ]  [ Cancel ] │
     │                                                                                                              │
     ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
 
  enter start   ↑↓ field   ^s start   esc cancel   ^a step-by-step

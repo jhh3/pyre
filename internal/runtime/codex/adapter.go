@@ -12,11 +12,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +28,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/messaging/header"
 	"github.com/jhh3/pyre/internal/osutil"
 	"github.com/jhh3/pyre/internal/runtime/hostsel"
@@ -78,6 +81,14 @@ type Options struct {
 	// limits a run's turns report) with the app-server's CODEX_HOME ("" =
 	// the machine's own login). Called on its own goroutine.
 	OnRateLimits func(codexHome string, raw json.RawMessage)
+	// WakeAllowed, when set, is asked before a turn is started to report a
+	// finished background command (bgwake.go); false (the session is
+	// archived or being archived) drops the notice. Must be bounded by ctx.
+	WakeAllowed func(ctx context.Context, sessionID string) bool
+	// TranscriptHomes are further CODEX_HOMEs (globs) searched for a
+	// thread's rollout besides the machine's own login: the accounts'
+	// shared store and the account profiles (ResumeOwner, pyre run).
+	TranscriptHomes []string
 	// DeliverTimeout bounds the wait for the userMessage item (default 10s).
 	DeliverTimeout time.Duration
 	// InterruptTimeout bounds turn/interrupt (default 5s).
@@ -96,7 +107,12 @@ type Adapter struct {
 	homes map[string]*homeServer
 	runs  map[string]*runRef
 
-	turnsPage int // thread/turns/list page size for sessions.read (0: 50; tests)
+	turnsPage  int           // thread/turns/list page size for sessions.read (0: 50; tests)
+	wakeSettle time.Duration // bgwake quiet window (0: wakeSettle; tests)
+
+	// userOnlyDir makes an app-server socket directory private to the
+	// current user (fileperm.UserOnlyDir; tests observe it).
+	userOnlyDir func(dir string) error
 }
 
 var _ contracts.RuntimeAdapter = (*Adapter)(nil)
@@ -104,6 +120,7 @@ var _ contracts.RuntimeAdapter = (*Adapter)(nil)
 type runRef struct {
 	deliverMu sync.Mutex
 	meta      runMeta
+	stateDir  string // the run's private state dir (RunHandle.StateDir)
 	hs        *homeServer
 	ts        *threadState
 	subOwner  *rpcClient // client the thread is subscribed on
@@ -170,7 +187,8 @@ func New(o Options) (*Adapter, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	a := &Adapter{o: o, srv: srv, homes: map[string]*homeServer{}, runs: map[string]*runRef{}}
+	a := &Adapter{o: o, srv: srv, homes: map[string]*homeServer{}, runs: map[string]*runRef{},
+		userOnlyDir: fileperm.UserOnlyDir}
 	go a.sweepLoop(context.Background()) // unload threads no live run owns (unload.go)
 	return a, nil
 }
@@ -187,7 +205,7 @@ func (a *Adapter) Capabilities() []string {
 		contracts.CapInputQueue, contracts.CapInputSteer, contracts.CapInputReconcile, contracts.CapInputAppServer,
 		contracts.CapApprovals, contracts.CapQuestions, contracts.CapInterrupt, contracts.CapStop,
 		contracts.CapResumeNative, contracts.CapResumeHandoff, contracts.CapSubagentsObserve,
-		contracts.CapTranscript, contracts.CapAccountProfile,
+		contracts.CapTranscript, contracts.CapAccountProfile, contracts.CapLaunchEnvFile, contracts.CapWakeBackground,
 	}
 	if !a.o.DisableTUI {
 		caps = append(caps, contracts.CapAttachNative, contracts.CapAttachReadOnly, contracts.CapAttachCodexRemote, contracts.CapScreen)
@@ -229,6 +247,7 @@ func (a *Adapter) Probe(ctx context.Context) (contracts.ProbeResult, error) {
 	}
 	pr.Version = versionRe.FindString(string(out))
 	pr.Available = true
+	pr.Models, pr.Efforts = a.models(ctx, pr.Executable), append([]string(nil), Efforts...)
 	tested := false
 	for _, t := range TestedVersions {
 		tested = tested || t == pr.Version
@@ -290,6 +309,17 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	if err != nil {
 		return contracts.RunHandle{}, err
 	}
+	// A chosen model and effort (pyre start --model/--effort) override
+	// -m and the managed model_reasoning_effort; "" keeps Codex's default.
+	if l.Model != "" {
+		model = l.Model
+	}
+	if l.Effort != "" {
+		if managedCfg == nil {
+			managedCfg = map[string]any{}
+		}
+		managedCfg["model_reasoning_effort"] = l.Effort
+	}
 	if l.Env[PermissionsEnv] == "bypass" {
 		// The app-server equivalents of --dangerously-bypass-approvals-and-sandbox.
 		approval, sandbox = approvalNever, sandboxFull
@@ -307,12 +337,14 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	if err := hs.addRef(l.RunID); err != nil {
 		return contracts.RunHandle{}, err
 	}
-	c, err := hs.ensure(ctx, l.Unset)
+	// The shared app-server gets the account binding's unsets only; the
+	// session's own (env file KEY=) apply to this thread (withSessionEnv).
+	c, err := hs.ensure(ctx, slices.DeleteFunc(slices.Clone(l.Unset), func(k string) bool { return slices.Contains(l.SessionUnset, k) }))
 	if err != nil {
 		hs.release(ctx, l.RunID)
 		return contracts.RunHandle{}, contracts.Errorf(contracts.ErrUnavailable, "%v", err)
 	}
-	tcfg, err := mergeThreadConfig(threadConfig(l.Env), managedCfg)
+	tcfg, err := mergeThreadConfig(withSessionEnv(threadConfig(l.Env), l.SessionEnv, l.SessionUnset), managedCfg)
 	if err != nil {
 		hs.release(ctx, l.RunID)
 		return contracts.RunHandle{}, err
@@ -357,7 +389,7 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	ts.config = tcfg
 	ts.setStatus(r.Thread.Status, a.o.Now())
 	hs.register(ts)
-	rr := &runRef{meta: meta, hs: hs, ts: ts, subOwner: c}
+	rr := &runRef{meta: meta, stateDir: l.StateDir, hs: hs, ts: ts, subOwner: c}
 	a.mu.Lock()
 	a.runs[l.RunID] = rr
 	a.mu.Unlock()
@@ -452,7 +484,8 @@ func parseOverrideValue(raw string) any {
 // config. A managed key equal to, inside or containing a Pyre identity key
 // (shell_environment_policy.set.PYRE_*, mcp_servers.pyre) is refused: the
 // app-server applies overrides in no defined order, so it could replace the
-// run's identity.
+// run's identity. A managed TMPDIR is the owner's choice and replaces the
+// run's.
 func mergeThreadConfig(pyre, managed map[string]any) (map[string]any, error) {
 	if len(managed) == 0 {
 		return pyre, nil
@@ -460,6 +493,11 @@ func mergeThreadConfig(pyre, managed map[string]any) (map[string]any, error) {
 	out := map[string]any{}
 	for k, v := range pyre {
 		out[k] = v
+	}
+	if _, ok := managed[threadTmpKey]; ok && pyre[threadTmpKey] != nil {
+		pyre = maps.Clone(pyre)
+		delete(pyre, threadTmpKey)
+		delete(out, threadTmpKey)
 	}
 	for k, v := range managed {
 		for p := range pyre {
@@ -471,6 +509,8 @@ func mergeThreadConfig(pyre, managed map[string]any) (map[string]any, error) {
 	}
 	return out, nil
 }
+
+const threadTmpKey = "shell_environment_policy.set.TMPDIR"
 
 // threadConfig gives the thread the run's Pyre identity. The app-server is
 // shared by every run on a CODEX_HOME, so its process environment cannot
@@ -496,8 +536,42 @@ func threadConfig(env map[string]string) map[string]any {
 	for k, v := range pyreEnv {
 		cfg["shell_environment_policy.set."+k] = v
 	}
+	if t := env["TMPDIR"]; t != "" {
+		// The run's temp dir (pyred's per-run TMPDIR, or the profile's):
+		// the shared app-server inherited its own.
+		cfg[threadTmpKey] = t
+	}
 	if cli := pyreEnv["PYRE_CLI"]; cli != "" {
 		cfg["mcp_servers.pyre"] = map[string]any{"command": cli, "args": []string{"mcp"}, "env": pyreEnv}
+	}
+	return cfg
+}
+
+// withSessionEnv adds the session's environment file (pyre start
+// --env-file; ResolvedLaunch.SessionEnv) to the thread's config: the shared
+// app-server, not the TUI pane, runs the agent's commands, so the variables
+// reach them as shell_environment_policy.set overrides for this thread
+// only; a variable the file clears (KEY=) is set empty there, since the
+// thread cannot remove what the app-server inherited. Like the Pyre
+// identity, they are kept in the run's private thread-config file so a
+// restarted app-server resumes with them.
+func withSessionEnv(cfg map[string]any, sessionEnv map[string]string, sessionUnset []string) map[string]any {
+	if len(sessionEnv) == 0 && len(sessionUnset) == 0 {
+		return cfg
+	}
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	for k, v := range sessionEnv {
+		if strings.HasPrefix(k, "PYRE_") {
+			continue // never from a session's file (internal/envfile refuses them)
+		}
+		cfg["shell_environment_policy.set."+k] = v
+	}
+	for _, k := range sessionUnset {
+		if _, set := sessionEnv[k]; !set && !strings.HasPrefix(k, "PYRE_") {
+			cfg["shell_environment_policy.set."+k] = ""
+		}
 	}
 	return cfg
 }
@@ -673,7 +747,7 @@ func (a *Adapter) run(h contracts.RunHandle) (*runRef, error) {
 	ts := newThreadState(meta.RunID, meta.SessionID, meta.ThreadID)
 	ts.config = readThreadConfig(h.StateDir)
 	hs.register(ts)
-	rr = &runRef{meta: meta, hs: hs, ts: ts}
+	rr = &runRef{meta: meta, stateDir: h.StateDir, hs: hs, ts: ts}
 	a.mu.Lock()
 	if existing := a.runs[h.RunID]; existing != nil {
 		rr = existing
@@ -811,6 +885,7 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	a.maybeRetry(h, rr, now)
+	a.armWake(ts) // a wake that had to wait (app-server unreachable, approval)
 	obs.NativeRef = &contracts.NativeRef{Kind: "codex_thread", ID: ts.threadID}
 	obs.Activity = ts.activity
 	obs.Doing = ts.doingNow() // the daemon keeps it only while the run is running
@@ -856,6 +931,17 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 	}
 	if pending && obs.State != contracts.RunWaitingApproval {
 		obs.State, obs.StateReason = contracts.RunWaitingApproval, "approval pending"
+	}
+	switch {
+	case obs.State == contracts.RunRunning || obs.State == contracts.RunWaitingApproval:
+		ts.turnsObserved = ts.turnsStarted
+	case obs.State == contracts.RunWaitingInput && ts.turnsObserved < ts.turnsStarted:
+		// A turn started and ended between two observations (win-home,
+		// Oct 2026: a launch prompt answered in 1.6 s, the daemon observes
+		// every 2 s): report it working once, so the transition to
+		// waiting_input that ends the turn is seen (child reports).
+		ts.turnsObserved = ts.turnsStarted
+		obs.State, obs.StateReason, obs.Doing = contracts.RunRunning, "turn active (ended since the last observation)", ""
 	}
 	for _, id := range ts.subOrder {
 		s := ts.subagents[id]
@@ -1084,7 +1170,8 @@ func (a *Adapter) receipt(o contracts.CommandOutcome, accepted bool, detail stri
 
 // Interrupt: turn/interrupt (bounded; interrupting a finished turn never
 // answers), then thread/backgroundTerminals/clean because commands keep
-// running after an interrupt.
+// running after an interrupt. An idle thread with commands still running
+// is cleaned too: an agent waiting on one (bgwake.go) is stopped.
 func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contracts.CommandReceipt, error) {
 	rr, err := a.run(h)
 	if err != nil {
@@ -1095,10 +1182,21 @@ func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contrac
 		return a.receipt(contracts.OutcomeFailed, false, err.Error()), nil
 	}
 	rr.ts.mu.Lock()
+	rr.ts.muteRunning() // the owner stopped the work: no wake for what it left running
+	rr.ts.mu.Unlock()
+	a.syncDeliver(ctx, rr) // a wake already sending: its turn becomes visible and is interrupted
+	rr.ts.mu.Lock()
 	active, done := rr.ts.activeTurn, rr.ts.turnDone
+	waiting := len(rr.ts.runningCmds) > 0
 	rr.ts.mu.Unlock()
 	if active == "" {
-		return a.receipt(contracts.OutcomeSucceeded, true, "nothing to interrupt"), nil
+		if !waiting {
+			return a.receipt(contracts.OutcomeSucceeded, true, "nothing to interrupt"), nil
+		}
+		// An idle agent waiting on commands it left running (bgwake.go):
+		// interrupting it stops that wait.
+		cerr := a.cleanTerminals(ctx, c, rr)
+		return a.receipt(contracts.OutcomeSucceeded, true, fmt.Sprintf("nothing to interrupt (no active turn); background commands stopped (backgroundTerminals/clean err=%v)", cerr)), nil
 	}
 	ictx, cancel := context.WithTimeout(ctx, a.o.InterruptTimeout)
 	ierr := c.call(ictx, "turn/interrupt", turnInterruptParams{ThreadID: rr.meta.ThreadID, TurnID: active}, nil)
@@ -1109,14 +1207,29 @@ func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contrac
 		completed = true
 	case <-time.After(a.o.InterruptTimeout):
 	}
-	cctx, cancel2 := context.WithTimeout(ctx, a.o.InterruptTimeout)
-	cerr := c.call(cctx, "thread/backgroundTerminals/clean", threadIDParams{ThreadID: rr.meta.ThreadID}, nil)
-	cancel2()
+	cerr := a.cleanTerminals(ctx, c, rr)
 	detail := fmt.Sprintf("turn/interrupt err=%v; backgroundTerminals/clean err=%v", ierr, cerr)
 	if completed {
 		return a.receipt(contracts.OutcomeSucceeded, true, "turn interrupted; "+detail), nil
 	}
 	return a.receipt(contracts.OutcomeIndeterminate, true, "turn completion not observed; "+detail), nil
+}
+
+// cleanTerminals stops the thread's background terminals. Their exits
+// are Pyre's own kills, not news: the commands running now are never woken
+// for, and nothing is during the clean and wakeMuteAfterClean after it.
+func (a *Adapter) cleanTerminals(ctx context.Context, c *rpcClient, rr *runRef) error {
+	rr.ts.mu.Lock()
+	rr.ts.muteRunning()
+	rr.ts.wakeMute = time.Now().Add(24 * time.Hour)
+	rr.ts.mu.Unlock()
+	cctx, cancel := context.WithTimeout(ctx, a.o.InterruptTimeout)
+	err := c.call(cctx, "thread/backgroundTerminals/clean", threadIDParams{ThreadID: rr.meta.ThreadID}, nil)
+	cancel()
+	rr.ts.mu.Lock()
+	rr.ts.wakes, rr.ts.wakeMute = nil, time.Now().Add(wakeMuteAfterClean)
+	rr.ts.mu.Unlock()
+	return err
 }
 
 // Stop interrupts an active turn, unsubscribes, closes the TUI and releases
@@ -1126,6 +1239,13 @@ func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.Co
 	if err != nil {
 		return a.receipt(contracts.OutcomeFailed, false, err.Error()), nil
 	}
+	rr.ts.mu.Lock()
+	rr.ts.closing = true // a stopped run is never woken (bgwake.go)
+	rr.ts.clearWakes(time.Time{})
+	rr.ts.mu.Unlock()
+	// A wake already sending holds deliverMu until its turn is visible:
+	// wait for it (bounded), so the turn is seen below and interrupted.
+	a.syncDeliver(ctx, rr)
 	c, cerr := a.client(ctx, rr, false)
 	if cerr == nil {
 		rr.ts.mu.Lock()
@@ -1235,17 +1355,27 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 	if err != nil {
 		return resp, err
 	}
-	c, err := a.client(ctx, rr, false)
-	if err != nil {
-		resp.Freshness.Stale, resp.Freshness.Reason = true, err.Error()
-		return resp, nil
-	}
 	limit := req.Limit
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 500 {
 		limit = 500
+	}
+	c, err := a.client(ctx, rr, false)
+	if err != nil {
+		resp.Freshness.Stale, resp.Freshness.Reason = true, err.Error()
+		if !errors.Is(err, errNoServer) && !stopped(h.StateDir) {
+			return resp, nil // a live app-server failed to answer: try again
+		}
+		if sel, ok := rolloutTranscript(h.StateDir, rr.meta, h.RunID, req, limit); ok {
+			resp.Entries, resp.NextCursor = sel, req.Cursor
+			if len(sel) > 0 {
+				resp.NextCursor = fmt.Sprintf("%d", sel[len(sel)-1].Seq)
+			}
+			resp.Freshness.Reason += "; read from the rollout file"
+		}
+		return resp, nil
 	}
 	var start int64
 	fmt.Sscanf(req.Cursor, "%d", &start)
@@ -1400,6 +1530,8 @@ func (a *Adapter) turnEntries(runID string, turns []turn, seq *int64) []contract
 				e.Kind, e.Text = "user", it.userText()
 				if strings.HasPrefix(e.Text, "[pyre-msg:") || it.ClientID != "" && safeIDRe.MatchString(it.ClientID) && header.HasMarker(e.Text, it.ClientID) {
 					e.Kind, e.MessageID = "pyre_message", it.ClientID
+				} else if strings.HasPrefix(it.ClientID, wakeIDPrefix) {
+					e.Kind = "system" // Pyre's background-command notice, not typed input
 				}
 			case "agentMessage":
 				e.Kind, e.Text = "assistant", it.Text

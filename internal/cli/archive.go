@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -35,6 +36,26 @@ type ArchiveResult struct {
 	Archived  bool   `json:"archived"`
 	WhenDone  bool   `json:"when_done"`
 	Note      string `json:"note"`
+	// ApprovalAsk is the owner approval the hub filed instead (an agent
+	// archiving a session it may not archive itself); Pyre archives it when
+	// the owner approves and messages the outcome.
+	ApprovalAsk string `json:"approval_ask,omitempty"`
+	// Cascade is what the archive does to the sessions under it (archived
+	// with it, or left because the owner is using them); the note says it.
+	Cascade *c.ArchiveCascade `json:"cascade,omitempty"`
+}
+
+// approvalResult describes an archive filed for the owner's approval.
+func approvalResult(sv c.SessionView, err error) (ArchiveResult, bool) {
+	var ce *c.Error
+	if !errors.As(err, &ce) || ce.Code != c.ErrApprovalRequested {
+		return ArchiveResult{}, false
+	}
+	r := ArchiveResult{SessionID: sv.Session.SessionID, Title: sv.Session.Title, Note: ce.Message}
+	if ce.Ref != nil {
+		r.ApprovalAsk = ce.Ref.ID
+	}
+	return r, true
 }
 
 // archiveResult describes an archive outcome for people and agents.
@@ -51,6 +72,10 @@ func archiveResult(sv c.SessionView, self bool) ArchiveResult {
 	default:
 		r.Note = "not archived"
 	}
+	if line := sv.ArchiveCascade.Line(); line != "" {
+		r.Cascade = sv.ArchiveCascade
+		r.Note += "; " + line
+	}
 	return r
 }
 
@@ -62,6 +87,15 @@ func (o *Ops) archivesWhenDone(p ArchiveParams, sv c.SessionView) bool {
 	}
 	self := o.Self.SessionID
 	return self != "" && (sv.Session.SessionID == self || sv.Session.StartedBy(self))
+}
+
+// needsApproval: an agent archiving a session it did not start; the hub
+// allows it for a session under the caller and files any other for the
+// owner's approval (an approved live session archives when its turn ends),
+// so it goes to the hub as is.
+func (o *Ops) needsApproval(sv c.SessionView) bool {
+	self := o.Self.SessionID
+	return self != "" && sv.Session.SessionID != self && !sv.Session.StartedBy(self)
 }
 
 // sessionEnded reports that nothing of the session runs: its run exited or
@@ -103,11 +137,18 @@ func (o *Ops) Archive(ctx context.Context, p ArchiveParams) (c.SessionView, erro
 	if err != nil {
 		return c.SessionView{}, err
 	}
+	// Filed for the owner's approval: the session as it is, with the error.
+	archiveCall := func(v c.SessionView, err error) (c.SessionView, error) {
+		if c.IsCode(err, c.ErrApprovalRequested) {
+			return sv, err
+		}
+		return v, err
+	}
 	yes := true
-	if !p.Force && !sessionEnded(sv) && o.archivesWhenDone(p, sv) {
+	if !p.Force && !sessionEnded(sv) && (o.archivesWhenDone(p, sv) || o.needsApproval(sv)) {
 		// W-archive2: the hub archives an ended session at once and
 		// schedules a live one for when its turn ends.
-		return o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes, WhenDone: true})
+		return archiveCall(o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes, WhenDone: true}))
 	}
 	// Right after `pyre stop` the node's exit report can trail the stop's
 	// receipt by a moment: give a just-stopped run a few seconds to land.
@@ -126,7 +167,7 @@ func (o *Ops) Archive(ctx context.Context, p ArchiveParams) (c.SessionView, erro
 		return c.SessionView{}, c.Errorf(c.ErrConflict, "session %s (%s) is still %s; archive it when its turn ends (pyre sessions archive --when-done %s) or stop it first (pyre stop %s)",
 			sv.Session.SessionID, orDash(sv.Session.Title), sv.Run.State, sv.Session.SessionID, sv.Session.SessionID)
 	}
-	return o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes})
+	return archiveCall(o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes}))
 }
 
 // Unarchive restores an archived session to listings.
@@ -150,7 +191,7 @@ func (o *Ops) archivedSessionID(ctx context.Context, ref string) (string, error)
 		return ref, nil
 	}
 	page, err := listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
-		return o.API.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur}, Query: ref, IncludeArchived: true})
+		return o.API.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur}, Query: ref, IncludeArchived: true, IncludeMonitors: true})
 	})
 	if err != nil {
 		return "", err
@@ -198,7 +239,7 @@ type PruneFailure struct {
 // Prune archives ended sessions (exited, failed or without a run),
 // optionally only those ended before now-OlderThan or on one node.
 func (o *Ops) Prune(ctx context.Context, p PruneParams, now time.Time) (PruneResult, error) {
-	page, err := o.ListSessions(ctx, SessionFilter{Node: p.Node})
+	page, err := o.ListSessions(ctx, SessionFilter{Node: p.Node, IncludeMonitors: true}) // ended monitors are pruned too
 	if err != nil {
 		return PruneResult{}, err
 	}
@@ -271,7 +312,7 @@ func (o *Ops) ArchiveProject(ctx context.Context, p ArchiveProjectParams) (Archi
 		ArchivedSessions: []ArchivedSessionRef{}, WhenDone: []ArchivedSessionRef{}, EndedLeft: []ArchivedSessionRef{}}
 	pid := pr.ProjectID
 	page, err := listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
-		return o.API.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur}, ProjectID: &pid})
+		return o.API.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur}, ProjectID: &pid, IncludeMonitors: true})
 	})
 	if err != nil {
 		return res, err

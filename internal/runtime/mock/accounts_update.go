@@ -15,8 +15,16 @@ func (b *Backend) UpdateAccount(ctx context.Context, req c.UpdateAccountRequest)
 		if err := requireOwner(p); err != nil {
 			return c.Account{}, err
 		}
-		if req.Label == nil && req.Disabled == nil {
-			return c.Account{}, c.Errorf(c.ErrInvalid, "nothing to update (label or disabled)")
+		if req.Label == nil && req.Disabled == nil && req.Tier == nil {
+			return c.Account{}, c.Errorf(c.ErrInvalid, "nothing to update (label, disabled or tier)")
+		}
+		var tier c.AccountTier
+		if req.Tier != nil {
+			t, ok := c.ParseAccountTier(string(*req.Tier))
+			if !ok {
+				return c.Account{}, c.Errorf(c.ErrInvalid, "tier %q is not normal or reserve", *req.Tier)
+			}
+			tier = t
 		}
 		a, ok := b.accounts[req.AccountID]
 		if !ok {
@@ -31,6 +39,9 @@ func (b *Backend) UpdateAccount(ctx context.Context, req c.UpdateAccountRequest)
 		}
 		if req.Disabled != nil {
 			a.Account.Disabled = *req.Disabled
+		}
+		if req.Tier != nil {
+			a.Account.Tier = tier
 		}
 		return a.Account, nil
 	})

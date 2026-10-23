@@ -233,6 +233,7 @@ func cmdServe(ctx context.Context, args []string, stderr io.Writer) error {
 	devMaxEvents := fs.Int("dev-max-events", 0, "testing: keep at most this many events instead of 200000")
 	auditMaxAge := fs.Duration("audit-max-age", 0, "keep audit log entries (pyre audit) this long (default 2160h = 90 days)")
 	auditMaxRows := fs.Int("audit-max-rows", 0, "keep at most this many audit log entries (default 100000)")
+	requireGrants := fs.Bool("require-connection-grants", false, "sessions need an explicit grant for every connection (default: a session uses connections verified on its own node, or verified for remote use on another node, without one)")
 	previewURL := fs.String("preview-url", "", "origin of the preview listener used in minted preview links (default: --hub-url host with the --preview-listen port)")
 	var hosts, alsoListen multiFlag
 	fs.Var(&hosts, "tls-host", "DNS name or IP for a newly generated certificate (repeatable)")
@@ -289,7 +290,7 @@ func cmdServe(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 		hopts.AuditRetention = &ar
 	}
-	st, err := assemble.Open(ctx, assemble.Config{DataDir: *data, HubURL: *hubURL, PreviewURL: pURL, TLSHosts: hosts, Logger: logger, FCM: fcm, Hub: hopts})
+	st, err := assemble.Open(ctx, assemble.Config{DataDir: *data, HubURL: *hubURL, PreviewURL: pURL, TLSHosts: hosts, Logger: logger, FCM: fcm, Hub: hopts, RequireConnectionGrants: *requireGrants})
 	if err != nil {
 		return err
 	}

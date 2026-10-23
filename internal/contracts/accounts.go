@@ -1,6 +1,9 @@
 package contracts
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Account is a provider subscription identity. It is separate from each
 // device's login/grant and from a run's assignment.
@@ -21,6 +24,45 @@ type Account struct {
 	// a separate refresh family (never copied with rota export/import), so
 	// nodes may check it out without an exclusive fleet lease.
 	PerMachineIndependent bool `json:"per_machine_independent,omitempty"`
+	// Tier orders automatic selection among a provider's accounts: a
+	// reserve account takes new work only when every normal account is at,
+	// near (usage.NearPercent) or past its limit or ineligible. Empty is
+	// normal (readers that predate tiers see every account as normal).
+	Tier AccountTier `json:"tier,omitempty"`
+}
+
+// AccountTier is an account's selection tier (Account.Tier).
+type AccountTier string
+
+const (
+	// TierNormal is the default; stored as "" (TierNormal on input).
+	TierNormal AccountTier = "normal"
+	// TierReserve: used only after every normal account is near or at its
+	// limit, or ineligible (accounts/select.go).
+	TierReserve AccountTier = "reserve"
+)
+
+// Reserve reports whether the account is in the reserve tier.
+func (a Account) Reserve() bool { return a.Tier == TierReserve }
+
+// TierName is the tier in words ("normal" for the empty default).
+func (a Account) TierName() AccountTier {
+	if a.Tier == "" {
+		return TierNormal
+	}
+	return a.Tier
+}
+
+// ParseAccountTier accepts "normal" or "reserve" (case-insensitive) and
+// returns the stored form ("" for normal).
+func ParseAccountTier(s string) (AccountTier, bool) {
+	switch AccountTier(strings.ToLower(strings.TrimSpace(s))) {
+	case TierNormal, "":
+		return "", true
+	case TierReserve:
+		return TierReserve, true
+	}
+	return "", false
 }
 
 // CredentialKind is the verified mechanism by which a device grant binds an

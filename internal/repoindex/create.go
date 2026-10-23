@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -117,11 +118,27 @@ func validBranch(b string) bool {
 	return true
 }
 
-// Create makes fresh worktrees for a launch. It never touches a main
-// checkout's working tree or index (`git worktree add -b` from HEAD), and
-// rolls back what it created if a later repository fails.
+// CreateOptions are the node's settings for Create.
+type CreateOptions struct {
+	GH string // gh binary for the fetch's credential fallback (FreshBase); empty: found on PATH
+}
+
+// Create makes fresh worktrees for a launch with default options.
 func Create(ctx context.Context, p contracts.WorktreeCreateParams, now time.Time) (contracts.WorktreeCreateResult, error) {
+	return CreateWith(ctx, p, now, CreateOptions{})
+}
+
+// CreateWith makes fresh worktrees for a launch. Each new branch starts at
+// origin's default branch, fetched first (FreshBase; HEAD, with a warning,
+// only without an origin remote), and tracks nothing, so a plain `git
+// push` never targets main (`git push -u origin <branch>` sets the
+// upstream). It never touches a main checkout's working tree, index or
+// local branches (`git worktree add --no-track -b`), and rolls back what
+// it created if a later repository fails.
+func CreateWith(ctx context.Context, p contracts.WorktreeCreateParams, now time.Time, opts CreateOptions) (contracts.WorktreeCreateResult, error) {
 	var res contracts.WorktreeCreateResult
+	token := contracts.NewID("claim") // names the session started here (Claim)
+	res.ClaimToken = token
 	if len(p.Repos) == 0 {
 		return res, contracts.Errorf(contracts.ErrInvalid, "worktree.create needs at least one repository")
 	}
@@ -206,6 +223,33 @@ func Create(ctx context.Context, p contracts.WorktreeCreateParams, now time.Time
 	if branch == "" {
 		return res, contracts.Errorf(contracts.ErrConflict, "no free branch name near %s", base)
 	}
+	// Fetch every repository (concurrently, each bounded) before creating
+	// anything: a failed fetch fails the launch with nothing to roll back.
+	starts := make([]FreshStart, len(repos))
+	errs := make([]error, len(repos))
+	var wg sync.WaitGroup
+	for i, r := range repos {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			starts[i], errs[i] = FreshBase(ctx, r, opts.GH)
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return res, err
+		}
+	}
+	for i, st := range starts {
+		if st.Warning != "" {
+			w := st.Warning
+			if multi {
+				w = filepath.Base(repos[i]) + ": " + w
+			}
+			res.Warnings = append(res.Warnings, w)
+		}
+	}
 	if multi {
 		folder += sfx
 		if err := os.MkdirAll(folder, 0o755); err != nil {
@@ -231,12 +275,12 @@ func Create(ctx context.Context, p contracts.WorktreeCreateParams, now time.Time
 			rollback()
 			return contracts.WorktreeCreateResult{}, err
 		}
-		if _, err := Git(ctx, r, "worktree", "add", "-b", branch, path, "HEAD"); err != nil {
+		if _, err := Git(ctx, r, "worktree", "add", "--no-track", "-b", branch, path, starts[i].Ref); err != nil {
 			rollback()
 			return contracts.WorktreeCreateResult{}, contracts.Errorf(contracts.ErrInvalid, "%s: %v", filepath.Base(r), err)
 		}
 		if adm, ok := adminDir(path); ok {
-			_ = os.WriteFile(filepath.Join(adm, MarkerFile), []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o644)
+			_ = os.WriteFile(filepath.Join(adm, MarkerFile), []byte(now.UTC().Format(time.RFC3339)+"\n"+markerClaimPrefix+token+"\n"), 0o644)
 		}
 		res.Worktrees = append(res.Worktrees, contracts.CreatedWorktree{Repo: r, Path: path, Branch: branch})
 	}

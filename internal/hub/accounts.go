@@ -53,7 +53,7 @@ func (h *Hub) UpsertAccount(ctx context.Context, req contracts.UpsertAccountRequ
 	if err := requireOp(req.Mutation); err != nil {
 		return contracts.Account{}, err
 	}
-	if req.Provider != contracts.ProviderAnthropic && req.Provider != contracts.ProviderOpenAI {
+	if contracts.HarnessForProvider(req.Provider) == "" {
 		return contracts.Account{}, contracts.Errorf(contracts.ErrInvalid, "unknown provider %q", req.Provider)
 	}
 	if strings.TrimSpace(req.Label) == "" {

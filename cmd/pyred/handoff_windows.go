@@ -14,6 +14,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Trampoline settings taken from the environment when `pyred run` starts
+// (takeTrampolineEnv).
+var trampolineFile, trampolinePID string
+
+func keepTrampoline(file, pid string) { trampolineFile, trampolinePID = file, pid }
+
 // doExec hands the exec request to the supervisor (see supervise.go): the
 // request file is written and the process exits with exitExecRequest. A
 // daemon started without a supervisor becomes one, starting the target as

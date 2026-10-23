@@ -47,15 +47,20 @@ type threadState struct {
 	statusAt   time.Time
 	activeTurn string
 	lastTurn   string
-	activity   string
-	inflight   doing.Inflight      // items between item/started and item/completed
-	evidence   map[string]evidence // by message id
-	seq        int64
-	approvals  map[string]*pendingApproval // by RequestID
-	order      []string
-	subagents  map[string]*subagent
-	subOrder   []string
-	limit      *contracts.LimitEvent
+	// turnsStarted counts turn/started notifications of the thread;
+	// turnsObserved is that count when Observe last reported the run
+	// working (Observe reports a turn it never saw active once).
+	turnsStarted  int64
+	turnsObserved int64
+	activity      string
+	inflight      doing.Inflight      // items between item/started and item/completed
+	evidence      map[string]evidence // by message id
+	seq           int64
+	approvals     map[string]*pendingApproval // by RequestID
+	order         []string
+	subagents     map[string]*subagent
+	subOrder      []string
+	limit         *contracts.LimitEvent
 	// lastErr is the newest failed turn's error (cleared by a completed
 	// turn). Codex reports such a thread as systemError although it is idle
 	// and takes input.
@@ -71,6 +76,16 @@ type threadState struct {
 	// config is the thread's Pyre identity overrides (threadConfig), re-sent
 	// on every thread/resume so a restarted app-server keeps them.
 	config map[string]any
+	// Background-command wake (bgwake.go): completions waiting for an
+	// idle thread, item ids already queued, a wake timer armed, the time
+	// before which completions are Pyre's own kills, and Stop begun.
+	wakes       []bgDone
+	wakeSeen    map[string]bool
+	wakeArmed   bool
+	wakeMute    time.Time
+	closing     bool
+	runningCmds map[string]bool // commandExecution items started, not yet completed
+	wakeIgnore  map[string]bool // their exits are Pyre's own kills (interrupt)
 	// changes counts app-server notifications and requests for this thread
 	// (and its subagents); Adapter.ChangeStamp exposes it lock-free.
 	changes atomic.Int64
@@ -193,6 +208,12 @@ func (ts *threadState) onTurnCompleted(t turn, at time.Time) {
 	}
 	ts.inflight.Clear()
 	ts.retryAt = time.Time{}
+	if t.Status == "failed" && ts.turnsObserved == ts.turnsStarted-1 {
+		// A failed turn no observation saw (an automatic capacity
+		// continue failing at once) is not reported as a turn: it would
+		// end in an idle report repeating the previous message.
+		ts.turnsObserved = ts.turnsStarted
+	}
 	if t.Status == "failed" && t.Error != nil {
 		ts.noteFailure(*t.Error, at)
 	} else if t.Status == "completed" {

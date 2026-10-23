@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Per-user LaunchAgent for the Pyre sentinel (hub-independent watchdog,
+  docs/operations.md "Sentinel"), rendered by scripts/install/sentinel.sh
+  (@HOME@ and @PYRED@ replaced). Separate from the pyred agent so it keeps
+  watching when pyred is what broke. @PYRED@ is the pyred inside Pyre.app
+  (a fixed path, bundle id dev.jhh3.pyre): macOS keys a bare binary's Local
+  Network permission to its per-version path, so the shim would ask again
+  after every upgrade, while Pyre.app's grant carries over. No secrets: the config and the Slack bot token file
+  are 0600 and referenced by path.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.jhh3.pyre.sentinel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PYRED@</string>
+    <string>sentinel</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>@HOME@</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/pyre/sentinel.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/pyre/sentinel.err.log</string>
+</dict>
+</plist>

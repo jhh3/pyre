@@ -83,34 +83,87 @@ type Envelope struct {
 	Ciphertext      string    `json:"ciphertext"`
 }
 
-func Build(ctx context.Context, store *state.Store, secrets vault.Store, tools toolchain.Manager, skills skillmanager.Manager) (Payload, error) {
+// Why a connection was left out of a backup.
+const (
+	SkipMissingSecret = "missing-secret" // its vault secret no longer exists
+	SkipOAuth         = "oauth"          // excluded on request (BuildOptions.ExcludeOAuth)
+)
+
+// SkippedConnection is a connection Build left out of a backup.
+type SkippedConnection struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Reason string `json:"reason"`
+}
+
+// BuildOptions tune Build.
+type BuildOptions struct {
+	// ExcludeOAuth leaves out connections whose credential is an
+	// Outfit-managed OAuth grant. Copies of one refresh-token family on
+	// several machines invalidate each other when the provider rotates it,
+	// so fleet copies leave them out unless asked.
+	ExcludeOAuth bool
+}
+
+// Build collects the portable payload. A connection whose credential secret
+// no longer exists in the vault cannot be restored anywhere, so it is left
+// out and reported in skipped instead of failing the whole backup; any other
+// vault error (a locked keychain) still fails.
+func Build(ctx context.Context, store *state.Store, secrets vault.Store, tools toolchain.Manager, skills skillmanager.Manager, options BuildOptions) (Payload, []SkippedConnection, error) {
 	connections, err := store.Connections(ctx)
 	if err != nil {
-		return Payload{}, err
+		return Payload{}, nil, err
 	}
 	payload := Payload{CreatedAt: time.Now().UTC()}
-	packageKeys := map[string]bool{}
-	for _, connection := range connections {
-		payload.Connections = append(payload.Connections, Connection{Name: connection.Name, ConnectorKey: connection.ConnectorKey, SelectedMode: connection.SelectedMode, CredentialMethod: connection.CredentialMethod, Status: connection.Status, CredentialID: connection.CredentialID, SafeIdentity: connection.SafeIdentity})
-		packageKeys[connection.ConnectorKey] = true
+	installed, err := store.Packages(ctx)
+	if err != nil {
+		return Payload{}, nil, err
+	}
+	packagesByKey := map[string]kit.Package{}
+	for _, item := range installed {
+		packagesByKey[item.Key] = item.Package
+	}
+	oauth := func(connectorKey, methodID string) bool {
+		method, ok := kit.FindCredentialMethod(packagesByKey[connectorKey], methodID)
+		return ok && method.OAuth != nil
 	}
 	credentials, err := store.Credentials(ctx)
 	if err != nil {
-		return Payload{}, err
+		return Payload{}, nil, err
 	}
+	missing := map[string]string{}
 	for _, credential := range credentials {
+		if options.ExcludeOAuth && oauth(credential.ConnectorKey, credential.MethodID) {
+			continue
+		}
 		fields := map[string]string{}
 		if credential.VaultRef != "" {
 			fields, err = secrets.Get(ctx, credential.VaultRef)
+			if vault.IsNotFound(err) {
+				missing[credential.ID] = "credential " + credential.DisplayName + " has no secret in the vault (" + credential.VaultRef + ")"
+				continue
+			}
 			if err != nil {
-				return Payload{}, fmt.Errorf("read credential %s: %w", credential.DisplayName, err)
+				return Payload{}, nil, fmt.Errorf("read credential %s: %w", credential.DisplayName, err)
 			}
 		}
 		payload.Credentials = append(payload.Credentials, Credential{ID: credential.ID, ConnectorKey: credential.ConnectorKey, MethodID: credential.MethodID, DisplayName: credential.DisplayName, Fingerprint: credential.Fingerprint, Environment: credential.Environment, AccountID: credential.AccountID, AccountName: credential.AccountName, PrincipalName: credential.PrincipalName, Scopes: credential.Scopes, CreatedAt: credential.CreatedAt, UpdatedAt: credential.UpdatedAt, LastVerifiedAt: credential.LastVerifiedAt, LastUsedAt: credential.LastUsedAt, Fields: fields})
 	}
-	installed, err := store.Packages(ctx)
-	if err != nil {
-		return Payload{}, err
+	var skipped []SkippedConnection
+	packageKeys := map[string]bool{}
+	included := map[string]bool{}
+	for _, connection := range connections {
+		if options.ExcludeOAuth && oauth(connection.ConnectorKey, connection.CredentialMethod) {
+			skipped = append(skipped, SkippedConnection{Name: connection.Name, Kind: SkipOAuth, Reason: "OAuth grant (" + connection.CredentialMethod + "); copies of one refresh token invalidate each other"})
+			continue
+		}
+		if reason, ok := missing[connection.CredentialID]; ok {
+			skipped = append(skipped, SkippedConnection{Name: connection.Name, Kind: SkipMissingSecret, Reason: reason})
+			continue
+		}
+		included[connection.Name] = true
+		payload.Connections = append(payload.Connections, Connection{Name: connection.Name, ConnectorKey: connection.ConnectorKey, SelectedMode: connection.SelectedMode, CredentialMethod: connection.CredentialMethod, Status: connection.Status, CredentialID: connection.CredentialID, SafeIdentity: connection.SafeIdentity})
+		packageKeys[connection.ConnectorKey] = true
 	}
 	for _, item := range installed {
 		if packageKeys[item.Key] {
@@ -119,7 +172,7 @@ func Build(ctx context.Context, store *state.Store, secrets vault.Store, tools t
 	}
 	receipts, err := tools.List()
 	if err != nil {
-		return Payload{}, err
+		return Payload{}, nil, err
 	}
 	seen := map[string]bool{}
 	for _, receipt := range receipts {
@@ -132,11 +185,17 @@ func Build(ctx context.Context, store *state.Store, secrets vault.Store, tools t
 			seen[receipt.ID] = true
 		}
 	}
-	payload.Skills, err = skills.ExportPreferences()
+	preferences, err := skills.ExportPreferences()
 	if err != nil {
-		return Payload{}, err
+		return Payload{}, nil, err
 	}
-	return payload, nil
+	payload.Skills = map[string]bool{}
+	for key, enabled := range preferences {
+		if name, _, _ := strings.Cut(key, "|"); included[name] {
+			payload.Skills[key] = enabled
+		}
+	}
+	return payload, skipped, nil
 }
 
 func Write(path, passphrase string, payload Payload) error {

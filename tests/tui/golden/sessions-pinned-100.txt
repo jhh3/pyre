@@ -1,4 +1,4 @@
- Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                       ● live
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts   cl 41%~!1   cx —!   ● live
 ────────────────────────────────────────────────────────────────────────────────────────────────────
   STATUS       SESSION                 MACHINE      AGE  │ worker · ○ idle · Claude        needs you
   Pinned 1 •                                             │ read-only snapshot · MOCK backend: there…

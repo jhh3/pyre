@@ -1,0 +1,79 @@
+name: CI full
+
+# The slow gates, moved off the fast check (ci.yml, I47): the full suite
+# (real-stack scenarios in tests/resilience and tests/security) with -race
+# on ubuntu and macOS, govulncheck, and the reproducible release build.
+# Run before a release or after risky changes: gh workflow run "CI full".
+on:
+  # Private personal repo: CI runs only when started by hand
+  # (gh workflow run <name>); verify locally before pushing.
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  go:
+    name: go -race full (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install tmux
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -q && sudo apt-get install -y -q tmux; else brew install tmux; fi
+      - name: Test (full suite, -race, no cached results)
+        run: go test -race -count=1 ./...
+      - name: testshard finds every test go test -list does (the fast check runs only those)
+        run: go run ./tools/testshard -verify ./...
+      - name: Build
+        run: make GO=go build
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: govulncheck (linux and darwin build tags)
+        run: make GO=go vuln
+
+  repro:
+    name: reproducible build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build the release twice (release.sh; binaries, tarballs, SHA256SUMS) and compare
+        run: make GO=go verify-repro

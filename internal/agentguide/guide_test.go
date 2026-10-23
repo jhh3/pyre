@@ -6,10 +6,20 @@ import (
 	"unicode/utf8"
 )
 
+// W-runtmp: the $TMPDIR line appears only on nodes that give runs their own.
+func TestGuideMentionsRunTmpDir(t *testing.T) {
+	if g := Text(Options{}); strings.Contains(g, "$TMPDIR") {
+		t.Fatal("plain guide mentions $TMPDIR")
+	}
+	if g := Text(Options{RunTmpDir: true}); !strings.Contains(g, "Put temp files under $TMPDIR") {
+		t.Fatalf("guide lacks the $TMPDIR line:\n%s", g)
+	}
+}
+
 func TestGuideIsShortAndCoversTheEssentials(t *testing.T) {
 	g := Text(Options{})
-	if n := strings.Count(g, "\n"); n > 50 {
-		t.Fatalf("guide is %d lines; keep it short (<= ~50)", n)
+	if n := strings.Count(g, "\n"); n > 56 {
+		t.Fatalf("guide is %d lines; keep it short (<= ~56)", n)
 	}
 	for _, want := range []string{
 		"pyre --json nodes", "$PYRE_SESSION_ID", "[pyre-msg:<id>]", "--reply-to",
@@ -22,6 +32,8 @@ func TestGuideIsShortAndCoversTheEssentials(t *testing.T) {
 		"Only top-level sessions contact the owner", "pyre ask new", "pyre ask find", "pyre ask withdraw",
 		"default you will take", "newcomer", "no progress pings", "final results once",
 		"question at the end of a turn never",
+		// W6: placement, monitors, the owner first
+		"least loaded", "pyre monitor add", "restarts daily", "answer that first", "full URLs", "--fallback-harness claude",
 	} {
 		if !strings.Contains(g, want) {
 			t.Errorf("guide lacks %q", want)
@@ -32,12 +44,20 @@ func TestGuideIsShortAndCoversTheEssentials(t *testing.T) {
 			t.Errorf("guide prescribes ceremony: %q", banned)
 		}
 	}
+	// Issues: Pyre and machine problems are filed, not sent to the owner.
+	for g, tool := range map[string]string{Text(Options{}): "pyre issue file --kind pyre_bug|machine", Text(Options{MCP: true}): "mcp__pyre__report_issue"} {
+		for _, want := range []string{tool, "login expired", "kind guidance", "not for your own mistakes, invalid arguments, or the project's own build or test failures", "Keep working around it", "don't message the owner about Pyre or machine problems"} {
+			if !strings.Contains(g, want) {
+				t.Errorf("guide lacks %q", want)
+			}
+		}
+	}
 	if !strings.Contains(Text(Options{MCP: true}), "question at the end of a turn never") {
 		t.Error("MCP variant lacks the end-of-turn question rule")
 	}
 	// W-web-inbox: ask context, clarification replies, the lead's project page.
 	for _, g := range []string{Text(Options{}), Text(Options{MCP: true})} {
-		for _, want := range []string{"300+ characters", "each with a detail", "what happens by default", "asks for clarification", "self-contained", "project's page", "at milestones"} {
+		for _, want := range []string{"300+ characters", "each with a detail", "what happens by default", "asks for clarification", "self-contained", "project's page", "at milestones", "status card", "ready_for_owner"} {
 			if !strings.Contains(g, want) {
 				t.Errorf("guide lacks %q", want)
 			}
@@ -51,6 +71,28 @@ func TestGuideIsShortAndCoversTheEssentials(t *testing.T) {
 	}
 	if !strings.Contains(Text(Options{MCP: true}), "MCP tools") {
 		t.Error("MCP variant should mention the tools")
+	}
+}
+
+func TestGuideWaitingAdviceFollowsTheHarness(t *testing.T) {
+	claude, codex, unknown := Text(Options{MCP: true, Harness: "claude"}), Text(Options{MCP: true, Harness: "codex"}), Text(Options{})
+	if !strings.Contains(claude, "Monitor tool") || !strings.Contains(claude, "run_in_background") || !strings.Contains(claude, "outlive it") {
+		t.Errorf("Claude should wait with its built-in Monitor tool:\n%s", claude)
+	}
+	if !strings.Contains(codex, "end your turn: Pyre starts a new turn with its exit code") || !strings.Contains(codex, "gh pr checks <n> --watch") ||
+		!strings.Contains(codex, "pyre monitor add --every 10m") || strings.Contains(codex, "Monitor tool") || !strings.Contains(codex, "outlive it") {
+		t.Errorf("Codex should wait with a background command Pyre wakes it for, pyre monitor only for long waits:\n%s", codex)
+	}
+	if agy := Text(Options{Harness: "agy"}); !strings.Contains(agy, "pyre monitor add --every 10m") || strings.Contains(agy, "Pyre starts a new turn") {
+		t.Errorf("agy has no wake and should wait with pyre monitor:\n%s", agy)
+	}
+	if !strings.Contains(unknown, "Monitor tool") || !strings.Contains(unknown, "pyre monitor add --every 10m") {
+		t.Errorf("an unknown harness gets both:\n%s", unknown)
+	}
+	for _, g := range []string{claude, codex, unknown} {
+		if !strings.Contains(g, "restarts daily") || strings.Contains(g, "__WAIT__") {
+			t.Errorf("waiting line:\n%s", g)
+		}
 	}
 }
 
@@ -123,16 +165,28 @@ func TestParentNoteAndPeerReports(t *testing.T) {
 		t.Fatalf("parent-side line missing or child note without a parent:\n%s", g)
 	}
 	child := Text(Options{MCP: true, ParentSessionID: "ses_synth-parent", ReportsToParent: true})
-	for _, want := range []string{"## Started by another session", "ses_synth-parent", "$PYRE_PARENT_SESSION_ID", "reports back to it automatically", "You do not contact the owner", "go to your parent"} {
+	for _, want := range []string{"## Started by another session", "ses_synth-parent", "$PYRE_PARENT_SESSION_ID", "reports back to it automatically", "You do not contact the owner", "go to your parent",
+		"waiting_on with quiet: true", "end your turn", "Don't stay in the turn polling your inbox"} {
 		if !strings.Contains(child, want) {
 			t.Errorf("child guide lacks %q", want)
 		}
 	}
 	off := ParentNote("ses_synth-parent", false)
-	if !strings.Contains(off, "off") || strings.Contains(off, "reports back to it automatically") {
+	if !strings.Contains(off, "off") || strings.Contains(off, "reports back to it automatically") || strings.Contains(off, "quiet") {
 		t.Errorf("opt-out note: %s", off)
 	}
 	if ParentNote("", true) != "" {
 		t.Error("no parent, no note")
+	}
+}
+
+// The owner's default: sessions use connections without asking him.
+func TestGuideSaysConnectionsNeedNoGrant(t *testing.T) {
+	for _, g := range []string{Text(Options{}), Text(Options{MCP: true})} {
+		for _, want := range []string{"`outfit`", "connection_invoke", "no grant needed"} {
+			if !strings.Contains(g, want) {
+				t.Errorf("guide lacks %q", want)
+			}
+		}
 	}
 }

@@ -37,3 +37,5 @@ func fixHint(path string, dir bool) string {
 }
 
 func protectNewDir(string) error { return nil }
+
+func userOnlyDir(dir string) error { return os.Chmod(dir, 0o700) }

@@ -478,7 +478,8 @@ func TestWaitingPushOncePerSessionPerHour(t *testing.T) {
 			t.Fatalf("push carries content: %+v", msgs[0].Data())
 		}
 	}
-	// It reopens at the next turns within the hour: no new push.
+	// It asks again at the next turns within the hour (a new item each
+	// time, same session): no new push.
 	for range 3 {
 		nextTurn("ses_synth-a")
 		e.clock.Advance(10 * time.Minute)
@@ -487,7 +488,7 @@ func TestWaitingPushOncePerSessionPerHour(t *testing.T) {
 	if n := len(pushes()); n != 1 {
 		t.Fatalf("pushes within the hour = %d", n)
 	}
-	if it := e.item("waiting:ses_synth-a"); it.State != contracts.AttnOpen || it.Count != 4 || it.Notification == nil ||
+	if it := e.item("waiting:ses_synth-a"); it.State != contracts.AttnOpen || it.Count != 1 || it.Notification == nil ||
 		it.Notification.State != notifications.StateDisabled || !strings.Contains(it.Notification.Detail, "1h0m0s") {
 		t.Fatalf("suppressed repeat: %+v %+v", it, it.Notification)
 	}

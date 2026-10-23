@@ -13,6 +13,19 @@ import (
 	"github.com/jhh3/pyre/internal/contracts"
 )
 
+// W-runtmp: the shared app-server runs the agent's commands, so the run's
+// TMPDIR reaches them as a per-thread override; a managed one wins.
+func TestThreadConfigCarriesRunTmpDir(t *testing.T) {
+	cfg := threadConfig(map[string]string{"PYRE_SESSION_ID": "ses_x", "TMPDIR": "/synthetic/state/tmp/runs/run_x"})
+	if cfg[threadTmpKey] != "/synthetic/state/tmp/runs/run_x" {
+		t.Fatalf("thread TMPDIR = %v", cfg[threadTmpKey])
+	}
+	m, err := mergeThreadConfig(cfg, map[string]any{threadTmpKey: "/synthetic/owner-tmp"})
+	if err != nil || m[threadTmpKey] != "/synthetic/owner-tmp" || cfg[threadTmpKey] != "/synthetic/state/tmp/runs/run_x" {
+		t.Fatalf("managed TMPDIR: %v %v", m, err)
+	}
+}
+
 func TestSplitConfigArgs(t *testing.T) {
 	rest, cfg, err := splitConfigArgs([]string{"-c", `model_reasoning_effort="high"`, "-m", "gpt-x",
 		"-c", `mcp_servers.synthetic-alpha.args=["/x/synth.py", "alpha"]`, "--config=features.synthetic=true",
@@ -150,5 +163,49 @@ func TestCodexRunsPinnedToTheirExecutable(t *testing.T) {
 	}
 	if _, err := a2.Stop(ctx, h2); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A chosen model and effort (pyre start --model/--effort) become the
+// thread's model and model_reasoning_effort, overriding -m and a managed
+// effort overlay.
+func TestCodexChosenModelAndEffort(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	work := filepath.Join(e.dir, "work")
+	_ = os.MkdirAll(work, 0o755)
+	h, err := e.a.Launch(ctx, contracts.ResolvedLaunch{RunID: "run_mm", SessionID: "ses_x", Harness: contracts.HarnessCodex, Cwd: work,
+		StateDir: filepath.Join(e.dir, "runs", "run_mm"), ProfileDir: e.home, Env: map[string]string{"PYRE_SESSION_ID": "ses_x"},
+		Args: []string{"-c", `model_reasoning_effort="low"`, "-m", "synthetic-old"}, Model: "synthetic-model-2", Effort: "xhigh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = e.a.Stop(ctx, h) }()
+	b, _ := os.ReadFile(filepath.Join(e.o.StateRoot, "codex", homeKey(e.home), "fake-config.log"))
+	if !strings.Contains(string(b), `"model_reasoning_effort":"xhigh"`) {
+		t.Fatalf("thread config: %s", b)
+	}
+	mb, _ := os.ReadFile(filepath.Join(e.dir, "runs", "run_mm", "run.json"))
+	var meta runMeta
+	if json.Unmarshal(mb, &meta) != nil || meta.Model != "synthetic-model-2" {
+		t.Fatalf("run.json model: %s", mb)
+	}
+}
+
+// A session's environment file reaches the agent's commands through the
+// thread's shell_environment_policy (the shared app-server runs them).
+func TestWithSessionEnv(t *testing.T) {
+	if got := withSessionEnv(nil, nil, nil); got != nil {
+		t.Fatalf("no env: %v", got)
+	}
+	cfg := withSessionEnv(threadConfig(map[string]string{"PYRE_SESSION_ID": "ses_x"}),
+		map[string]string{"AGENT_INTAKE_URL": "http://127.0.0.1:8091", "PYRE_SESSION_ID": "ses_forged"}, []string{"OPENAI_API_KEY"})
+	if cfg["shell_environment_policy.set.AGENT_INTAKE_URL"] != "http://127.0.0.1:8091" || cfg["shell_environment_policy.set.PYRE_SESSION_ID"] != "ses_x" ||
+		cfg["shell_environment_policy.set.OPENAI_API_KEY"] != "" {
+		t.Fatalf("cfg = %v", cfg)
+	}
+	if cfg := withSessionEnv(nil, map[string]string{"K": "v"}, nil); cfg["shell_environment_policy.set.K"] != "v" {
+		t.Fatalf("cfg = %v", cfg)
 	}
 }

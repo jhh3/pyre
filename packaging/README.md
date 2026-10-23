@@ -19,6 +19,7 @@ dist/release/
   pyre-tools-<V>-<os>-<arch>.tar.gz        optional bundled tools, one per platform (--no-tools omits)
   pyre-<V>-windows-amd64.zip               Windows node + CLI (--no-windows omits)
   pyre-<V>-windows-arm64.zip
+  pyre-tools-<V>-windows-<arch>.zip        Outfit for Windows (outfit.exe, outfit-core.exe; --no-tools or --no-windows omits)
 
 pyre-<V>-<os>-<arch>/                      single top-level directory per tarball
   bin/pyre  bin/pyred  bin/pyre-hub        static, CGO_ENABLED=0, -trimpath, version stamped
@@ -55,7 +56,13 @@ and continues (rehearsals, CI).
   `bin/hive` launcher) and `rota/bin/rota`, plus `VERSION`, `BUILDINFO`,
   `NOTICE` and `SHA256SUMS`. Only git-tracked files are copied. It is tarred
   the same deterministic way and listed in the same signed `SHA256SUMS`.
-  `install.sh --with-tools` installs it into `~/.local/share/pyre/tools/`.
+  `install.sh --with-tools` installs it into `~/.local/share/pyre/tools/`
+  and links `~/.local/bin/outfit-core` (the Outfit plugin's command) to the
+  bundled `outfit`. The `windows/<arch>` bundles hold Outfit only:
+  `outfit/bin/outfit.exe` and an identical `outfit-core.exe` (no symlink
+  shims on Windows); Hive and Rota are POSIX launchers and are not bundled.
+  They are zipped like the Windows release zips, and `install.ps1
+  -WithTools` installs them into `%LOCALAPPDATA%\Programs\Pyre\tools\`.
 - `NOTICE` lists the third-party Go modules compiled in (`go version -m`).
   The build copies `LICENSE` (MIT) and `NOTICE` (third-party notices) from
   the repository root into every tarball.

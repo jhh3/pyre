@@ -1,11 +1,12 @@
- Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                         ○ synced
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     cl 41%~!1   cx —!   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
     ╭─ New session ────────────────────────────────────────────────────────────────────────────────────────────────╮
     │                                                                                                              │
-    │ › Where      orbit▏                                                                                          │
-    │              GitHub                                                                                          │
-    │              › orbit                   demo/orbit                   not cloned          contributed 5h ago   │
+    │   Machine    ● synth-linux  1/16 runs · cpu 7% · mem 40%    claude shell  auto                               │
+    │              ○ synth-mac    2/8 runs · cpu 18% · mem 63%    claude codex shell                               │
+    │ › Where      clone: orbit▏                                                                                   │
+    │              Clone onto synth-linux                                                                          │
+    │              › orbit                   demo/orbit                   GitHub              contributed 5h ago   │
     │                                                                                                              │
     │                                                                                                              │
     │                                                                                                              │
@@ -15,10 +16,10 @@
     │                                                                                                              │
     │                                                                                                              │
     │                                                                                                              │
-    │                📁 Browse folders…      any folder, or a new one on synth-linux                               │
     │                                                                                                              │
-    │   Machine    ● synth-linux · will clone   ○ synth-mac · will clone   auto                                    │
-    │   Agent      ● Claude   ○ Codex   ○ Shell   auto                                                             │
+    │   Agent      ● Claude   ○ Shell   auto                                                                       │
+    │   Model      ● default                                                                                       │
+    │   Effort     ● default                                                                                       │
     │   Workspace  ● main checkout   ○ fresh worktree   ○ new branch   auto                                        │
     │   Account    ● auto   ○ claude-personal-a   ○ claude-personal-b   ○ claude-work-c                            │
     │   Prompt     optional first prompt (shift+enter: new line)                                                   │
@@ -30,5 +31,4 @@
     ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
-
- ↑↓ choose   tab next field   + add repo   ^s start   esc cancel   ^a step-by-step
+ ↑↓ choose   tab next field   esc back to the list   ^s start

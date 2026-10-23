@@ -15,6 +15,7 @@ const (
 	EnvConfig       = cc.EnvConfig
 	EnvStateDir     = cc.EnvStateDir
 	EnvSessionID    = cc.EnvSessionID
+	EnvHarness      = cc.EnvHarness
 	EnvRunID        = cc.EnvRunID
 	EnvNodeID       = cc.EnvNodeID
 	ConfigVersion   = cc.ConfigVersion

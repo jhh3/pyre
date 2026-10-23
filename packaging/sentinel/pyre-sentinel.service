@@ -1,0 +1,35 @@
+# systemd user unit for the Pyre sentinel (hub-independent watchdog,
+# docs/operations.md "Sentinel"). Separate from pyred.service so it keeps
+# watching when pyred is what broke. No secrets: the config
+# (~/.config/pyre/sentinel.json) and the Slack bot token file are 0600 and
+# referenced by path.
+#
+#   install -m 0644 packaging/sentinel/pyre-sentinel.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now pyre-sentinel
+#
+# (scripts/install/sentinel.sh install does this after a dry-run probe.)
+# On the watched host itself (server) this unit dies with its user manager like
+# everything else there; the other sentinels are what notice that.
+
+[Unit]
+Description=Pyre sentinel (hub-independent watchdog)
+Documentation=https://github.com/jhh3/pyre/blob/main/docs/operations.md
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pyred sentinel run
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+WorkingDirectory=%h
+Restart=always
+RestartSec=15s
+TimeoutStopSec=10s
+# Bounded: a 60 s loop of a few ssh sessions and HTTPS GETs.
+MemoryMax=128M
+CPUQuota=20%
+TasksMax=64
+Nice=5
+SyslogIdentifier=pyre-sentinel
+
+[Install]
+WantedBy=default.target

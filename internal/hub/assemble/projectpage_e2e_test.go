@@ -96,4 +96,35 @@ func TestProjectPageEndToEnd(t *testing.T) {
 	if seen != 3 {
 		t.Fatalf("document.revised events for the project: %d", seen)
 	}
+
+	// The status card: written alone (the page is unchanged), read back
+	// with the page, replaced whole by the next write, validated.
+	pct := 40
+	sv, err := st.Hub.SetProjectPage(lead, c.SetProjectPageRequest{Mutation: op(), Summary: "status", Status: &c.ProjectStatus{Progress: &pct, Phase: "synthetic phase",
+		ReadyForOwner: []c.StatusItem{{Title: "synthetic PR", URL: "https://example.invalid/pr/1", State: "review"}}}})
+	if err != nil || sv.Status == nil || *sv.Status.Progress != 40 || sv.StatusUpdatedAt == nil || sv.Revision == nil || sv.Revision.RevisionID != v3.Revision.RevisionID {
+		t.Fatalf("status write: %+v %v", sv, err)
+	}
+	got, err := st.Hub.GetProjectPage(child, c.GetProjectPageRequest{})
+	if err != nil || got.Status == nil || got.Status.Phase != "synthetic phase" || len(got.Status.ReadyForOwner) != 1 || got.Content != v3.Content {
+		t.Fatalf("status read: %+v %v", got, err)
+	}
+	pct = 70
+	both, err := st.Hub.SetProjectPage(lead, c.SetProjectPageRequest{Mutation: op(), Content: "# Synthetic alpha\n\nNearly there.", Status: &c.ProjectStatus{Progress: &pct}})
+	if err != nil || both.Revision.Seq != 4 || *both.Status.Progress != 70 || both.Status.Phase != "" || both.Status.ReadyForOwner != nil {
+		t.Fatalf("page and status: %+v %v", both, err)
+	}
+	bad := 101
+	if _, err := st.Hub.SetProjectPage(lead, c.SetProjectPageRequest{Mutation: op(), Status: &c.ProjectStatus{Progress: &bad}}); !c.IsCode(err, c.ErrInvalid) {
+		t.Fatalf("progress 101: %v", err)
+	}
+	if _, err := st.Hub.SetProjectPage(lead, c.SetProjectPageRequest{Mutation: op(), Status: &c.ProjectStatus{Shipped: []c.StatusItem{{URL: "x"}}}}); !c.IsCode(err, c.ErrInvalid) {
+		t.Fatalf("untitled item: %v", err)
+	}
+	if _, err := st.Hub.SetProjectPage(lead, c.SetProjectPageRequest{Mutation: op(), Status: &c.ProjectStatus{Shipped: []c.StatusItem{{Title: "x", URL: "javascript:alert(1)"}}}}); !c.IsCode(err, c.ErrInvalid) {
+		t.Fatalf("non-http url: %v", err)
+	}
+	if _, err := st.Hub.SetProjectPage(child, c.SetProjectPageRequest{Mutation: op(), Status: &c.ProjectStatus{Phase: "child"}}); !c.IsCode(err, c.ErrForbidden) {
+		t.Fatalf("child status write: %v", err)
+	}
 }

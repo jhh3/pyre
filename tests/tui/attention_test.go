@@ -16,12 +16,14 @@ import (
 
 const pairing = "ses_synth-leased" // "pairing session": idle, no flag in the fixture
 
-// sendToOwner has a session message the owner (synthetic text).
+// sendToOwner has a session message the owner (synthetic text), asking
+// for his acknowledgement: a report that asks nothing is an update, which
+// flags nothing (internal/messaging/ownermail).
 func sendToOwner(t *testing.T, api contracts.API, sid, text string) contracts.MessageView {
 	t.Helper()
 	ctx := contracts.WithPrincipal(context.Background(), contracts.Principal{Kind: contracts.PrincipalSession, ID: sid})
 	mv, err := api.SendMessage(ctx, contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)},
-		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, Mode: contracts.ModeInfo, Body: contracts.MessageBody{Text: text}})
+		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, Body: contracts.MessageBody{Text: text}, RequestAck: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +93,24 @@ func TestMessageForYouIsNotNeedsYou(t *testing.T) {
 	})
 }
 
+// A report that asks nothing (an update) flags nothing: no "✉ message",
+// no message line (owner report 2026-10-19).
+func TestUpdateToOwnerFlagsNothing(t *testing.T) {
+	h, api := startWatched(t, 160, 34)
+	ctx := contracts.WithPrincipal(context.Background(), contracts.Principal{Kind: contracts.PrincipalSession, ID: pairing})
+	mv, err := api.SendMessage(ctx, contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)},
+		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, Body: contracts.MessageBody{Text: "Synthetic digest: two PRs merged. Nothing urgent."}})
+	if err != nil || mv.Status.AckRef != contracts.AckRefUpdate {
+		t.Fatalf("update: %v %+v", err, mv.Status)
+	}
+	h.Settle()
+	selectSession(t, h, pairing)
+	h.Settle()
+	if strings.Contains(rowOf(h.View(), "pairing session"), "✉ message") || h.Contains("message for you:") {
+		t.Fatalf("an update flagged the session:\n%s", h.View())
+	}
+}
+
 func TestStripNothingNeedsYouButAMessage(t *testing.T) {
 	h, api := startWatched(t, 100, 30)
 	sendToOwner(t, api, pairing, "Synthetic: FYI only.")
@@ -116,4 +136,51 @@ func TestNeedsYouListLabelAndStrip(t *testing.T) {
 	if !strings.Contains(v, " Needs you ") || strings.Contains(v, "I inbox") {
 		t.Fatalf("strip:\n%s", v)
 	}
+}
+
+// Owner request 2026-10-19 ("why are a few sessions stuck with needs you
+// state??"): d on a session dismisses its own flag (or "waiting on you"),
+// and then, after a confirmation, its open asks (no option, no default).
+func TestDismissFlagThenAsks(t *testing.T) {
+	h, api := startWatched(t, 160, 34)
+	if _, err := api.FlagAttention(sessCtx(pairing), contracts.FlagAttentionRequest{Mutation: contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)},
+		Text: "Synthetic: need the staging key"}); err != nil {
+		t.Fatal(err)
+	}
+	a := ask(t, api, pairing, "synthetic-key-rotation", "Rotate the synthetic staging key?", "The synthetic key is old.", "a", false, 0, "Rotate", "Keep")
+	h.WaitFor("needs you", 5*sec, func() bool { return strings.Contains(rowOf(h.View(), "pairing session"), "needs you") })
+	selectSession(t, h, pairing)
+	// The flag shows the ask (it outranks the session's own flag): the first
+	// d dismisses it, after a confirmation.
+	h.WaitFor("ask line with keys", 5*sec, func() bool { return h.Contains("! Rotate the synthetic staging key? — m reply · d dismiss") })
+	pressUntil(t, h, "d", "confirm", func() bool {
+		return h.M.OverlayOpen() && h.Contains("Dismiss 1 open ask from") && h.Contains("Rotate the synthetic staging key?")
+	})
+	h.Key("y")
+	h.WaitFor("ask dismissed", 5*sec, func() bool {
+		got, err := api.(contracts.AsksAPI).GetAsk(context.Background(), contracts.GetRequest{ID: a.AskID})
+		return err == nil && got.State == contracts.AskWithdrawn
+	})
+	// Then the session's own flag shows; d marks it handled.
+	h.WaitFor("flag line with keys", 5*sec, func() bool { return h.Contains("! Synthetic: need the staging key — m reply · d dismiss") })
+	h.Key("d")
+	h.WaitFor("flag dismissed", 5*sec, func() bool { return h.Contains("dismissed its flag") })
+	h.WaitFor("nothing left", 5*sec, func() bool {
+		return !h.Contains("d dismiss") && !strings.Contains(rowOf(h.View(), "› "), "needs you") && !h.Contains("● 1 ask")
+	})
+	pressUntil(t, h, "d", "nothing to dismiss", func() bool { return h.Contains("has nothing for you to dismiss") })
+}
+
+// pressUntil presses key until cond holds (a cache the key reads may load
+// a moment after the screen shows what it acts on).
+func pressUntil(t *testing.T, h *tuitest.Harness, key, what string, cond func() bool) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		h.Key(key)
+		h.Settle()
+		if cond() {
+			return
+		}
+	}
+	h.WaitFor(what, 5*sec, cond)
 }

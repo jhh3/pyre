@@ -54,7 +54,7 @@ machine and session is costing in CPU and memory.
 - **Attention first:** a *Needs you* bar; `⌥→` jumps to the next waiting session, `a` answers in place.
 - **Fast switching:** `⌥↑`/`⌥↓` step through sessions even while typing, `⌥s` opens a fuzzy switcher.
 - **Three views:** sidenav + terminal, a table with account and usage columns, a grid of live tiles (`v`).
-- **Launch by repo name:** `n` → `repo [@machine] [claude|codex|shell] prompt`; `ctrl+f` for a fresh worktree.
+- **Launch by repo name:** `n` → `repo [@machine] [claude|codex|agy|shell] prompt`; `ctrl+f` for a fresh worktree.
 - **Account pool:** `claude setup-token` accounts usable on every machine, per-machine Codex logins, usage
   bars, automatic switching at limits (never silently to another provider or a paid API key).
 - **Agent messaging:** durable messages with explicit delivery states; peers report back when they finish.
@@ -82,6 +82,8 @@ Each piece is optional and works on its own; Pyre uses the others when they are 
 
 Releases ship the three tools as a separate `pyre-tools-<version>-<os>-<arch>.tar.gz`; `install.sh --with-tools`
 installs them next to Pyre and skips any tool you already have installed (`make tools` builds them from source).
+Windows gets Outfit only (`pyre-tools-<version>-windows-<arch>.zip`, `outfit.exe` and `outfit-core.exe`) through
+`install.ps1 -WithTools`.
 
 ## Quick start
 
@@ -93,7 +95,7 @@ go run ./internal/tui/demo
 ```
 
 For real use you need Go 1.27+ and `make` to build, and `tmux` plus the `claude` and/or `codex` CLI on each
-machine that runs agents. One machine runs both the hub and a node. Each step is explained in
+machine that runs agents (Google Antigravity's `agy` is offered too wherever it is installed and signed in). One machine runs both the hub and a node. Each step is explained in
 [getting started](docs/getting-started.md). The steps below install per-user services (launchd/systemd
 `--user`); to try Pyre first with everything in the foreground and no account, follow
 [try it without services](docs/getting-started.md#try-it-without-services).
@@ -172,8 +174,8 @@ Pyre finds your git repos by itself — no registration step — and any repo wo
 - **Use other folders:** start the node with `pyred run --repo-roots ~/work,~/oss` (or set
   `PYRE_REPO_ROOTS=~/work,~/oss`); `--no-repo-index` turns scanning off.
 - **Start in a repo:** press `n`, type part of its name (`atlas`) or `owner/name`, and adjust the fields below
-  it — Machine, Agent (Claude/Codex/Shell), Workspace (main checkout, fresh worktree or a new branch), Account,
-  Prompt, Title — with ←/→ or a click; `ctrl+s` (or `ctrl+enter`) starts. `+` adds another repo to the same
+  it — Machine, Agent (Claude/Codex/Agy/Shell), Workspace (main checkout, fresh worktree or a new branch), Account,
+  Model, Effort, Prompt, Title — with ←/→ or a click; `ctrl+s` (or `ctrl+enter`) starts. `+` adds another repo to the same
   workspace. Machine, agent and workspace are remembered per repo. From a shell:
   `pyre new atlas @desktop codex "fix the flaky test"`.
 - **Start anywhere else:** type a path instead of a repo — `~/scratch`, `/tmp/experiment` — and Tab completes

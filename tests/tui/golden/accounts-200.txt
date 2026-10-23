@@ -1,4 +1,4 @@
- Pyre  S Sessions 3 · P Projects · M Machines · [A Accounts]                                                                                 anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+ Pyre  S Sessions 3 · P Projects · M Machines · [A Accounts]                                                               claude 5h 61% · wk 41% (2/3) !1   codex wk — (0/1) ! · none ready   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ACCOUNTS · updated now
 
@@ -23,8 +23,8 @@
     ↻ 04:57 synth-mac · switched 'migration work' from claude-work-c (5h 100%) to claude-personal-a (weekly 41%) — limit reached
 
   Pyre keeps each machine on its own account below 80%, else the most 5-hour, then weekly headroom. Credentials never leave their machine.
-
-
+  Top bar: mean 5-hour and weekly use per provider, each account weighted equally: 5-hour readings up to 15 minutes old, weekly up to 3 hours; (n/m) or ~ when some accounts are left out; !N accounts
+  at their limit; — not reported.
 
 
  ↑↓ select   r refresh   a activity                                                                                                                                                   esc back   ? help

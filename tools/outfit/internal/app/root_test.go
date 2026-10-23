@@ -436,3 +436,111 @@ func TestRenderInvocationEnvelopeSpillsOnlyInAgentMode(t *testing.T) {
 	}
 	defer os.Remove(envelope.Meta.Spill.Path)
 }
+
+// server's intercom was reported "ok" while its vault file was gone.
+func TestDoctorReportsAConnectionWhoseSecretIsMissing(t *testing.T) {
+	t.Setenv("OUTFIT_HOME", t.TempDir())
+	t.Setenv("OUTFIT_VAULT_BACKEND", "file")
+	env, err := openBaseEnvironment(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, name := range []string{"intercom", "intercom-ok"} {
+		ref, err := env.vault.Put(ctx, map[string]string{"INTERCOM_ACCESS_TOKEN": "synthetic-token"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := env.state.CreateConnection(ctx, state.Connection{ID: "con_" + name, Name: name, ConnectorKey: "intercom", SelectedMode: "rest", CredentialMethod: "managed-token", Status: "active", CredentialRef: ref, SafeIdentity: map[string]string{}}); err != nil {
+			t.Fatal(err)
+		}
+		if name == "intercom" {
+			if err := env.vault.Delete(ctx, ref); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	env.state.Close()
+	command := doctorCommand()
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetErr(&output)
+	command.SetArgs([]string{"--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil {
+		t.Fatalf("doctor output %s: %v", output.String(), err)
+	}
+	statuses := map[string]string{}
+	for _, item := range envelope.Data {
+		if name, ok := item["connection"].(string); ok {
+			statuses[name], _ = item["status"].(string)
+		}
+	}
+	if !strings.Contains(statuses["intercom"], "credential missing") || statuses["intercom-ok"] != "ok" {
+		t.Fatalf("doctor statuses = %#v", statuses)
+	}
+}
+
+func TestBackupPassphraseComesFromAFileNotArgv(t *testing.T) {
+	t.Setenv("OUTFIT_BACKUP_PASSPHRASE", "")
+	path := filepath.Join(t.TempDir(), "passphrase")
+	if err := os.WriteFile(path, []byte("synthetic passphrase\r\nignored\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []*cobra.Command{backupCreateCommand(), backupRestoreCommand()} {
+		if err := command.Flags().Set("passphrase-file", path); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := backupPassphrase(command, true); err != nil || got != "synthetic passphrase" {
+			t.Fatalf("%s passphrase = %q, %v", command.Name(), got, err)
+		}
+	}
+	empty := filepath.Join(t.TempDir(), "empty")
+	_ = os.WriteFile(empty, nil, 0o600)
+	command := backupCreateCommand()
+	_ = command.Flags().Set("passphrase-file", empty)
+	if _, err := backupPassphrase(command, true); err == nil {
+		t.Fatal("empty passphrase file accepted")
+	}
+}
+
+func TestBackupCreateFailsLoudlyWhenConnectionsAreLeftOut(t *testing.T) {
+	t.Setenv("OUTFIT_HOME", t.TempDir())
+	t.Setenv("OUTFIT_VAULT_BACKEND", "file")
+	ctx := context.Background()
+	env, err := openBaseEnvironment(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := env.vault.Put(ctx, map[string]string{"INTERCOM_ACCESS_TOKEN": "synthetic-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.state.CreateConnection(ctx, state.Connection{ID: "con_broken", Name: "intercom", ConnectorKey: "intercom", SelectedMode: "rest", CredentialMethod: "managed-token", Status: "active", CredentialRef: ref, SafeIdentity: map[string]string{}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = env.vault.Delete(ctx, ref)
+	env.state.Close()
+	dir := t.TempDir()
+	passphrase := filepath.Join(dir, "passphrase")
+	_ = os.WriteFile(passphrase, []byte("synthetic passphrase\n"), 0o600)
+	run := func(extra ...string) error {
+		command := backupCreateCommand()
+		var output bytes.Buffer
+		command.SetOut(&output)
+		command.SetErr(&output)
+		command.SetArgs(append([]string{filepath.Join(dir, "fleet.outfit"), "--passphrase-file", passphrase}, extra...))
+		return command.Execute()
+	}
+	if err := run(); err == nil || !strings.Contains(err.Error(), "intercom") || !strings.Contains(err.Error(), "--allow-missing") {
+		t.Fatalf("incomplete backup = %v", err)
+	}
+	if err := run("--allow-missing"); err != nil {
+		t.Fatalf("--allow-missing: %v", err)
+	}
+}

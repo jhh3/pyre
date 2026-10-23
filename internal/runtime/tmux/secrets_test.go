@@ -49,9 +49,12 @@ func TestLaunchArgvHasNoSecrets(t *testing.T) {
 		if containsSecret(full) || strings.Contains(full, "-e\x00") || strings.Contains(full, "PYRE_SESSION_TOKEN") {
 			t.Fatalf("tmux argv carries the environment: %q", full)
 		}
-		want := []string{"--", "/opt/pyre/pyred", ExecEnvArg, envFile, "--", "claude", "--settings", "/x/settings.json"}
+		want := []string{"--", "/opt/pyre/pyred", ExecEnvArg, envFile, "--"}
 		if got := args[len(args)-len(want):]; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 			t.Fatalf("pane command %q, want %q", got, want)
+		}
+		if strings.Contains(full, "/x/settings.json") {
+			t.Fatalf("the harness argv is on the tmux command line: %q", full)
 		}
 		st, err := os.Stat(envFile)
 		if err != nil || st.Mode().Perm() != 0o600 {
@@ -60,17 +63,20 @@ func TestLaunchArgvHasNoSecrets(t *testing.T) {
 		if dst, _ := os.Stat(filepath.Dir(envFile)); dst.Mode().Perm() != 0o700 {
 			t.Fatalf("env dir mode %v", dst.Mode())
 		}
-		set, unset, err := readEnvFile(envFile)
+		lf, err := readLaunchFile(envFile)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Stat(envFile); !os.IsNotExist(err) {
 			t.Fatalf("env file not deleted after read: %v", err)
 		}
-		joined := strings.Join(set, "\x00")
+		joined := strings.Join(lf.Set, "\x00")
 		if !strings.Contains(joined, "PYRE_SESSION_TOKEN="+synthToken) || !strings.Contains(joined, "PYRE_TEST_API_KEY="+synthAPIKey) ||
-			len(unset) != 1 || unset[0] != "PYRE_AMBIENT" {
-			t.Fatalf("env file content set=%q unset=%q", set, unset)
+			len(lf.Unset) != 1 || lf.Unset[0] != "PYRE_AMBIENT" {
+			t.Fatalf("env file content set=%q unset=%q", lf.Set, lf.Unset)
+		}
+		if strings.Join(lf.Argv, "\x00") != strings.Join(spec.Argv, "\x00") {
+			t.Fatalf("launch file argv %q, want %q", lf.Argv, spec.Argv)
 		}
 	}
 	// No environment: plain argv, no launcher, no file.
@@ -91,7 +97,7 @@ func TestReadEnvFileRefusesSharedFile(t *testing.T) {
 	if err := os.Chmod(p, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := readEnvFile(p); err == nil {
+	if _, err := readLaunchFile(p); err == nil {
 		t.Fatal("group/world-readable env file accepted")
 	}
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
@@ -256,7 +262,7 @@ func TestLaunchProcessTableHasNoSecrets(t *testing.T) {
 				if strings.Contains(l, " -t =leak") || strings.Contains(l, " -s leak") {
 					clientSeen.Add(1)
 				}
-				if strings.Contains(l, ExecEnvArg) && strings.Contains(l, canary) {
+				if strings.Contains(l, ExecEnvArg) && strings.Contains(l, envFilePrefix) {
 					launcherSeen.Add(1)
 				}
 			}

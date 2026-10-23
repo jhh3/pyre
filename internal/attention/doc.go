@@ -19,14 +19,17 @@
 //	account.exhausted              -> "account_exhausted" (normal, grouped per provider); none when it
 //	                                  belongs to a run's fallback plan (that plan's account.fallback raises it)
 //	account.fallback waiting|intervention -> "account_exhausted" (urgent, grouped per provider)
-//	run.ended with state failed    -> "failure" (grouped per session; "unknown" is never failure); none
+//	run.ended with state failed    -> "failure" (grouped per cause; "unknown" is never failure); none
 //	                                  for a session under a parent (the hub reports it there); an
 //	                                  owner-started launch with no account capacity joins the one
-//	                                  "capacity:<provider>" item listing its sessions (members.go)
+//	                                  "capacity:<provider>" item listing its sessions, any other
+//	                                  owner-started failure the one "failed:<project>:<cause>" item
+//	                                  ("12 sessions failed to start: working folder missing";
+//	                                  runfail.CauseOf; members.go); notified once per item
 //	run.ended (any)                -> the session's "account_exhausted" items withdrawn
 //	run.started / run.observed live, session.updated archived
 //	                               -> the session's "failure" / "account_exhausted" items withdrawn and
-//	                                  it leaves capacity groups
+//	                                  it leaves its failure groups
 //	artifact.published with review_requested -> "review_ready" (grouped per artifact)
 //	comment.created mentioning "owner"       -> "comment" (grouped per review target)
 //	document.conflict (non-owner author)     -> "document_conflict" (grouped per document)

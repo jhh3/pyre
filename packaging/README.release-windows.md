@@ -34,13 +34,18 @@ $Z = "..\pyre-@VERSION@-@PLATFORM@.zip"     # with SHA256SUMS and SHA256SUMS.sig
 $A = "..\release-allowed-signers"            # the copy from your trusted checkout
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install\install.ps1 -Zip $Z -AllowedSigners $A -DryRun
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install\install.ps1 -Zip $Z -AllowedSigners $A -EditPath
+# Plus Outfit (outfit.exe, outfit-core.exe for the Outfit plugin), from pyre-tools-@VERSION@-@PLATFORM@.zip beside the zip:
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install\install.ps1 -Zip $Z -AllowedSigners $A -WithTools
 # Node with the logon task, enrolled with a ticket from `pyre --json enroll-node --name NAME`:
 Get-Content ticket.json | powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install\install.ps1 `
   -Zip $Z -AllowedSigners $A -Service node -Name NAME -HubUrl https://hub.example:7443
 ```
 
 Binaries go to `%LOCALAPPDATA%\Programs\Pyre\<version>\bin` with the junction
-`current`; `-EditPath` puts `...\Pyre\current\bin` on your user PATH. Node state lives
+`current`; `-EditPath` puts `...\Pyre\current\bin` (and with `-WithTools`
+`...\Pyre\tools\outfit\bin`) on your user PATH. `-Permissions bypass` runs the node
+with bypass permissions and records Claude's bypass-permissions acceptance in
+`%USERPROFILE%\.claude\settings.json`. Node state lives
 in `%LOCALAPPDATA%\Pyre`, config in `%APPDATA%\Pyre`. The node runs as a per-user
 scheduled task at logon in your desktop session, so agents can start and test GUI
 apps; `pyred service status|stop|start` manages it. Upgrade by running `install.ps1`

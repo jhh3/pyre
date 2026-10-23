@@ -49,9 +49,25 @@ func addOptionalOps(m map[string]rpcFunc, a contracts.API) {
 		m[contracts.OpAsksHeld] = unary(k.ListHeldAnswers)
 		m[contracts.OpAsksFlush] = unary(k.FlushHeldAnswers)
 	}
+	if g, ok := a.(contracts.StandingGrantsAPI); ok { // W-grants: standing grants
+		m[contracts.OpGrantsCreate] = unary(g.CreateGrant)
+		m[contracts.OpGrantsList] = unary(g.ListGrants)
+		m[contracts.OpGrantsRevoke] = unary(g.RevokeGrant)
+	}
+	if is, ok := a.(contracts.IssuesAPI); ok { // issues filed by sessions
+		m[contracts.OpIssuesFile] = unary(is.FileIssue)
+		m[contracts.OpIssuesList] = unary(is.ListIssues)
+		m[contracts.OpIssuesGet] = unary(is.GetIssue)
+		m[contracts.OpIssuesUpdate] = unary(is.UpdateIssue)
+		m[contracts.OpIssuesTriageGet] = unary(is.GetIssueTriage)
+		m[contracts.OpIssuesTriageSet] = unary(is.SetIssueTriage)
+	}
 	if pg, ok := a.(contracts.ProjectPageAPI); ok { // W-web-inbox: project pages
 		m[contracts.OpProjectsSetPage] = unary(pg.SetProjectPage)
 		m[contracts.OpProjectsGetPage] = unary(pg.GetProjectPage)
+	}
+	if w, ok := a.(contracts.WaitingOnAPI); ok { // waiting on own job
+		m[contracts.OpSessionsWaitingOn] = unary(w.SetWaitingOn)
 	}
 	if f, ok := a.(contracts.AccountTokenFetcher); ok {
 		m[contracts.OpFetchAccountToken] = unary(f.FetchAccountToken)

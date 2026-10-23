@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/notifications"
 )
 
 // W-asks: one "ask" item per ask; a merged repeat is not new attention;
@@ -56,5 +57,50 @@ func TestDeriveAskLifecycle(t *testing.T) {
 	e.drain()
 	if g := e.byGroup("ask:ask_synth-2"); len(g) != 1 || g[0].State != contracts.AttnWithdrawn {
 		t.Fatalf("withdrawn: %+v", g)
+	}
+}
+
+// W-grants: an ask a standing grant answered is created decided; it never
+// raises an ask item. The owner gets one informational "grant_fyi" item
+// per grant: raised when it is created, collecting each use, handled when
+// it is revoked, and never pushed by default.
+func TestDeriveGrantFYI(t *testing.T) {
+	e := newEnv(t)
+	pid := "prj_synth-1"
+	g := contracts.StandingGrant{GrantID: "sgr_synth-1", Scope: contracts.GrantScopeProject, ProjectID: &pid, Action: "merge", Option: "a",
+		ExpiresAt: t0.Add(7 * 24 * time.Hour), CreatedAt: t0, RecordedBy: contracts.Principal{Kind: contracts.PrincipalOwner, ID: "owner"}}
+	grantEv := func(g contracts.StandingGrant) {
+		e.log.AppendPayload(contracts.EvStandingGrantChanged, contracts.ObjectRef{Kind: contracts.KindStandingGrant, ID: g.GrantID}, "", g.ProjectID, g)
+	}
+	grantEv(g)
+	e.drain()
+	fyi := e.byGroup("grant:sgr_synth-1")
+	if len(fyi) != 1 || fyi[0].Kind != contracts.AttnGrantFYI || fyi[0].Severity != "info" || fyi[0].State != contracts.AttnOpen ||
+		fyi[0].Title != "Standing go-ahead: merge → a" || fyi[0].SessionID != "" || fyi[0].Count != 1 {
+		t.Fatalf("created: %+v", fyi)
+	}
+	if st, _ := notifications.Evaluate(contracts.NotificationPrefs{}, fyi[0], t0); st != notifications.StateDisabled {
+		t.Fatalf("an FYI pushes by default: %q", st)
+	}
+	for i, id := range []string{"ask_synth-g1", "ask_synth-g2", "ask_synth-g3"} {
+		a := contracts.Ask{AskID: id, TopicKey: "merge-pr-" + id, SessionID: "ses_synth-a", ProjectID: &pid, Title: "Merge synthetic PR " + id + "?", Action: "merge",
+			Options: []contracts.AskOption{{ID: "a", Label: "Merge"}, {ID: "b", Label: "Wait"}}, State: contracts.AskAnswered, Count: 1, GrantID: g.GrantID,
+			Answer: &contracts.AskAnswer{OptionID: "a", By: contracts.Principal{Kind: contracts.PrincipalSystem, ID: "grants"}, At: t0}}
+		e.log.AppendPayload(contracts.EvAskChanged, contracts.ObjectRef{Kind: contracts.KindAsk, ID: a.AskID}, a.SessionID, nil, a)
+		e.drain()
+		if g := e.byGroup("ask:" + id); len(g) != 0 {
+			t.Fatalf("granted ask %d raised an ask item: %+v", i, g)
+		}
+	}
+	fyi = e.byGroup("grant:sgr_synth-1")
+	if len(fyi) != 1 || fyi[0].Count != 4 || fyi[0].Title != "Standing go-ahead used: merge" || fyi[0].Summary != `Answered "Merge synthetic PR ask_synth-g3?"` {
+		t.Fatalf("uses collapse into one item: %+v", fyi)
+	}
+	now := t0.Add(time.Hour)
+	g.RevokedAt = &now
+	grantEv(g)
+	e.drain()
+	if fyi = e.byGroup("grant:sgr_synth-1"); len(fyi) != 1 || fyi[0].State != contracts.AttnHandled {
+		t.Fatalf("revoked: %+v", fyi)
 	}
 }

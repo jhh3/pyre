@@ -4,7 +4,8 @@
 // "2h ago" stay meaningful whenever the page is opened. Mutations behave
 // like the server (answer, hold, undo, send held, reply) and emit the same
 // events, with delivery progressing a moment later. Archive acknowledges
-// a message thread (it moves to Done); an open ask is refused with 409. ?fail=1 makes answers
+// a message thread (it moves to Done); an open ask is dismissed when the
+// request says so (else 409), and a session item is dismissed. ?fail=1 makes answers
 // and replies fail so the error states can be seen.
 import { ApiError, type EventName } from './api';
 import { clock } from './time';
@@ -81,15 +82,19 @@ export async function create({ fail = false } = {}) {
     return msg;
   }
 
-  function decide(t: Entry, optionId?: string, text?: string) {
+  function decide(t: Entry, optionId?: string, text?: string, perItem?: Record<string, string> | null) {
     const ask = t.thread.ask!;
     if (ask.state !== 'open') throw new ApiError(409, 'conflict', 'This question was already decided.');
     const opt = ask.options.find((o) => o.id === optionId);
+    const byItem = perItem && Object.keys(perItem).length ? perItem : null;
+    if (byItem && !optionId && (ask.items ?? []).some((it) => !byItem[it.id]))
+      throw new ApiError(400, 'invalid_argument', 'Answer every item or give an option for the rest.');
     ask.state = 'answered';
-    ask.answer = { option_id: optionId ?? '', text: text ?? '', by: { kind: 'owner', id: 'owner', name: 'You' }, at: now() };
-    const msg = ownerMessage(t, `Decision: **${opt ? opt.label : text}**`, ask.ask_id);
+    ask.answer = { option_id: optionId ?? '', items: byItem, text: text ?? '', by: { kind: 'owner', id: 'owner', name: 'You' }, at: now() };
+    const label = byItem ? 'an answer per item' : opt ? opt.label : text;
+    const msg = ownerMessage(t, `Decision: **${label}**`, ask.ask_id);
     ask.decision_message_id = msg.message_id;
-    t.thread.preview = 'You chose: ' + (opt ? opt.label : text);
+    t.thread.preview = (opt || byItem ? 'You chose: ' : 'You answered: ') + label;
     t.thread.unread = false;
     deliverLater(t, msg);
     return copy(ask);
@@ -105,7 +110,7 @@ export async function create({ fail = false } = {}) {
     const results = items().map((item) => {
       const t = byAsk(item.ask_id)!;
       try {
-        return { ask_id: item.ask_id, ask: decide(t, item.option_id, item.text) };
+        return { ask_id: item.ask_id, ask: decide(t, item.option_id, item.text, item.items) };
       } catch (e) {
         const err = e as ApiError;
         return { ask_id: item.ask_id, error: { code: err.code, message: err.message } };
@@ -117,12 +122,20 @@ export async function create({ fail = false } = {}) {
     return results;
   }
 
-  // Like the server: an open ask is refused; anything else stops waiting on you.
-  function archive(id: string): Thread {
+  // Like the server: an open ask is dismissed only when asked to (no
+  // option, no default); anything else stops waiting on you.
+  function archive(id: string, dismiss = false): Thread {
     const t = byId(id);
     if (!t) throw new ApiError(404, 'not_found', `No conversation ${id} in your inbox.`);
-    if (t.thread.kind === 'ask' && t.thread.ask!.state === 'open')
-      throw new ApiError(409, 'conflict', "Answer it or let it default; open questions can't be archived");
+    if (t.thread.kind === 'ask' && t.thread.ask!.state === 'open') {
+      if (!dismiss) throw new ApiError(409, 'conflict', 'Answer it, or dismiss it: open questions are archived only by dismissing them');
+      const ask = t.thread.ask!;
+      ask.state = 'withdrawn';
+      ask.answer = { text: 'dismissed by the owner', by: { kind: 'owner', id: 'owner', name: 'You' }, at: now() };
+      t.thread.preview = 'Dismissed by you';
+      if (heldFor(ask.ask_id)) setHeld({ ...held, items: items().filter((i) => i.ask_id !== ask.ask_id) });
+    }
+    if (t.thread.attention) t.thread.attention.state = 'handled';
     t.thread.needs_reply = false;
     t.thread.unread = false;
     return view(t);
@@ -157,9 +170,9 @@ export async function create({ fail = false } = {}) {
       }
       return {};
     }],
-    ['POST', /^\/threads\/([^/]+)\/archive$/, ([id]) => {
+    ['POST', /^\/threads\/([^/]+)\/archive$/, ([id], body) => {
       if (fail) throw new ApiError(502, 'unavailable', "The hub didn't answer. Nothing was archived.");
-      const thread = archive(id);
+      const thread = archive(id, !!body?.dismiss);
       emit('inbox');
       emit('thread', { thread_id: id });
       return { thread };
@@ -209,13 +222,13 @@ export async function create({ fail = false } = {}) {
       if (body.mode === 'hold') {
         if (t.thread.ask!.state !== 'open') throw new ApiError(409, 'conflict', 'This question was already decided.');
         const rest = items().filter((i) => i.ask_id !== askId);
-        rest.push({ ask_id: askId, option_id: body.option_id ?? '', text: body.text ?? '', held_at: now() });
+        rest.push({ ask_id: askId, option_id: body.option_id ?? '', items: body.items ?? null, text: body.text ?? '', held_at: now() });
         setHeld({ items: rest, sends_at: new Date(Date.now() + QUIET_MS).toISOString() });
         emit('inbox');
         emit('thread', { thread_id: t.thread.thread_id });
         return { ask: copy(t.thread.ask), held: copy(held) };
       }
-      const ask = decide(t, body.option_id, body.text);
+      const ask = decide(t, body.option_id, body.text, body.items);
       if (heldFor(askId)) setHeld({ ...held, items: items().filter((i) => i.ask_id !== askId) });
       emit('inbox');
       emit('thread', { thread_id: t.thread.thread_id });
@@ -235,6 +248,16 @@ export async function create({ fail = false } = {}) {
         open_asks: threads.filter((t) => t.thread.project?.id === p.project_id && t.thread.ask?.state === 'open').length,
       })),
     })],
+    ['POST', /^\/grants\/([^/]+)\/revoke$/, ([id]) => {
+      for (const [pid, d] of Object.entries(details.details)) {
+        const g = (d.grants ?? []).find((x) => x.grant_id === id);
+        if (!g) continue;
+        d.grants = (d.grants ?? []).filter((x) => x.grant_id !== id);
+        emit('project', { project_id: pid });
+        return { grant: { ...g, revoked_at: now() } };
+      }
+      throw new ApiError(404, 'not_found', 'That go-ahead no longer exists.');
+    }],
     ['GET', /^\/projects\/([^/]+)$/, ([id]) => {
       const d = details.details[id];
       if (!d) throw new ApiError(404, 'not_found', 'That project no longer exists.');

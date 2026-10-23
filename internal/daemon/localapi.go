@@ -103,6 +103,9 @@ func (l *LocalAPI) ListSessions(ctx context.Context, r contracts.ListSessionsReq
 		if v.Session.Archived && !r.IncludeArchived {
 			continue
 		}
+		if !r.IncludeMonitors && r.Harness != contracts.HarnessShell && v.Session.IsMonitor() {
+			continue
+		}
 		if r.Harness != "" && v.Session.Harness != r.Harness {
 			continue
 		}

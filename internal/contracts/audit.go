@@ -48,6 +48,7 @@ const (
 	AuditAccountRenamed       = "account.renamed"        // label changed (From -> To)
 	AuditAccountDisabled      = "account.disabled"       // excluded from new work
 	AuditAccountEnabled       = "account.enabled"        // eligible for new work again
+	AuditAccountTierChanged   = "account.tier_changed"   // selection tier changed (From -> To: normal, reserve)
 )
 
 // Audit actions. Session:
@@ -66,12 +67,14 @@ const (
 	AuditSessionLeaseTakenOver   = "session.lease_taken_over"
 	AuditSessionReportedToParent = "session.reported_to_parent"
 	AuditSessionReparented       = "session.reparented" // From -> To parent session ("" = top level) (W-reparent)
+	AuditSessionCleanedUp        = "session.cleaned_up" // its node stopped leftover processes / removed its worktrees (W-lifecycle)
 )
 
 // Audit actions. Fleet:
 const (
 	AuditNodeEnrolled      = "node.enrolled"
 	AuditNodeRevoked       = "node.revoked"
+	AuditNodeTicketCreated = "node.enrollment_ticket_created" // an enrollment ticket created by an approved session request
 	AuditNodeConnected     = "node.connected"
 	AuditNodeDisconnected  = "node.disconnected"
 	AuditNodeUpgraded      = "node.upgraded"       // pyred version changed (From -> To)
@@ -80,6 +83,17 @@ const (
 	AuditNodeTrustAccepted = "node.trust_accepted" // a harness's folder-trust prompt answered for an owner-trusted dir
 	AuditNodeCapacityRetry = "node.capacity_retry" // a Codex turn that failed at model capacity was continued after backoff
 	AuditNodeExitConfirmed = "node.exit_confirmed" // Claude's "background work is running" exit dialog confirmed on stop
+	// AuditNodeDevChannelsAccepted (additive): Claude's "Loading development
+	// channels" startup warning confirmed for a run launched with
+	// --dangerously-load-development-channels (the owner asked for it).
+	AuditNodeDevChannelsAccepted = "node.dev_channels_accepted"
+	// AuditNodeBackgroundWake (additive): a Codex session was woken with a
+	// new turn because a background command it started finished.
+	AuditNodeBackgroundWake = "node.background_wake"
+	// AuditNodeOnboardingAnswered (additive): Claude's first-run onboarding
+	// screen (theme picker, security notes) answered with Enter for a run
+	// that had not started.
+	AuditNodeOnboardingAnswered = "node.onboarding_answered"
 )
 
 // AuditActor is who did it. Kind: "owner" | "session" | "node" | "pyre"
@@ -157,6 +171,15 @@ const (
 	AutomationTrustAccepted = "trust_accepted" // folder-trust prompt answered for an owner-trusted directory
 	AutomationExitConfirmed = "exit_confirmed" // Claude's exit dialog confirmed ("Exit and stop tasks") on stop
 	AutomationCapacityRetry = "capacity_retry" // a turn that failed at provider capacity was continued after backoff
+	// AutomationDevChannelsAccepted (additive): the development-channels
+	// startup warning confirmed for a run whose launch arguments load them.
+	AutomationDevChannelsAccepted = "dev_channels_accepted"
+	// AutomationBackgroundWake (additive): a turn started to report a
+	// background command that finished after the agent's turn ended.
+	AutomationBackgroundWake = "background_wake"
+	// AutomationOnboardingAnswered (additive): Claude's first-run
+	// onboarding screen answered (Detail: which screen).
+	AutomationOnboardingAnswered = "onboarding_answered"
 )
 
 // NodeAutomation is the payload of node.automation. Detail is a short

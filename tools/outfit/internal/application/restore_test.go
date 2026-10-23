@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jhh3/outfit/internal/backup"
 	"github.com/jhh3/outfit/internal/connection"
 	"github.com/jhh3/outfit/internal/kit"
 	"github.com/jhh3/outfit/internal/runtime"
@@ -56,7 +57,7 @@ func TestPortableBackupRestoresCredentialAndRuntimeIntoFreshHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	backupPath := filepath.Join(t.TempDir(), "portable.outfit")
-	if err := source.CreateBackup(ctx, backupPath, "correct horse battery staple"); err != nil {
+	if _, err := source.CreateBackup(ctx, backupPath, "correct horse battery staple", backup.BuildOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	closeSource()

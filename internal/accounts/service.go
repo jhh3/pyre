@@ -73,6 +73,13 @@ type RunInfo struct {
 	Capabilities []string
 	NativeRef    *contracts.NativeRef
 	TurnInFlight bool
+	// State is the run's state (the rebalancer moves only waiting_input).
+	State contracts.RunState
+	// RecentInput: a message is queued for the session or was delivered
+	// within the last minute (the rebalancer leaves it alone).
+	RecentInput bool
+	// Live: the run's process is still up.
+	Live bool
 }
 
 // QuiesceResult reports how a run was stopped.
@@ -93,10 +100,13 @@ type Continuation struct {
 	UncertainWork bool                       // do not replay the interrupted instruction
 	Reason        string
 	// Prompt is the successor's first prompt: a short "continue where you
-	// left off (account switched from X to Y because of the usage limit)"
+	// left off (switched from account "X" to account "Y" because of the usage limit)"
 	// so the work goes on without a human "go". Never the interrupted
 	// instruction itself.
 	Prompt string
+	// NativeOnly: start the successor only as a native resume (never a
+	// handoff that would lose the conversation); proactive moves.
+	NativeOnly bool
 }
 
 // ContinuationResult identifies the successor.
@@ -134,6 +144,12 @@ type Config struct {
 	UserClaudeDir  string
 	UserClaudeJSON string
 	UserCodexDir   string
+	// UserAgyDir is agy's state dir (default ~/.gemini/antigravity-cli):
+	// only its sign-in's identity claims are read (OwnLogin).
+	UserAgyDir string
+	// AgyBin is the agy executable for its usage reading (agyusage.go;
+	// default "agy" on PATH).
+	AgyBin string
 
 	// Usage observation.
 	ClaudeUsageURL  string        // default https://api.anthropic.com/api/oauth/usage
@@ -254,10 +270,11 @@ type Service struct {
 	now  func() time.Time
 	rng  *rand.Rand
 	rmu  sync.Mutex
-	obmu sync.Mutex  // serializes usage probes (max concurrency 1)
-	fbmu sync.Mutex  // serializes fallback planning (one replacement per run)
-	comu sync.Mutex  // serializes rota checkout / write-back / check-in
-	own  ownObsState // own-login observation throttle (ownlogin.go)
+	obmu sync.Mutex    // serializes usage probes (max concurrency 1)
+	fbmu sync.Mutex    // serializes fallback planning (one replacement per run)
+	comu sync.Mutex    // serializes rota checkout / write-back / check-in
+	own  ownObsState   // own-login observation throttle (ownlogin.go)
+	agy  agyUsageState // agy's own quota reading (agyusage.go)
 	// refreshFailed backs off accounts whose harness could not refresh an
 	// expired-at-rest login at checkout (automatic selection only).
 	rfmu          sync.Mutex
@@ -270,6 +287,8 @@ type Service struct {
 	tok tokenCache
 	// fleet caches the hub's view of other machines' runs (affinity.go).
 	fleet fleetCache
+	// rb remembers idle runs and failed moves between sweeps (rebalance.go).
+	rb rebalanceState
 }
 
 // New validates cfg, applies defaults and migrates the "accounts" namespace.
@@ -302,6 +321,9 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 		} else if home != "" {
 			cfg.UserCodexDir = filepath.Join(home, ".codex")
 		}
+	}
+	if cfg.UserAgyDir == "" && home != "" {
+		cfg.UserAgyDir = filepath.Join(home, ".gemini", "antigravity-cli")
 	}
 	if cfg.ClaudeUsageURL == "" {
 		cfg.ClaudeUsageURL = "https://api.anthropic.com/api/oauth/usage"

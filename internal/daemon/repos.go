@@ -222,9 +222,12 @@ func (d *Daemon) reportWorktrees(ctx context.Context) {
 }
 
 func (d *Daemon) registerRepoActions() {
-	d.RegisterSyncAction(contracts.ActionWorktreeCreate, d.actionWorktreeCreate)
+	// Async: it fetches origin first (up to repoindex.FetchTimeout), which
+	// must not hold up the node's command stream.
+	d.RegisterAction(contracts.ActionWorktreeCreate, d.actionWorktreeCreate)
 	d.RegisterSyncAction(contracts.ActionWorktreeScan, d.actionWorktreeScan)
 	d.RegisterSyncAction(contracts.ActionWorktreeRemove, d.actionWorktreeRemove)
+	d.RegisterSyncAction(contracts.ActionWorktreeClaim, d.actionWorktreeClaim) // W-lifecycle
 	d.RegisterAction(contracts.ActionRepoReindex, func(ctx context.Context, _ json.RawMessage) (any, error) { return d.reindex(ctx) })
 	d.RegisterAction(contracts.ActionRepoClone, d.actionRepoClone)         // W-newsession
 	d.RegisterAction(contracts.ActionGitHubRefresh, d.actionGitHubRefresh) // W-newsession
@@ -245,7 +248,7 @@ func (d *Daemon) actionWorktreeCreate(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
-	return repoindex.Create(ctx, p, d.now())
+	return repoindex.CreateWith(ctx, p, d.now(), repoindex.CreateOptions{GH: d.ghBinary()})
 }
 
 // sessionRun finds the session's latest run on this node.
@@ -284,6 +287,17 @@ func (d *Daemon) actionWorktreeScan(ctx context.Context, raw json.RawMessage) (a
 	d.storeWorktreeChecks(sw)
 	sw.NodeID, sw.ReportedAt = d.nodeID, d.now()
 	return sw, nil
+}
+
+func (d *Daemon) actionWorktreeClaim(ctx context.Context, raw json.RawMessage) (any, error) {
+	p, err := decodeAction[contracts.WorktreeClaimParams](contracts.ActionWorktreeClaim, raw)
+	if err != nil {
+		return nil, err
+	}
+	if p.SessionID == "" || p.Token == "" || len(p.Paths) == 0 || len(p.Paths) > 8 {
+		return nil, contracts.Errorf(contracts.ErrInvalid, "worktree.claim needs session_id, token and 1 to 8 paths")
+	}
+	return contracts.WorktreeClaimResult{Claimed: repoindex.Claim(p.Paths, p.SessionID, p.Token)}, nil
 }
 
 func (d *Daemon) actionWorktreeRemove(ctx context.Context, raw json.RawMessage) (any, error) {

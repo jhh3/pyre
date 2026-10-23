@@ -49,6 +49,7 @@ func init() {
 	// stays owner-only.
 	sessionActions[contracts.ActionWorktreeCreate] = true
 	sessionActions[contracts.ActionWorktreeScan] = true
+	sessionActions[contracts.ActionWorktreeClaim] = true // needs the create's token (W-lifecycle)
 	// A launch on a machine that lacks the repository clones it first
 	// (never overwriting; W-newsession).
 	sessionActions[contracts.ActionRepoClone] = true

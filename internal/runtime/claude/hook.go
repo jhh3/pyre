@@ -53,6 +53,9 @@ var toolDoneEvents = map[string]bool{"PostToolUse": true, "PostToolUseFailure": 
 // the run state dir even when invoked without the positional argument.
 const StateDirEnv = "PYRE_CLAUDE_STATE_DIR"
 
+// TmpDirEnv is Claude Code's temp directory override (see Options.TmpDir).
+const TmpDirEnv = "CLAUDE_CODE_TMPDIR"
+
 type brokerConfig struct {
 	WaitSeconds int `json:"wait_seconds"`
 }

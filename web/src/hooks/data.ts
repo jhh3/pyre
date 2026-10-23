@@ -5,7 +5,7 @@ import { QueryClient, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { api, ApiError, connectEvents, newOpId, type LiveStatus } from '@/lib/api';
-import { canArchive, isOpenAsk, OPEN_ASK_ARCHIVE, threadHref } from '@/lib/model';
+import { archiveDismisses, canArchive, isOpenAsk, threadHref } from '@/lib/model';
 import { clock } from '@/lib/time';
 import type { AnswerMode, Ask, Box, HeldAnswers, Msg, Thread, ThreadResponse } from '@/lib/types';
 import { getUI, setUI, withKey } from '@/lib/ui-store';
@@ -115,14 +115,16 @@ function refreshAfterAnswer(threadId?: string) {
  * Choose an option: send it now, or hold it in the batch. A retry of a
  * failed attempt (same option and mode) reuses its operation ID.
  */
-export async function choose(thread: Thread, optionId: string, mode: AnswerMode) {
+/** Answer an ask with one option (for every item of a batched ask), or per item. */
+export async function choose(thread: Thread, optionId: string, mode: AnswerMode, items?: Record<string, string>) {
   const ask = thread.ask!;
   const prev = getUI().answering[ask.ask_id];
   if (prev?.phase === 'sending') return;
-  const op = prev && prev.option_id === optionId && prev.mode === mode ? prev.op : newOpId();
-  setUI((s) => ({ answering: withKey(s.answering, ask.ask_id, { phase: 'sending', option_id: optionId, mode, op }) }));
+  const same = prev && prev.option_id === optionId && prev.mode === mode && JSON.stringify(prev.items ?? null) === JSON.stringify(items ?? null);
+  const op = same ? prev.op : newOpId();
+  setUI((s) => ({ answering: withKey(s.answering, ask.ask_id, { phase: 'sending', option_id: optionId, items, mode, op }) }));
   try {
-    const r = await api.answer(ask.ask_id, { option_id: optionId, mode }, op);
+    const r = await api.answer(ask.ask_id, { option_id: optionId, items, mode }, op);
     setHeld(r.held);
     if (r.ask) patchThreadAsk(thread.thread_id, r.ask);
     setUI((s) => ({
@@ -136,9 +138,34 @@ export async function choose(thread: Thread, optionId: string, mode: AnswerMode)
       toast.error('Already decided', { description: err.message });
     } else {
       setUI((s) => ({
-        answering: withKey(s.answering, ask.ask_id, { phase: 'error', option_id: optionId, mode, op, message: err.message }),
+        answering: withKey(s.answering, ask.ask_id, { phase: 'error', option_id: optionId, items, mode, op, message: err.message }),
       }));
     }
+  } finally {
+    refreshAfterAnswer(thread.thread_id);
+  }
+}
+
+/**
+ * Answer an ask with free text from the composer ("Answer with this"): the
+ * text is the answer, delivered to the session with the decision.
+ */
+export async function answerWithText(thread: Thread, text: string) {
+  const ask = thread.ask!;
+  if (getUI().answering[ask.ask_id]?.phase === 'sending') return false;
+  const op = newOpId();
+  setUI((s) => ({ answering: withKey(s.answering, ask.ask_id, { phase: 'sending', option_id: '', mode: 'now', op }) }));
+  try {
+    const r = await api.answer(ask.ask_id, { text, mode: 'now' }, op);
+    setHeld(r.held);
+    if (r.ask) patchThreadAsk(thread.thread_id, r.ask);
+    setUI((s) => ({ answering: withKey(s.answering, ask.ask_id, undefined), fresh: withKey(s.fresh, ask.ask_id, Date.now()) }));
+    return true;
+  } catch (e) {
+    setUI((s) => ({ answering: withKey(s.answering, ask.ask_id, undefined) }));
+    const err = e as ApiError;
+    toast.error(err.code === 'conflict' ? 'Already decided' : 'Answer not sent', { description: err.message });
+    return false;
   } finally {
     refreshAfterAnswer(thread.thread_id);
   }
@@ -219,9 +246,14 @@ export function discardReply(threadId: string, key: string) {
 }
 
 const marked = new Set<string>();
-/** Mark a thread read once per view (unread threads only). */
+/**
+ * Mark a thread read once per view: unread threads, and message threads
+ * still waiting on the owner (opening one acknowledges its messages at the
+ * hub, so it moves to Done even when another surface already marked it read).
+ */
 export function markRead(thread: Thread) {
-  if (!thread.unread || marked.has(thread.thread_id)) return;
+  const pendingMail = thread.kind === 'message' && thread.needs_reply;
+  if ((!thread.unread && !pendingMail) || marked.has(thread.thread_id)) return;
   marked.add(thread.thread_id);
   api
     .read(thread.thread_id)
@@ -256,11 +288,15 @@ const archiving = new Set<string>();
  * messages so it moves to Done. When it is the open conversation, the view
  * moves on to the next one in the list (else the previous, else the list).
  * The hub has no unarchive; a new message from the session reopens it.
+ * An open ask is dismissed (no option, no default) once confirmed: without
+ * confirmed this only opens the confirmation (DismissDialog). A session
+ * item ("waiting on you", its own flag) is dismissed at once.
  */
-export async function archiveThread(thread: Thread) {
+export async function archiveThread(thread: Thread, confirmed = false) {
   const id = thread.thread_id;
-  if (isOpenAsk(thread)) {
-    toast.error("Can't archive an open question", { description: OPEN_ASK_ARCHIVE });
+  const dismiss = isOpenAsk(thread);
+  if (dismiss && !confirmed) {
+    setUI({ dismissing: thread });
     return;
   }
   if (!canArchive(thread) || archiving.has(id)) return;
@@ -274,15 +310,27 @@ export async function archiveThread(thread: Thread) {
   if (ui.cursor === id) setUI({ cursor: next?.thread_id ?? null });
   dropFromOpen(new Set([id]));
   try {
-    const r = await api.archive(id, newOpId());
+    const r = await api.archive(id, newOpId(), dismiss);
     queryClient.setQueryData<ThreadResponse>(['thread', id], (d) => (d ? { ...d, thread: r.thread } : d));
-    toast('Archived', { duration: 2000 });
+    toast(archiveDismisses(thread) ? 'Dismissed' : 'Archived', { duration: 2000 });
   } catch (e) {
     toast.error("Couldn't archive", { description: (e as Error).message });
   } finally {
     archiving.delete(id);
     queryClient.invalidateQueries({ queryKey: ['inbox'] });
     queryClient.invalidateQueries({ queryKey: ['thread', id] });
+  }
+}
+
+/** Revoke a standing grant (project page). Asks for its action reach the owner again. */
+export async function revokeGrant(grantId: string, projectId: string) {
+  try {
+    await api.revokeGrant(grantId, newOpId());
+    toast('Go-ahead revoked', { duration: 2500 });
+  } catch (e) {
+    toast.error("Couldn't revoke", { description: (e as Error).message });
+  } finally {
+    queryClient.invalidateQueries({ queryKey: ['project', projectId] });
   }
 }
 

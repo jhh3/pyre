@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -27,8 +29,9 @@ type tuiState struct {
 	// the list order (sort.go): grouped (default) or attention.
 	SessionsView string `json:"sessions_view,omitempty"`
 	Sort         string `json:"sort,omitempty"`
-	// NewSession remembers the new-session panel's last machine, agent and
-	// workspace per repository (newsession.go).
+	// NewSession remembers the new-session panel's last machine and agent
+	// overall, and the machine, agent and workspace per repository
+	// (newsession.go).
 	NewSession *nsMemory `json:"new_session,omitempty"`
 	// Lead signals (leads.go): when each session was last on screen past
 	// the dwell (bounded, archived pruned), and the baseline before which
@@ -69,15 +72,31 @@ func (m *Model) saveState() tea.Cmd {
 	m.grouping.save(&st)
 	m.sessView.save(&st)
 	m.seen.save(&st)
-	if m.nsMem.Agent != "" || len(m.nsMem.Repos) > 0 {
+	if !m.nsMem.empty() {
 		mem := m.nsMem.clone()
 		st.NewSession = &mem
 	}
+	seq := stateWrites.seq.Add(1)
 	return func() tea.Msg {
-		_ = saveTUIState(p, st)
+		// Saves run on their own goroutines; an older one that runs late
+		// must not overwrite a newer state, and two must not share the tmp
+		// file at once.
+		stateWrites.mu.Lock()
+		defer stateWrites.mu.Unlock()
+		if seq > stateWrites.last[p] {
+			stateWrites.last[p] = seq
+			_ = saveTUIState(p, st)
+		}
 		return nil
 	}
 }
+
+// stateWrites orders background state saves per file.
+var stateWrites = struct {
+	seq  atomic.Uint64
+	mu   sync.Mutex
+	last map[string]uint64
+}{last: map[string]uint64{}}
 
 // dismissTips hides the tips bar and remembers that in the state file.
 func (m *Model) dismissTips() tea.Cmd {

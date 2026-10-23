@@ -17,7 +17,7 @@ import (
 var eligible = contracts.AccountPolicy{Mode: contracts.AccountEligible}
 
 func explicit(id string) contracts.AccountPolicy {
-	return contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: id}
+	return contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: id, Strict: true}
 }
 
 // A11 (synthetic, one node): two accounts of one provider run concurrently

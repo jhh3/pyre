@@ -87,7 +87,7 @@ var actionDefs = []actionDef{
 	{id: "sessions.info", group: "Session", desc: "session details (project, directory, run, delivery)", keys: []string{"i"}},
 	{id: "sessions.answer", group: "Session", desc: "approve / answer the pending request", keys: []string{"a"}},
 	{id: "sessions.message", group: "Session", desc: "message (queue or steer); replies to its message for you", keys: []string{"m"}},
-	{id: "sessions.dismiss", group: "Session", desc: "dismiss its message for you (acknowledge, no reply)", keys: []string{"d"}},
+	{id: "sessions.dismiss", group: "Session", desc: "dismiss what it has for you: its message (acknowledged, no reply), else its waiting-on-you or flag, else its open asks (confirms; no option, no default)", keys: []string{"d"}},
 	{id: "sessions.history", group: "Session", desc: "message history & reconcile (delivery states of messages to/from this session)", keys: []string{"H"}},
 	{id: "sessions.interrupt", group: "Session", desc: "interrupt (confirms)", keys: []string{"!"}},
 	{id: "sessions.stop", group: "Session", desc: "stop (confirms)", keys: []string{"x"}},

@@ -65,16 +65,18 @@ const (
 	AskMaxTitle      = 120
 	AskMaxContext    = 16000
 	AskMaxOptionText = 300
+	AskMaxItems      = 50
+	AskMaxAction     = 40
 )
 
 type AskState string
 
 const (
 	AskOpen       AskState = "open"
-	AskAnswered   AskState = "answered"   // the owner chose
+	AskAnswered   AskState = "answered"   // the owner chose (or answered in chat: Answer.Source)
 	AskDefaulted  AskState = "defaulted"  // deadline passed; DefaultOption applied
 	AskExpired    AskState = "expired"    // deadline passed with no default
-	AskWithdrawn  AskState = "withdrawn"  // the asker took it back (or its session was archived)
+	AskWithdrawn  AskState = "withdrawn"  // the asker took it back, the owner dismissed it, or its session was archived
 	AskSuperseded AskState = "superseded" // replaced by SupersededBy
 )
 
@@ -87,13 +89,43 @@ type AskOption struct {
 	Detail string `json:"detail,omitempty"` // one line of consequence
 }
 
-type AskAnswer struct {
-	OptionID  string    `json:"option_id,omitempty"`
-	Text      string    `json:"text,omitempty"` // free text instead of / alongside an option
-	By        Principal `json:"by"`
-	ByDefault bool      `json:"by_default,omitempty"`
-	At        time.Time `json:"at"`
+// AskItem is one item of a batched ask ("approve these N merges"): the
+// ask's options apply to each item, and the owner may answer per item.
+type AskItem struct {
+	ID     string `json:"id"`               // short, stable ("pr-12")
+	Label  string `json:"label"`            // what the item is
+	Detail string `json:"detail,omitempty"` // one line: what and why, state
+	URL    string `json:"url,omitempty"`
 }
+
+type AskAnswer struct {
+	OptionID string `json:"option_id,omitempty"`
+	// Items (batched asks) is the option chosen per item; an item missing
+	// here takes OptionID.
+	Items     map[string]string `json:"items,omitempty"`
+	Text      string            `json:"text,omitempty"` // free text instead of / alongside an option
+	By        Principal         `json:"by"`
+	ByDefault bool              `json:"by_default,omitempty"`
+	At        time.Time         `json:"at"`
+	// Source (additive) is how the owner answered: "" for an answer to the
+	// ask itself (web inbox, CLI, phone), AskSourceChat when he wrote to the
+	// session directly instead (Text is what he wrote; rules in
+	// internal/hub/asks_chat.go).
+	Source string `json:"source,omitempty"`
+	// With (additive) lists the other asks the same chat input answered.
+	With []string `json:"with,omitempty"`
+}
+
+// AskSourceChat: the owner answered by writing to the asking session
+// itself (typed into it, or a Pyre message to it that is not a reply in a
+// thread). Every open ask of the session filed before that input is
+// answered with its text.
+const AskSourceChat = "chat"
+
+// AskDismissReason is the withdraw reason the owner's clients send to
+// dismiss (archive) an open ask: no option is chosen and the default is
+// never applied; the asking session is told.
+const AskDismissReason = "dismissed by the owner: no option was chosen and the default does not apply. Do not act on this ask; if it still blocks you, ask again and say what changed"
 
 // AskUpdate is a follow-up merged into an open ask (same topic) instead of
 // a new inbox item.
@@ -116,14 +148,25 @@ type Ask struct {
 	Urgent        bool        `json:"urgent,omitempty"`
 	DeadlineAt    *time.Time  `json:"deadline_at,omitempty"`
 	DeadlineRule  string      `json:"deadline_rule,omitempty"` // "1h" | "custom" | "morning" | "urgent"
-	State         AskState    `json:"state"`
-	Answer        *AskAnswer  `json:"answer,omitempty"`
-	Updates       []AskUpdate `json:"updates,omitempty"`
-	Count         int         `json:"count"` // 1 + merged repeats
-	SupersededBy  string      `json:"superseded_by,omitempty"`
-	MessageID     string      `json:"message_id,omitempty"` // the owner message carrying the ask
-	ThreadID      string      `json:"thread_id,omitempty"`
-	AttentionID   string      `json:"attention_id,omitempty"`
+	// Items makes this a batched ask: Options apply to each item.
+	Items []AskItem `json:"items,omitempty"`
+	// Action names the kind of go-ahead asked for ("merge"); a standing
+	// grant for it may answer the ask at once (GrantID; rules in
+	// standing_grants.go).
+	Action  string `json:"action,omitempty"`
+	GrantID string `json:"grant_id,omitempty"`
+	// Irreversible asks are never answered by a grant.
+	Irreversible bool `json:"irreversible,omitempty"`
+	// Proposal is set on a proposed grant or fact (standing_grants.go).
+	Proposal     *AskProposal `json:"proposal,omitempty"`
+	State        AskState     `json:"state"`
+	Answer       *AskAnswer   `json:"answer,omitempty"`
+	Updates      []AskUpdate  `json:"updates,omitempty"`
+	Count        int          `json:"count"` // 1 + merged repeats
+	SupersededBy string       `json:"superseded_by,omitempty"`
+	MessageID    string       `json:"message_id,omitempty"` // the owner message carrying the ask
+	ThreadID     string       `json:"thread_id,omitempty"`
+	AttentionID  string       `json:"attention_id,omitempty"`
 	// DecisionMessageID is the message that told the asker the outcome.
 	DecisionMessageID string    `json:"decision_message_id,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -150,6 +193,22 @@ type CreateAskRequest struct {
 	DeadlineSeconds int         `json:"deadline_seconds,omitempty"`
 	Urgent          bool        `json:"urgent,omitempty"`
 	ProjectID       *string     `json:"project_id,omitempty"` // default: the session's project
+	// Action (optional slug, e.g. "merge") is the go-ahead this ask wants.
+	// A standing grant held by the asker (its own tree's or its project's)
+	// for exactly this action answers the ask immediately (status
+	// "granted") when the ask offers the grant's option, has a default and
+	// is not Irreversible (all rules in standing_grants.go). Without Action
+	// no grant answers the ask.
+	Action string `json:"action,omitempty"`
+	// Irreversible marks an action that cannot be undone: never answered
+	// by a grant (give it no default either).
+	Irreversible bool `json:"irreversible,omitempty"`
+	// Proposal files a proposed standing grant or fact for the owner to
+	// approve; the hub then writes Title, Context and Options itself (the
+	// request's Context is kept as the session's reason).
+	Proposal *AskProposal `json:"proposal,omitempty"`
+	// Items makes a batched ask: one inbox item, one answer per item.
+	Items []AskItem `json:"items,omitempty"`
 	// Reopen asks again on a topic that was already decided (new ask; the
 	// decided one stays as history). Reason goes into Context.
 	Reopen bool `json:"reopen,omitempty"`
@@ -167,6 +226,7 @@ const (
 	AskAlreadyDecided    AskCreateStatus = "decided"            // same topic decided: Ask carries the answer; nothing sent
 	AskPossibleDuplicate AskCreateStatus = "possible_duplicate" // similar open ask(s) in Candidates; resend with ConfirmNew or use their topic
 	AskRedirected        AskCreateStatus = "redirected"         // caller is a child session: forwarded to its parent as MessageID
+	AskGranted           AskCreateStatus = "granted"            // a standing grant answered it at once (Ask.GrantID); the owner was not asked
 )
 
 type CreateAskResponse struct {
@@ -192,7 +252,10 @@ type ListAsksRequest struct {
 type AnswerAskItem struct {
 	AskID    string `json:"ask_id"`
 	OptionID string `json:"option_id,omitempty"`
-	Text     string `json:"text,omitempty"` // free text; required when OptionID is empty
+	// Items (batched asks): option per item ID; items left out take
+	// OptionID (required then).
+	Items map[string]string `json:"items,omitempty"`
+	Text  string            `json:"text,omitempty"` // free text; required when OptionID is empty
 }
 
 // AnswerAsksRequest answers one or more asks at once (owner only). Each

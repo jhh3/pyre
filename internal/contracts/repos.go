@@ -45,11 +45,26 @@ const (
 	// ActionWorktreeScan reports a session's worktrees now
 	// (WorktreeScanParams -> SessionWorktrees).
 	ActionWorktreeScan = "worktree.scan"
+	// ActionWorktreeClaim records the session a launch's fresh worktrees
+	// were created for in their pyre-created markers (WorktreeClaimParams ->
+	// WorktreeClaimResult); only automatic cleanup of that session removes
+	// them (W-lifecycle).
+	ActionWorktreeClaim = "worktree.claim"
 	// ActionWorktreeRemove removes worktrees a session created, re-checking
 	// every safety rule on the node (WorktreeRemoveParams -> WorktreeRemoveResult).
 	ActionWorktreeRemove = "worktree.remove"
 	// ActionRepoReindex rescans the node's repo roots now ({} -> NodeRepoIndex).
 	ActionRepoReindex = "repos.reindex"
+	// ActionSessionCleanup tidies up after sessions that ended and were
+	// archived (SessionCleanupParams -> SessionCleanupResult): removes the
+	// clean worktrees each created whose branch is merged or pushed and
+	// stops processes it left running (W-lifecycle). Hub-issued only.
+	ActionSessionCleanup = "session.cleanup"
+	// ActionNodeSweep is the nightly node cleanup (NodeSweepParams ->
+	// NodeSweepResult): ActionSessionCleanup for the sessions the hub just
+	// archived, then orphan worktrees and stale harness temp folders.
+	// Hub-issued only.
+	ActionNodeSweep = "node.sweep"
 )
 
 // Repo is one discovered repository's metadata on a node.
@@ -138,7 +153,10 @@ type SessionWorktrees struct {
 // directory (<repo>/.worktrees/<slug>, or an existing <repo>-worktrees/
 // sibling); several = Dir (default ~/pyre-work/<slug>) holding one worktree
 // per repo, all on the same branch. The branch is deduplicated per repo
-// (pyre/x, pyre/x-2, ...) and starts at each repo's current HEAD.
+// (pyre/x, pyre/x-2, ...) and starts at each repo's origin default branch,
+// fetched first (origin/HEAD, else main/master), with no upstream; a
+// failed fetch fails the call. A repo without an origin remote starts at
+// its HEAD and the result carries a warning.
 type WorktreeCreateParams struct {
 	Repos  []string `json:"repos"`            // main checkout paths on the node
 	Branch string   `json:"branch,omitempty"` // default pyre/<slug>
@@ -156,6 +174,26 @@ type WorktreeCreateResult struct {
 	Cwd       string            `json:"cwd"` // where the session should start
 	Branch    string            `json:"branch"`
 	Worktrees []CreatedWorktree `json:"worktrees"`
+	// ClaimToken, written into the new worktrees' markers, lets the caller
+	// name the session it starts there (ActionWorktreeClaim) once.
+	ClaimToken string `json:"claim_token,omitempty"`
+	// Warnings: notes for the launcher to show, e.g. "no origin remote;
+	// branched from local HEAD" (prefixed with the repo's name when
+	// several).
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// WorktreeClaimParams names the session started in worktrees a
+// worktree.create returned (with its ClaimToken). A marker that already
+// names a session, or carries another token, is left alone.
+type WorktreeClaimParams struct {
+	SessionID string   `json:"session_id"`
+	Token     string   `json:"token"`
+	Paths     []string `json:"paths"`
+}
+
+type WorktreeClaimResult struct {
+	Claimed []string `json:"claimed"`
 }
 
 type WorktreeScanParams struct {
@@ -172,7 +210,10 @@ type WorktreeRemoveParams struct {
 type WorktreeRemoval struct {
 	Path   string `json:"path"`
 	Branch string `json:"branch,omitempty"`
-	// Outcome: removed | kept_dirty | kept_main | kept_not_session | missing | failed
+	// Outcome: removed | kept_dirty | kept_main | kept_not_session | missing | failed;
+	// automatic cleanup also: kept_unmerged (branch neither merged nor
+	// pushed) | kept_in_use (a live session or process works in it) |
+	// kept_recent (touched within the idle window)
 	Outcome string `json:"outcome"`
 	// Branch handling: deleted | kept_unmerged | kept (detached/none) | ""
 	BranchOutcome string `json:"branch_outcome,omitempty"`
@@ -181,6 +222,50 @@ type WorktreeRemoval struct {
 
 type WorktreeRemoveResult struct {
 	Results []WorktreeRemoval `json:"results"`
+}
+
+// SessionCleanupParams names ended sessions to tidy up on the node.
+type SessionCleanupParams struct {
+	SessionIDs []string `json:"session_ids"`
+}
+
+// SessionCleanup is what the node did for one session.
+type SessionCleanup struct {
+	SessionID string            `json:"session_id"`
+	Worktrees []WorktreeRemoval `json:"worktrees,omitempty"`
+	// ProcessesStopped counts leftover processes of the session (background
+	// shells, watchers) that were still running and were stopped.
+	ProcessesStopped int    `json:"processes_stopped,omitempty"`
+	Error            string `json:"error,omitempty"`
+}
+
+type SessionCleanupResult struct {
+	Sessions []SessionCleanup `json:"sessions"`
+}
+
+// NodeSweepParams: zero durations take the node defaults (24h, 72h).
+type NodeSweepParams struct {
+	SessionIDs []string `json:"session_ids,omitempty"` // archived by this sweep: cleaned up first
+	// KeepSessions are the hub's unarchived sessions: their worktrees are
+	// never orphans, live run or not.
+	KeepSessions []string `json:"keep_sessions,omitempty"`
+	// WorktreeIdleSeconds: an orphan worktree is removed only when nothing in
+	// its git metadata changed for this long.
+	WorktreeIdleSeconds int `json:"worktree_idle_seconds,omitempty"`
+	// TmpIdleSeconds: a harness temp folder of a session is removed when no
+	// file in it changed for this long.
+	TmpIdleSeconds int  `json:"tmp_idle_seconds,omitempty"`
+	DryRun         bool `json:"dry_run,omitempty"`
+}
+
+type NodeSweepResult struct {
+	Sessions []SessionCleanup `json:"sessions,omitempty"`
+	// Worktrees: orphan worktrees removed or kept (removed, kept_dirty,
+	// kept_unmerged, kept_in_use; kept_recent ones are not listed).
+	Worktrees      []WorktreeRemoval `json:"worktrees,omitempty"`
+	TmpDirsRemoved int               `json:"tmp_dirs_removed,omitempty"`
+	TmpBytesFreed  int64             `json:"tmp_bytes_freed,omitempty"`
+	Errors         []string          `json:"errors,omitempty"`
 }
 
 // ReposAPI is implemented by hubs, the mock backend, the client and the

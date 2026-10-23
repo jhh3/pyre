@@ -17,6 +17,7 @@ const (
 	ExitUnavailable   = 5 // hub/node unreachable, capacity exhausted, or a wait timed out (retry later)
 	ExitUnsupported   = 6 // capability or protocol not supported
 	ExitIndeterminate = 7 // the outcome is unknown; inspect before retrying
+	ExitPending       = 8 // filed for the owner's approval; Pyre runs it once approved
 )
 
 const exitCodesHelp = `Exit codes:
@@ -28,6 +29,8 @@ const exitCodesHelp = `Exit codes:
   5  unavailable: hub/node unreachable, capacity exhausted, or a wait timed out (retry later)
   6  unsupported capability or protocol mismatch
   7  indeterminate: the outcome is unknown; inspect before retrying (never blindly resend)
+  8  pending: an owner-only operation was filed for the owner's approval; Pyre runs it
+     when he approves and messages the requesting session the outcome
 `
 
 // ExitCodeFor maps an error to the documented exit code.
@@ -64,6 +67,8 @@ func exitForCode(code contracts.ErrorCode) int {
 		return ExitUnsupported
 	case contracts.ErrOutcomeIndeterminate:
 		return ExitIndeterminate
+	case contracts.ErrApprovalRequested:
+		return ExitPending
 	}
 	return ExitError
 }

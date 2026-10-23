@@ -31,11 +31,30 @@ type attachTerm interface {
 	Resize(cols, rows int) error
 }
 
-// ptyTerm is an attach client's PTY master.
-type ptyTerm struct{ *os.File }
+// ptyTerm is an attach client's PTY master. Resize (refit, hubToPTY) and
+// Close (whichever goroutine ends the stream) are serialised: the resize
+// ioctl takes the raw descriptor, which Close releases, and the number may
+// already belong to another file.
+type ptyTerm struct {
+	*os.File
+	mu     sync.Mutex
+	closed bool
+}
 
-func (p ptyTerm) Resize(cols, rows int) error {
+func (p *ptyTerm) Resize(cols, rows int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return os.ErrClosed
+	}
 	return pty.Setsize(p.File, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+}
+
+func (p *ptyTerm) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	return p.File.Close()
 }
 
 // openDirect attaches a stream to a termhost session (Windows runs, or
@@ -219,7 +238,7 @@ func (b *NodeBridge) Open(ctx context.Context, tc contracts.TerminalOpenCommand,
 			release()
 			return contracts.Errorf(contracts.ErrUnavailable, "start attach client: %v", err).WithRef(contracts.KindRun, tc.RunID)
 		}
-		s.cmd, s.term = cmd, ptyTerm{ptmx}
+		s.cmd, s.term = cmd, &ptyTerm{File: ptmx}
 		go func() {
 			_ = cmd.Wait()
 			close(s.exited)

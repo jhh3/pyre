@@ -285,3 +285,44 @@ func TestPlanSession(t *testing.T) {
 		t.Fatalf("unverified must be unavailable: %v", err)
 	}
 }
+
+// win-home: Outfit failed "resolve config directory: %AppData% is not
+// defined" because pyred dropped the Windows profile variables.
+func TestChildEnvCarriesWindowsProfileAndOutfitSettings(t *testing.T) {
+	orig := systemEnv
+	t.Cleanup(func() { systemEnv = orig })
+	systemEnv = func() []string {
+		return []string{`APPDATA=C:\Users\synthetic\AppData\Roaming`, `LOCALAPPDATA=C:\Users\synthetic\AppData\Local`, `USERPROFILE=C:\Users\synthetic`, `SystemRoot=C:\Windows`}
+	}
+	t.Setenv("OUTFIT_VAULT_BACKEND", "file")
+	t.Setenv("OUTFIT_HOME", "/synthetic/outfit-home")
+	t.Setenv("OUTFIT_BACKUP_PASSPHRASE", "synthetic-passphrase")
+	t.Setenv("OUTFIT_AGENT", "1")
+	t.Setenv("OUTFIT_FUTURE_SECRET", "synthetic-future-secret")
+	t.Setenv("PYRE_SESSION_TOKEN", "synthetic-session-token")
+	env := map[string]string{}
+	for _, kv := range New(Options{}).childEnv() {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+	for k, want := range map[string]string{"APPDATA": `C:\Users\synthetic\AppData\Roaming`, "LOCALAPPDATA": `C:\Users\synthetic\AppData\Local`, "USERPROFILE": `C:\Users\synthetic`, "SystemRoot": `C:\Windows`, "OUTFIT_VAULT_BACKEND": "file", "OUTFIT_HOME": "/synthetic/outfit-home"} {
+		if env[k] != want {
+			t.Errorf("%s = %q, want %q", k, env[k], want)
+		}
+	}
+	for _, k := range []string{"OUTFIT_BACKUP_PASSPHRASE", "OUTFIT_AGENT", "OUTFIT_FUTURE_SECRET", "PYRE_SESSION_TOKEN"} {
+		if _, ok := env[k]; ok {
+			t.Errorf("%s leaked into the outfit environment", k)
+		}
+	}
+	// An explicit Home overrides the inherited OUTFIT_HOME exactly once.
+	var homes []string
+	for _, kv := range New(Options{Home: "/synthetic/isolated"}).childEnv() {
+		if strings.HasPrefix(kv, "OUTFIT_HOME=") {
+			homes = append(homes, kv)
+		}
+	}
+	if len(homes) != 1 || homes[0] != "OUTFIT_HOME=/synthetic/isolated" {
+		t.Fatalf("OUTFIT_HOME entries = %v", homes)
+	}
+}

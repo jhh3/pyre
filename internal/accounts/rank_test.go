@@ -14,9 +14,10 @@ func win(name string, used float64) contracts.UsageWindow {
 	return contracts.UsageWindow{Name: name, UsedPercent: used}
 }
 
-// rank prefers the most 5-hour headroom, then the most weekly headroom; an
-// unreported window never counts as headroom.
-func TestRankMostHeadroomFiveHourThenWeekly(t *testing.T) {
+// rank prefers the lowest binding window (the higher of 5-hour and weekly
+// use), then the lower weekly use; an unreported window never counts as
+// headroom.
+func TestRankMostHeadroomBindingWindow(t *testing.T) {
 	mk := func(id string, ws ...contracts.UsageWindow) *candidate {
 		return &candidate{acct: contracts.Account{AccountID: id}, room: usage.HeadroomOf(ws)}
 	}
@@ -25,7 +26,7 @@ func TestRankMostHeadroomFiveHourThenWeekly(t *testing.T) {
 		mk("acct_synth-weekly-high", win("five_hour", 12), win("seven_day", 90)),
 		mk("acct_synth-best", win("five_hour", 12), win("seven_day", 40)),
 		mk("acct_synth-no-windows"),
-		// 12.4% rounds to 12: the weekly window decides, not the fraction.
+		// 12.4% rounds to 12: whole percents only.
 		mk("acct_synth-fraction", win("five_hour", 12.4), win("seven_day", 50)),
 		// The extra-usage budget is not a limit and does not rank.
 		mk("acct_synth-extra", win("five_hour", 30), win("seven_day", 30), win("extra_usage", 100)),
@@ -37,7 +38,7 @@ func TestRankMostHeadroomFiveHourThenWeekly(t *testing.T) {
 	for _, c := range cs {
 		got = append(got, c.acct.AccountID)
 	}
-	want := []string{"acct_synth-best", "acct_synth-fraction", "acct_synth-scoped", "acct_synth-weekly-high", "acct_synth-extra", "acct_synth-busy", "acct_synth-no-windows"}
+	want := []string{"acct_synth-extra", "acct_synth-best", "acct_synth-fraction", "acct_synth-busy", "acct_synth-scoped", "acct_synth-weekly-high", "acct_synth-no-windows"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("rank\n got %v\nwant %v", got, want)
 	}
@@ -53,8 +54,9 @@ func TestRankMostHeadroomFiveHourThenWeekly(t *testing.T) {
 	}
 }
 
-// End to end: automatic selection picks the account with the most 5-hour
-// headroom, then weekly, and says why in plain words.
+// End to end: automatic selection picks the account with the lowest binding
+// window (an empty 5-hour window does not hide a spent week) and says why in
+// plain words.
 func TestSelectPrefersMostHeadroomAndExplains(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -73,20 +75,20 @@ func TestSelectPrefersMostHeadroomAndExplains(t *testing.T) {
 	obs("acct_synth-b", win("five_hour", 12), win("seven_day", 40))
 	obs("acct_synth-c", win("five_hour", 3), win("seven_day", 99), win("extra_usage", 100))
 	sel, err := e.svc.Select(ctx, contracts.AccountSelectParams{Provider: contracts.ProviderAnthropic, Policy: eligible})
-	if err != nil || sel.AccountID != "acct_synth-c" {
-		t.Fatalf("want C (least 5h use; extra usage is not a limit), got %+v %v", sel, err)
+	if err != nil || sel.AccountID != "acct_synth-b" {
+		t.Fatalf("want B (C's week is 99%% spent despite its empty 5h window), got %+v %v", sel, err)
 	}
-	if sel.Reason != "most headroom (5h 3% used, weekly 99%)" {
+	if sel.Reason != "most headroom (5h 12% used, weekly 40%)" {
 		t.Fatalf("reason %q", sel.Reason)
 	}
-	// With C's 5h window as busy as the others, weekly decides: B.
+	// C with room in both windows wins (extra usage is not a limit).
 	e.clock.Advance(time.Second)
-	obs("acct_synth-c", win("five_hour", 12), win("seven_day", 99))
+	obs("acct_synth-c", win("five_hour", 3), win("seven_day", 30), win("extra_usage", 100))
 	_, _, asg, err := e.svc.Resolve(ctx, contracts.HarnessClaude, eligible, "run_1")
-	if err != nil || asg.AccountID != "acct_synth-b" {
-		t.Fatalf("want B (same 5h, least weekly), got %+v %v", asg, err)
+	if err != nil || asg.AccountID != "acct_synth-c" {
+		t.Fatalf("want C, got %+v %v", asg, err)
 	}
-	if asg.Reason != "most headroom (5h 12% used, weekly 40%)" {
+	if asg.Reason != "most headroom (5h 3% used, weekly 30%)" {
 		t.Fatalf("assignment reason %q", asg.Reason)
 	}
 }

@@ -14,6 +14,7 @@ import (
 const (
 	FormatClaude = "claude"
 	FormatCodex  = "codex"
+	FormatAgy    = "agy"
 )
 
 // maxLine bounds one transcript record the scanner parses; longer records
@@ -120,8 +121,12 @@ func (s *Scanner) line(b []byte) {
 	if len(b) == 0 {
 		return
 	}
-	if s.Format == FormatCodex {
+	switch s.Format {
+	case FormatCodex:
 		s.codexLine(b)
+		return
+	case FormatAgy:
+		s.agyLine(b)
 		return
 	}
 	s.claudeLine(b)
@@ -272,4 +277,27 @@ func codexIndexName(path, thread string) string {
 		}
 	}
 	return name
+}
+
+// agyLine: agy keeps no title in its transcript; the first USER_INPUT step
+// (its <USER_REQUEST> text) names the session.
+func (s *Scanner) agyLine(b []byte) {
+	if s.firstPrompt != "" || !bytes.Contains(b, []byte(`"USER_INPUT"`)) {
+		return
+	}
+	var r struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(b, &r) != nil || r.Type != "USER_INPUT" {
+		return
+	}
+	text := r.Content
+	if i := strings.Index(text, "<USER_REQUEST>"); i >= 0 {
+		text = text[i+len("<USER_REQUEST>"):]
+		if j := strings.Index(text, "</USER_REQUEST>"); j >= 0 {
+			text = text[:j]
+		}
+	}
+	s.firstPrompt = FromPrompt(strings.TrimSpace(text))
 }

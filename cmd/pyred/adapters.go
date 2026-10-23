@@ -1,17 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/jhh3/pyre/internal/stablepath"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/runtime/agy"
 	"github.com/jhh3/pyre/internal/runtime/claude"
 	"github.com/jhh3/pyre/internal/runtime/codex"
 	"github.com/jhh3/pyre/internal/runtime/mock"
@@ -25,6 +29,7 @@ const maxSocketPath = 100
 // integrations need (the Codex adapter reads rate limits for accounts).
 type builtAdapters struct {
 	list  []contracts.RuntimeAdapter
+	exec  []contracts.RuntimeAdapter // headless pyre run adapters (daemon.Config.ExecAdapters)
 	codex *codex.Adapter
 	// rates relays the Codex adapter's rate-limit pushes to the accounts
 	// service once it exists (own-login usage, accounts/ownlogin.go).
@@ -32,6 +37,9 @@ type builtAdapters struct {
 	// auto relays dialogs an adapter answered by itself (trust prompt,
 	// Claude's exit dialog) to the hub's audit log once reporting is up.
 	auto *autoRelay
+	// wake answers the Codex adapter's "may this session be woken?" once
+	// the hub client exists (bgwake.go; allowed before then).
+	wake *wakeRelay
 	// doorbell is the Claude doorbell monitor argv (nil when disabled) and
 	// doorbellOff why it is disabled.
 	doorbell    []string
@@ -89,20 +97,40 @@ func buildAdapters(o runOpts, nodeID string, log *slog.Logger) (builtAdapters, e
 	cl, err := claude.New(claude.Options{NodeID: nodeID, TmuxSocket: sock, SSHAlias: o.sshAlias,
 		HookCommand: []string{exe, "hook", "claude"}, ProfileAsConfigDir: true, TrustWorkspace: trustFunc(o.trustDirs),
 		TranscriptHomes: claudeTranscriptHomes(profileRoot(o.state, os.Getenv, userHome())),
+		TmpDir:          claudeTmpDir(o.state),
 		PermissionMode:  "default", ApprovalWait: 120 * time.Second, DoorbellCommand: b.doorbell, OnAutomation: b.auto.call})
 	if err != nil {
 		log.Warn("claude adapter unavailable", "err", err)
 	} else {
 		b.list = append(b.list, cl)
+		b.exec = append(b.exec, claude.NewExec(cl))
 	}
 	b.rates = &rateRelay{}
+	b.wake = &wakeRelay{}
 	cx, err := codex.New(codex.Options{NodeID: nodeID, TmuxSocket: sock, SSHAlias: o.sshAlias, StateRoot: filepath.Join(o.state, "rt"),
-		ApprovalPolicy: "on-request", Sandbox: "workspace-write", TrustWorkspace: trustFunc(o.trustDirs), OnRateLimits: b.rates.call, OnAutomation: b.auto.call})
+		ApprovalPolicy: "on-request", Sandbox: "workspace-write", TrustWorkspace: trustFunc(o.trustDirs), OnRateLimits: b.rates.call, OnAutomation: b.auto.call,
+		WakeAllowed: b.wake.call, TranscriptHomes: codexTranscriptHomes(profileRoot(o.state, os.Getenv, userHome()))})
 	if err != nil {
 		log.Warn("codex adapter unavailable", "err", err)
 	} else {
 		b.list = append(b.list, cx)
+		b.exec = append(b.exec, codex.NewExec(cx))
 		b.codex = cx
+	}
+	// agy (Google Antigravity): offered wherever the agy binary is found and
+	// signed in (its Probe says why not otherwise). Runs use the node's own
+	// login; hooks and the pyre MCP server travel in a per-session
+	// workspace folder under <state>/agy.
+	var agyMCP []string
+	if cli := findPyreCLI(); cli != "" {
+		agyMCP = []string{cli, "mcp"}
+	}
+	ag, err := agy.New(agy.Options{NodeID: nodeID, TmuxSocket: sock, SSHAlias: o.sshAlias, WorkspaceRoot: filepath.Join(o.state, "agy"),
+		HookCommand: []string{exe, "hook", "agy"}, MCPCommand: agyMCP, TrustWorkspace: trustFunc(o.trustDirs), OnAutomation: b.auto.call})
+	if err != nil {
+		log.Warn("agy adapter unavailable", "err", err)
+	} else {
+		b.list = append(b.list, ag)
 	}
 	sh, err := shell.New(shell.Options{NodeID: nodeID, TmuxSocket: sock, SSHAlias: o.sshAlias})
 	if err != nil {
@@ -174,6 +202,33 @@ func (r *autoRelay) call(a contracts.NodeAutomation) {
 	}
 }
 
+// wakeRelay forwards the Codex adapter's wake check to a handler set after
+// start-up (every wake is allowed before then).
+type wakeRelay struct{ f atomic.Value }
+
+func (r *wakeRelay) set(f func(context.Context, string) bool) { r.f.Store(f) }
+
+func (r *wakeRelay) call(ctx context.Context, sessionID string) bool {
+	if f, ok := r.f.Load().(func(context.Context, string) bool); ok && f != nil {
+		return f(ctx, sessionID)
+	}
+	return true
+}
+
+// wakeAllowed is the hub's answer to "may this session be woken by a
+// finished background command?": not when it is archived or scheduled to
+// archive when done (its run is about to stop). A hub that cannot answer
+// allows it; one that no longer knows the session does not.
+func wakeAllowed(get func(context.Context, contracts.GetRequest) (contracts.SessionView, error)) func(context.Context, string) bool {
+	return func(ctx context.Context, sessionID string) bool {
+		v, err := get(ctx, contracts.GetRequest{ID: sessionID})
+		if err != nil {
+			return !contracts.IsCode(err, contracts.ErrNotFound)
+		}
+		return !v.Session.Archived && !slices.Contains(v.Session.Tags, contracts.TagArchiveWhenDone)
+	}
+}
+
 // claudeTranscriptHomes are the Claude config homes a resume searches for a
 // conversation besides the default login: the accounts' shared store and
 // every account profile (one not yet linked to the store keeps its own).
@@ -182,4 +237,23 @@ func claudeTranscriptHomes(profiles string) []string {
 		filepath.Join(filepath.Dir(filepath.Clean(profiles)), "shared", "claude"),
 		filepath.Join(profiles, "*", "claude*"),
 	}
+}
+
+// codexTranscriptHomes are the CODEX_HOMEs besides ~/.codex that hold
+// rollouts: the accounts' shared store and every account profile.
+func codexTranscriptHomes(profiles string) []string {
+	return []string{
+		filepath.Join(filepath.Dir(filepath.Clean(profiles)), "shared", "codex"),
+		filepath.Join(profiles, "*", "codex*"),
+	}
+}
+
+// claudeTmpDir keeps Claude's per-session scratch on disk under the node
+// state instead of /tmp, which is RAM-backed tmpfs (with a per-user quota) on
+// some hosts. Windows' %TEMP% is already on disk.
+func claudeTmpDir(state string) string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return filepath.Join(state, "tmp", "claude")
 }

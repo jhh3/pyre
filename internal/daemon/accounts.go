@@ -136,6 +136,32 @@ type RunInfo struct {
 	AccountID    string
 	TurnInFlight bool
 	Live         bool
+	State        contracts.RunState
+	// RecentInput: a message for the session is queued on this node or
+	// changed delivery state within the last minute (input may be on its
+	// way into the harness even though the run still reads idle).
+	RecentInput bool
+}
+
+// recentInput reports queued or recently delivered messages for a session.
+func (d *Daemon) recentInput(ctx context.Context, sessionID string, within time.Duration) bool {
+	if d.inbox == nil {
+		return false
+	}
+	if q, err := d.inbox.Queued(ctx, sessionID); err != nil || len(q) > 0 {
+		return true // unknown counts as busy
+	}
+	ms, err := d.inbox.List(ctx, sessionID, 20)
+	if err != nil {
+		return true
+	}
+	cut := d.now().Add(-within)
+	for _, m := range ms {
+		if m.UpdatedAt.After(cut) || !m.Terminal() {
+			return true
+		}
+	}
+	return false
 }
 
 // CurrentRun describes the session's current run on this node.
@@ -152,7 +178,8 @@ func (d *Daemon) CurrentRun(ctx context.Context, sessionID string) (RunInfo, err
 	}
 	r := rec.Run
 	return RunInfo{SessionID: r.SessionID, RunID: r.RunID, Harness: r.Harness, Capabilities: r.Capabilities, NativeRef: r.NativeRef,
-		AccountID: r.AccountID, TurnInFlight: r.State == contracts.RunRunning, Live: rec.Phase == phaseLive}, nil
+		AccountID: r.AccountID, TurnInFlight: r.State == contracts.RunRunning, Live: rec.Phase == phaseLive, State: r.State,
+		RecentInput: d.recentInput(ctx, sessionID, time.Minute)}, nil
 }
 
 // QuiesceRun stops a run (as the adapter supports) and waits until it has
@@ -170,9 +197,13 @@ func (d *Daemon) QuiesceRun(ctx context.Context, sessionID, runID string) (exite
 	if !contracts.HasCap(rec.Run.Capabilities, contracts.CapStop) {
 		return false, turnInFlight, "adapter cannot stop runs", contracts.Errorf(contracts.ErrUnsupported, "adapter %s cannot stop runs", lr.adapter.Name())
 	}
+	marked := d.markStopRequested(ctx, lr, "account fallback")
 	cctx, cancel := context.WithTimeout(ctx, d.cfg.CommandTimeout)
-	_, err = lr.adapter.Stop(cctx, *rec.Handle)
+	rcpt, err := lr.adapter.Stop(cctx, *rec.Handle)
 	cancel()
+	if marked && (err != nil || rcpt.Outcome == contracts.OutcomeFailed) {
+		d.clearStopRequested(ctx, lr)
+	}
 	if err != nil {
 		return false, turnInFlight, "", err
 	}
@@ -200,6 +231,15 @@ type ContinuationRequest struct {
 	// off; account switched ..."). It never repeats the interrupted
 	// instruction. A handoff gets it after the handoff instructions.
 	Prompt string
+	// NativeOnly refuses a handoff: when the thread is not reachable from
+	// the new account the successor is not started (proactive moves).
+	NativeOnly bool
+	// Policy, when set, replaces the explicit strict AccountID policy
+	// (crash resume: the previous account, or the ambient login).
+	Policy *contracts.AccountPolicy
+	// Actor names the system actor of the resume command (default
+	// "account-fallback").
+	Actor string
 }
 
 // StartContinuation starts a successor run in the same session, bound to
@@ -222,11 +262,18 @@ func (d *Daemon) StartContinuation(ctx context.Context, c ContinuationRequest) (
 	tok, _, _ := d.st.tokenForSession(ctx, c.SessionID)
 	runID := contracts.NewID(contracts.PrefixRun)
 	prevRun := prev.Run
+	policy := contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: c.AccountID, Strict: true}
+	if c.Policy != nil {
+		policy = *c.Policy
+	}
+	actor := c.Actor
+	if actor == "" {
+		actor = "account-fallback"
+	}
 	sc := contracts.StartRunCommand{Session: prev.Session, RunID: runID, Cwd: prevRun.Cwd,
-		AccountPolicy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: c.AccountID},
-		SessionToken:  tok, PreviousRun: &prevRun, AllowHandoff: true, InitialPrompt: c.Prompt}
+		AccountPolicy: policy, SessionToken: tok, PreviousRun: &prevRun, AllowHandoff: !c.NativeOnly, InitialPrompt: c.Prompt}
 	cmd := contracts.NodeCommand{CommandID: contracts.NewID(contracts.PrefixCommand), Kind: contracts.CmdResume,
-		Actor: contracts.Principal{Kind: contracts.PrincipalSystem, ID: "account-fallback"}, IssuedAt: d.now()}
+		Actor: contracts.Principal{Kind: contracts.PrincipalSystem, ID: actor}, IssuedAt: d.now()}
 	res, err := d.startRun(ctx, cmd, sc, true)
 	if err != nil {
 		return "", "", err

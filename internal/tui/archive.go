@@ -282,7 +282,7 @@ func (m *Model) archivedLoader() loaderFn {
 		})
 		var out []contracts.SessionView
 		for _, s := range list {
-			if s.Session.Archived {
+			if s.Session.Archived && !s.Session.IsMonitor() {
 				out = append(out, s)
 			}
 		}

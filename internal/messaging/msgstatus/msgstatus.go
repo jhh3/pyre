@@ -14,6 +14,7 @@ import (
 	"time"
 
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/ownermail"
 )
 
 // IdleGrace is how long a message to an idle, connected recipient is shown
@@ -55,11 +56,24 @@ func Derive(m c.MessageView, rcpt *c.SessionView, now time.Time) c.DeliverySumma
 		}
 		return s
 	case c.AckAcknowledged:
+		switch st.AckRef {
+		case c.AckRefUpdate:
+			return c.DeliverySummary{State: c.SummaryAcknowledged, Since: st.StoredAt,
+				Summary: "stored as an update for the owner: it asks nothing of him, so it is not in his inbox and nobody is notified (he sees it in your session's and project's history). For a decision use ask_owner; if he must read it, send with request_ack"}
+		case c.AckRefAskClosed:
+			return c.DeliverySummary{State: c.SummaryAcknowledged, Summary: "acknowledged: its ask was closed"}
+		case c.AckRefEngaged:
+			return c.DeliverySummary{State: c.SummaryAcknowledged, Summary: "acknowledged: the owner engaged with the session"}
+		}
 		return c.DeliverySummary{State: c.SummaryAcknowledged, Summary: "acknowledged by the recipient"}
 	}
 	stored := st.StoredAt
 	switch e.Recipient.Kind {
 	case c.AddrOwner:
+		if ownermail.Question(e) {
+			return c.DeliverySummary{State: c.SummaryStored, Since: stored,
+				Summary: "in the owner's inbox (not acknowledged yet). It reads as a question: decisions go in ask_owner (a topic, 2–4 options, a default), which he answers in one tap and which merges repeats; a message stays one more thing to read"}
+		}
 		return c.DeliverySummary{State: c.SummaryStored, Since: stored, Summary: "in the owner's inbox (not acknowledged yet)"}
 	case c.AddrChannel, c.AddrProject:
 		return c.DeliverySummary{State: c.SummaryStored, Since: stored, Summary: "stored in " + string(e.Recipient.Kind) + " " + e.Recipient.ID + " (not injected into a runtime)"}

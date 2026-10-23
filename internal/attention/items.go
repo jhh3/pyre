@@ -291,6 +291,11 @@ type change struct {
 	// their titles) and is withdrawn when the last one leaves (members.go).
 	member      string
 	memberLabel string
+	// readOnly limits a withdraw/handle to items the owner already read.
+	readOnly bool
+	// objectID limits a withdraw/handle to items whose object is this one
+	// (a sender's item now standing for a newer message survives).
+	objectID string
 }
 
 func activeBySessionKindsTx(ctx context.Context, tx *sql.Tx, sessionID string, kinds []contracts.AttentionKind) ([]itemRow, error) {
@@ -395,10 +400,11 @@ func (s *Store) applyChangeTx(ctx context.Context, tx *sql.Tx, ch change, cursor
 		if err != nil {
 			return false, err
 		}
-		if !ch.before.IsZero() {
+		if !ch.before.IsZero() || ch.readOnly || ch.objectID != "" {
 			kept := active[:0]
 			for _, r := range active {
-				if !r.item.UpdatedAt.After(ch.before) {
+				if (ch.before.IsZero() || !r.item.UpdatedAt.After(ch.before)) && (!ch.readOnly || r.item.State == contracts.AttnRead) &&
+					(ch.objectID == "" || r.item.Object.ID == ch.objectID) {
 					kept = append(kept, r)
 				}
 			}

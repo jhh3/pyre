@@ -1,5 +1,5 @@
 // Small shared pieces: dots, avatars, chips, markdown, empty/error states.
-import { AlertTriangle, Clock, Pause, RotateCw } from 'lucide-react';
+import { AlertTriangle, Clock, Eye, Pause, RotateCw } from 'lucide-react';
 import type { ComponentProps, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
@@ -109,6 +109,30 @@ export function HeldChip({ held, sendsAt, ask }: { held: HeldAnswer; sendsAt?: s
     <Chip tone="brand" icon={<Pause />} title={label ? `Held answer: ${label}` : 'Held answer'}>
       Held{sendsAt ? ` — sends ${T.clock(sendsAt)}` : ''}
     </Chip>
+  );
+}
+
+/** "watching N": the monitors (pyre monitor) that wake a session; their
+ * checks on hover. Monitors are not listed as sessions. */
+export function Watching({ titles }: { titles?: string[] }) {
+  if (!titles?.length) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className="inline-flex shrink-0 items-center gap-1 rounded bg-muted px-1.5 text-[10.5px] leading-4 font-medium text-muted-foreground [&>svg]:size-3"
+          aria-label={`Watching ${titles.length}: ${titles.join('; ')}`}
+        >
+          <Eye />
+          watching {titles.length}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>
+        {titles.map((t, i) => (
+          <div key={i}>{t}</div>
+        ))}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

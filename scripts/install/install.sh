@@ -6,7 +6,8 @@
 #              [--allowed-signers FILE] [--allow-unsigned]
 #              [--service none|node|hub] [--no-activate] [--no-prune] [--edit-path]
 #              [node: --state DIR --credential FILE --name NAME --ssh-alias A --max-runs N
-#                     --dev-mock --no-integrations --pyred-arg ARG (repeatable)]
+#                     --dev-mock --no-integrations --pyred-arg ARG (repeatable)
+#                     --permissions ask|bypass]
 #              [hub:  --hub-data DIR --hub-listen ADDR --hub-also-listen ADDR (repeatable) --hub-url URL --preview-listen ADDR]
 #              [--memory-max V --memory-high V --cpu-quota V --no-harden] [--path PATH]
 #              [Linux node: --no-scope --runs-memory-high V --runs-cpu-weight N --force-scope-switch]
@@ -30,8 +31,15 @@
 # DIR cannot be signature-checked: refused once a key is pinned or given,
 # unless --allow-unsigned.
 #
+# Value flags take --flag VALUE or --flag=VALUE (--pyred-arg=--trust-dir=DIR).
+#
 # --pyred-arg ARG adds ARG to the node service's `pyred run` command line
 # (e.g. --rota-checkout, --trust-dir DIR, --tool-path DIR); never a secret.
+# --permissions MODE is short for --pyred-arg --permissions --pyred-arg MODE.
+# With bypass (either way), install.sh also records in ~/.claude/settings.json
+# that the owner accepted Claude's bypass-permissions warning
+# (skipDangerousModePermissionPrompt: true, merged into the existing settings),
+# so the node's first bypass launch does not fail on the one-time prompt.
 #
 # Linux node default: pyred starts its tmux server (all runs) in transient
 # scopes in pyre-runs.slice (written next to pyred.service), so pyred.service
@@ -48,7 +56,8 @@
 # pyre-tools-<V>-<os>-<arch>.tar.gz (default: beside --tarball, checked against
 # the same verified SHA256SUMS) or from an unpacked directory (--tools-from;
 # default: beside --from, e.g. `make tools` output in dist/tools/) into
-# <prefix>/tools/<tool>, with shims in ~/.local/bin. A tool that is already
+# <prefix>/tools/<tool>, with shims in ~/.local/bin (outfit also as
+# outfit-core, the command the Outfit plugin runs). A tool that is already
 # installed (a non-Pyre ~/.local/bin/<tool>, another one on PATH, or for Hive a
 # Claude plugin install) is skipped with a note and left untouched;
 # --tools-alongside installs the bundled copy anyway, without a shim (Pyre's
@@ -63,7 +72,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib.sh"
 TEMPLATES="$HERE/../../packaging"
 
-usage() { sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 FROM="" TARBALL="" SUMS="" SIG="" ALLOWED_ARG="" ALLOW_UNSIGNED=0 VERSION="" SERVICE=none ACTIVATE=1 EDIT_PATH=0 PRUNE=1
 PYRED_ARGS=()
@@ -75,6 +84,7 @@ SCOPE=1 MEM_HIGH="" RUNS_MEM_HIGH="85%" RUNS_CPU_WEIGHT=90 FORCE_SCOPE_SWITCH=0
 WITH_TOOLS=0 TOOLS_TARBALL="" TOOLS_FROM="" TOOLS_ALONGSIDE=0
 
 while [ $# -gt 0 ]; do
+  case "$1" in --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;; esac # --flag=value
   parse_common_flag "$@"
   if [ "$SHIFT_N" -gt 0 ]; then shift "$SHIFT_N"; continue; fi
   case "$1" in
@@ -85,6 +95,8 @@ while [ $# -gt 0 ]; do
     --allowed-signers) ALLOWED_ARG=${2:?}; shift 2 ;;
     --allow-unsigned) ALLOW_UNSIGNED=1; shift ;;
     --pyred-arg) PYRED_ARGS+=("${2:?}"); shift 2 ;;
+    --permissions)
+      case "${2:-}" in ask|bypass) PYRED_ARGS+=(--permissions "$2"); shift 2 ;; *) echo "--permissions must be ask or bypass" >&2; exit 2 ;; esac ;;
     --version) VERSION=${2:?}; shift 2 ;;
     --service) SERVICE=${2:?}; shift 2 ;;
     --no-activate) ACTIVATE=0; shift ;;
@@ -377,6 +389,22 @@ for b in $PYRE_BINS; do
   act ln -s "../share/pyre/current/bin/$b" "$s"
 done
 note "shims: $SHIM_DIR/{pyre,pyred,pyre-hub} -> ../share/pyre/current/bin/*"
+# outfit_core_shim: the Outfit Claude/Codex plugin runs `outfit-core` (its
+# MCP server and hooks; Outfit's own installer ships both names). Link it to
+# the bundled outfit unless an outfit-core is already installed.
+outfit_core_shim() {
+  local cs ours_c="../share/pyre/tools/outfit/bin/outfit" other=""
+  cs=$(r "$SHIM_DIR/outfit-core")
+  if [ -L "$cs" ] && [ "$(readlink "$cs")" = "$ours_c" ]; then return 0; fi
+  if [ -e "$cs" ] || [ -L "$cs" ]; then
+    other="$SHIM_DIR/outfit-core"
+  elif [ "$T_OS" = "$HOST_OS" ] && [ -z "$ROOT" ] && [ "$T_HOME" = "$HOME" ]; then
+    other=$(command -v outfit-core 2>/dev/null || true)
+  fi
+  if [ -n "$other" ]; then note "outfit-core: existing $other left untouched (the Outfit plugin uses it)"; return 0; fi
+  act ln -s "$ours_c" "$cs"
+  note "outfit-core: shim $SHIM_DIR/outfit-core -> bundled outfit (the Outfit plugin's MCP server and hooks run outfit-core)"
+}
 if [ "$WITH_TOOLS" = 1 ]; then
   # Bundled tools live outside the version directories (<prefix>/tools), so
   # upgrades and pruning keep them. Existing installs are never replaced.
@@ -412,6 +440,7 @@ if [ "$WITH_TOOLS" = 1 ]; then
     else
       if ! { [ -L "$shim" ] && [ "$(readlink "$shim")" = "$ours" ]; }; then act ln -s "$ours" "$shim"; fi
       note "$t: installed $TDIR/$t; shim $SHIM_DIR/$t"
+      if [ "$t" = outfit ]; then outfit_core_shim; fi
     fi
   done
   if [ "$DRY" = 0 ]; then
@@ -452,6 +481,67 @@ if [ "$SERVICE" = none ]; then
   note "no service requested (--service node|hub to install one)"
   exit 0
 fi
+
+# ---- Claude bypass-permissions acknowledgement ----
+# pyred refuses a --permissions bypass Claude launch until the owner accepted
+# Claude's one-time warning (skipDangerousModePermissionPrompt in
+# ~/.claude/settings.json). Bypass on his nodes is the owner's standing
+# choice, so asking for it here records the acceptance (merged, never
+# replacing other settings).
+bypass_requested() {
+  local prev="" a
+  for a in ${PYRED_ARGS[@]+"${PYRED_ARGS[@]}"}; do
+    if [ "$a" = --permissions=bypass ] || { [ "$prev" = --permissions ] && [ "$a" = bypass ]; }; then return 0; fi
+    prev=$a
+  done
+  return 1
+}
+accept_claude_bypass() {
+  local f shown="$T_HOME/.claude/settings.json" rc=0
+  f=$(r "$shown")
+  if [ "$DRY" = 1 ]; then echo "[dry-run] set skipDangerousModePermissionPrompt: true in $shown (merge)"; return 0; fi
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    mkdir -p "$(dirname "$f")"
+    (umask 077; printf '{\n  "skipDangerousModePermissionPrompt": true\n}\n' >"$f")
+    note "Claude bypass-permissions warning recorded as accepted: wrote $shown"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not found: add \"skipDangerousModePermissionPrompt\": true to $shown yourself (bypass launches fail until then)"
+    return 0
+  fi
+  python3 - "$f" <<'PY' || rc=$?
+import json, os, sys, tempfile
+key = "skipDangerousModePermissionPrompt"
+path = os.path.realpath(sys.argv[1])  # a symlinked settings.json is edited in place
+with open(path, encoding="utf-8") as fh:
+    raw = fh.read()
+try:
+    doc = json.loads(raw) if raw.strip() else {}
+except ValueError as e:
+    print(f"not valid JSON ({e})", file=sys.stderr)
+    sys.exit(3)
+if not isinstance(doc, dict):
+    print("not a JSON object", file=sys.stderr)
+    sys.exit(3)
+if doc.get(key) is True:
+    sys.exit(10)
+doc[key] = True
+mode = os.stat(path).st_mode & 0o777
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.json.")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+os.chmod(tmp, mode)
+os.replace(tmp, path)
+PY
+  case "$rc" in
+    0) note "Claude bypass-permissions warning recorded as accepted in $shown (skipDangerousModePermissionPrompt: true, other settings kept)" ;;
+    10) note "Claude bypass-permissions warning already accepted in $shown" ;;
+    *) warn "$shown could not be updated (see above); left unchanged: add \"skipDangerousModePermissionPrompt\": true yourself" ;;
+  esac
+}
+if [ "$SERVICE" = node ] && bypass_requested; then accept_claude_bypass; fi
 
 # PATH for the service: launchd/systemd start with a minimal PATH, but pyred
 # must find tmux, claude, codex and the Hive/Outfit/Rota commands.

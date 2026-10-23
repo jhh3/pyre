@@ -105,13 +105,7 @@ func harnessEnvVar(h contracts.Harness) string {
 
 // harnessForProvider maps a subscription provider to its agent harness.
 func harnessForProvider(p contracts.Provider) contracts.Harness {
-	switch p {
-	case contracts.ProviderAnthropic:
-		return contracts.HarnessClaude
-	case contracts.ProviderOpenAI:
-		return contracts.HarnessCodex
-	}
-	return ""
+	return contracts.HarnessForProvider(p)
 }
 
 // shellQuote single-quotes s for display in a copy-pasteable command.

@@ -224,6 +224,12 @@ func (h *Hub) prepareForSend(ctx context.Context, r commandRec) (contracts.NodeC
 	if err := json.Unmarshal(r.Payload, &sr); err != nil {
 		return cmd, err
 	}
+	if (r.Kind == contracts.CmdStartRun && nodeStarter(sr.Session.CreatedBy)) || nodeStarter(r.Actor) {
+		// A node-started headless run (nodestart.go), or any start or
+		// resume a node credential asked for, gets no agent credential:
+		// nothing in it may message, ask or flag the owner.
+		return cmd, nil
+	}
 	tok, err := h.cfg.Tokens.IssueSessionToken(ctx, sr.Session.SessionID)
 	if err != nil {
 		return cmd, err

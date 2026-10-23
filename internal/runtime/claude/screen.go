@@ -15,10 +15,16 @@ type screenInfo struct {
 	InputLines  []string // box contents (prompt glyph/indent stripped)
 	Placeholder bool
 	Dialog      string // title of a dialog covering the input ("" if none)
-	DialogKind  string // "trust" | "permission" | "login" | "unknown"
-	TrustYes    bool   // trust dialog: "Yes, I trust this folder" is selected
-	RuleWidth   int    // width of the rule above the input box (Claude draws it across the pane)
-	Lines       []string
+	DialogKind  string // "trust" | "devchannels" | "onboarding" | "permission" | "login" | "unknown"
+	// Onboarding: which first-run onboarding screen is shown ("theme" or
+	// "security"); both are answered with Enter.
+	Onboarding string
+	TrustYes   bool // trust dialog: "Yes, I trust this folder" is selected
+	// DevAccept: development-channels warning, its "I am using this for
+	// local development" option is selected.
+	DevAccept bool
+	RuleWidth int // width of the rule above the input box (Claude draws it across the pane)
+	Lines     []string
 }
 
 // InputEmpty reports an input box with no draft text.
@@ -159,6 +165,24 @@ func parseScreen(plain, escaped string) screenInfo {
 				si.TrustYes = true
 			}
 		}
+	case !si.HasInputBox && strings.Contains(all, themePickerTitle):
+		// Claude's first onboarding screen, shown whenever the config
+		// lacks hasCompletedOnboarding (2.1.302 on win-home sat an hour
+		// on it). It has no numbered options or key hints, so it never
+		// looked like a dialog.
+		si.DialogKind, si.Dialog, si.Onboarding = "onboarding", "Claude first-run theme picker", "theme"
+	case !si.HasInputBox && strings.Contains(all, securityNotesTitle) && strings.Contains(all, pressEnterToContinue):
+		si.DialogKind, si.Dialog, si.Onboarding = "onboarding", "Claude first-run security notes", "security"
+	case !si.HasInputBox && strings.Contains(all, devChannelsTitle) && strings.Contains(all, devChannelsAccept):
+		// Claude 2.1.299 shows it at every start with
+		// --dangerously-load-development-channels: confirm or Exit.
+		si.DialogKind, si.Dialog = "devchannels", "development channels warning"
+		for _, l := range lines {
+			t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "│"))
+			if optionRe.MatchString(t) && strings.Contains(t, devChannelsAccept) {
+				si.DevAccept = true
+			}
+		}
 	case !si.HasInputBox && (strings.Contains(all, "Do you want to proceed?") ||
 		strings.Contains(all, "Do you want to make this edit") || strings.Contains(all, "Do you want to create")):
 		si.DialogKind, si.Dialog = "permission", "permission prompt"
@@ -169,6 +193,21 @@ func parseScreen(plain, escaped string) screenInfo {
 	}
 	return si
 }
+
+// The development-channels startup warning (Claude Code 2.1.299 binary).
+const (
+	devChannelsTitle  = "Loading development channels"
+	devChannelsAccept = "I am using this for local development"
+)
+
+// Claude's first-run onboarding screens (Claude Code 2.1.304 binary and a
+// fresh CLAUDE_CONFIG_DIR, 2026-10-20): the theme picker ("Let's get
+// started." above it) and, for a logged-in profile, the security notes.
+const (
+	themePickerTitle     = "Choose the text style that looks best with your terminal"
+	securityNotesTitle   = "Security notes:"
+	pressEnterToContinue = "Press Enter to continue"
+)
 
 // optionRe matches a selected numbered dialog option ("❯ 1. Yes"). Past
 // prompts in the scrollback also start with "❯ ", so unnumbered lines never

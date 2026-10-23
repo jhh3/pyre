@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -45,6 +46,27 @@ type SessionParentLookup interface {
 	SessionParent(ctx context.Context, sessionID string) (string, error)
 }
 
+// SessionTagsLookup is optionally implemented by a Lookup to read a
+// session's tags. A failed run of a headless pyre run session
+// (contracts.TagPyreRun) raises nothing: its caller already got the exit
+// code, and pyre run never creates owner attention.
+type SessionTagsLookup interface {
+	SessionTags(ctx context.Context, sessionID string) ([]string, error)
+}
+
+// headlessAdapters are the adapters of pyre run runs (claude.ExecAdapterName,
+// codex.ExecAdapterName).
+var headlessAdapters = []string{"claude-exec", "codex-exec"}
+
+func sessionTagged(ctx context.Context, lk Lookup, sessionID, tag string) bool {
+	if tl, ok := lk.(SessionTagsLookup); ok && sessionID != "" {
+		if tags, err := tl.SessionTags(ctx, sessionID); err == nil {
+			return slices.Contains(tags, tag)
+		}
+	}
+	return false
+}
+
 // derivedKinds are the event kinds that can produce attention. The deriver
 // asks the hub for only these; attention.changed is deliberately absent.
 var derivedKinds = []contracts.EventKind{
@@ -66,6 +88,7 @@ var derivedKinds = []contracts.EventKind{
 	contracts.EvDocumentConflict,
 	contracts.EvUpdateResult,
 	contracts.EvAskChanged,
+	contracts.EvStandingGrantChanged,
 }
 
 const (
@@ -131,6 +154,8 @@ func derive(ctx context.Context, ev contracts.Event, lk Lookup) []change {
 		return deriveUpdate(ev)
 	case contracts.EvAskChanged:
 		return deriveAsk(ev)
+	case contracts.EvStandingGrantChanged:
+		return deriveStandingGrant(ev)
 	}
 	return nil
 }
@@ -329,6 +354,9 @@ func deriveMessageStored(ev contracts.Event) []change {
 		if contracts.ValidID(env.ThreadID, contracts.PrefixAsk) {
 			return nil // the message carrying an ask: its "ask" item stands for it
 		}
+		if storedAcknowledged(ev) {
+			return nil // an update: it asks nothing of the owner (internal/messaging/ownermail)
+		}
 		ch := change{
 			op:        opRaise,
 			kind:      contracts.AttnMessage,
@@ -370,6 +398,14 @@ func deriveMessageStored(ev contracts.Event) []change {
 	return nil
 }
 
+// storedAcknowledged reports whether a message.stored payload says the
+// message was stored already acknowledged (an update for the owner).
+// Older payloads (a bare envelope) say nothing.
+func storedAcknowledged(ev contracts.Event) bool {
+	var v contracts.MessageView
+	return unmarshal(ev, &v) && v.Envelope.MessageID != "" && v.Status.Ack != "" && v.Status.Ack != contracts.AckNone
+}
+
 // maxExcerpt bounds a message item's summary (runes).
 const maxExcerpt = 300
 
@@ -405,11 +441,19 @@ func deriveMessageAck(ev contracts.Event) []change {
 	if env.Recipient.Kind != contracts.AddrOwner || env.Sender.Kind == contracts.PrincipalOwner {
 		return nil
 	}
+	ch := change{op: opHandle, groupKey: ownerMessageGroup(env)}
+	if env.ThreadID == "" {
+		// A sender's unthreaded mail is one item, whose object is its newest
+		// message: acknowledging an older one leaves a newer question open.
+		ch.objectID = env.MessageID
+	}
 	switch v.Status.Ack {
 	case contracts.AckAcknowledged:
-		return []change{{op: opHandle, groupKey: ownerMessageGroup(env), summary: "Acknowledged."}}
+		ch.summary = "Acknowledged."
+		return []change{ch}
 	case contracts.AckReplied:
-		return []change{{op: opHandle, groupKey: ownerMessageGroup(env), summary: "Replied."}}
+		ch.summary = "Replied."
+		return []change{ch}
 	}
 	return nil
 }
@@ -485,6 +529,8 @@ func providerLabel(p contracts.Provider) string {
 		return "Claude"
 	case contracts.ProviderOpenAI:
 		return "Codex"
+	case contracts.ProviderGoogle:
+		return "agy"
 	case "":
 		return "Unknown-provider"
 	}
@@ -752,8 +798,12 @@ func withdrawWaiting(session, summary string, before time.Time) change {
 	return change{op: opWithdraw, groupKey: WaitingGroup(session), summary: summary, before: before}
 }
 
-// deriveSessionArchived: an archived session's failure and account items
-// are no longer the owner's concern.
+// deriveSessionArchived: an archived session's failure and account items,
+// its "waiting on you" and the messages to the owner he already read are
+// no longer his concern (owner report 2026-10-19: message items from long
+// finished sessions stayed open for days). An unread message stays: most
+// archives are automatic (archive when done, the nightly sweep), and a
+// session's final report must not vanish with it.
 func deriveSessionArchived(ev contracts.Event) []change {
 	var s contracts.Session
 	if !unmarshal(ev, &s) || !s.Archived {
@@ -763,7 +813,8 @@ func deriveSessionArchived(ev contracts.Event) []change {
 	if session == "" {
 		return nil
 	}
-	return append(resolveSession(session, "The session was archived."), withdrawWaiting(session, "The session was archived.", time.Time{}))
+	return append(resolveSession(session, "The session was archived."), withdrawWaiting(session, "The session was archived.", time.Time{}),
+		change{op: opWithdraw, sessionID: session, kinds: []contracts.AttentionKind{contracts.AttnMessage}, readOnly: true, summary: "The session was archived."})
 }
 
 // sessionParent resolves a session's parent when the lookup can ("" otherwise).
@@ -795,6 +846,9 @@ func deriveRunEnded(ctx context.Context, ev contracts.Event, lk Lookup) []change
 	// Only an explicit failure; "unknown" (lost contact) is never failure.
 	if r.State != contracts.RunFailed {
 		return out
+	}
+	if slices.Contains(headlessAdapters, r.Adapter) || r.Adapter == "" && sessionTagged(ctx, lk, session, contracts.TagPyreRun) {
+		return out // pyre run: the caller has the exit code (a later interactive resume still raises)
 	}
 	if session != "" && sessionParent(ctx, lk, session) != "" {
 		// A session started by another session: the hub reports the
@@ -830,8 +884,12 @@ func deriveRunEnded(ctx context.Context, ev contracts.Event, lk Lookup) []change
 	}
 	switch {
 	case session != "":
-		ch.groupKey = "failure:" + session
+		// Sessions that failed for the same cause (in the same project) are
+		// one item listing them (members.go).
+		ch.groupKey = failedGroup(ev.ProjectID, runfail.CauseOf(r.StateReason, r.ExitCode).Key)
 		ch.object = contracts.ObjectRef{Kind: contracts.KindSession, ID: session}
+		ch.sessionID = "" // many sessions; the project stays
+		ch.member, ch.memberLabel = session, sessionTitle(ctx, lk, session)
 	case r.RunID != "":
 		ch.groupKey = "failure:" + r.RunID
 		ch.object = contracts.ObjectRef{Kind: contracts.KindRun, ID: r.RunID}
@@ -1101,7 +1159,13 @@ func deriveAsk(ev contracts.Event) []change {
 		case contracts.AskExpired:
 			summary = "Expired with no answer."
 		}
-		return []change{{op: opHandle, groupKey: group, summary: summary}}
+		out := []change{{op: opHandle, groupKey: group, summary: summary}}
+		if a.GrantID != "" && a.State == contracts.AskAnswered {
+			// A standing grant answered it: the owner hears of it as an
+			// FYI collected on the grant's item.
+			out = append(out, grantFYI(a.GrantID, a.ProjectID, "Standing go-ahead used: "+a.Action, "Answered \""+a.Title+"\""))
+		}
+		return out
 	case contracts.AskWithdrawn, contracts.AskSuperseded:
 		return []change{{op: opWithdraw, groupKey: group, summary: "Withdrawn.", oneShot: true}}
 	}
@@ -1114,4 +1178,36 @@ func askTime(t time.Time) string {
 		return t.In(loc).Format("Mon 3:04 PM") + " PT"
 	}
 	return t.UTC().Format("Mon 15:04") + " UTC"
+}
+
+// grantFYI raises the informational item of a standing grant (one per
+// grant; later raises collapse into it with Count).
+func grantFYI(grantID string, projectID *string, title, summary string) change {
+	return change{
+		op:        opRaise,
+		groupKey:  "grant:" + grantID,
+		kind:      contracts.AttnGrantFYI,
+		severity:  "info",
+		object:    contracts.ObjectRef{Kind: contracts.KindStandingGrant, ID: grantID},
+		projectID: projectID,
+		title:     short(title, maxTitle),
+		summary:   short(summary, maxSummary),
+	}
+}
+
+// deriveStandingGrant: an FYI when a grant is created (it has never been
+// used), handled when it is revoked. Its uses come from ask events.
+func deriveStandingGrant(ev contracts.Event) []change {
+	var g contracts.StandingGrant
+	if !unmarshal(ev, &g) || g.GrantID == "" {
+		return nil
+	}
+	if g.RevokedAt != nil {
+		return []change{{op: opHandle, groupKey: "grant:" + g.GrantID, summary: "Revoked."}}
+	}
+	if g.UsedCount > 0 {
+		return nil
+	}
+	summary := "Answers asks naming " + g.Action + " that offer \"" + g.Option + "\"; expires " + askTime(g.ExpiresAt) + ". Revoke on the project page."
+	return []change{grantFYI(g.GrantID, g.ProjectID, "Standing go-ahead: "+g.Action+" → "+g.Option, summary)}
 }

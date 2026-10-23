@@ -219,3 +219,40 @@ func TestSetTokenOnRotaAccountKeepsLease(t *testing.T) {
 		t.Fatal("a rota account with a token lost its fleet lease (PerMachineIndependent set)")
 	}
 }
+
+// Folding a reserve account into a normal one keeps the survivor in
+// reserve, and the audit log says why.
+func TestFoldKeepsReserveTier(t *testing.T) {
+	h, _ := newTokenHub(t)
+	ctx := context.Background()
+	rota, err := h.UpsertAccount(as(owner), contracts.UpsertAccountRequest{Mutation: tokOp(), Provider: contracts.ProviderAnthropic,
+		Label: "synth-spare", RotaRef: "synth-spare@example.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokOnly, err := h.UpsertAccount(as(owner), contracts.UpsertAccountRequest{Mutation: tokOp(), Provider: contracts.ProviderAnthropic,
+		Label: "synth-spare", PerMachineIndependent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := contracts.TierReserve
+	if _, err := h.UpdateAccount(as(owner), contracts.UpdateAccountRequest{Mutation: tokOp(), AccountID: tokOnly.AccountID, Tier: &reserve}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SetAccountToken(as(owner), contracts.SetAccountTokenRequest{Mutation: tokOp(), AccountID: tokOnly.AccountID, Token: synthHubToken}); err != nil {
+		t.Fatal(err)
+	}
+	if acct, _ := h.getAccount(ctx, h.db, rota.AccountID); !acct.Reserve() {
+		t.Fatalf("survivor lost the reserve tier: %+v", acct)
+	}
+	page, err := h.ListAudit(as(owner), contracts.ListAuditRequest{AccountID: rota.AccountID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range page.Items {
+		if e.Action == contracts.AuditAccountTierChanged && e.To == "reserve" && strings.Contains(e.Reason, "folded from "+tokOnly.AccountID) {
+			return
+		}
+	}
+	t.Fatalf("no tier audit on the survivor: %+v", page.Items)
+}

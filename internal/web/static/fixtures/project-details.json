@@ -84,7 +84,11 @@
      "last_activity": {
       "line": "Replaying 14 retried events against v2",
       "at": "2026-10-15T16:37:00Z"
-     }
+     },
+     "watching": [
+      "gh pr checks 1412",
+      "gh run view 88 --json status"
+     ]
     }
    ],
    "asks": [
@@ -162,6 +166,57 @@
      ]
     },
     {
+     "ask_id": "ask_fx_merges",
+     "topic_key": "merges",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_studio_lead",
+     "title": "Merge these reviewed billing PRs?",
+     "context": "**What's being decided:** which of the three reviewed billing PRs merge before the freeze. Each one is reviewed and CI is green; the options apply to each PR.\n\n- **#2231** only touches invoice PDF fonts.\n- **#2232** retries webhook deliveries with backoff (behind a flag).\n- **#2233** adds the `credits_ledger` table (additive migration, no backfill yet).\n\nDefault: merge all three; anything you hold waits until Monday.",
+     "options": [
+      {
+       "id": "merge",
+       "label": "Merge",
+       "detail": "Merges now; I watch CI on main."
+      },
+      {
+       "id": "hold",
+       "label": "Hold until Monday",
+       "detail": "Stays open and rebased."
+      }
+     ],
+     "default_option": "merge",
+     "urgent": false,
+     "deadline_at": "2026-10-15T17:34:00Z",
+     "deadline_rule": "1h",
+     "state": "open",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_merges",
+     "thread_id": "thr_ask_fx_merges",
+     "created_at": "2026-10-15T16:34:00Z",
+     "updated_at": "2026-10-15T16:34:00Z",
+     "action": "merge",
+     "items": [
+      {
+       "id": "pr-2231",
+       "label": "Invoice PDF fonts",
+       "detail": "Fonts only; CI green",
+       "url": "https://example.invalid/pr/2231"
+      },
+      {
+       "id": "pr-2232",
+       "label": "Webhook retries with backoff",
+       "detail": "Behind billing.webhook_retries; CI green",
+       "url": "https://example.invalid/pr/2232"
+      },
+      {
+       "id": "pr-2233",
+       "label": "credits_ledger table",
+       "detail": "Additive migration; CI green",
+       "url": "https://example.invalid/pr/2233"
+      }
+     ]
+    },
+    {
      "ask_id": "ask_fx_rotate",
      "topic_key": "rotate",
      "project_id": "prj_fx_studio",
@@ -198,6 +253,45 @@
        "at": "2026-10-14T16:40:00Z"
       }
      ]
+    },
+    {
+     "ask_id": "ask_fx_granted",
+     "topic_key": "granted",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_billing",
+     "title": "Merge PR #2229 (invoice rounding)?",
+     "context": "**What's being decided:** merge PR #2229 (invoice rounding fix). Reviewed by the billing reviewer, CI green.",
+     "options": [
+      {
+       "id": "merge",
+       "label": "Merge",
+       "detail": "Merges now."
+      },
+      {
+       "id": "wait",
+       "label": "Wait",
+       "detail": "Stays open."
+      }
+     ],
+     "default_option": "merge",
+     "urgent": false,
+     "deadline_rule": "1h",
+     "state": "answered",
+     "count": 1,
+     "thread_id": "thr_ask_fx_granted",
+     "created_at": "2026-10-15T15:30:00Z",
+     "updated_at": "2026-10-15T15:30:00Z",
+     "answer": {
+      "option_id": "merge",
+      "text": "standing grant sgr_fx_merge (\"reviewed and CI green\"): owner said \"merge when reviewed and green\"",
+      "by": {
+       "kind": "system",
+       "id": "grants"
+      },
+      "at": "2026-10-15T15:30:00Z"
+     },
+     "action": "merge",
+     "grant_id": "sgr_fx_merge"
     }
    ],
    "artifacts": [
@@ -212,6 +306,133 @@
      "title": "Prod snapshot dry-run report (Oct 14)",
      "url": "/api/artifacts/art_fx_2/content",
      "updated_at": "2026-10-15T06:30:00Z"
+    }
+   ],
+   "status": {
+    "lead": {
+     "progress": 65,
+     "phase": "Migrating live customers to billing_v2 in batches",
+     "eta": "Thursday",
+     "in_flight": [
+      {
+       "title": "Batch 3 of 5: mid-market customers",
+       "state": "running",
+       "session": "ses_fx_billing"
+      }
+     ],
+     "ready_for_owner": [
+      {
+       "title": "PR #412 invoice PDF font fix",
+       "url": "https://github.com/example/studio/pull/412",
+       "state": "review",
+       "note": "CI green; small, display only"
+      }
+     ],
+     "shipped": [
+      {
+       "title": "PR #398 usage meter v2",
+       "url": "https://github.com/example/studio/pull/398",
+       "state": "deployed"
+      },
+      {
+       "title": "PR #405 webhook idempotency keys",
+       "url": "https://github.com/example/studio/pull/405",
+       "state": "merged"
+      }
+     ],
+     "blocked": []
+    },
+    "updated_at": "2026-10-15T16:20:00Z",
+    "stale": false,
+    "stale_after_minutes": 30,
+    "working": [
+     {
+      "id": "ses_fx_studio_lead",
+      "title": "Studio lead",
+      "state": "working",
+      "node": "server",
+      "is_lead": true,
+      "last_activity": {
+       "line": "Reviewing invoice PDF font fix",
+       "at": "2026-10-15T16:34:00Z"
+      }
+     },
+     {
+      "id": "ses_fx_webhooks",
+      "title": "Stripe webhooks",
+      "state": "working",
+      "node": "mbp",
+      "is_lead": false,
+      "last_activity": {
+       "line": "Replaying 14 retried events against v2",
+       "at": "2026-10-15T16:37:00Z"
+      },
+      "watching": [
+       "gh pr checks 1412",
+       "gh run view 88 --json status"
+      ]
+     }
+    ],
+    "needs_you": [
+     {
+      "id": "ses_fx_billing",
+      "title": "Billing migration",
+      "state": "needs_you",
+      "node": "server",
+      "is_lead": false,
+      "last_activity": {
+       "line": "Waiting for your answer on the merge window",
+       "at": "2026-10-15T16:31:00Z"
+      }
+     }
+    ],
+    "idle": [],
+    "stuck": []
+   },
+   "grants": [
+    {
+     "grant_id": "sgr_fx_merge",
+     "scope": "project",
+     "project_id": "prj_fx_studio",
+     "action": "merge",
+     "option": "merge",
+     "condition": "once reviewed and CI green",
+     "quote": "yes, merge them once reviewed and green",
+     "ask_id": "ask_fx_grant_old",
+     "proposed_by": {
+      "kind": "session",
+      "id": "ses_fx_studio_lead"
+     },
+     "recorded_by": {
+      "kind": "owner",
+      "id": "owner",
+      "name": "You"
+     },
+     "expires_at": "2026-10-22T09:40:00Z",
+     "used_count": 3,
+     "last_used_at": "2026-10-15T15:30:00Z",
+     "created_at": "2026-10-15T09:40:00Z"
+    },
+    {
+     "grant_id": "sgr_fx_tag",
+     "scope": "session",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_billing",
+     "action": "tag",
+     "option": "tag",
+     "ask_id": "ask_fx_grant_tag",
+     "proposed_by": {
+      "kind": "session",
+      "id": "ses_fx_billing"
+     },
+     "recorded_by": {
+      "kind": "owner",
+      "id": "owner",
+      "name": "You"
+     },
+     "expires_at": "2026-10-17T08:40:00Z",
+     "used_count": 0,
+     "created_at": "2026-10-15T13:20:00Z"
     }
    ]
   },
@@ -380,7 +601,64 @@
      "url": "/api/artifacts/art_fx_3/content",
      "updated_at": "2026-10-15T16:35:00Z"
     }
-   ]
+   ],
+   "status": {
+    "lead": {
+     "progress": 40,
+     "phase": "Building the inbox and project pages",
+     "ready_for_owner": [],
+     "shipped": [
+      {
+       "title": "v0.2.8",
+       "url": "https://github.com/example/pyre/releases/tag/v0.2.8",
+       "state": "released"
+      }
+     ]
+    },
+    "updated_at": "2026-10-15T15:05:00Z",
+    "stale": true,
+    "stale_after_minutes": 30,
+    "working": [
+     {
+      "id": "ses_fx_web_lead",
+      "title": "Pyre web lead",
+      "state": "working",
+      "node": "server",
+      "is_lead": true,
+      "last_activity": {
+       "line": "Integrating web-server and web-ui branches",
+       "at": "2026-10-15T16:38:00Z"
+      }
+     },
+     {
+      "id": "ses_fx_web_ui",
+      "title": "web-ui",
+      "state": "working",
+      "node": "server",
+      "is_lead": false,
+      "last_activity": {
+       "line": "Taking screenshots for review",
+       "at": "2026-10-15T16:39:00Z"
+      }
+     }
+    ],
+    "needs_you": [
+     {
+      "id": "ses_fx_web_server",
+      "title": "web-server",
+      "state": "needs_you",
+      "node": "server",
+      "is_lead": false,
+      "last_activity": {
+       "line": "Waiting for the hostname answer",
+       "at": "2026-10-15T16:28:00Z"
+      }
+     }
+    ],
+    "idle": [],
+    "stuck": []
+   },
+   "grants": []
   },
   "prj_fx_vortex": {
    "project": {
@@ -541,7 +819,30 @@
      "url": "/api/artifacts/art_fx_4/content",
      "updated_at": "2026-10-15T15:40:00Z"
     }
-   ]
+   ],
+   "status": {
+    "lead": null,
+    "updated_at": "2026-10-15T11:40:00Z",
+    "stale": false,
+    "stale_after_minutes": 30,
+    "working": [],
+    "needs_you": [
+     {
+      "id": "ses_fx_funnel",
+      "title": "Trial funnel analysis",
+      "state": "needs_you",
+      "node": "mbp",
+      "is_lead": false,
+      "last_activity": {
+       "line": "Waiting for your answer on trial length",
+       "at": "2026-10-15T15:45:00Z"
+      }
+     }
+    ],
+    "idle": [],
+    "stuck": []
+   },
+   "grants": []
   },
   "prj_fx_backrooms": {
    "project": {
@@ -615,7 +916,30 @@
      "url": "/api/artifacts/art_fx_5/content",
      "updated_at": "2026-10-15T13:35:00Z"
     }
-   ]
+   ],
+   "status": {
+    "lead": null,
+    "updated_at": null,
+    "stale": false,
+    "stale_after_minutes": 30,
+    "working": [],
+    "needs_you": [
+     {
+      "id": "ses_fx_render",
+      "title": "Render farm",
+      "state": "needs_you",
+      "node": "server",
+      "is_lead": false,
+      "last_activity": {
+       "line": "Asked whether to switch the farm tonight",
+       "at": "2026-10-15T15:59:00Z"
+      }
+     }
+    ],
+    "idle": [],
+    "stuck": []
+   },
+   "grants": []
   }
  }
 }

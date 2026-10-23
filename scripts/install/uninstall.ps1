@@ -7,9 +7,9 @@ Remove a per-user Pyre installation on Windows (the counterpart of uninstall.sh)
 
 Stops and unregisters the node logon task (`pyred service stop`, `pyred
 service uninstall`), removes the version directories, the `current`
-junction, .previous and the .pyre-install marker under
-%LOCALAPPDATA%\Programs\Pyre, and the PATH entry install.ps1 -EditPath added
-(unless -KeepPath). Refused (exit 3) when the prefix has no .pyre-install marker.
+junction, .previous, the bundled tools (tools\, install.ps1 -WithTools) and
+the .pyre-install marker under %LOCALAPPDATA%\Programs\Pyre, and the PATH
+entries install.ps1 -EditPath added (unless -KeepPath). Refused (exit 3) when the prefix has no .pyre-install marker.
 
 Data is kept unless -Purge: the node state %LOCALAPPDATA%\Pyre (database,
 outbox, run records, logs, node credential) and the client config
@@ -79,6 +79,7 @@ $Prefix = Join-Path $LocalAppData "Programs\Pyre"
 $ConfigDir = Join-Path $AppData "Pyre"
 if ($State -eq "") { $State = Join-Path $LocalAppData "Pyre" }
 $CurBin = Join-Path $Prefix "current\bin"
+$ToolsBin = Join-Path $Prefix "tools\outfit\bin"  # install.ps1 -WithTools -EditPath
 
 $P = Under-Root $Prefix
 if (Test-Path -LiteralPath $P) {
@@ -100,13 +101,13 @@ if (Test-Path -LiteralPath $exe) {
 if (-not $KeepPath -and $Root -eq "") {
   $userPath = [string](Get-Item "HKCU:\Environment").GetValue("Path", "", "DoNotExpandEnvironmentNames")
   $parts = @($userPath -split ';' | Where-Object { $_ -ne "" })
-  $keep = @($parts | Where-Object { $_.TrimEnd('\') -ine $CurBin })
+  $keep = @($parts | Where-Object { $_.TrimEnd('\') -ine $CurBin -and $_.TrimEnd('\') -ine $ToolsBin })
   if ($keep.Count -ne $parts.Count) {
-    if ($DryRun) { Write-Output "[dry-run] remove $CurBin from the user PATH" } else {
+    if ($DryRun) { Write-Output "[dry-run] remove $CurBin and $ToolsBin from the user PATH" } else {
       [Microsoft.Win32.Registry]::SetValue("HKEY_CURRENT_USER\Environment", "Path", ($keep -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
       [Environment]::SetEnvironmentVariable("PYRE_PATH_REFRESH", $null, "User")
     }
-    Note "removed $CurBin from the user PATH"
+    Note "removed Pyre's directories from the user PATH"
   }
 }
 

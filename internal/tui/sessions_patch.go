@@ -155,16 +155,23 @@ func (m *Model) applySessionPatch(resp contracts.GetManySessionsResponse) {
 	ss, _ := st.val.([]contracts.SessionView)
 	recs := make(map[string]sessPatchRec, len(resp.Items)+len(resp.Missing))
 	order := make([]string, 0, len(resp.Items))
+	var mons []contracts.SessionView
 	for _, v := range resp.Items {
 		id := v.Session.SessionID
-		// The list excludes archived sessions (ListSessions default).
-		recs[id] = sessPatchRec{v: v, gone: v.Session.Archived}
+		// The list excludes archived sessions and monitors (ListSessions
+		// default); a monitor's change updates its target's badge instead.
+		recs[id] = sessPatchRec{v: v, gone: v.Session.Archived || v.Session.IsMonitor()}
 		order = append(order, id)
+		if v.Session.IsMonitor() {
+			mons = append(mons, v)
+		}
 	}
 	for _, id := range resp.Missing {
 		recs[id] = sessPatchRec{gone: true}
 	}
-	st.val = patchSessionList(ss, recs, order)
+	patched := patchSessionList(ss, recs, order)
+	patchMonitorBadges(patched, mons) // monitors.go
+	st.val = patched
 	st.rev++
 	if st.inflight {
 		if m.sessPatch.overlay == nil || m.sessPatch.overlaySeq != st.seq {

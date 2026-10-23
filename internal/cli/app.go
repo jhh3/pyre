@@ -25,6 +25,7 @@ import (
 	"github.com/jhh3/pyre/internal/client"
 	"github.com/jhh3/pyre/internal/cloud"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/enrollment"
 	"github.com/jhh3/pyre/internal/notifications"
 )
 
@@ -59,6 +60,16 @@ type App struct {
 	CloudKeys       cloud.KeyMinter
 	CloudPoll       time.Duration
 	CloudHandoff    time.Duration
+	// SSHRunner runs the ssh/scp steps of `enroll-node --bootstrap` (and
+	// its target probe); nil uses the real ssh (tests inject a fake).
+	SSHRunner enrollment.Runner
+	// StartRecover paces the replays of a start whose answer was lost; nil
+	// uses the default (tests shorten it).
+	StartRecover *StartRecovery
+	// LaunchWait is how long `pyre start` and start_session wait for the
+	// launch outcome by default (NewApp: DefaultLaunchWait; 0 = do not
+	// wait, the in-process test default).
+	LaunchWait time.Duration
 
 	// per-invocation state
 	jsonOut    bool
@@ -75,7 +86,7 @@ type App struct {
 // NewApp returns an App wired to the real process environment.
 func NewApp() *App {
 	a := &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv,
-		RunTUI: RunTUI, Notify: notifications.Desktop}
+		RunTUI: RunTUI, Notify: notifications.Desktop, LaunchWait: DefaultLaunchWait}
 	a.IsTerminal = func() bool { return isTTY(os.Stdin) && isTTY(os.Stdout) }
 	return a
 }
@@ -133,6 +144,10 @@ func (a *App) Main(ctx context.Context, args []string) int {
 		a.printCached()
 		return ExitOK
 	}
+	var se *silentExit
+	if errors.As(err, &se) {
+		return se.code // pyre run: the child's exit status, nothing printed
+	}
 	code := ExitCodeFor(err)
 	var ce *contracts.Error
 	var st *statusError
@@ -178,6 +193,13 @@ func (a *App) reportError(err error, code int) {
 		b, _ := json.Marshal(contracts.ErrorBody{Error: e})
 		fmt.Fprintln(a.Stderr, string(b))
 		return
+	}
+	if code == ExitPending { // filed, not refused: say so without an error code
+		var e *contracts.Error
+		if errors.As(err, &e) {
+			fmt.Fprintf(a.Stderr, "pyre: %s\n", e.Message)
+			return
+		}
 	}
 	fmt.Fprintf(a.Stderr, "pyre: %s\n", err)
 	a.reportEndpoint(err)
@@ -225,6 +247,8 @@ func codeForExit(code int) contracts.ErrorCode {
 		return contracts.ErrUnsupported
 	case ExitIndeterminate:
 		return contracts.ErrOutcomeIndeterminate
+	case ExitPending:
+		return contracts.ErrApprovalRequested
 	}
 	return contracts.ErrInternal
 }
@@ -257,7 +281,8 @@ func (a *App) connect() (*Ops, error) {
 		// attach/start know the client's node (local vs ssh attach).
 		self.NodeID = discoverLocalNode(a.Getenv)
 	}
-	a.ops = &Ops{API: api, Self: self, PollInterval: a.PollInterval}
+	a.ops = &Ops{API: api, Self: self, PollInterval: a.PollInterval, Stderr: a.Stderr, StartRecover: a.StartRecover, LaunchWait: a.LaunchWait,
+		ClientCredential: a.conn != nil && (a.conn.TokenSource == EnvToken || a.conn.TokenSource == "config")}
 	return a.ops, nil
 }
 
@@ -303,13 +328,18 @@ else the client config.
 	root.SetVersionTemplate("pyre {{.Version}}\n")
 
 	for _, add := range []func(*cobra.Command){
-		a.addSystemCommands, a.addFleetCommands, a.addSessionCommands, a.addMessageCommands,
+		a.addSystemCommands, a.addFleetCommands, a.addSessionCommands, a.addRunCommand, a.addMessageCommands,
 		a.addApprovalCommands, a.addProjectCommands, a.addArtifactCommands, a.addNodeActionCommands,
 		a.addAttentionCommands, a.addAgentCommands, a.addDigestCommands, a.addSearchCommands,
 		a.addQuickLaunchCommands, // W-quicklaunch
 		a.addAuditCommands,       // W-audit
 		a.addAskCommands,         // W-asks
+		a.addWaitingFactCommands, // waiting on own job, fact sheet
+		a.addGrantCommands,       // W-grants
+		a.addIssueCommands,       // issues filed by sessions
 		a.addWebCommands,         // W-web-inbox
+		a.addMonitorCommands,     // W6 monitors
+		a.addModelCommands,       // pyre models (start --model/--effort choices)
 	} {
 		add(root)
 	}

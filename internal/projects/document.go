@@ -141,6 +141,9 @@ func (s *Store) insertDocument(ctx context.Context, tx *sql.Tx, who contracts.Pr
 	}
 	doc.HeadRevisionID = rev.RevisionID
 
+	if projectID != nil && *projectID != "" && slug == contracts.FactSheetSlug && !contracts.FactSheetWriter(who) {
+		return out, contracts.Errorf(contracts.ErrForbidden, contracts.FactSheetForbiddenText)
+	}
 	candidate := slug
 	for i := 1; ; i++ {
 		if i > 1 {
@@ -360,6 +363,9 @@ func (s *Store) proposeTx(ctx context.Context, tx *sql.Tx, who contracts.Princip
 	doc, err := getDocumentQ(ctx, tx, docID)
 	if err != nil {
 		return contracts.DocumentWithRevision{}, err
+	}
+	if doc.ProjectID != nil && doc.Slug == contracts.FactSheetSlug && !contracts.FactSheetWriter(who) {
+		return contracts.DocumentWithRevision{}, contracts.Errorf(contracts.ErrForbidden, contracts.FactSheetForbiddenText).WithRef(contracts.KindDocument, doc.DocumentID)
 	}
 	if err := s.checkContent(content, summary); err != nil {
 		return contracts.DocumentWithRevision{}, err

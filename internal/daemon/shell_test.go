@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,11 +36,11 @@ func TestPlainShellSession(t *testing.T) {
 	tm := supervisor.Tmux{Socket: rec.Handle.TmuxSocket, OwnedRoot: dir}
 	t.Cleanup(func() { tm.Kill(context.Background()) })
 	// The run environment reached the shell (token via env, not argv).
-	tm.SendKeys(context.Background(), "pyre", true, `echo "sid=$PYRE_SESSION_ID run=$PYRE_RUN_ID tok=${#PYRE_SESSION_TOKEN}"`)
+	tm.SendKeys(context.Background(), "pyre", true, `echo "sid=$PYRE_SESSION_ID run=$PYRE_RUN_ID tok=${#PYRE_SESSION_TOKEN} tmp=$TMPDIR"`)
 	tm.SendKeys(context.Background(), "pyre", false, "Enter")
 	waitFor(t, "env echo", func() bool {
 		out, _ := tm.Capture(context.Background(), "pyre", 0)
-		return strings.Contains(out, "sid=ses_sh run=run_sh tok=37")
+		return strings.Contains(out, "sid=ses_sh run=run_sh tok=37 tmp="+filepath.Join(dir, "tmp", "runs", "run_sh"))
 	})
 
 	res := n.do(command(contracts.CmdAttach, contracts.AttachCommand{SessionID: "ses_sh"}))

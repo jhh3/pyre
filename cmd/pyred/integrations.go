@@ -78,8 +78,10 @@ func wireIntegrations(ctx context.Context, cfg *daemon.Config, o runOpts, built 
 		svc.MigrateSharedStores(ctx)
 		cfg.Accounts = accountsResolver{svc}
 		// The machine's own login: identity in the harness inventory, usage
-		// from the rate limits Pyre's own runs on it receive (no probes).
+		// from the rate limits Pyre's own runs on it receive (no probes;
+		// agy's quota is read by the observer, at most every 5 minutes).
 		cfg.OwnLogin = svc.OwnLogin
+		cfg.OwnUsage = svc.OwnUsage // agy reports its own quota (agyusage.go)
 		if built.rates != nil {
 			built.rates.set(func(home string, raw json.RawMessage) {
 				if home == "" {
@@ -87,6 +89,12 @@ func wireIntegrations(ctx context.Context, cfg *daemon.Config, o runOpts, built 
 				}
 			})
 		}
+	}
+
+	// A Codex session archived (or archiving when done) is not woken by a
+	// background command that finishes afterwards (codex bgwake.go).
+	if built.wake != nil && in.hub != nil {
+		built.wake.set(wakeAllowed(in.hub.GetSession))
 	}
 
 	// W-audit: dialogs the adapters answered by themselves reach the
@@ -196,6 +204,7 @@ func (in *integrations) attach(ctx context.Context, d *daemon.Daemon, link *tran
 			d.RegisterAction(name, daemon.ActionFunc(h))
 		}
 		go in.acct.RunObserver(ctx)
+		go in.acct.RunRebalancer(ctx) // idle sessions leave near-limit accounts between turns
 		if in.hub != nil {
 			// Token accounts follow the hub: registered here without
 			// add-token (node enrolled or harness installed later), and the
@@ -366,7 +375,7 @@ func (c *runController) CurrentRun(ctx context.Context, sessionID string) (accou
 		return accounts.RunInfo{}, err
 	}
 	r, err := d.CurrentRun(ctx, sessionID)
-	return accounts.RunInfo{SessionID: r.SessionID, RunID: r.RunID, Harness: r.Harness, Capabilities: r.Capabilities, NativeRef: r.NativeRef, TurnInFlight: r.TurnInFlight}, err
+	return accounts.RunInfo{SessionID: r.SessionID, RunID: r.RunID, Harness: r.Harness, Capabilities: r.Capabilities, NativeRef: r.NativeRef, TurnInFlight: r.TurnInFlight, State: r.State, RecentInput: r.RecentInput, Live: r.Live}, err
 }
 
 func (c *runController) Quiesce(ctx context.Context, sessionID, runID string) (accounts.QuiesceResult, error) {
@@ -384,7 +393,7 @@ func (c *runController) StartContinuation(ctx context.Context, k accounts.Contin
 		return accounts.ContinuationResult{}, err
 	}
 	id, kind, err := d.StartContinuation(ctx, daemon.ContinuationRequest{SessionID: k.SessionID, PreviousRunID: k.PreviousRunID,
-		AccountID: k.AccountID, Kind: k.Kind, Reason: k.Reason, Prompt: k.Prompt})
+		AccountID: k.AccountID, Kind: k.Kind, Reason: k.Reason, Prompt: k.Prompt, NativeOnly: k.NativeOnly})
 	return accounts.ContinuationResult{NewRunID: id, Kind: kind}, err
 }
 

@@ -1,4 +1,4 @@
- Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                               anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts             claude 5h 61% · wk 41% (2/3) !1   codex wk — (0/1) ! · none ready   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   STATUS       SESSION                         MACHINE     HARNESS  AGE  │ outfit API client · ● working · Claude on synth-linux · claude-personal-b 5h 60%
   Synthetic Outfit 1                                                     │ read-only snapshot · MOCK backend: there is no live terminal; showing transcript/scr…

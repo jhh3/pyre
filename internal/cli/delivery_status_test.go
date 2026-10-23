@@ -51,7 +51,11 @@ func TestWaitReplyReturnsEarlyWhenRecipientEnded(t *testing.T) {
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		api.mu.Lock()
-		api.sess.Run.State = c.RunExited
+		// A new Run, not a write through the shared pointer: GetSession's
+		// callers read the previous one without the lock.
+		run := *api.sess.Run
+		run.State = c.RunExited
+		api.sess.Run = &run
 		api.mu.Unlock()
 	}()
 	start := time.Now()

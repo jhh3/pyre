@@ -139,6 +139,9 @@ func (h *Hub) auditTx(ctx context.Context, q interface {
 	if r.Actor.Kind == "" {
 		r.Actor = pyreActor
 	}
+	if why := ownerActionReason(ctx); why != "" { // owneractions.go: done on the owner's approval
+		r.Reason = strings.TrimPrefix(r.Reason+"; "+why, "; ")
+	}
 	_, _ = q.ExecContext(ctx, `INSERT INTO audit_log(at,kind,action,automatic,actor_kind,actor_id,actor_name,node_id,session_id,run_id,account_id,
 		from_val,to_val,from_account,to_account,from_note,to_note,reason,dedupe) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe) DO NOTHING`,
 		persistence.Time(r.At), string(audit.KindOf(r.Action)), r.Action, boolInt(r.Automatic), r.Actor.Kind,
@@ -219,6 +222,12 @@ func (h *Hub) auditEvent(ctx context.Context, tx *sql.Tx, ev contracts.Event) {
 			action = contracts.AuditNodeExitConfirmed
 		case contracts.AutomationCapacityRetry:
 			action = contracts.AuditNodeCapacityRetry
+		case contracts.AutomationDevChannelsAccepted:
+			action = contracts.AuditNodeDevChannelsAccepted
+		case contracts.AutomationBackgroundWake:
+			action = contracts.AuditNodeBackgroundWake
+		case contracts.AutomationOnboardingAnswered:
+			action = contracts.AuditNodeOnboardingAnswered
 		default:
 			return
 		}
@@ -340,7 +349,7 @@ func (h *Hub) accountLimitedTx(ctx context.Context, q queryer, accountID string)
 }
 
 // auditAccountEditTx records owner edits of an account (rename,
-// disable/enable) by comparing before and after.
+// disable/enable, tier) by comparing before and after.
 func (h *Hub) auditAccountEditTx(ctx context.Context, tx *sql.Tx, act contracts.AuditActor, before *contracts.Account, after contracts.Account) {
 	if before == nil {
 		h.auditTx(ctx, tx, auditRec{Action: contracts.AuditAccountAdded, Actor: act, AccountID: after.AccountID, Reason: string(after.Provider)})
@@ -355,6 +364,10 @@ func (h *Hub) auditAccountEditTx(ctx context.Context, tx *sql.Tx, act contracts.
 			a = contracts.AuditAccountDisabled
 		}
 		h.auditTx(ctx, tx, auditRec{Action: a, Actor: act, AccountID: after.AccountID})
+	}
+	if before.TierName() != after.TierName() {
+		h.auditTx(ctx, tx, auditRec{Action: contracts.AuditAccountTierChanged, Actor: act, AccountID: after.AccountID,
+			From: string(before.TierName()), To: string(after.TierName())})
 	}
 }
 

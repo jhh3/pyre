@@ -6,6 +6,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/client"
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/httpapi"
 )
 
 type bearerKey struct{}
@@ -73,6 +74,7 @@ func fwd0[Resp any](p proxy, ctx context.Context, f func(c.API, context.Context)
 func (d *Daemon) SetHubLink(connected bool) {
 	d.hubLinkDown.Store(!connected)
 	if connected {
+		d.crash.wake() // crash resume waiting for the hub's view (crashresume.go)
 		d.inboxWait.signalAll()
 	}
 }
@@ -251,6 +253,22 @@ func (p proxy) OpenContent(ctx context.Context, versionID string) (io.ReadCloser
 		return nil, c.ArtifactVersion{}, err
 	}
 	return a.OpenContent(p.d.upstreamCtx(ctx), versionID)
+}
+
+// OpenContentRange forwards a Range request to the hub (httpapi.ContentRanger),
+// so a resumed `pyre artifact get` through this node moves only the missing
+// bytes over the hub link. The upstream request is bound to the local
+// request: when the CLI aborts a stalled attempt, the hub transfer stops too.
+func (p proxy) OpenContentRange(ctx context.Context, versionID string, offset, length int64) (io.ReadCloser, error) {
+	a, err := p.d.upstream(bearerFrom(ctx))
+	if err != nil {
+		return nil, err
+	}
+	cr, ok := a.(httpapi.ContentRanger)
+	if !ok {
+		return nil, c.Errorf(c.ErrUnsupported, "upstream cannot serve byte ranges")
+	}
+	return cr.OpenContentRange(p.d.upstreamCtx(ctx), versionID, offset, length)
 }
 func (p proxy) CreateComment(ctx context.Context, r c.CreateCommentRequest) (c.ReviewComment, error) {
 	return fwd(p, ctx, r, c.API.CreateComment)

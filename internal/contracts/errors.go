@@ -24,6 +24,11 @@ const (
 	ErrProtocolMismatch     ErrorCode = "protocol_mismatch"
 	ErrPayloadTooLarge      ErrorCode = "payload_too_large"
 	ErrInternal             ErrorCode = "internal"
+	// ErrApprovalRequested: a session asked for an owner-only operation;
+	// the hub filed it as an approval in the owner's inbox (Ref: the ask;
+	// Details: ask_id, status "filed" | "merged") and runs it as the owner
+	// once approved, then messages the session the outcome. Not a refusal.
+	ErrApprovalRequested ErrorCode = "approval_requested"
 )
 
 // Error is the single error shape on every Pyre wire boundary.
@@ -78,7 +83,7 @@ func (c ErrorCode) HTTPStatus() int {
 		return http.StatusBadRequest
 	case ErrUnauthorized:
 		return http.StatusUnauthorized
-	case ErrForbidden:
+	case ErrForbidden, ErrApprovalRequested: // not done now; the body says it was filed
 		return http.StatusForbidden
 	case ErrNotFound:
 		return http.StatusNotFound

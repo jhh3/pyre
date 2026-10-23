@@ -148,6 +148,10 @@ type AccountSelection struct {
 	Reason    string          `json:"reason"`
 	Freshness Freshness       `json:"freshness"`
 	Outcome   FallbackOutcome `json:"outcome,omitempty"` // set when nothing eligible (waiting/intervention)
+	// Reserve: the automatic choice is a reserve account (Account.Tier):
+	// no normal account has room on that node. Placement prefers a node
+	// where a normal account does. Older nodes omit it.
+	Reserve bool `json:"reserve,omitempty"`
 }
 
 type InjectLimitParams struct {
@@ -190,12 +194,21 @@ type MemoryStatus struct {
 
 type DirListParams struct {
 	Path string `json:"path,omitempty"` // default home
+	// Hidden (additive) also lists dot-folders; an older pyred ignores it
+	// and the result's Hidden stays false.
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 type DirListResult struct {
 	Path  string   `json:"path"`
 	Dirs  []string `json:"dirs"`
 	IsGit bool     `json:"is_git"`
+	// Additive (folder pickers): whether dot-folders are included, the
+	// node's home and its worktree root (pyred --worktree-root, "" when
+	// unset). An older pyred sends none of them.
+	Hidden       bool   `json:"hidden,omitempty"`
+	Home         string `json:"home,omitempty"`
+	WorktreeRoot string `json:"worktree_root,omitempty"`
 }
 
 type Diagnostics struct {

@@ -1,0 +1,42 @@
+{
+  "self": "devbox",
+  "sentinels": [
+    {"name": "devbox", "ssh": ["devbox"]},
+    {"name": "office-box2", "ssh": ["office-box2"], "via": "server"},
+    {"name": "laptop", "ssh": ["laptop"]},
+    {"name": "server", "ssh": ["server"]}
+  ],
+  "targets": [
+    {
+      "name": "server",
+      "ssh": ["server"],
+      "hub": [
+        {"url": "https://192.168.1.200:7443", "label": "LAN"},
+        {"url": "https://100.64.0.163:7443", "label": "Tailscale"}
+      ],
+      "hub_pin": "78d6709a32ddd8f8c3a70f48a0137ed8ed89a1184413e88423be39a9258edee7",
+      "units": [
+        "pyre-hub", "pyred", "pyre-web", "pyre-web-tunnel", "db-tunnel-prod",
+        "backrooms-ngrok", "vortex-dash-tunnel", "support-intake-tunnel", "vortex-uiux-tunnel"
+      ],
+      "tcp": ["127.0.0.1:5431"],
+      "public": [
+        {"url": "https://pyre-example.ngrok.app", "label": "pyre-web"},
+        {"url": "https://backrooms-jhh3.ngrok.app", "label": "backrooms"},
+        {"url": "https://vortex-launch.ngrok.app", "label": "vortex-dash"},
+        {"url": "https://support-vortex.ngrok.app", "label": "support-intake"},
+        {"url": "https://vortex-ui-ux-iss.ngrok.app", "label": "vortex-uiux"}
+      ]
+    }
+  ],
+  "sites": {
+    "home": ["server", "devbox", "laptop"],
+    "office": ["office-box2"]
+  },
+  "ssh_identity": "~/.ssh/pyre_sentinel_ed25519",
+  "slack": {
+    "user_id": "U0XXXXXXXXX",
+    "bot_token_file": "~/.config/pyre/sentinel-slack-token",
+    "agent_slack": "agent-slack"
+  }
+}

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,19 +122,33 @@ func (a *App) addFleetCommands(root *cobra.Command) {
 		}),
 	})
 
-	var enName, enSSH, enPyred, enRemoteDir, enHubURL string
+	var enName, enSSH, enPyred, enRemoteDir, enHubURL, enTargetOS string
 	var enTTL int
 	var enBootstrap, enExecute bool
 	enroll := &cobra.Command{
-		Use:   "enroll-node --name NAME [--ssh ALIAS] [--bootstrap [--execute]]",
+		Use:   "enroll-node --name NAME [--hub-url URL] [--ssh ALIAS] [--bootstrap [--execute] [--target-os auto|unix|windows]]",
 		Short: "Create a one-time enrollment ticket for a machine (optionally install pyred over ssh)",
 		Long: `Create a one-time node enrollment ticket. The secret is shown once.
+--hub-url sets the hub URL the ticket carries (the hub as reachable from the
+node), with or without --bootstrap.
 
 With --bootstrap --ssh ALIAS, print the exact scp/ssh steps that install pyred
 on the host through your existing ssh alias and enroll it (dry run, no ticket
 is created). Add --execute to create the ticket and run the steps; the
 secret travels on ssh stdin, never in argv. --pyred must be a binary built
-for the target platform.`,
+for the target platform.
+
+The target's OS is probed before the ticket is created (ssh ALIAS uname -s,
+else a PowerShell probe); --target-os unix|windows skips the probe. A dry run
+does not connect: it shows the unix steps unless --target-os windows. Windows
+targets get PowerShell steps (any OpenSSH login shell) and install
+bin\pyred.exe and node-credential.json in %LOCALAPPDATA%\Programs\Pyre, where
+install.ps1 -Service node picks the credential up; --pyred must then be a
+pyred.exe built for windows.
+
+Run from an agent session, the request is filed for the owner's approval
+(exit 8); once he approves, run the same command again to receive the
+ticket (its secret never travels in a message).`,
 		Args: cobra.NoArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			if enName == "" {
@@ -144,6 +159,24 @@ for the target platform.`,
 			}
 			if enExecute && !enBootstrap {
 				return usagef("--execute only applies with --bootstrap")
+			}
+			target := ""
+			switch enTargetOS {
+			case "", "auto":
+			case "unix", "linux", "darwin", "macos":
+				target = enrollment.TargetUnix
+			case "windows":
+				target = enrollment.TargetWindows
+			default:
+				return usagef("--target-os must be auto, unix (linux, darwin) or windows (got %q)", enTargetOS)
+			}
+			if enTargetOS != "" && !enBootstrap {
+				return usagef("--target-os only applies with --bootstrap")
+			}
+			if enHubURL != "" {
+				if hu, err := url.Parse(enHubURL); err != nil || hu.Scheme != "https" || hu.Host == "" {
+					return usagef("--hub-url must be https://host[:port] reachable from the node (got %q)", enHubURL)
+				}
 			}
 			ops, err := a.connect()
 			if err != nil {
@@ -158,8 +191,12 @@ for the target platform.`,
 				if hub == "" && a.conn != nil {
 					hub = a.conn.HubURL
 				}
+				shown := target
+				if shown == "" {
+					shown = enrollment.TargetUnix // a dry run does not connect to probe
+				}
 				placeholder := c.EnrollmentTicket{NodeID: "node_PENDING", Secret: "pye_dry-run-placeholder-secret", HubURL: hub}
-				plan, err := enrollment.SSHBootstrapPlan(enSSH, a.pyredPath(enPyred), hub, pin, placeholder, enRemoteDir)
+				plan, err := enrollment.SSHBootstrapPlanFor(shown, enSSH, a.bootstrapPyred(enPyred, shown), hub, pin, placeholder, enRemoteDir)
 				if err != nil {
 					return err
 				}
@@ -171,12 +208,30 @@ for the target platform.`,
 				}
 				return a.emit(steps, func(w io.Writer) {
 					fmt.Fprint(w, "dry run (no ticket created): "+plan.String())
+					if target == "" {
+						fmt.Fprintln(w, "the target OS is probed at --execute (uname -s, else PowerShell); --target-os windows previews the Windows steps")
+					}
 					fmt.Fprintln(w, "re-run with --execute to create the ticket and run these steps")
 				})
+			}
+			if enBootstrap {
+				if target == "" {
+					// Probe before the ticket exists: an unreachable host wastes nothing.
+					if target, err = enrollment.ProbeTarget(cmd.Context(), a.SSHRunner, enSSH); err != nil {
+						return err
+					}
+					fmt.Fprintf(a.Stderr, "==> %s is a %s host\n", enSSH, target)
+				}
+				if target == enrollment.TargetWindows && enPyred == "" {
+					return usagef("%s runs Windows: pass --pyred with a pyred.exe built for windows (amd64 or arm64)", enSSH)
+				}
 			}
 			t, err := ops.API.CreateEnrollment(cmd.Context(), c.EnrollmentRequest{Mutation: mut(a.opID), Name: enName, SSHAlias: enSSH, TTL: enTTL})
 			if err != nil {
 				return err
+			}
+			if enHubURL != "" {
+				t.HubURL = enHubURL // the hub as reachable from the node; pyred enroll --ticket-stdin uses it
 			}
 			if !enBootstrap {
 				a.warnf("the enrollment secret is shown once; it expires %s", stamp(t.ExpiresAt))
@@ -193,15 +248,18 @@ for the target platform.`,
 			if t.HubCertSHA256 != "" && a.pinFlag == "" {
 				pin = "" // the ticket's own pin (SSHBootstrapPlan falls back to it)
 			}
-			plan, err := enrollment.SSHBootstrapPlan(enSSH, a.pyredPath(enPyred), enHubURL, pin, t, enRemoteDir)
+			plan, err := enrollment.SSHBootstrapPlanFor(target, enSSH, a.bootstrapPyred(enPyred, target), enHubURL, pin, t, enRemoteDir)
 			if err != nil {
 				return err
 			}
-			if err := enrollment.Execute(cmd.Context(), plan, nil, enrollment.ExecuteOptions{Out: a.Stderr}); err != nil {
+			if err := enrollment.Execute(cmd.Context(), plan, a.SSHRunner, enrollment.ExecuteOptions{Out: a.Stderr}); err != nil {
 				return withStatus(ExitIndeterminate, fmt.Errorf("%w; the node may be partially installed: check with `pyre nodes show %s`", err, t.NodeID))
 			}
-			return a.emit(map[string]string{"node_id": t.NodeID, "alias": enSSH}, func(w io.Writer) {
+			return a.emit(map[string]string{"node_id": t.NodeID, "alias": enSSH, "target_os": target, "credential_file": plan.CredentialFile}, func(w io.Writer) {
 				fmt.Fprintf(w, "%s enrolled as %s; it appears in `pyre nodes` once pyred connects\n", enSSH, t.NodeID)
+				if target == enrollment.TargetWindows {
+					fmt.Fprintf(w, "next, on the node: install.ps1 -Zip <pyre-windows zip> -Service node -Name %s (it uses %s)\n", enName, plan.CredentialFile)
+				}
 			})
 		}),
 	}
@@ -211,9 +269,10 @@ for the target platform.`,
 	f.IntVar(&enTTL, "ttl", 0, "ticket lifetime in seconds (hub default if 0)")
 	f.BoolVar(&enBootstrap, "bootstrap", false, "install pyred and enroll over ssh (dry run unless --execute)")
 	f.BoolVar(&enExecute, "execute", false, "with --bootstrap: create the ticket and run the steps")
-	f.StringVar(&enPyred, "pyred", "", "local pyred binary for the target platform (default: next to pyre, or on PATH)")
-	f.StringVar(&enRemoteDir, "remote-dir", "", "install directory on the node (default "+enrollment.DefaultRemoteDir+")")
-	f.StringVar(&enHubURL, "hub-url", "", "hub URL as reachable from the node (default: the ticket's)")
+	f.StringVar(&enPyred, "pyred", "", "local pyred binary for the target platform (default: next to pyre, or on PATH; required for Windows targets)")
+	f.StringVar(&enRemoteDir, "remote-dir", "", "install directory on the node (default "+enrollment.DefaultRemoteDir+"; Windows "+enrollment.DefaultWindowsRemoteDir+")")
+	f.StringVar(&enHubURL, "hub-url", "", "hub URL as reachable from the node (default: the hub's own)")
+	f.StringVar(&enTargetOS, "target-os", "", "with --bootstrap: auto (probe over ssh), unix or windows")
 	root.AddCommand(enroll)
 
 	var pcName, pcKind string
@@ -260,7 +319,10 @@ for the target platform.`,
 	revoke := &cobra.Command{
 		Use:   "revoke node|client <id>",
 		Short: "Revoke a node's or client's credential",
-		Args:  cobra.ExactArgs(2),
+		Long: `Revoke a node's or client's credential. From an agent session, revoking a
+node is filed for the owner's approval (exit 8); Pyre revokes it when he
+approves and messages the session the outcome.`,
+		Args: cobra.ExactArgs(2),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
 			if err != nil {
@@ -289,6 +351,16 @@ for the target platform.`,
 	}
 	revoke.Flags().StringVar(&revokeReason, "reason", "", "reason recorded with the revocation")
 	root.AddCommand(revoke)
+}
+
+// bootstrapPyred is the local binary a bootstrap copies: --pyred, else (for
+// a unix target) pyredPath's default. A Windows target needs --pyred (the
+// command refuses earlier); the placeholder only shapes a dry run.
+func (a *App) bootstrapPyred(flag, target string) string {
+	if flag == "" && target == enrollment.TargetWindows {
+		return "pyred.exe"
+	}
+	return a.pyredPath(flag)
 }
 
 func (a *App) pyredPath(flag string) string {

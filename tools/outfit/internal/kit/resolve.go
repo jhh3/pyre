@@ -1,5 +1,7 @@
 package kit
 
+import "sort"
+
 func FindMode(pkg Package, id string) (Mode, bool) {
 	for _, mode := range pkg.Modes {
 		if mode.ID == id {
@@ -16,6 +18,23 @@ func FindCredentialMethod(pkg Package, id string) (CredentialMethod, bool) {
 		}
 	}
 	return CredentialMethod{}, false
+}
+
+// BindingConditions returns the operation arguments that choose between
+// conditional credential bindings (whenArgument / unlessArgument), sorted.
+func BindingConditions(bindings []CredentialBinding) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, binding := range bindings {
+		for _, name := range []string{binding.WhenArgument, binding.UnlessArgument} {
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func CredentialBindingsFor(mode Mode, method CredentialMethod) []CredentialBinding {

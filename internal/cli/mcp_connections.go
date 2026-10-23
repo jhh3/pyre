@@ -75,12 +75,12 @@ func connectionMCPTools() []MCPTool {
 	invokeHints := hints("Use connection", readOnly, true)
 	invokeHints.OpenWorldHint = true
 	return []MCPTool{
-		tool("connection_check", "Check connection", "Check whether you may use a named connection now (hub grant decision) and on which nodes it is available. Never returns credentials.",
+		tool("connection_check", "Check connection", "Check whether you may use a named connection now and where it is available. Connections verified on your node, or for remote use on another, need no grant. Never returns credentials.",
 			obj(props{"connection": conn, "session": str("session ID; default: you")}, "connection"), hints("Check connection", readOnly, true),
 			func(ctx context.Context, o *Ops, p ConnectionAccessParams) (ConnectionAccess, error) {
 				return o.CheckConnectionAccess(ctx, p)
 			}),
-		tool("connection_invoke", "Use connection", "Run a read operation over a granted connection. The node holding the credential runs it (Outfit) and returns bounded output; the credential never reaches you. Writes are refused.",
+		tool("connection_invoke", "Use connection", "Run a read operation on a connection (GitHub, Linear, ...); no grant needed for connections your machines hold. The holding node runs it via Outfit; the credential never reaches you. Writes are refused.",
 			obj(props{"connection": conn, "operation": str("operation name (see the connection's skill or `outfit describe`)"),
 				"args": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "operation arguments"},
 				"node": str("executing node; default: the hub routes to the verified holder"), "operation_id": opIDProp}, "connection", "operation"), invokeHints,

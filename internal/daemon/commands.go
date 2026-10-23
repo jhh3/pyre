@@ -12,6 +12,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/agentguide"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/envfile"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 	"github.com/jhh3/pyre/internal/supervisor"
 	"github.com/jhh3/pyre/internal/terminal"
@@ -82,7 +83,11 @@ func (d *Daemon) dispatch(ctx context.Context, cmd contracts.NodeCommand) (contr
 		if err != nil {
 			return contracts.CommandResult{}, err
 		}
-		return d.startRun(ctx, cmd, sc, false)
+		res, err := d.startRun(ctx, cmd, sc, false)
+		if err != nil {
+			d.failExecClaim(sc, err) // pyre run: answer its claim now (execrun.go)
+		}
+		return res, err
 	case contracts.CmdResume:
 		rc, err := decode[contracts.ResumeCommand](cmd.Payload)
 		if err != nil {
@@ -123,6 +128,13 @@ func (d *Daemon) dispatch(ctx context.Context, cmd contracts.NodeCommand) (contr
 		rc, err := decode[contracts.RunCommand](cmd.Payload)
 		if err != nil {
 			return contracts.CommandResult{}, err
+		}
+		if cmd.Kind == contracts.CmdStop {
+			// A stop queued for a run that died while the node was down
+			// (crashresume.go).
+			if res, handled, err := d.crashStop(ctx, cmd, rc); handled {
+				return res, err
+			}
 		}
 		return d.runControl(ctx, cmd, rc)
 	case contracts.CmdAttach:
@@ -229,6 +241,7 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	if d.cfg.MaxRuns > 0 && d.activeRuns() >= d.cfg.MaxRuns {
 		return contracts.CommandResult{}, contracts.Errorf(contracts.ErrCapacityExhausted, "node is at its run capacity (%d)", d.cfg.MaxRuns)
 	}
+	defaultCwd(&sc)
 	if resume && recreateTempDir(sc.Cwd) {
 		d.cfg.Logger.Info("resume: recreated a temporary working directory a reboot removed", "session", sc.Session.SessionID, "cwd", sc.Cwd)
 	}
@@ -249,7 +262,55 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	if err != nil {
 		return contracts.CommandResult{}, err
 	}
+	args, modelReq, effortReq, err := splitModelArgs(args)
+	if err != nil {
+		return contracts.CommandResult{}, err
+	}
+	if effortReq != "" && len(probe.Efforts) > 0 && !slices.Contains(probe.Efforts, effortReq) {
+		// Claude ignores an unknown --effort with a warning: the run would
+		// record an effort it never used.
+		return contracts.CommandResult{}, contracts.Errorf(contracts.ErrInvalid, "effort %q is not offered by %s on this node (choices: %s)",
+			effortReq, harness, strings.Join(probe.Efforts, ", "))
+	}
+	args, adopt, err := splitNativeResumeArg(args)
+	if err != nil {
+		return contracts.CommandResult{}, err
+	}
+	args, envFileReq, err := splitEnvFileArg(args)
+	if err != nil {
+		return contracts.CommandResult{}, err
+	}
+	args, execHash, execResume, err := splitExecArgs(args)
+	if err != nil {
+		return contracts.CommandResult{}, err
+	}
+	if execHash != "" {
+		// pyre run: the caller executes the command itself (execrun.go).
+		ex := d.execAdapterFor(harness)
+		if ex == nil {
+			return contracts.CommandResult{}, contracts.Errorf(contracts.ErrUnsupported, "headless runs (pyre run) of %s are not supported on this node", harness)
+		}
+		if resume || adopt != "" {
+			return contracts.CommandResult{}, contracts.Errorf(contracts.ErrInvalid, "a headless run is always a new run")
+		}
+		if envFileReq != "" {
+			return contracts.CommandResult{}, contracts.Errorf(contracts.ErrInvalid, "a headless run (pyre run) takes the caller's environment; %s does not apply", EnvFileArg)
+		}
+		adapter = ex
+		sc.AccountPolicy = d.execPolicy(ctx, harness, sc.AccountPolicy, sc.Cwd, execResume)
+	}
 	sc.Args = args
+	var argsPrev *contracts.Run
+	if resume {
+		argsPrev = sc.PreviousRun
+	}
+	if sc.Args, err = runHarnessArgs(harness, sc.Args, argsPrev); err != nil {
+		return contracts.CommandResult{}, err
+	}
+	envFile, sessEnv, err := d.runEnvFile(ctx, envFileReq, argsPrev)
+	if err != nil {
+		return contracts.CommandResult{}, err
+	}
 	needsAccount := contracts.ProviderFor(harness) != ""
 	if !needsAccount && (sc.AccountPolicy.Mode == contracts.AccountExplicit || sc.AccountPolicy.AccountID != "") {
 		return contracts.CommandResult{}, contracts.Errorf(contracts.ErrUnsupported,
@@ -277,7 +338,29 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 
 	cont := contracts.ContinuationFresh
 	var resumeRef *contracts.NativeRef
+	if execHash != "" && execResume != "" {
+		// pyre run: the caller's command continues this conversation; the
+		// headless adapter records it as the run's native id.
+		resumeRef = &contracts.NativeRef{Kind: execNativeKind[harness], ID: execResume}
+	}
 	prevRunID := ""
+	if adopt != "" && (relaunchOf != "" || !resume) {
+		// pyre start --native-resume: the first run continues a
+		// conversation started outside Pyre (nativeresume.go).
+		ref, err := nativeResumeRef(harness, adopt)
+		if err != nil {
+			return contracts.CommandResult{}, err
+		}
+		if l, ok := adapter.(nativeThreadLocator); !ok || !l.NativeThreadOnNode(contracts.Run{Harness: harness, Cwd: expandHome(sc.Cwd), NativeRef: ref}) {
+			return contracts.CommandResult{}, contracts.Errorf(contracts.ErrNotFound, "conversation %s is not on this node (no transcript under the Claude config homes Pyre searches)", adopt)
+		}
+		if u, ok := adapter.(conversationUser); ok {
+			if busy, why := u.ConversationInUse(expandHome(sc.Cwd), adopt); busy {
+				return contracts.CommandResult{}, contracts.Errorf(contracts.ErrConflict, "conversation %s looks live outside Pyre (%s): stop that claude first, then start again", adopt, why)
+			}
+		}
+		cont, resumeRef = contracts.ContinuationNativeResume, ref
+	}
 	if relaunchOf != "" {
 		prevRunID = relaunchOf
 	} else if resume {
@@ -352,7 +435,10 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	} else if harness != contracts.HarnessShell {
 		run.AdapterData["pyre.account"] = string(contracts.AccountAmbient)
 	}
-	if harness != contracts.HarnessShell {
+	if execHash != "" {
+		run.Capabilities = append([]string(nil), execCapabilities...)
+		run.AdapterData[adapterDataMode] = modeHeadless
+	} else if harness != contracts.HarnessShell {
 		var prevRun *contracts.Run
 		if resume {
 			prevRun = sc.PreviousRun
@@ -362,6 +448,20 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 		if perm == PermissionsBypass {
 			run.Capabilities = append(append([]string(nil), run.Capabilities...), contracts.CapPermissionsBypass)
 		}
+		model, effort := runModel(harness, modelReq, effortReq, prevRun)
+		if model != "" {
+			run.AdapterData[adapterDataModel] = model
+		}
+		if effort != "" {
+			run.AdapterData[adapterDataEffort] = effort
+		}
+	}
+	recordHarnessArgs(&run, sc.Args)
+	if cmd.Actor.Kind == contracts.PrincipalSystem && cmd.Actor.ID == crashResumeActor {
+		run.AdapterData[adapterDataCrashResumed] = ftime(now) // crashresume.go: at most once
+	}
+	if envFile != "" {
+		run.AdapterData[adapterDataEnvFile] = envFile // the path only, never the values
 	}
 	session := sc.Session
 	session.CurrentRunID = sc.RunID
@@ -414,11 +514,16 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 		ad[k] = v
 	}
 	rec.Run.AdapterData = ad
+	if execHash != "" {
+		d.putExecClaim(sc.RunID, execHash)
+		// An unclaimed binding (the CLI gave up) is not kept in memory.
+		time.AfterFunc(execClaimWait+2*time.Minute, func() { d.dropExecClaim(sc.RunID) })
+	}
 	d.asyncWG.Add(1)
 	go func() {
 		defer d.asyncWG.Done()
 		defer d.endLaunch()
-		d.launch(context.WithoutCancel(ctx), cmd, sc, rec, adapter, binding, resumeRef)
+		d.launch(context.WithoutCancel(ctx), cmd, sc, rec, adapter, binding, resumeRef, sessEnv)
 	}()
 	return okResult(contracts.OutcomeDelivered, run)
 }
@@ -494,12 +599,15 @@ func handoffPrompt(sc contracts.StartRunCommand, prev contracts.Run) string {
 
 // launch performs the slow part of start_run and reports the final result.
 func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contracts.StartRunCommand, rec runRecord, adapter contracts.RuntimeAdapter,
-	binding AccountBinding, resumeRef *contracts.NativeRef) {
+	binding AccountBinding, resumeRef *contracts.NativeRef, sessEnv envfile.Vars) {
 	profileDir, acctEnv, assignment := binding.ProfileDir, binding.Env, binding.Assignment
 	fail := func(err error) {
 		d.releaseAccount(rec.Run.RunID)
 		ce := contracts.AsError(err)
 		ce.Message = redact(ce.Message)
+		if c := d.execClaim(rec.Run.RunID); c != nil {
+			c.finish(ExecBinding{}, ce) // pyre run falls back
+		}
 		now := d.now()
 		rec.Phase = phaseEnded
 		rec.Run.State = contracts.RunFailed
@@ -564,7 +672,11 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 	envBase := map[string]string{}
 	var extraArgs, grants []string
 	genID := ""
-	if d.cfg.Environments != nil {
+	// A headless run (pyre run) runs the caller's command as given: only the
+	// account binding applies, no environment generation, connections,
+	// agent guide or Pyre MCP server.
+	execRun := isExecAdapter(adapter)
+	if d.cfg.Environments != nil && !execRun {
 		er, err := d.cfg.Environments.Resolve(pctx, EnvRequest{NodeID: d.nodeID, Harness: rec.Run.Harness, Profile: sc.EnvProfile,
 			ProjectID: rec.Session.ProjectID, SessionID: sc.Session.SessionID, RunID: sc.RunID, Cwd: cwd, ConfigHome: profileDir})
 		if err != nil {
@@ -585,7 +697,7 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 			profileDir = er.ProfileDir
 		}
 	}
-	if d.cfg.LaunchPrep != nil {
+	if d.cfg.LaunchPrep != nil && !execRun {
 		lp, err := d.cfg.LaunchPrep(pctx, LaunchPrepRequest{SessionID: sc.Session.SessionID, RunID: sc.RunID,
 			ProjectID: rec.Session.ProjectID, Harness: rec.Run.Harness, ConnectionGrants: grants})
 		if err != nil {
@@ -605,8 +717,21 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 	if perm := rec.Run.AdapterData[adapterDataPermissions]; perm != "" {
 		envBase[PermissionsEnv] = perm
 	}
+	unset := binding.Unset
+	var sessionEnv map[string]string
+	var sessionUnset []string
+	if envFile := rec.Run.AdapterData[adapterDataEnvFile]; envFile != "" {
+		var kept []string
+		sessionEnv, unset, kept = applyEnvFile(envBase, unset, sessEnv)
+		sessionUnset = unset[len(binding.Unset):]
+		// Keys only: the values never reach a log.
+		d.cfg.Logger.Info("session env file applied", "run", sc.RunID, "path", envFile, "keys", strings.Join(sessEnv.Keys(), ","))
+		if len(kept) > 0 {
+			d.cfg.Logger.Warn("session env file: Pyre's own value kept", "run", sc.RunID, "path", envFile, "keys", strings.Join(kept, ","))
+		}
+	}
 	guide := ""
-	if d.cfg.AgentGuide != nil && rec.Run.Harness != contracts.HarnessShell {
+	if d.cfg.AgentGuide != nil && rec.Run.Harness != contracts.HarnessShell && !execRun {
 		guide = d.cfg.AgentGuide(rec.Run.Harness, rec.Session)
 		if parent := rec.Session.Lineage.ParentSessionID; parent != "" && !strings.Contains(guide, "## Started by another session") { // W-childnotify
 			guide = strings.TrimRight(guide, "\n") + "\n" + agentguide.ParentNote(parent, slices.Contains(rec.Session.Tags, contracts.TagReportParent))
@@ -616,8 +741,11 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 		}
 	}
 	args := append(append([]string(nil), extraArgs...), sc.Args...)
-	if rec.Run.Harness == contracts.HarnessClaude {
-		mcpArgs, err := d.agentMCPArgs(args, runDir)
+	if rec.Run.Harness == contracts.HarnessClaude && !execRun {
+		// Only the environment's own arguments can replace Pyre's MCP
+		// config; a session's extra --mcp-config adds to it (the flag is
+		// variadic and accumulates).
+		mcpArgs, err := d.agentMCPArgs(extraArgs, runDir)
 		if err != nil {
 			fail(err)
 			return
@@ -626,8 +754,12 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 	}
 	l := contracts.ResolvedLaunch{RunID: sc.RunID, SessionID: sc.Session.SessionID, Harness: rec.Run.Harness, Title: sc.Session.Title,
 		Cwd: cwd, Executable: rec.Run.Runtime.Executable, Args: args,
-		Env: d.runEnv(envBase, sc, runDir), Unset: binding.Unset, StateDir: runDir, ProfileDir: profileDir, InitialPrompt: sc.InitialPrompt,
-		EnvGeneration: genID, Resume: resumeRef, AgentGuide: guide}
+		Env: d.runEnv(envBase, sc, runDir), Unset: unset, SessionEnv: sessionEnv, SessionUnset: sessionUnset, StateDir: runDir, ProfileDir: profileDir, InitialPrompt: sc.InitialPrompt,
+		EnvGeneration: genID, Resume: resumeRef, AgentGuide: guide,
+		Model: rec.Run.AdapterData[adapterDataModel], Effort: rec.Run.AdapterData[adapterDataEffort]}
+	if execRun {
+		l.Env = envBase // the account's environment only
+	}
 	if pctx.Err() != nil {
 		failPrep(pctx.Err())
 		return
@@ -653,6 +785,13 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 			h.Data = map[string]string{}
 		}
 		h.Data[HandleProfileDir] = profileDir
+	}
+	claim := d.execClaim(rec.Run.RunID)
+	if execRun && claim != nil {
+		if h.Data == nil {
+			h.Data = map[string]string{}
+		}
+		h.Data[handleDataExecClaim] = claim.hash
 	}
 	now := d.now()
 	rec.Phase = phaseLive
@@ -689,6 +828,9 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 	}
 	d.rep.Kick()
 	d.addLive(&liveRun{rec: rec, adapter: adapter, recovered: true, interval: d.cfg.Poll.Interval})
+	if execRun && claim != nil {
+		claim.finish(execBindingFor(rec, profileDir, envBase, binding.Unset), nil)
+	}
 	d.engine.Kick(sc.Session.SessionID)
 	d.cfg.Logger.Info("launched run", "run", sc.RunID, "session", sc.Session.SessionID, "adapter", adapter.Name())
 }
@@ -782,7 +924,11 @@ func (d *Daemon) runControl(ctx context.Context, cmd contracts.NodeCommand, rc c
 	defer cancel()
 	var rcpt contracts.CommandReceipt
 	if cmd.Kind == contracts.CmdStop {
+		marked := d.markStopRequested(ctx, lr, string(cmd.Actor.Kind)+":"+cmd.Actor.ID)
 		rcpt, err = lr.adapter.Stop(cctx, *rec.Handle)
+		if marked && (err != nil || rcpt.Outcome == contracts.OutcomeFailed) {
+			d.clearStopRequested(ctx, lr)
+		}
 	} else {
 		rcpt, err = lr.adapter.Interrupt(cctx, *rec.Handle)
 	}

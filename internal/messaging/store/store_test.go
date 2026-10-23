@@ -785,3 +785,102 @@ func TestReceiptDedupUsesIndex(t *testing.T) {
 		t.Fatalf("duplicate not detected: %v %+v", err, res)
 	}
 }
+
+// Owner mail that asks nothing of the owner is stored acknowledged (an
+// update); a question, a requested ack and a reply to him stay unacked.
+func TestOwnerUpdatesStoredAcknowledged(t *testing.T) {
+	e := newEnv(t, Limits{})
+	toOwner := contracts.Address{Kind: contracts.AddrOwner}
+	send := func(op, text string, mut func(*contracts.SendMessageRequest)) contracts.MessageView {
+		req := contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: op}, Recipient: toOwner, Body: contracts.MessageBody{Text: text}}
+		if mut != nil {
+			mut(&req)
+		}
+		v, err := e.s.SendMessage(as(sesA), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	upd := send("op_u", "Merged #12 and deployed. Nothing urgent.", nil)
+	if upd.Status.Ack != contracts.AckAcknowledged || upd.Status.AckRef != contracts.AckRefUpdate {
+		t.Fatalf("update: %+v", upd.Status)
+	}
+	q := send("op_q", "Ready. Should I merge it?", nil)
+	ra := send("op_ra", "Prod is down.", func(r *contracts.SendMessageRequest) { r.RequestAck = true })
+	for _, v := range []contracts.MessageView{q, ra} {
+		if v.Status.Ack != contracts.AckNone {
+			t.Fatalf("%q: %+v", v.Envelope.Body.Text, v.Status)
+		}
+	}
+	mine, err := e.s.SendMessage(as(owner), contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: "op_o"}, Recipient: contracts.Address{Kind: contracts.AddrSession, ID: sesA.ID}, Body: contracts.MessageBody{Text: "status of the export fix"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := send("op_r", "On it; PR by tonight.", func(r *contracts.SendMessageRequest) { r.InReplyTo = mine.Envelope.MessageID })
+	if reply.Status.Ack != contracts.AckNone {
+		t.Fatalf("reply to the owner: %+v", reply.Status)
+	}
+	// An answer to the owner without reply_to (he wrote to the session since
+	// its last message to him) is for him; the next report is an update.
+	if _, err := e.s.SendMessage(as(owner), contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: "op_o2"}, Recipient: contracts.Address{Kind: contracts.AddrSession, ID: sesA.ID}, Body: contracts.MessageBody{Text: "did the deploy finish"}}); err != nil {
+		t.Fatal(err)
+	}
+	if v := send("op_a", "Deploy finished, all green.", nil); v.Status.Ack != contracts.AckNone {
+		t.Fatalf("answer without reply_to: %+v", v.Status)
+	}
+	if v := send("op_a2", "Cleaned up the worktree too.", nil); v.Status.AckRef != contracts.AckRefUpdate {
+		t.Fatalf("report after the answer: %+v", v.Status)
+	}
+	page, err := e.s.ListMessages(as(owner), contracts.ListMessagesRequest{Unacked: true})
+	if err != nil || len(page.Items) != 4 {
+		t.Fatalf("unacked owner inbox: %v %d", err, len(page.Items))
+	}
+	// The whole mailbox still has the updates.
+	page, _ = e.s.ListMessages(as(owner), contracts.ListMessagesRequest{})
+	if len(page.Items) != 6 {
+		t.Fatalf("owner inbox: %d", len(page.Items))
+	}
+}
+
+func TestAckOwnerMail(t *testing.T) {
+	e := newEnv(t, Limits{})
+	toOwner := contracts.Address{Kind: contracts.AddrOwner}
+	ask := contracts.NewID(contracts.PrefixAsk)
+	send := func(p contracts.Principal, op, thread, text string) contracts.MessageView {
+		v, err := e.s.SendMessage(as(p), contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: op}, Recipient: toOwner, ThreadID: thread, RequestAck: true, Body: contracts.MessageBody{Text: text}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	carrier := send(sesA, "op_1", ask, "[pyre ask] merge?")
+	follow := send(sesA, "op_2", ask, "also: CI is green")
+	other := send(sesB, "op_3", "", "b's question")
+	plain := send(sesA, "op_4", "", "a's question")
+	if _, err := e.s.AckOwnerMail(context.Background(), OwnerMail{}, "x"); err == nil {
+		t.Fatal("empty selection accepted")
+	}
+	n, err := e.s.AckOwnerMail(context.Background(), OwnerMail{ThreadID: ask}, contracts.AckRefAskClosed)
+	if err != nil || n != 2 {
+		t.Fatalf("thread ack: %d %v", n, err)
+	}
+	e.clock.Add(time.Minute)
+	late := send(sesA, "op_5", "", "a's later question")
+	n, err = e.s.AckOwnerMail(context.Background(), OwnerMail{FromSession: sesA.ID, SkipAsks: true, Through: e.clock.Now().Add(-time.Second)}, contracts.AckRefEngaged)
+	if err != nil || n != 1 {
+		t.Fatalf("session ack: %d %v", n, err)
+	}
+	want := map[string]contracts.AckState{carrier.Envelope.MessageID: contracts.AckAcknowledged, follow.Envelope.MessageID: contracts.AckAcknowledged,
+		other.Envelope.MessageID: contracts.AckNone, plain.Envelope.MessageID: contracts.AckAcknowledged, late.Envelope.MessageID: contracts.AckNone}
+	for id, st := range want {
+		v, err := e.s.GetMessage(as(owner), contracts.GetRequest{ID: id})
+		if err != nil || v.Status.Ack != st {
+			t.Fatalf("%s: %v %+v want %s", id, err, v.Status, st)
+		}
+	}
+	evs, err := e.log.ListEvents(context.Background(), contracts.ListEventsRequest{Kinds: []contracts.EventKind{contracts.EvMessageAck}})
+	if err != nil || len(evs.Events) != 3 {
+		t.Fatalf("ack events: %v %d", err, len(evs.Events))
+	}
+}

@@ -1,10 +1,8 @@
 package tui_test
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/jhh3/pyre/internal/tui"
@@ -25,9 +23,7 @@ func TestSessionsViewsCycleZoomAndRemember(t *testing.T) {
 	if h.M.SessionsMode() != "table" || !h.Contains("ACCOUNT · USAGE") || !h.Contains("claude-personal-a 5h 22% wk 41%") || !h.Contains("v table") {
 		t.Fatalf("v did not open the table with usage at a glance:\n%s", h.View())
 	}
-	if b, _ := os.ReadFile(state); !strings.Contains(string(b), `"sessions_view": "table"`) {
-		t.Fatalf("view not remembered: %s", b)
-	}
+	stateHas(t, h, state, `"sessions_view": "table"`)
 	// enter opens the selected session's terminal, typing; ctrl+] returns.
 	selectSession(t, h, "ses_synth-a")
 	h.Key("enter")
@@ -95,9 +91,7 @@ func TestSortAttentionInsideGroups(t *testing.T) {
 	if i < 0 || !slices.Contains(rows[i:i+3], "ses_synth-apr") || !slices.Contains(rows[i:i+3], "ses_synth-standalone") {
 		t.Fatalf("needs-you sessions do not lead their group: %v\n%s", rows, h.View())
 	}
-	if b, _ := os.ReadFile(state); !strings.Contains(string(b), `"sort": "attention"`) {
-		t.Fatalf("sort not remembered: %s", b)
-	}
+	stateHas(t, h, state, `"sort": "attention"`)
 	h.Key(":")
 	h.Type("sort activity")
 	h.Key("enter")

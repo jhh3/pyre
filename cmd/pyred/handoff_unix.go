@@ -10,6 +10,10 @@ import (
 	"syscall"
 )
 
+// keepTrampoline: exec(2) replaces the process in place, so a supervisor
+// trampoline is never used here.
+func keepTrampoline(_, _ string) {}
+
 // doExec replaces the process. Only returns on failure.
 func doExec(r *execRequest) error {
 	p := absExecPath(r.path)

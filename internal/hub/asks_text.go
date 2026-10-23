@@ -127,7 +127,22 @@ func renderAskBody(a contracts.Ask) string {
 	b.WriteString(a.Title)
 	b.WriteString("\n\n")
 	b.WriteString(a.Context)
-	b.WriteString("\n\nOptions:\n")
+	if len(a.Items) > 0 {
+		fmt.Fprintf(&b, "\n\nItems (%d; the options apply to each, answer per item or all at once):\n", len(a.Items))
+		for _, it := range a.Items {
+			fmt.Fprintf(&b, "  - [%s] %s", it.ID, it.Label)
+			if it.Detail != "" {
+				b.WriteString(" — " + it.Detail)
+			}
+			if it.URL != "" {
+				b.WriteString(" <" + it.URL + ">")
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\nOptions:\n")
+	} else {
+		b.WriteString("\n\nOptions:\n")
+	}
 	for i, o := range a.Options {
 		fmt.Fprintf(&b, "  %d. [%s] %s", i+1, o.ID, o.Label)
 		if o.Detail != "" {
@@ -154,8 +169,13 @@ func renderAskBody(a contracts.Ask) string {
 	return b.String()
 }
 
-// askOutcome is a one-line outcome of a decided ask.
+// askOutcome is a one-line outcome of a decided ask (with what Pyre
+// recorded for a proposal).
 func askOutcome(a contracts.Ask) string {
+	return askOutcomeBase(a) + proposalOutcome(a)
+}
+
+func askOutcomeBase(a contracts.Ask) string {
 	ans := a.Answer
 	if ans == nil {
 		ans = &contracts.AskAnswer{}
@@ -166,6 +186,16 @@ func askOutcome(a contracts.Ask) string {
 	}
 	switch a.State {
 	case contracts.AskAnswered:
+		if a.GrantID != "" {
+			return "answered by " + oneLine(ans.Text, 1000) + "; go ahead with " + askOptionLabel(a, ans.OptionID)
+		}
+		if ans.Source == contracts.AskSourceChat {
+			out := "owner answered in chat: " + oneLine(ans.Text, 1000)
+			if len(ans.With) > 0 {
+				out += " (the same words answered " + strings.Join(ans.With, ", ") + ")"
+			}
+			return out
+		}
 		if ans.OptionID == "" {
 			return "owner answered: " + oneLine(ans.Text, 1000)
 		}
@@ -175,6 +205,9 @@ func askOutcome(a contracts.Ask) string {
 	case contracts.AskExpired:
 		return fmt.Sprintf("no answer by %s and no default — use your judgement, prefer the reversible path", askClock(ans.At))
 	case contracts.AskWithdrawn:
+		if ans.By.Kind == contracts.PrincipalOwner {
+			return "withdrawn by the owner" + text
+		}
 		return "withdrawn" + text
 	case contracts.AskSuperseded:
 		return "superseded by " + a.SupersededBy + text
@@ -182,7 +215,23 @@ func askOutcome(a contracts.Ask) string {
 	return string(a.State)
 }
 
+// askItemOutcomes lists a decided batched ask's outcome per item (one
+// line each, indented), or "" when it has no items or no chosen options.
+func askItemOutcomes(a contracts.Ask, indent string) string {
+	if len(a.Items) == 0 || a.Answer == nil || (a.Answer.OptionID == "" && len(a.Answer.Items) == 0) {
+		return ""
+	}
+	var b strings.Builder
+	for _, it := range a.Items {
+		fmt.Fprintf(&b, "\n%s- [%s] %s: %s", indent, it.ID, oneLine(it.Label, 120), askOptionLabel(a, askItemOption(a, it.ID)))
+	}
+	return b.String()
+}
+
 func askTag(a contracts.Ask) string {
+	if a.GrantID != "" {
+		return "[pyre ask granted]"
+	}
 	switch a.State {
 	case contracts.AskExpired:
 		return "[pyre ask expired]"
@@ -197,12 +246,12 @@ func askTag(a contracts.Ask) string {
 func renderDecisions(asks []contracts.Ask) string {
 	if len(asks) == 1 {
 		a := asks[0]
-		return fmt.Sprintf("%s %s: %s\n(ask %s, topic %s)", askTag(a), a.Title, askOutcome(a), a.AskID, a.TopicKey)
+		return fmt.Sprintf("%s %s: %s%s\n(ask %s, topic %s)", askTag(a), a.Title, askOutcome(a), askItemOutcomes(a, "  "), a.AskID, a.TopicKey)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[pyre ask decided] %d of your asks were decided:\n", len(asks))
 	for _, a := range asks {
-		fmt.Fprintf(&b, "- %s: %s (ask %s, topic %s)\n", a.Title, askOutcome(a), a.AskID, a.TopicKey)
+		fmt.Fprintf(&b, "- %s: %s (ask %s, topic %s)%s\n", a.Title, askOutcome(a), a.AskID, a.TopicKey, askItemOutcomes(a, "    "))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

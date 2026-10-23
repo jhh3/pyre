@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/refs"
 )
 
 // RegisterAccountParams onboards a rota account on a node.
@@ -120,76 +121,16 @@ func (o *Ops) ResolveAccount(ctx context.Context, ref string) (c.Account, error)
 }
 
 // accountRef turns an --account reference into an account ID ("" stays "").
-// A full account ID is passed through without a lookup.
+// A full account ID is passed through without a lookup (internal/refs).
 func (o *Ops) accountRef(ctx context.Context, ref string, provider c.Provider) (string, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" || strings.HasPrefix(ref, c.PrefixAccount+"_") {
-		return ref, nil
-	}
-	a, err := o.resolveAccount(ctx, ref, provider)
-	if err != nil {
-		return "", err
-	}
-	return a.AccountID, nil
+	return refs.AccountID(ctx, o.API, ref, provider)
 }
 
 func (o *Ops) resolveAccount(ctx context.Context, ref string, provider c.Provider) (c.Account, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
+	if strings.TrimSpace(ref) == "" {
 		return c.Account{}, usagef("an account is required (see `pyre accounts`)")
 	}
-	page, err := listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.AccountView], error) {
-		return o.API.ListAccounts(ctx, c.ListAccountsRequest{PageRequest: c.PageRequest{Cursor: cur}, Provider: provider})
-	})
-	if err != nil {
-		return c.Account{}, err
-	}
-	var hits, prefix []c.Account
-	lower := strings.ToLower(ref)
-	tokenKind := map[string]bool{}
-	for _, av := range page.Items {
-		a := av.Account
-		for _, g := range av.Grants {
-			tokenKind[a.AccountID] = tokenKind[a.AccountID] || g.Kind == c.CredOAuthToken
-		}
-		if a.AccountID == ref {
-			return a, nil
-		}
-		switch {
-		case a.Label == ref || a.RotaRef == ref || strings.EqualFold(a.Label, ref) || strings.EqualFold(a.RotaRef, ref):
-			hits = append(hits, a)
-		case strings.HasPrefix(strings.ToLower(a.Label), lower) || strings.HasPrefix(strings.ToLower(a.RotaRef), lower):
-			prefix = append(prefix, a)
-		}
-	}
-	if len(hits) == 0 {
-		hits = prefix
-	}
-	if len(hits) > 1 {
-		// A token account and another login of the same name: the token
-		// account is the preferred one (accounts_token.go); the other is
-		// still reachable by ID or rota name.
-		var tok []c.Account
-		for _, a := range hits {
-			if tokenKind[a.AccountID] {
-				tok = append(tok, a)
-			}
-		}
-		if len(tok) == 1 {
-			hits = tok
-		}
-	}
-	switch len(hits) {
-	case 0:
-		return c.Account{}, notFoundf(c.KindAccount, ref)
-	case 1:
-		return hits[0], nil
-	}
-	ids := make([]string, len(hits))
-	for i, a := range hits {
-		ids[i] = a.AccountID
-	}
-	return c.Account{}, ambiguous(c.KindAccount, ref, ids)
+	return refs.Account(ctx, o.API, ref, provider)
 }
 
 func (a *App) addAccountOnboarding(accounts *cobra.Command) {

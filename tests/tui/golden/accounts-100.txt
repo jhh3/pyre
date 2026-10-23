@@ -1,4 +1,4 @@
- Pyre  S Sessions 3 · P Projects · M Machines · [A Accounts]                               ○ synced
+ Pyre  S Sessions 3 · P Projects · M Machines · [A Accounts]           cl 41%~!1   cx —!   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────
   ACCOUNTS · updated now
 
@@ -25,6 +25,6 @@
     ↻ 04:57 synth-mac · switched 'migration work' from claude-work-c (5h 100%) to claude-personal-a…
 
   Pyre keeps each machine on its own account below 80%, else the most 5-hour, then weekly headroom.…
-
+  Top bar: mean 5-hour and weekly use per provider, each account weighted equally: 5-hour readings
 
  ↑↓ select   r refresh   a activity                                               esc back   ? help

@@ -208,7 +208,7 @@ func TestRunHookEventsAndBroker(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		ents, _ := os.ReadDir(filepath.Join(dir, dirPending))
 		for _, e := range ents {
-			// writeFileAtomic stages ".<rid>.json.tmp<pid>" in the same
+			// writeFileAtomic stages ".<rid>.json.tmp<random>" in the same
 			// directory before the rename; only the final name is a request.
 			if n := e.Name(); !strings.HasPrefix(n, ".") && strings.HasSuffix(n, ".json") {
 				rid = strings.TrimSuffix(n, ".json")

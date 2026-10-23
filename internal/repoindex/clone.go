@@ -195,22 +195,15 @@ func Clone(ctx context.Context, p contracts.RepoCloneParams, o CloneOptions) (co
 }
 
 // runClone clones with the machine's own git credentials (ssh agent, git
-// credential helpers, or gh): a GitHub remote uses ssh when the machine's
-// other GitHub checkouts do, else gh when it is installed, else https.
+// credential helpers, or gh). A GitHub repository, in whatever form the
+// remote names it (another machine's ssh alias included), is cloned the
+// way this machine reaches GitHub: ssh when its other GitHub checkouts
+// do, else gh when it is installed (its own git_protocol), else https
+// (gh's credential helper or any other). The remote as given is used
+// only for other hosts.
 func runClone(ctx context.Context, o CloneOptions, remote, dir string) error {
-	full := ""
-	if strings.HasPrefix(NormalizeRemote(remote), "github.com/") {
-		full = FullNameOf(remote)
-	}
-	var cmd *exec.Cmd
-	switch {
-	case full != "" && prefersSSH(o.Index):
-		cmd = exec.CommandContext(ctx, "git", "clone", "--quiet", "--", "git@github.com:"+full+".git", dir)
-	case full != "" && o.GH != "":
-		cmd = exec.CommandContext(ctx, o.GH, "repo", "clone", full, dir, "--", "--quiet")
-	default:
-		cmd = exec.CommandContext(ctx, "git", "clone", "--quiet", "--", remote, dir)
-	}
+	name, args := cloneCommand(o, remote, dir)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1", "LC_ALL=C")
 	cmd.Stdin = nil
 	var errb bytes.Buffer
@@ -229,6 +222,23 @@ func runClone(ctx context.Context, o CloneOptions, remote, dir string) error {
 		return contracts.Errorf(contracts.ErrUnavailable, "clone of %s failed (this machine's git credentials: ssh key, credential helper or gh auth): %s", remote, msg)
 	}
 	return nil
+}
+
+// cloneCommand is the command runClone runs (see there for the choice).
+func cloneCommand(o CloneOptions, remote, dir string) (string, []string) {
+	full := ""
+	if strings.HasPrefix(NormalizeRemote(remote), "github.com/") {
+		full = FullNameOf(remote)
+	}
+	switch {
+	case full != "" && prefersSSH(o.Index):
+		return "git", []string{"clone", "--quiet", "--", "git@github.com:" + full + ".git", dir}
+	case full != "" && o.GH != "":
+		return o.GH, []string{"repo", "clone", full, dir, "--", "--quiet"}
+	case full != "":
+		return "git", []string{"clone", "--quiet", "--", "https://github.com/" + full + ".git", dir}
+	}
+	return "git", []string{"clone", "--quiet", "--", remote, dir}
 }
 
 // prefersSSH: most of the machine's GitHub checkouts use ssh remotes.
@@ -286,6 +296,40 @@ func CloneVia(ctx context.Context, api ActionInvoker, nodeID string, p contracts
 			return out, contracts.Errorf(contracts.ErrUnsupported, "this machine's pyred cannot clone repositories yet (upgrade it)")
 		}
 		return out, contracts.Errorf(contracts.ErrInternal, "repo.clone: %s", res.Outcome)
+	}
+}
+
+// CreateVia runs worktree.create on a node through the hub and waits for
+// it (bounded by ctx). It fetches origin first, so like CloneVia a pending
+// or delivered outcome is asked again with the same operation id (an older
+// pyred answers at once).
+func CreateVia(ctx context.Context, api ActionInvoker, nodeID string, p contracts.WorktreeCreateParams, opID string) (contracts.WorktreeCreateResult, error) {
+	var out contracts.WorktreeCreateResult
+	raw, _ := json.Marshal(p)
+	for {
+		res, err := api.InvokeNodeAction(ctx, contracts.NodeActionRequest{Mutation: contracts.Mutation{OperationID: opID},
+			NodeID: nodeID, Action: contracts.ActionWorktreeCreate, Params: raw, TimeoutSeconds: 60})
+		if err != nil {
+			return out, err
+		}
+		if res.Error != nil {
+			return out, res.Error
+		}
+		switch res.Outcome {
+		case contracts.OutcomeSucceeded:
+			err := json.Unmarshal(res.Result, &out)
+			return out, err
+		case contracts.OutcomePending, contracts.OutcomeDelivered:
+			select {
+			case <-ctx.Done():
+				return out, contracts.Errorf(contracts.ErrOutcomeIndeterminate, "worktree creation still running on the machine (command %s)", res.CommandID)
+			case <-time.After(time.Second):
+			}
+			continue
+		case contracts.OutcomeUnsupported:
+			return out, contracts.Errorf(contracts.ErrUnsupported, "worktree.create is not supported on this machine")
+		}
+		return out, contracts.Errorf(contracts.ErrInternal, "worktree.create: %s", res.Outcome)
 	}
 }
 

@@ -9,10 +9,13 @@ import (
 )
 
 type answerBody struct {
-	OptionID    string `json:"option_id,omitempty"`
-	Text        string `json:"text,omitempty"`
-	Mode        string `json:"mode,omitempty"` // "now" (default) | "hold"
-	OperationID string `json:"operation_id,omitempty"`
+	OptionID string `json:"option_id,omitempty"`
+	// Items (batched asks): the option per item; items left out take
+	// OptionID.
+	Items       map[string]string `json:"items,omitempty"`
+	Text        string            `json:"text,omitempty"`
+	Mode        string            `json:"mode,omitempty"` // "now" (default) | "hold"
+	OperationID string            `json:"operation_id,omitempty"`
 }
 
 // errNoHold is the answer when the hub has no held-answer queue.
@@ -28,8 +31,11 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	item := c.AnswerAskItem{AskID: r.PathValue("ask_id"), OptionID: strings.TrimSpace(body.OptionID), Text: strings.TrimSpace(body.Text)}
-	if item.OptionID == "" && item.Text == "" {
+	item := c.AnswerAskItem{AskID: r.PathValue("ask_id"), OptionID: strings.TrimSpace(body.OptionID), Items: body.Items, Text: strings.TrimSpace(body.Text)}
+	if len(item.Items) == 0 {
+		item.Items = nil
+	}
+	if item.OptionID == "" && item.Text == "" && len(item.Items) == 0 {
 		writeErr(w, c.Errorf(c.ErrInvalid, "Pick an option or write an answer."))
 		return
 	}

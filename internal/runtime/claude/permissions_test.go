@@ -96,3 +96,34 @@ func TestLaunchPermissionsBypass(t *testing.T) {
 		t.Fatal("ask run got the bypass acceptance")
 	}
 }
+
+// A chosen model and effort reach Claude Code as --model/--effort; none
+// chosen adds neither.
+func TestLaunchModelAndEffort(t *testing.T) {
+	f := newFakeEnv(t, nil)
+	work := filepath.Join(f.dir, "work")
+	_ = os.MkdirAll(work, 0o755)
+	argvOf := func(runID, model, effort string) string {
+		argvFile := filepath.Join(f.dir, runID+".argv")
+		_, err := f.a.Launch(context.Background(), contracts.ResolvedLaunch{
+			RunID: runID, SessionID: "ses_t", Harness: contracts.HarnessClaude, Cwd: work, Model: model, Effort: effort,
+			Env:      map[string]string{"PYRE_TEST_ROLE": "fakeclaude", "PYRE_SESSION_ID": "ses_t", "FAKE_ARGV_FILE": argvFile},
+			StateDir: filepath.Join(f.dir, "runs", runID), ProfileDir: filepath.Join(f.dir, "cfg"),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var argv []byte
+		for i := 0; i < 100 && len(argv) == 0; i++ {
+			argv, _ = os.ReadFile(argvFile)
+			time.Sleep(50 * time.Millisecond)
+		}
+		return string(argv)
+	}
+	if a := argvOf("run_model", "opus", "high"); !strings.Contains(a, "--model\nopus\n") || !strings.Contains(a, "--effort\nhigh") {
+		t.Fatalf("argv %q", a)
+	}
+	if a := argvOf("run_nomodel", "", ""); strings.Contains(a, "--model") || strings.Contains(a, "--effort") {
+		t.Fatalf("default argv %q", a)
+	}
+}

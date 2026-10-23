@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	c "github.com/jhh3/pyre/internal/contracts"
 )
 
 // addConnectionSubcommands adds grant/revoke/invoke/verify under
@@ -109,7 +111,16 @@ func (a *App) addConnectionSubcommands(connections *cobra.Command) {
 	verify := &cobra.Command{
 		Use:   "verify <connection> [--node N]",
 		Short: "Verify the connection now on its holder node(s) (connection.check)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Verify the connection now: pyred on each node runs the real check there
+(outfit connector test NAME for an Outfit connection, a store read for a
+Pyre-provisioned credential) and reports its result. pyred runs in the
+user's login session, so the result is what Pyre sessions on that node get;
+an ssh login can reach a different credential store (Windows Credential
+Manager, a locked macOS keychain) and see another result.
+
+Exits 0 only when every checked node reports "verified"; otherwise it prints
+(or, with --json, emits) the per-node results and exits 1.`,
+		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
 			if err != nil {
@@ -121,13 +132,19 @@ func (a *App) addConnectionSubcommands(connections *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			return a.emit(avs, func(w io.Writer) {
+			if err := a.emit(avs, func(w io.Writer) {
 				var rows [][]string
 				for _, av := range avs {
 					rows = append(rows, []string{av.NodeID, av.Mode, av.State, ago(av.VerifiedAt), orDash(av.Detail)})
 				}
 				table(w, "NODE\tMODE\tSTATE\tVERIFIED\tDETAIL", rows)
-			})
+				if len(avs) > 0 {
+					fmt.Fprintln(w, "checked by pyred on each node: the result Pyre sessions there get (an ssh login may reach a different credential store)")
+				}
+			}); err != nil {
+				return err
+			}
+			return verifyFailures(args[0], avs)
 		}),
 	}
 	verify.Flags().StringVar(&cp.Node, "node", "", "node to verify on (default: every holder)")
@@ -166,4 +183,23 @@ func (a *App) addNotePromote(note *cobra.Command) {
 	promote.Flags().StringVar(&p.BaseRevision, "base", "", "the document head revision the promotion builds on")
 	promote.Flags().StringVar(&p.Project, "project", "", "project ID or name")
 	note.AddCommand(promote)
+}
+
+// verifyFailures is nil when every node verified the connection, else an
+// error (exit 1) naming each node and state. No node at all is a failure:
+// nothing holds the connection.
+func verifyFailures(conn string, avs []c.ConnectionAvailability) error {
+	if len(avs) == 0 {
+		return withStatus(ExitError, fmt.Errorf("%s: no node holds this connection (give --node to check one)", conn))
+	}
+	var bad []string
+	for _, av := range avs {
+		if av.State != "verified" {
+			bad = append(bad, fmt.Sprintf("%s on %s: %s", conn, av.NodeID, av.State))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return withStatus(ExitError, fmt.Errorf("not verified: %s", strings.Join(bad, "; ")))
 }

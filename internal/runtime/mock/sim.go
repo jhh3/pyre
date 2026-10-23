@@ -302,6 +302,19 @@ func (b *Backend) raiseIndeterminateLocked(m *c.MessageView) {
 
 // ---- simulated node reports (test and demo controls) ----
 
+// SetNodeHarnesses replaces what a node reports about its harnesses (test
+// and demo control: e.g. a machine with agy and its model choices).
+func (b *Backend) SetNodeHarnesses(nodeID string, hs []c.HarnessInfo) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n, ok := b.nodes[nodeID]
+	if !ok {
+		return notFound(c.KindNode, nodeID)
+	}
+	n.Harnesses = append([]c.HarnessInfo(nil), hs...)
+	return nil
+}
+
 // SetNodeConnected simulates a node's control connection dropping or
 // returning. Disconnect marks its runs unknown/stale (never failed or idle)
 // and turns in-flight attempts indeterminate on the next tick.

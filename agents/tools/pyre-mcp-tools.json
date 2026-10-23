@@ -105,6 +105,116 @@
     }
   },
   {
+    "name": "list_models",
+    "title": "List models",
+    "description": "List the models and reasoning efforts each machine's agent harnesses offer, for start_session model and effort (any name the harness accepts also works).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "description": "only this harness: claude, codex or agy",
+          "type": "string"
+        },
+        "node": {
+          "description": "only this node (ID or name)",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "ModelChoice": {
+          "properties": {
+            "default": {
+              "type": "boolean"
+            },
+            "efforts": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "NodeModels": {
+          "properties": {
+            "efforts": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "harness": {
+              "type": "string"
+            },
+            "models": {
+              "items": {
+                "$ref": "#/$defs/ModelChoice"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "node_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "node_id",
+            "node_name",
+            "harness",
+            "models",
+            "efforts"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "harnesses": {
+          "items": {
+            "$ref": "#/$defs/NodeModels"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "harnesses"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "List models",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "list_sessions",
     "title": "List sessions",
     "description": "List sessions across the fleet: one line each with id, title, run state, machine (\"this machine\" shares your filesystem), age and project.",
@@ -120,11 +230,15 @@
           "type": "string"
         },
         "harness": {
-          "description": "claude, codex or shell",
+          "description": "claude, codex, agy or shell",
           "type": "string"
         },
         "include_archived": {
           "description": "include archived",
+          "type": "boolean"
+        },
+        "include_monitors": {
+          "description": "include monitor sessions (pyre monitor add); by default each session shows only how many monitors watch for it",
           "type": "boolean"
         },
         "node": {
@@ -193,12 +307,12 @@
   {
     "name": "start_session",
     "title": "Start session",
-    "description": "Start a peer session on a machine (no project needed; launch is asynchronous). It messages you automatically when it finishes a turn (with its last message), needs input, or exits; no need to ask it to.",
+    "description": "Start a peer session on a machine (no project needed). Waits up to 20 s; a failed launch is an error. It messages you automatically when it finishes a turn (with its last message), needs input, or exits; no need to ask it to.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "account": {
-          "description": "explicit account: ID, label or rota name, or a unique prefix",
+          "description": "explicit account: ID, label or rota name, or a unique prefix; at its limit the best eligible account is used instead (with a note) unless strict_account",
           "type": "string"
         },
         "ambient": {
@@ -213,20 +327,47 @@
           "description": "absolute working directory on the node",
           "type": "string"
         },
+        "effort": {
+          "description": "reasoning effort: low, medium, high, xhigh or max (codex also ultra); default: the harness's own",
+          "type": "string"
+        },
+        "env_file": {
+          "description": "absolute path on the node to KEY=VALUE lines added to the harness environment at every launch (a private file: chmod 600; Pyre and login keys refused unless empty); only the path is recorded",
+          "type": "string"
+        },
+        "fallback_harness": {
+          "description": "claude: when no Codex (OpenAI) account is free, run on Claude instead; use for reviews and second opinions. Default: a Codex launch with no free account fails at once with the reason",
+          "type": "string"
+        },
         "fresh": {
           "description": "start in a new worktree and branch of repo instead of its main checkout",
           "type": "boolean"
         },
         "harness": {
-          "description": "claude, codex or shell",
+          "description": "claude, codex, agy or shell (agy: Google Antigravity, on machines that have it)",
           "type": "string"
+        },
+        "harness_args": {
+          "description": "extra harness flags from an allowlist, e.g. claude --append-system-prompt-file=F, --plugin-dir=D, --dangerously-load-development-channels=plugin:N@M; kept across resumes; Pyre-controlled flags are refused",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "include_context": {
           "description": "include the bounded project brief",
           "type": "boolean"
         },
+        "model": {
+          "description": "model (default: the harness's own); claude takes opus/sonnet/haiku/fable or a full name; choices per machine: list_models",
+          "type": "string"
+        },
+        "native_resume": {
+          "description": "claude: continue this existing conversation (session id) started outside Pyre; stop its process first",
+          "type": "string"
+        },
         "node": {
-          "description": "node ID (node_...) or name; default: this session's node",
+          "description": "node ID (node_...) or name; default: the least loaded connected node with the harness (with project+repo: among nodes holding that checkout; with cwd: this session's node); the result's placement says which and why",
           "type": "string"
         },
         "operation_id": {
@@ -260,6 +401,10 @@
           },
           "type": "array"
         },
+        "strict_account": {
+          "description": "keep account even when it is at its limit or ineligible (the launch fails)",
+          "type": "boolean"
+        },
         "tags": {
           "description": "tags",
           "items": {
@@ -283,6 +428,43 @@
     },
     "outputSchema": {
       "$defs": {
+        "ArchiveCascade": {
+          "properties": {
+            "archived": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "left": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CascadeSession": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        },
         "CheckoutBinding": {
           "properties": {
             "branch": {
@@ -399,6 +581,24 @@
           },
           "type": "object"
         },
+        "MonitorRef": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "title"
+          ],
+          "type": "object"
+        },
         "NativeRef": {
           "properties": {
             "id": {
@@ -411,6 +611,25 @@
           "required": [
             "kind",
             "id"
+          ],
+          "type": "object"
+        },
+        "Placement": {
+          "properties": {
+            "node_id": {
+              "type": "string"
+            },
+            "node_name": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "node_id",
+            "node_name",
+            "reason"
           ],
           "type": "object"
         },
@@ -808,6 +1027,16 @@
         },
         "SessionView": {
           "properties": {
+            "archive_cascade": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArchiveCascade"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "attention": {
               "type": "integer"
             },
@@ -823,6 +1052,18 @@
             },
             "freshness": {
               "$ref": "#/$defs/Freshness"
+            },
+            "monitor": {
+              "type": "boolean"
+            },
+            "monitors": {
+              "items": {
+                "$ref": "#/$defs/MonitorRef"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "node_name": {
               "type": "string"
@@ -888,8 +1129,27 @@
         "command_id": {
           "type": "string"
         },
+        "placement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Placement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "session": {
           "$ref": "#/$defs/SessionView"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -957,7 +1217,7 @@
   {
     "name": "interrupt_session",
     "title": "Interrupt session",
-    "description": "Interrupt a session's current turn. The receipt reports acceptance; the outcome is observed separately.",
+    "description": "Interrupt a session's current turn (for an idle Codex session, also stop the background commands it left running). The receipt reports acceptance; the outcome is observed separately.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1077,7 +1337,7 @@
   {
     "name": "send_message",
     "title": "Send message",
-    "description": "Send a durable message to a session, \"owner\", channel:\u003cname\u003e or project. With reply_to and no to, replies to the original sender. delivery_status.summary says whether it is getting through (e.g. recipient ended or its machine is offline).",
+    "description": "Send a durable message to a session, \"owner\", channel:\u003cname\u003e or project; reply_to alone replies to its sender. delivery_status.summary says if it gets through. A report to the owner that asks nothing is an update, not in his inbox.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1109,7 +1369,7 @@
           "type": "string"
         },
         "request_ack": {
-          "description": "ask the recipient to acknowledge",
+          "description": "ask the recipient to acknowledge (to the owner: keeps a report in his inbox)",
           "type": "boolean"
         },
         "steer": {
@@ -3568,7 +3828,7 @@
   {
     "name": "archive_session",
     "title": "Archive session",
-    "description": "When your work is finished and reported, archive yourself with archive_session (no arguments). A live session (yours or one you started) archives when its turn ends; an ended one at once.",
+    "description": "When your work is finished and reported, archive yourself with archive_session (no arguments); a live one archives when its turn ends; sessions under it go with it. Sessions outside your tree go to the owner for approval (approval_ask).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3584,9 +3844,61 @@
       "type": "object"
     },
     "outputSchema": {
+      "$defs": {
+        "ArchiveCascade": {
+          "properties": {
+            "archived": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "left": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CascadeSession": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        }
+      },
       "properties": {
+        "approval_ask": {
+          "type": "string"
+        },
         "archived": {
           "type": "boolean"
+        },
+        "cascade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArchiveCascade"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "note": {
           "type": "string"
@@ -3752,6 +4064,43 @@
     },
     "outputSchema": {
       "$defs": {
+        "ArchiveCascade": {
+          "properties": {
+            "archived": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "left": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CascadeSession": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        },
         "CheckoutBinding": {
           "properties": {
             "branch": {
@@ -3866,6 +4215,24 @@
               "type": "string"
             }
           },
+          "type": "object"
+        },
+        "MonitorRef": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "title"
+          ],
           "type": "object"
         },
         "NativeRef": {
@@ -4312,6 +4679,16 @@
         }
       },
       "properties": {
+        "archive_cascade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArchiveCascade"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "attention": {
           "type": "integer"
         },
@@ -4327,6 +4704,18 @@
         },
         "freshness": {
           "$ref": "#/$defs/Freshness"
+        },
+        "monitor": {
+          "type": "boolean"
+        },
+        "monitors": {
+          "items": {
+            "$ref": "#/$defs/MonitorRef"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "node_name": {
           "type": "string"
@@ -6229,7 +6618,7 @@
   {
     "name": "connection_check",
     "title": "Check connection",
-    "description": "Check whether you may use a named connection now (hub grant decision) and on which nodes it is available. Never returns credentials.",
+    "description": "Check whether you may use a named connection now and where it is available. Connections verified on your node, or for remote use on another, need no grant. Never returns credentials.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -6319,7 +6708,7 @@
   {
     "name": "connection_invoke",
     "title": "Use connection",
-    "description": "Run a read operation over a granted connection. The node holding the credential runs it (Outfit) and returns bounded output; the credential never reaches you. Writes are refused.",
+    "description": "Run a read operation on a connection (GitHub, Linear, ...); no grant needed for connections your machines hold. The holding node runs it via Outfit; the credential never reaches you. Writes are refused.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -6473,6 +6862,10 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "action": {
+          "description": "the go-ahead asked for in one word (merge, deploy); a standing grant for exactly this action answers at once when the ask offers its option and has a default",
+          "type": "string"
+        },
         "confirm_new": {
           "description": "create it even though a similar open ask exists under another topic",
           "type": "boolean"
@@ -6496,6 +6889,41 @@
             "json"
           ],
           "type": "string"
+        },
+        "irreversible": {
+          "description": "cannot be undone: never answered by a standing grant (give no default)",
+          "type": "boolean"
+        },
+        "items": {
+          "description": "batch several like decisions into one ask (e.g. the PRs to merge): the options apply to each item; the owner answers per item or all at once",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "description": "one line: what and why, its state",
+                "type": "string"
+              },
+              "id": {
+                "description": "short stable id, e.g. \"pr-12\"",
+                "type": "string"
+              },
+              "label": {
+                "description": "what the item is, a few words",
+                "type": "string"
+              },
+              "url": {
+                "description": "link to it (PR, doc)",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ],
+            "type": "object"
+          },
+          "maxItems": 50,
+          "type": "array"
         },
         "operation_id": {
           "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
@@ -6959,9 +7387,401 @@
     }
   },
   {
+    "name": "propose_grant",
+    "title": "Propose a standing grant",
+    "description": "Ask the owner to approve a lasting go-ahead (e.g. merge PRs once reviewed and green). Files an owner ask; only if he approves does Pyre record it, quoting his own answer. Never claim he already said it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "the go-ahead in one word: merge, ... (asks must name exactly this action to be answered)",
+          "type": "string"
+        },
+        "deadline_minutes": {
+          "description": "minutes until the proposal expires unanswered (default 1440); nothing is recorded then",
+          "type": "integer"
+        },
+        "expires_days": {
+          "description": "days after approval until it lapses (default 7, max 30)",
+          "type": "integer"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "note": {
+          "description": "informational note shown with it, e.g. \"once reviewed and CI green\" (Pyre never checks it)",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "option": {
+          "description": "the ask option (id or label) the grant picks, e.g. merge",
+          "type": "string"
+        },
+        "scope": {
+          "description": "project (default when this session has one) or session (this session and the sessions it starts)",
+          "type": "string"
+        },
+        "session": {
+          "description": "scope session: the root of the tree (default: this session; or a session you started)",
+          "type": "string"
+        },
+        "why": {
+          "description": "why the owner should approve it, with the evidence (his earlier message or ask, links); shown as your words, never as his",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "option"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Propose a standing grant",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "propose_fact",
+    "title": "Propose a project fact",
+    "description": "Ask the owner to approve a settled fact for this project's fact sheet (every new session reads it). Files an owner ask; only if he approves does Pyre add it, quoting his own answer.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "deadline_minutes": {
+          "description": "minutes until the proposal expires unanswered (default 1440); nothing is recorded then",
+          "type": "integer"
+        },
+        "fact": {
+          "description": "the settled fact, one line",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "why": {
+          "description": "why the owner should approve it, with the evidence (his earlier message or ask, links); shown as your words, never as his",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fact"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Propose a project fact",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_grants",
+    "title": "List standing grants",
+    "description": "List the standing grants (the owner's lasting go-aheads) that hold for this session: its project's and its session tree's.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "only this action",
+          "type": "string"
+        },
+        "all": {
+          "description": "every grant you may see, not only those holding for this session",
+          "type": "boolean"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "include_revoked": {
+          "description": "include revoked and expired grants",
+          "type": "boolean"
+        },
+        "project": {
+          "description": "project ID or name (your own)",
+          "type": "string"
+        },
+        "session": {
+          "description": "list the grants holding for this session (default: this session)",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "title": "List standing grants",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "revoke_grant",
+    "title": "Revoke a standing grant",
+    "description": "Revoke a standing grant that holds for you, e.g. when the owner takes the go-ahead back. Asks for its action then go to the owner again.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "grant_id": {
+          "description": "standing grant ID (sgr_...)",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "reason": {
+          "description": "one line: why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Revoke a standing grant",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "report_issue",
+    "title": "Report a Pyre or machine problem",
+    "description": "Report Pyre misbehaving (pyre_bug), a broken machine (machine) or wrong/confusing Pyre instructions (guidance), with evidence. Not for your own mistakes or the project's build/test failures. Keep working around it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "description": "what you did, what happened, what you expected; evidence (exact errors, IDs, commands) in markdown",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "kind": {
+          "description": "pyre_bug, machine, guidance or other",
+          "enum": [
+            "pyre_bug",
+            "machine",
+            "guidance",
+            "other"
+          ],
+          "type": "string"
+        },
+        "node": {
+          "description": "the machine a machine issue is about (default: yours)",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "related": {
+          "description": "session or run IDs involved (yours are added automatically)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "the problem in one line (\"send_message to a stopped session reported delivered\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "title"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Report a Pyre or machine problem",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_issues",
+    "title": "List issues",
+    "description": "List issues sessions reported (Pyre bugs, machine problems, guidance problems), most recently seen first. Default: open and triaged.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "kind": {
+          "description": "pyre_bug, machine, guidance or other",
+          "type": "string"
+        },
+        "limit": {
+          "description": "at most this many (default 100)",
+          "type": "integer"
+        },
+        "node": {
+          "description": "only issues about this machine",
+          "type": "string"
+        },
+        "status": {
+          "description": "open, triaged, fixed, wontfix or duplicate, comma-separated, or all (default: open,triaged)",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "title": "List issues",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_issue",
+    "title": "Show an issue",
+    "description": "Show an issue with its reports (each with its evidence and context) and triage notes.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "issue_id": {
+          "description": "issue ID (iss_...)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Show an issue",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_issue",
+    "title": "Triage an issue",
+    "description": "Triage session or owner only: set an issue's status (fixed, wontfix, duplicate close it), add a note or links (PR URLs).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "duplicate_of": {
+          "description": "with status duplicate: the issue it duplicates (later reports go there)",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "issue_id": {
+          "description": "issue ID (iss_...)",
+          "type": "string"
+        },
+        "links": {
+          "description": "URLs to add (PRs, docs)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "note": {
+          "description": "what was found or done (shown as the resolution when closing)",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "status": {
+          "description": "open, triaged, fixed, wontfix or duplicate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Triage an issue",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "update_project_page",
     "title": "Update project page",
-    "description": "Replace your project's page, the owner's main view of it in the web app (leads only). Short, current markdown: goal, status, results with links, open decisions, next. Create it early; update at milestones.",
+    "description": "Update your project's page (leads only): the markdown page and/or its status card (progress, phase, in flight, ready for the owner, shipped). Create it early; update the card at each milestone. Stale after 30 idle min while work runs.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -6970,7 +7790,7 @@
           "type": "string"
         },
         "content": {
-          "description": "the whole page in markdown (replaces the previous version)",
+          "description": "the whole page in markdown (replaces the previous version); omit to update only the status",
           "type": "string"
         },
         "format": {
@@ -6989,14 +7809,164 @@
           "description": "project ID or name (default: this session's project)",
           "type": "string"
         },
+        "status": {
+          "additionalProperties": false,
+          "description": "the status card; replaces the previous one (send every field you want kept; get_project_page shows the current card)",
+          "properties": {
+            "blocked": {
+              "description": "blocked items and on what",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "note": {
+                    "description": "one line of detail",
+                    "type": "string"
+                  },
+                  "session": {
+                    "description": "session ID doing or owning it",
+                    "type": "string"
+                  },
+                  "state": {
+                    "description": "e.g. review, ci failing, merged, deployed, released",
+                    "type": "string"
+                  },
+                  "title": {
+                    "description": "what it is (\"PR #12 status card\")",
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "link (PR, deploy, release, artifact)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "eta": {
+              "description": "when you expect to finish (free text)",
+              "type": "string"
+            },
+            "in_flight": {
+              "description": "work under way that live sessions do not show by themselves",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "note": {
+                    "description": "one line of detail",
+                    "type": "string"
+                  },
+                  "session": {
+                    "description": "session ID doing or owning it",
+                    "type": "string"
+                  },
+                  "state": {
+                    "description": "e.g. review, ci failing, merged, deployed, released",
+                    "type": "string"
+                  },
+                  "title": {
+                    "description": "what it is (\"PR #12 status card\")",
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "link (PR, deploy, release, artifact)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "phase": {
+              "description": "one line: where things stand now",
+              "type": "string"
+            },
+            "progress": {
+              "description": "percent toward the goal",
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ready_for_owner": {
+              "description": "waiting on the owner but not an ask: PRs to review or merge, a build to try",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "note": {
+                    "description": "one line of detail",
+                    "type": "string"
+                  },
+                  "session": {
+                    "description": "session ID doing or owning it",
+                    "type": "string"
+                  },
+                  "state": {
+                    "description": "e.g. review, ci failing, merged, deployed, released",
+                    "type": "string"
+                  },
+                  "title": {
+                    "description": "what it is (\"PR #12 status card\")",
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "link (PR, deploy, release, artifact)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "shipped": {
+              "description": "merged, deployed or released items (state says which)",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "note": {
+                    "description": "one line of detail",
+                    "type": "string"
+                  },
+                  "session": {
+                    "description": "session ID doing or owning it",
+                    "type": "string"
+                  },
+                  "state": {
+                    "description": "e.g. review, ci failing, merged, deployed, released",
+                    "type": "string"
+                  },
+                  "title": {
+                    "description": "what it is (\"PR #12 status card\")",
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "link (PR, deploy, release, artifact)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "summary": {
           "description": "one line: what changed",
           "type": "string"
         }
       },
-      "required": [
-        "content"
-      ],
       "type": "object"
     },
     "annotations": {
@@ -7038,6 +8008,52 @@
     }
   },
   {
+    "name": "waiting_on",
+    "title": "Waiting on own job",
+    "description": "Before ending your turn while your own CI, review, workers or watcher are pending: your parent hears you wait (not idle), and again if not woken by expect_minutes. quiet: it hears nothing now; end your turn, don't poll inbox.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "clear": {
+          "description": "drop the marker",
+          "type": "boolean"
+        },
+        "expect_minutes": {
+          "description": "when it should be done (default 60, max 1440)",
+          "type": "integer"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "quiet": {
+          "description": "don't report this turn's end to your parent; a Monitor, a child's report or a message wakes you (it still hears if you are not woken by expect_minutes, and when your run exits)",
+          "type": "boolean"
+        },
+        "what": {
+          "description": "the job, with its URL, e.g. \"CI on PR #12 https://github.com/o/r/pull/12\"",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Waiting on own job",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "rename_session",
     "title": "Rename session",
     "description": "Rename any session (default your own) so the owner can tell the work apart, e.g. your own or sessions you started (\"Fix stripe webhook retries\"). Short, specific, at most ~6 words. A title the owner chose is kept.",
@@ -7068,6 +8084,43 @@
     },
     "outputSchema": {
       "$defs": {
+        "ArchiveCascade": {
+          "properties": {
+            "archived": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "left": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CascadeSession": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        },
         "CheckoutBinding": {
           "properties": {
             "branch": {
@@ -7182,6 +8235,24 @@
               "type": "string"
             }
           },
+          "type": "object"
+        },
+        "MonitorRef": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "title"
+          ],
           "type": "object"
         },
         "NativeRef": {
@@ -7628,6 +8699,16 @@
         }
       },
       "properties": {
+        "archive_cascade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArchiveCascade"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "attention": {
           "type": "integer"
         },
@@ -7643,6 +8724,18 @@
         },
         "freshness": {
           "$ref": "#/$defs/Freshness"
+        },
+        "monitor": {
+          "type": "boolean"
+        },
+        "monitors": {
+          "items": {
+            "$ref": "#/$defs/MonitorRef"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "node_name": {
           "type": "string"
@@ -7703,6 +8796,43 @@
     },
     "outputSchema": {
       "$defs": {
+        "ArchiveCascade": {
+          "properties": {
+            "archived": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "left": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CascadeSession": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        },
         "CheckoutBinding": {
           "properties": {
             "branch": {
@@ -7817,6 +8947,24 @@
               "type": "string"
             }
           },
+          "type": "object"
+        },
+        "MonitorRef": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "title"
+          ],
           "type": "object"
         },
         "NativeRef": {
@@ -8263,6 +9411,16 @@
         }
       },
       "properties": {
+        "archive_cascade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArchiveCascade"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "attention": {
           "type": "integer"
         },
@@ -8278,6 +9436,18 @@
         },
         "freshness": {
           "$ref": "#/$defs/Freshness"
+        },
+        "monitor": {
+          "type": "boolean"
+        },
+        "monitors": {
+          "items": {
+            "$ref": "#/$defs/MonitorRef"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "node_name": {
           "type": "string"

@@ -182,6 +182,58 @@ func (s *store) latestRunForSession(ctx context.Context, sessionID string) (runR
 	return r, err == nil, err
 }
 
+// recentRunCwds lists the distinct working directories of runs created
+// after since (W-lifecycle: the nightly sweep's repositories).
+func (s *store) recentRunCwds(ctx context.Context, since time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT run FROM daemon_runs WHERE created_at>?`, ftime(since))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	var out []string
+	for rows.Next() {
+		var b []byte
+		var r contracts.Run
+		if rows.Scan(&b) != nil || json.Unmarshal(b, &r) != nil {
+			continue
+		}
+		for _, c := range []string{r.Cwd, checkoutPath(r)} {
+			if c != "" && !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+func checkoutPath(r contracts.Run) string {
+	if r.Checkout != nil {
+		return r.Checkout.Path
+	}
+	return ""
+}
+
+// sessionPanePIDs lists the pane process IDs this node launched the
+// session's runs as (each the leader of the run's terminal session).
+func (s *store) sessionPanePIDs(ctx context.Context, sessionID string) ([]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT handle FROM daemon_runs WHERE session_id=? AND handle IS NOT NULL`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int
+	for rows.Next() {
+		var b []byte
+		var h contracts.RunHandle
+		if rows.Scan(&b) == nil && json.Unmarshal(b, &h) == nil && h.PID > 0 {
+			out = append(out, h.PID)
+		}
+	}
+	return out, rows.Err()
+}
+
 // runForNative returns the most recent run whose harness-native session
 // (Claude session UUID, Codex thread ID) is nativeID.
 func (s *store) runForNative(ctx context.Context, nativeID string) (runRecord, bool, error) {

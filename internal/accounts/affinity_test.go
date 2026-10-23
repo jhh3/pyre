@@ -70,9 +70,9 @@ func TestRankAffinityTable(t *testing.T) {
 			cands: []affCand{{id: "a", five: 1, week: 1}, {id: "b", five: 40, week: 40}, {id: "c", five: 20, week: 20}},
 			use:   map[string][]string{"a": {"node_mac", "node_server"}, "b": {"node_mac"}, "c": {"node_nuc"}},
 			want:  "c", order: "c,b,a"},
-		{name: "all near limit: plain headroom, fewer machines on a tie",
+		{name: "all near limit: binding window, fewer machines on a tie",
 			cands: []affCand{{id: "a", five: 85, week: 10}, {id: "b", five: 82, week: 90}, {id: "c", five: 82, week: 90}},
-			use:   map[string][]string{"b": {"node_mac"}}, want: "c", order: "c,b,a"},
+			use:   map[string][]string{"b": {"node_mac"}}, want: "a", order: "a,c,b"},
 		{name: "free near-limit account ranks after a shared healthy one",
 			cands: []affCand{{id: "a", five: 10, week: 90}, {id: "b", five: 30, week: 30}},
 			use:   map[string][]string{"b": {"node_mac"}}, want: "b"},
@@ -82,9 +82,15 @@ func TestRankAffinityTable(t *testing.T) {
 		{name: "no fleet: home sticks, otherwise headroom as before",
 			fleet: &fleetUse{}, cands: []affCand{{id: "a", five: 1, week: 1}, {id: "b", five: 50, week: 50, home: true}, {id: "c", five: 5, week: 5}},
 			want: "b", order: "b,a,c"},
-		{name: "no fleet, no home: today's 5h-then-weekly order",
+		{name: "no fleet, no home: the binding window decides (99% weekly never wins)",
 			fleet: &fleetUse{}, cands: []affCand{{id: "a", five: 12, week: 80}, {id: "b", five: 12, week: 40}, {id: "c", five: 3, week: 99}},
-			want: "c", order: "c,b,a"},
+			want: "b", order: "b,a,c"},
+		{name: "home past 70% weekly stops being sticky",
+			cands: []affCand{{id: "a", five: 0, week: 72, home: true}, {id: "b", five: 20, week: 30}},
+			want:  "b"},
+		{name: "home below 70% weekly stays",
+			cands: []affCand{{id: "a", five: 0, week: 65, home: true}, {id: "b", five: 5, week: 4}},
+			want:  "a"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -248,7 +254,7 @@ func TestSelectSharesOnlyWhenEverythingIsInUse(t *testing.T) {
 	if a.AccountID != "acct_synth-b" {
 		t.Fatalf("want B, got %s: %s", a.AccountID, a.Reason)
 	}
-	if a.Reason != "every eligible account below 80% is in use on another machine; shared with mac (fewest other machines, 5h 20% used, weekly 30%)" {
+	if a.Reason != "every eligible account with room is in use on another machine; shared with mac (fewest other machines, 5h 20% used, weekly 30%)" {
 		t.Fatalf("reason %q", a.Reason)
 	}
 }
@@ -271,7 +277,7 @@ func TestAffinityNeverPicksIneligible(t *testing.T) {
 	if a.AccountID != "acct_synth-b" {
 		t.Fatalf("want B (shared, but the only usable one), got %s: %s", a.AccountID, a.Reason)
 	}
-	if !strings.HasPrefix(a.Reason, "home account C is not available now; every eligible account below 80% is in use on another machine; shared with mac") {
+	if !strings.HasPrefix(a.Reason, "home account C is not available now; every eligible account with room is in use on another machine; shared with mac") {
 		t.Fatalf("reason %q", a.Reason)
 	}
 }
@@ -305,10 +311,10 @@ func TestAffinityHubUnreachableFallsBack(t *testing.T) {
 	e.obsWin("acct_synth-b", 12, 40)
 	e.obsWin("acct_synth-c", 3, 99)
 	a := e.resolve("run_1")
-	if a.AccountID != "acct_synth-c" {
-		t.Fatalf("want today's choice C, got %s", a.AccountID)
+	if a.AccountID != "acct_synth-b" {
+		t.Fatalf("want the most headroom (B), got %s", a.AccountID)
 	}
-	if !strings.HasPrefix(a.Reason, "most headroom (5h 3% used, weekly 99%); fleet view unavailable:") {
+	if !strings.HasPrefix(a.Reason, "most headroom (5h 12% used, weekly 40%); fleet view unavailable:") {
 		t.Fatalf("reason %q", a.Reason)
 	}
 	// The failure is cached: the next launch does not wait on the hub again.

@@ -46,10 +46,7 @@ func TestGroupByCyclesAndIsRemembered(t *testing.T) {
 	if h.M.GroupMode() != "machine" || !h.Contains("SESSION · by machine") || !h.Contains("synth-mac 5") || h.Contains("MACHINE") {
 		t.Fatalf("gb did not group by machine:\n%s", h.View())
 	}
-	b, err := os.ReadFile(state)
-	if err != nil || !strings.Contains(string(b), `"group": "machine"`) || !strings.Contains(string(b), `"group_version": 2`) {
-		t.Fatalf("explicit machine choice not remembered: %s %v", b, err)
-	}
+	stateHas(t, h, state, `"group": "machine"`, `"group_version": 2`)
 	h.Key("g", "b")
 	h.Settle()
 	if h.M.GroupMode() != "repo" || !h.Contains("SESSION · by repo") || !h.Contains("scratch 1") {
@@ -117,9 +114,7 @@ func TestFoldGroupsWithZaEnterAndClick(t *testing.T) {
 		t.Fatalf("za did not fold the project (sel %s):\n%s", h.M.SelectedSession(), h.View())
 	}
 	golden(t, "sessions-folded-100", h.View())
-	if b, _ := os.ReadFile(state); !strings.Contains(string(b), "project:prj_synth-outfit") {
-		t.Fatalf("fold not remembered: %s", b)
-	}
+	stateHas(t, h, state, "project:prj_synth-outfit")
 	if !h.Contains("enter expand") {
 		t.Fatalf("folded row has no expand hint:\n%s", h.View())
 	}

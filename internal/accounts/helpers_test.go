@@ -269,6 +269,11 @@ type fakeController struct {
 	turnInFlight  bool
 	continuations []Continuation
 	startErr      map[string]error
+	// quiesceBlock, when set, makes Quiesce wait for it (or the context): a
+	// stop that hangs.
+	quiesceBlock    chan struct{}
+	quiesceBlockRun string
+	onQuiesce       func(*fakeController) // under mu, after a stop
 }
 
 func (c *fakeController) CurrentRun(_ context.Context, sessionID string) (RunInfo, error) {
@@ -281,10 +286,26 @@ func (c *fakeController) CurrentRun(_ context.Context, sessionID string) (RunInf
 	return r, nil
 }
 
-func (c *fakeController) Quiesce(_ context.Context, sessionID, runID string) (QuiesceResult, error) {
+func (c *fakeController) Quiesce(ctx context.Context, sessionID, runID string) (QuiesceResult, error) {
+	c.mu.Lock()
+	block := c.quiesceBlock
+	if c.quiesceBlockRun != runID {
+		block = nil
+	}
+	c.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return QuiesceResult{Detail: "timed out waiting for exit"}, nil
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.order = append(c.order, "quiesce:"+runID)
+	if c.onQuiesce != nil {
+		c.onQuiesce(c)
+	}
 	if c.quiesceErr != nil {
 		return QuiesceResult{}, c.quiesceErr
 	}
@@ -309,11 +330,11 @@ func (c *fakeController) StartContinuation(ctx context.Context, k Continuation) 
 		sess = res.NewSessionID
 	}
 	if _, err := c.svc.ResolveFor(ctx, ResolveRequest{Harness: k.Harness, RunID: newRun, SessionID: sess,
-		Policy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: k.AccountID}}); err != nil {
+		Policy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: k.AccountID, Strict: true}}); err != nil {
 		return ContinuationResult{}, err
 	}
 	c.mu.Lock()
-	c.runs[sess] = RunInfo{SessionID: sess, RunID: newRun, Harness: k.Harness, Capabilities: c.runs[k.SessionID].Capabilities}
+	c.runs[sess] = RunInfo{SessionID: sess, RunID: newRun, Harness: k.Harness, Capabilities: c.runs[k.SessionID].Capabilities, Live: true}
 	c.mu.Unlock()
 	return res, nil
 }
@@ -464,6 +485,8 @@ func newEnv(t *testing.T, mod ...func(*Config)) *testEnv {
 		ClaudeUsageURL: e.fake.base + "/api/oauth/usage", HTTPClient: e.fake.srv.Client(),
 		PollInterval: time.Minute, FreshFor: 15 * time.Minute, CodexReader: e.reader,
 		GOOS: "linux", SecurityPath: filepath.Join(base, "no-security"),
+		// Never the real agy or its sign-in (agyusage.go).
+		UserAgyDir: filepath.Join(home, ".gemini", "antigravity-cli"), AgyBin: filepath.Join(base, "no-agy"),
 		Reporter: e.rep, Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Now: e.clock.Now, TestMode: true,
 	}

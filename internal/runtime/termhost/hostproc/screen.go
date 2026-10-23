@@ -76,7 +76,6 @@ func (s *screen) close() {
 	}
 }
 func (s *screen) mode(m ansi.DECMode) bool { return s.modes[m] }
-func (s *screen) size() (cols, rows int)   { return s.em.Width(), s.em.Height() }
 
 // line returns visible row y as a line of cells.
 func (s *screen) line(y int) uv.Line {

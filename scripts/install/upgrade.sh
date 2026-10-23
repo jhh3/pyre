@@ -53,6 +53,7 @@ SERVICE=auto HUB_PROTO="" SKIP_HUB=0 TIMEOUT=45 ROLLBACK=0 TO="" ALLOW_RUN_LOSS=
 SRC_TARBALL="" SRC_FROM="" SRC_SUMS="" SIG="" ALLOWED_ARG="" ALLOW_UNSIGNED=0
 RELEASE_NAMESPACE=pyre-release
 while [ $# -gt 0 ]; do
+  case "$1" in --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;; esac # --flag=value
   parse_common_flag "$@"
   if [ "$SHIFT_N" -gt 0 ]; then
     COMMON+=("${@:1:$SHIFT_N}")
@@ -104,6 +105,83 @@ esac
 SERVICES=${SERVICES# }
 VERIFY=0
 if [ -n "$SERVICES" ] && [ "$DRY" = 0 ] && { [ "$NO_SM" = 0 ] || [ -n "${PYRE_UPGRADE_RESTART_HOOK:-}" ]; } && can_exec; then VERIFY=1; fi
+
+# ---- maintenance window, sentinel restart ----
+# Sentinels watching this machine read ~/.local/state/pyre/maintenance.json
+# over ssh and stay silent while "until" is in the future (docs/operations.md,
+# "Sentinel"). Set only once services are really about to restart (not for a
+# refused or dry-run upgrade). Best effort: a failure here never stops the
+# upgrade, and a longer window already set (pyred maintenance --for 1h) is
+# kept.
+set_maintenance_window() {
+  local f until now cur
+  f=$(r "$T_HOME/.local/state/pyre/maintenance.json")
+  until=$(date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 0
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cur=""
+  [ ! -f "$f" ] || cur=$(sed -n 's/.*"until":"\([^"]*\)".*/\1/p' "$f" 2>/dev/null | head -n 1) || cur=""
+  if [ -n "$cur" ] && [ "$(printf '%s\n%s\n' "$cur" "$until" | LC_ALL=C sort | tail -n 1)" = "$cur" ]; then return 0; fi
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  if printf '{"until":"%s","reason":"upgrade.sh from %s","set_at":"%s"}\n' "$until" "$OLD" "$now" 2>/dev/null >"$f.tmp.$$"; then
+    mv -f "$f.tmp.$$" "$f" 2>/dev/null && MAINT_UNTIL=$until && note "maintenance window until $until (sentinels stay silent)"
+  fi
+  rm -f "$f.tmp.$$" 2>/dev/null
+  return 0
+}
+MAINT_UNTIL=""
+maybe_maintenance_window() { if [ -n "$SERVICES" ] && [ "$DRY" = 0 ]; then set_maintenance_window || true; fi; }
+# clear_maintenance_window: after a healthy restart, end the window this
+# run set (a window someone else set or lengthened since is left alone).
+# Sentinels then count their grace periods from the window's end, so a
+# service still settling does not alert at once.
+clear_maintenance_window() {
+  local f cur
+  [ -n "$MAINT_UNTIL" ] || return 0
+  f=$(r "$T_HOME/.local/state/pyre/maintenance.json")
+  cur=$(sed -n 's/.*"until":"\([^"]*\)".*/\1/p' "$f" 2>/dev/null | head -n 1) || cur=""
+  if [ "$cur" = "$MAINT_UNTIL" ] && rm -f "$f" 2>/dev/null; then note "maintenance window cleared"; fi
+  MAINT_UNTIL=""
+  return 0
+}
+
+# restart_sentinel: a running pyre-sentinel (scripts/install/sentinel.sh)
+# runs the pyred shim (Linux) or Pyre.app's pyred (macOS), so after `current`
+# moves it restarts onto the new version. Best effort; nothing when it is not
+# installed. A macOS agent written before Pyre.app ran the shim, whose Local
+# Network permission macOS keys to the per-version path (a new prompt after
+# every upgrade): it is repointed at Pyre.app, which keeps one grant.
+# Never in a test or staged install: a restart hook, --root, --home or a
+# foreign --os means the real service is not ours to touch.
+restart_sentinel() {
+  [ "$DRY" = 0 ] && [ "$NO_SM" = 0 ] || return 0
+  [ -z "${PYRE_UPGRADE_RESTART_HOOK:-}" ] && [ -z "$ROOT" ] && [ "$T_HOME" = "$HOME" ] && [ "$T_OS" = "$HOST_OS" ] || return 0
+  if [ "$HOST_OS" = darwin ]; then
+    local label=dev.jhh3.pyre.sentinel plist="$HOME/Library/LaunchAgents/dev.jhh3.pyre.sentinel.plist"
+    local app="$PREFIX/Pyre.app/Contents/MacOS/pyred"
+    launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || return 0
+    if [ -x "$app" ] && grep -q "<string>$HOME/.local/bin/pyred</string>" "$plist" 2>/dev/null; then
+      sed "s|<string>$HOME/.local/bin/pyred</string>|<string>$app</string>|" "$plist" >"$plist.tmp.$$" &&
+        mv -f "$plist.tmp.$$" "$plist" && note "sentinel now runs $app (one Local Network grant across upgrades)"
+      rm -f "${plist:?}.tmp.$$"
+      sm launchctl bootout "gui/$(id -u)/$label" || true
+      # bootout returns before the job is gone (launchd allows it 20 s after
+      # SIGTERM); bootstrap fails with EIO until then.
+      local i=0
+      while [ "$i" -lt 60 ] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; do sleep 0.5; i=$((i + 1)); done
+      for i in 1 2 3; do
+        sm launchctl bootstrap "gui/$(id -u)" "$plist" && return 0
+        sleep 2
+      done
+      warn "the sentinel did not reload: run scripts/install/sentinel.sh install"
+      return 0
+    fi
+    sm launchctl kickstart -k "gui/$(id -u)/$label" || true
+  else
+    systemctl --user is-enabled --quiet pyre-sentinel.service 2>/dev/null || return 0
+    sm systemctl --user try-restart pyre-sentinel.service || true
+  fi
+  return 0
+}
 
 node_cred_file() {
   if [ -f "$(r "$NODE_STATE/node-credential.json")" ]; then echo "$(r "$NODE_STATE/node-credential.json")"
@@ -211,13 +289,16 @@ if [ "$ROLLBACK" = 1 ]; then
   fi
   [ "$TO" != "$OLD" ] || die "current is already $TO"
   BEFORE=$(live_runs_now)
+  maybe_maintenance_window
   switch_to "$TO"
   rc=0; restart_all "$TO" "$BEFORE" || rc=$?
-  if [ "$rc" = 0 ]; then note "rolled back $OLD -> $TO"; exit 0; fi
+  restart_sentinel
+  if [ "$rc" = 0 ]; then clear_maintenance_window; note "rolled back $OLD -> $TO"; exit 0; fi
   if [ "$rc" = 2 ]; then echo "rolled back to $TO, but not every run was recovered: check pyre sessions" >&2; exit 5; fi
   echo "rollback to $TO did not become healthy; switching back to $OLD" >&2
   switch_to "$OLD"
   rc=0; restart_all "$OLD" 0 || rc=$?
+  restart_sentinel
   [ "$rc" = 0 ] || { echo "CRITICAL: neither $TO nor $OLD became healthy; inspect logs (docs/operations.md, troubleshooting)" >&2; exit 6; }
   exit 5
 fi
@@ -364,15 +445,19 @@ if printf '%s\n' $SERVICES | grep -qx node; then
 fi
 PREV_BEFORE=""
 [ ! -f "$(r "$PREFIX/.previous")" ] || PREV_BEFORE=$(cat "$(r "$PREFIX/.previous")")
+maybe_maintenance_window
 switch_to "$NEW"
 if [ -z "$SERVICES" ]; then
+  restart_sentinel
   note "no Pyre service to restart; new processes use $NEW"
   [ "$PRUNE" = 0 ] || prune_versions
   exit 0
 fi
 rc=0; restart_all "$NEW" "$BEFORE" || rc=$?
+restart_sentinel
 if [ "$rc" = 0 ]; then
   [ "$VERIFY" = 1 ] || note "restart not verified (service manager not invoked or dry run)"
+  clear_maintenance_window
   note "upgraded $OLD -> $NEW (rollback: upgrade.sh --rollback)"
   [ "$PRUNE" = 0 ] || prune_versions
   exit 0
@@ -380,6 +465,7 @@ fi
 echo "upgrade to $NEW failed its health check; rolling back to $OLD" >&2
 [ "$DRY" = 1 ] || : >"$(r "$PREFIX/$NEW/.failed")"
 switch_to "$OLD"
+restart_sentinel
 # The failed version must not become the rollback target.
 if [ "$DRY" = 0 ]; then
   if [ -n "$PREV_BEFORE" ]; then echo "$PREV_BEFORE" >"$(r "$PREFIX/.previous")"; else rm -f "$(r "$PREFIX/.previous")"; fi

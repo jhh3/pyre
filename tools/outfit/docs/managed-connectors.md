@@ -31,6 +31,22 @@ outfit stripe-test logs-tail       # live output; Ctrl-C stops it
 
 `outfit` downloads the official platform archive, verifies its published SHA-256, and injects `STRIPE_API_KEY` only into the selected child. A competing inherited key cannot select another account. Native Stripe login remains an alternative method: on a fresh machine Outfit opens Stripe's browser approval, waits for the CLI's returned completion step, completes it through the same pinned binary, and verifies the account before committing the connection. Dashboard links are test/live bound before lookup.
 
+Reads default to test mode. Add `--live` to any typed read (get, list, search, retrieve) to read live-mode data; it needs no `--write`:
+
+```bash
+outfit stripe subscriptions-get --subscription-id sub_123 --live
+outfit exec stripe -- get /v1/subscriptions/sub_123 --live        # raw reads need no --write either
+outfit exec stripe -- subscriptions retrieve sub_123 --live
+```
+
+With native Stripe login, `--live` makes the CLI use its profile's live key (Stripe keeps it in the OS keyring; if the CLI says the live key "needs to be re-configured", run `stripe login` again). A managed-key connection stores an optional second key, `STRIPE_LIVE_API_KEY` (an `rk_live_` restricted key with read permissions is best), read from the environment of setup or `outfit credential replace`, never from argv:
+
+```bash
+STRIPE_API_KEY=rk_test_... STRIPE_LIVE_API_KEY=rk_live_... outfit credential replace stripe
+```
+
+Setup and `outfit connector test` verify both keys. Without a stored live key, `--live` fails with a message naming the missing field instead of reading test data. Mutations stay CLI-only with `--write` in both modes. A Stripe error such as `resource_missing` is a failed call (`ok: false`, `meta.status: 404`, `error.provider_code: resource_missing`); in test mode it often means the object exists only in live mode.
+
 Set `OUTFIT_STRIPE_TEST_KEY` and run `scripts/accept-managed-connectors.sh` to include a bounded real-account read in release acceptance.
 
 ## Google Workspace

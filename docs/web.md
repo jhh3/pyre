@@ -85,7 +85,18 @@ trust boundary is the machine (the hub credential lives there anyway).
 ## Behaviour
 
 - **Inbox (open)**: open asks, plus message threads where a session wrote to
-  you after your last message and you have not answered or acknowledged.
+  you after your last message and you have not answered, acknowledged or
+  opened (an update, mail that asked nothing of you, is stored acknowledged
+  and only ever appears in Done; docs/experience.md),
+  plus session items (thread kind `attention`, thread ID = the attention
+  ID): a lead's "waiting on you" (it ended its turn with a question in its
+  own chat) and a session's own "needs you" flag. Their thread shows the
+  excerpt and the owner's messages to the session between the item's
+  creation and the session's next item of that kind (a new question is a
+  new item, so a new conversation; a reply typed in a thread stays in it,
+  remembered in the server's `read.json`); a reply goes to
+  the session as chat (no thread, so it also answers the session's open
+  asks), and Archive dismisses the item (`attention.update` handled).
   **Done**: decided asks and answered threads from the last 14 days.
 - **Threads**: a thread is the hub thread (`thread_id`). An ask's thread is
   `Ask.ThreadID` (or `ask:<ask_id>` on hubs that do not thread asks). A
@@ -94,7 +105,12 @@ trust boundary is the machine (the hub credential lives there anyway).
   `send_message reply_to` answer lands in the same thread.
 - **Reply** sends a queue-mode message from you to the thread's session,
   replying to the newest message that session wrote in the thread (the ask's
-  carrying message if it has not written since).
+  carrying message if it has not written since). A reply in an ask's thread
+  does not answer the ask (it may be a question back); **Answer with this**
+  in the composer of an open ask sends the text as the answer
+  (`POST /api/asks/{id}/answer` with `text`). Writing to the session itself
+  (its terminal, `pyre send`) answers its open asks (docs/experience.md,
+  Asks).
 - **Answers**: `mode: "now"` answers at once (AnswerAsks); `mode: "hold"`
   puts it in the hub's held queue, which sends after 5 quiet minutes (each
   new hold restarts the wait), on "send now", or before the ask's deadline.
@@ -103,8 +119,12 @@ trust boundary is the machine (the hub credential lives there anyway).
   the owner, every session message in it nobody acknowledged (the hub's
   `messages.ack`, as `pyre ack` does) and marks its attention items read,
   so it moves from Open to Done. There is no unarchive; a new message from
-  the session opens the thread again. An open ask cannot be archived (409:
-  answer it or let it default); a decided ask's thread is already in Done
+  the session opens the thread again. An open ask is archived only by
+  dismissing it: `{"dismiss": true}` withdraws it as the owner (reason
+  `contracts.AskDismissReason`: no option, its default never applies, the
+  session is told); without it the request is refused (409), and bulk
+  archive never dismisses. The app asks to confirm ("Dismiss this
+  question?"). A decided ask's thread is already in Done
   (only unanswered follow-ups in it are acknowledged). In the app: the
   Archive button in the thread header, `e`, a per-row archive button on
   open message threads (on hover; always shown on touch screens), and
@@ -113,16 +133,35 @@ trust boundary is the machine (the hub credential lives there anyway).
   moves to the next one in the list.
 - **Unread**: the server remembers when you opened each thread here
   (`read.json`); opening a thread also marks its attention items read at the
-  hub, and an item another surface marked read is not shown unread.
+  hub (a message's item handled: reading it is all it asks) and acknowledges
+  the session messages in it (not an open ask's carrier, which closes with
+  its ask), so a message thread moves to Done once read; an item another
+  surface marked read is not shown unread. The app sends the read for an
+  unread thread and for a message thread still waiting on you.
 - **Delivery** lines are plain English from the message's stored delivery
   facts: "Sent 9:41 AM · waiting: <session> is working (...)", "Delivered to
   <session> at 9:41 AM", "Read by the agent at 9:42 AM", "<session> replied
   at 9:50 AM", or "Not delivered: <why>". Times are America/Los_Angeles.
 - **Projects**: one card per project with its leads (top-level sessions in
-  the project), open asks, whether something waits on you, and the start of
-  the project page; the project view shows the page (markdown, maintained by
-  the lead), sessions (leads first), asks (open, then the last 10 decided)
-  and the 20 most recent artifacts.
+  the project), open asks, whether something waits on you, the lead's
+  progress and phase, a "Stale" chip, and the start of the project page; the
+  project view opens with a live status card, then the page (markdown,
+  maintained by the lead), sessions (leads first), asks (open, then the last
+  10 decided) and the 20 most recent artifacts.
+- **Status card**: the lead writes progress (0-100%), phase, ETA, in-flight
+  items, items ready for the owner (PRs to review), shipped items (merged,
+  deployed, released) and blockers with `update_project_page` `status` (or
+  `pyre project page status`); the server adds working sessions, sessions
+  that need you, idle workers (not the lead), stuck sessions (working with no
+  activity for 20 minutes, or failed) and open asks. The card is stale when
+  sessions are working (stuck-but-working included, failed not) and the lead
+  last updated the page or card more than 30 minutes ago; a project whose
+  lead never wrote either is not flagged.
+- **Standing go-aheads**: the project view lists the project's active
+  standing grants (action → option, the owner's own words or "approved a
+  proposal", note, expiry, uses), each with a Revoke button. A proposal ask
+  ("Remember this go-ahead?" / "Add to the fact sheet?") is answered like any
+  ask: Approve records it with the typed answer as the owner's words.
 - **Live updates**: the server keeps one hub event subscription for all
   browsers and fans out Server-Sent Events; browsers refetch on each.
 
@@ -138,25 +177,26 @@ not applied twice.
 | `GET /api/inbox?box=open\|done[&project=<id>][&session=<id>]` | | `{threads:[Thread], held: HeldAnswers}`; `session` keeps that session and the sessions under it |
 | `GET /api/threads/{thread_id}` | | `{thread: Thread, messages:[Msg]}` |
 | `POST /api/threads/{thread_id}/reply` | `{text}` | `{message: Msg}` |
-| `POST /api/threads/{thread_id}/read` | `{}` | `{}` |
-| `POST /api/threads/{thread_id}/archive` | `{}` | `{thread: Thread}` (open ask: 409 `conflict`) |
+| `POST /api/threads/{thread_id}/read` | `{operation_id?}` | `{}` (acknowledges the thread's session messages, as archive does) |
+| `POST /api/threads/{thread_id}/archive` | `{dismiss?: bool}` | `{thread: Thread}` (open ask without `dismiss`: 409 `conflict`; with it the ask is dismissed; a session item is marked handled) |
 | `POST /api/inbox/archive` | `{thread_ids:[...]}` (at most 200) | `{results:[{thread_id, thread?, error?:{code,message}}]}` in request order |
-| `POST /api/asks/{ask_id}/answer` | `{option_id?, text?, mode: "now"\|"hold"}` | `{ask: Ask, held: HeldAnswers}` (hold on a hub without it: 501 `unsupported`) |
+| `POST /api/asks/{ask_id}/answer` | `{option_id?, items?: {item_id: option_id}, text?, mode: "now"\|"hold"}` (items: batched asks, per-item answers) | `{ask: Ask, held: HeldAnswers}` (hold on a hub without it: 501 `unsupported`) |
 | `POST /api/held/{ask_id}/undo` | `{}` | `{held}` (already sent: 404) |
 | `POST /api/held/send` | `{}` | `{results, held}` |
 | `GET /api/projects` | | `{projects:[ProjectCard]}` |
-| `GET /api/projects/{project_id}` | | `{project, page, sessions:[SessionCard], asks:[Ask], artifacts:[{id,title,url,updated_at}]}` |
+| `GET /api/projects/{project_id}` | | `{project, page, sessions:[SessionCard], asks:[Ask], artifacts:[{id,title,url,updated_at}], status:StatusCard, grants:[StandingGrant]}` (grants: the project's active standing grants) |
+| `POST /api/grants/{grant_id}/revoke` | `{reason?}` | `{grant: StandingGrant}` (the project page's Revoke) |
 | `GET /api/artifacts/{artifact_id}/content` | | the latest version's bytes (sandboxed) |
 | `GET /api/events` | | SSE: `inbox` `{}`, `held` HeldAnswers, `project` `{project_id}`, `thread` `{thread_id}`; `: ping` every 20s |
 
 Types:
 
-- `Thread {thread_id, kind:"ask"|"message", title, preview, project:{id,name}|null, session:{id,title,state,node}|null, ask|null, held|null, last_at, unread, message_count, needs_reply}`
+- `Thread {thread_id, kind:"ask"|"message"|"attention", title, preview, project:{id,name}|null, session:{id,title,state,node}|null, ask|null, held|null, last_at, unread, message_count, needs_reply, attention?: AttentionItem (kind "attention": the session item)}`
 - `Msg {message_id, from:{kind:"owner"|"session",id,label}, text, at, reply_to, delivery:{state, summary}, ask_id?}`;
   delivery state is `stored|queued|delivered|read|replied|failed`; `ask_id`
   marks an ask's carrying message and its decision.
 - `ProjectCard {project_id, name, description, open_asks, waiting, leads:[SessionCard], page_updated_at|null, page_summary, last_activity_at}`
-- `SessionCard {id, title, state, node, is_lead, last_activity:{line,at}|null}`
+- `SessionCard {id, title, state, node, is_lead, last_activity:{line,at}|null, watching?:[string]}` (watching: the checks of the live monitors that wake the session, shown as a "watching N" badge; monitor sessions themselves are never cards, nor counted in live sessions or the status buckets)
 - Session `state`: `working`, `needs_you`, `idle`, `starting`, `ended`,
   `failed`, `unknown`, `archived`.
 

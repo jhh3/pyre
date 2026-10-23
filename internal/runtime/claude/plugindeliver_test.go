@@ -205,28 +205,36 @@ func TestFakePluginDeliveryWhileHumanAttachedAndTyping(t *testing.T) {
 
 func TestFakePluginBusyWithdrawsAndDrop(t *testing.T) {
 	t.Parallel()
-	f := newFakeEnv(t, func(o *Options) { o.DeliverTimeout = 1500 * time.Millisecond })
+	// The default DeliverTimeout: deliveries to the idle session wait for
+	// the module's next poll and its report, which a loaded runner slows.
+	// Only the attempt during the long turn is cut short (its context).
+	f := newFakeEnv(t, nil)
 	h := f.launch("run_plugbusy", pluginEnv(), nil)
 	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
 	waitPluginAlive(t, f, h)
 	ctx := context.Background()
 	// A long turn: the engine is told to wait, and a direct attempt is
 	// withdrawn unsent (never claimed while the turn runs).
-	if r := deliver(t, f.a, h, "msg_long", "FAKE_SLEEP_MS=4000 work", contracts.ModeQueue); r.State != contracts.DeliveryAccepted {
+	if r := deliver(t, f.a, h, "msg_long", "FAKE_SLEEP_MS=8000 work", contracts.ModeQueue); r.State != contracts.DeliveryAccepted {
 		t.Fatalf("long: %+v", r)
 	}
 	f.waitState(f.a, h, contracts.RunRunning, 3*time.Second)
 	if ok, why := f.a.InputReady(ctx, h, contracts.ModeQueue); ok || !strings.Contains(why, "plugin delivery waits") {
 		t.Fatalf("ready while busy: %v %s", ok, why)
 	}
-	r := deliver(t, f.a, h, "msg_wait", "after the turn", contracts.ModeQueue)
+	bctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond) // well inside the 8 s turn, even when its acceptance was slow
+	r, err := f.a.Deliver(bctx, h, contracts.DeliveryInput{MessageID: "msg_wait", AttemptID: "dlv_msg_wait", Mode: contracts.ModeQueue, Text: "after the turn"})
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r.State != contracts.DeliveryQueued || !strings.Contains(r.Detail, "withdrawn") {
 		t.Fatalf("busy: %+v", r)
 	}
 	if last := lastAttempts(h.StateDir)["msg_wait"]; last.State != jRejected {
 		t.Fatalf("journal %+v", last)
 	}
-	f.waitState(f.a, h, contracts.RunWaitingInput, 10*time.Second)
+	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
 	if r := deliver(t, f.a, h, "msg_wait", "after the turn", contracts.ModeQueue); r.State != contracts.DeliveryAccepted {
 		t.Fatalf("after turn: %+v", r)
 	}

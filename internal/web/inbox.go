@@ -156,6 +156,9 @@ func (s *Server) inboxThreads(sn *snap, box string) []Thread {
 		}
 		keep(s.askThread(sn, a, msgs))
 	}
+	for _, t := range s.attentionThreads(sn) {
+		keep(t)
+	}
 	for key, msgs := range sn.mail.by {
 		if _, isAsk := sn.askThread[key]; isAsk || c.ValidID(key, c.PrefixAsk) {
 			continue // an ask's thread (an ask outside the window is not listed)
@@ -232,14 +235,18 @@ func (sn *snap) descendants(id string) map[string]bool {
 
 // resolved is one thread with its messages (oldest first).
 type resolved struct {
-	thread Thread
-	ask    *c.Ask
-	msgs   []c.MessageView
+	thread    Thread
+	ask       *c.Ask
+	attention *c.AttentionItem // a session item's thread (attention.go)
+	msgs      []c.MessageView
 }
 
 // resolveThread finds thread id: an ask's ("ask:<id>", an ask ID, or an
 // ask's ThreadID) or a mail thread, reading the thread's messages live.
 func (s *Server) resolveThread(ctx context.Context, sn *snap, id string) (*resolved, error) {
+	if c.ValidID(id, c.PrefixAttention) {
+		return s.resolveAttention(ctx, sn, id, true)
+	}
 	askID := ""
 	switch {
 	case strings.HasPrefix(id, "ask:"):
@@ -388,12 +395,16 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if rt.ask != nil {
+	switch {
+	case rt.attention != nil:
+		// Chat to the session, not a thread: it answers the item and the
+		// session's open asks (internal/hub/asks_chat.go).
+	case rt.ask != nil:
 		req.ThreadID = rt.ask.ThreadID
 		if req.InReplyTo == "" {
 			req.InReplyTo = rt.ask.MessageID
 		}
-	} else {
+	default:
 		req.ThreadID = id // a thread keyed by its first message gets that key
 	}
 	mv, err := s.api.SendMessage(ctx, req)
@@ -403,6 +414,11 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mail.apply(mv)
 	sn.mail.msgs[mv.Envelope.MessageID] = mv
+	if rt.attention != nil {
+		if err := s.read.markReply(mv.Envelope.MessageID, rt.thread.ThreadID, s.now()); err != nil {
+			s.logf("pyre web: saving reply marks: %v", err)
+		}
+	}
 	_ = s.read.mark(rt.thread.ThreadID, s.now())
 	s.bus.publish("inbox", struct{}{})
 	s.bus.publish("thread", map[string]string{"thread_id": rt.thread.ThreadID})
@@ -410,8 +426,12 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRead marks a thread read here and its attention items read at the
-// hub (so the TUI and phone agree).
+// hub (so the TUI and phone agree), and acknowledges the session messages
+// in it: opening a message is reading it (owner report 2026-10-19), so it
+// moves to Done. An ask's carrier closes with its ask instead.
 func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
+	var body archiveBody
+	_ = decodeBody(r, &body) // only operation_id; an empty body is fine
 	ctx, cancel := hubCtx(r)
 	defer cancel()
 	sn, err := s.loadSnap(ctx, need{mail: true, asks: true, attention: true})
@@ -425,13 +445,22 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	skip := ""
+	if rt.ask != nil {
+		skip = rt.ask.MessageID
+	}
+	if acked, err := s.ackSessionMail(ctx, sn, rt, skip, body.OperationID, "read in the web inbox"); err != nil {
+		s.logf("pyre web: acknowledging %s on read: %v", id, err)
+	} else if acked {
+		s.bus.publish("thread", map[string]string{"thread_id": rt.thread.ThreadID})
+	}
 	s.markRead(ctx, sn, rt)
 	s.bus.publish("inbox", struct{}{})
 	writeJSON(w, http.StatusOK, struct{}{})
 }
 
 // markRead marks thread rt read here and its open attention items read at
-// the hub.
+// the hub (a message's item handled).
 func (s *Server) markRead(ctx context.Context, sn *snap, rt *resolved) {
 	if err := s.read.mark(rt.thread.ThreadID, s.now()); err != nil {
 		s.logf("pyre web: saving read marks: %v", err)
@@ -445,22 +474,30 @@ func (s *Server) markRead(ctx context.Context, sn *snap, rt *resolved) {
 		if it.State != c.AttnOpen {
 			continue
 		}
-		hit := (it.Object.Kind == c.KindThread && it.Object.ID == rt.thread.ThreadID) || (it.Object.Kind == c.KindMessage && ids[it.Object.ID])
+		hit := (it.Object.Kind == c.KindThread && it.Object.ID == rt.thread.ThreadID) || (it.Object.Kind == c.KindMessage && ids[it.Object.ID]) ||
+			(rt.attention != nil && it.AttentionID == rt.attention.AttentionID)
 		if rt.ask != nil {
 			hit = hit || it.AttentionID == rt.ask.AttentionID || (it.Object.Kind == c.KindAsk && it.Object.ID == rt.ask.AskID)
 		}
 		if !hit {
 			continue
 		}
+		// Reading a message here (its pane shows the whole thread) is all it
+		// asks for: its item closes (owner report 2026-10-19: read message
+		// items stayed for days). Other items, and other clients, keep read.
+		state := c.AttnRead
+		if it.Kind == c.AttnMessage {
+			state = c.AttnHandled
+		}
 		if _, err := s.api.UpdateAttention(ctx, c.UpdateAttentionRequest{Mutation: c.Mutation{OperationID: opID("")},
-			AttentionID: it.AttentionID, State: c.AttnRead}); err != nil {
+			AttentionID: it.AttentionID, State: state}); err != nil {
 			s.logf("pyre web: marking %s read: %v", it.AttentionID, err)
 			continue
 		}
 		if !changed { // the snapshot's slice is the cache's: copy before editing
 			sn.attention = append([]c.AttentionItem(nil), sn.attention...)
 		}
-		sn.attention[i].State = c.AttnRead
+		sn.attention[i].State = state
 		changed = true
 	}
 	if changed {

@@ -8,8 +8,9 @@ never edits the user PATH unless -EditPath; never overwrites files it does not o
               [-AllowedSigners FILE] [-AllowUnsigned]
               [-Service none|node] [-Restart] [-NoActivate] [-NoPrune] [-EditPath]
               [node: -State DIR -Credential FILE -Name NAME -SshAlias A -MaxRuns N
-                     -DevMock -NoIntegrations -PyredArg ARG (repeatable)
+                     -DevMock -NoIntegrations -PyredArg A,B (array) -PyredArgsFile F -Permissions ask|bypass
                      -HubUrl URL -EnrollTicketFile FILE (or the ticket on stdin)]
+              [-WithTools [-ToolsZip FILE | -ToolsFrom DIR] [-ToolsAlongside]]
               [-Arch amd64|arm64] [-Root DIR] [-DryRun]
 
 The Windows counterpart of scripts/install/install.sh (docs/operations.md,
@@ -18,6 +19,7 @@ The Windows counterpart of scripts/install/install.sh (docs/operations.md,
   %LOCALAPPDATA%\Programs\Pyre\current  (directory junction -> <version>)
   %LOCALAPPDATA%\Programs\Pyre\.previous, .pyre-install
   %LOCALAPPDATA%\Programs\Pyre\<old version>  (junction -> current after pruning)
+  %LOCALAPPDATA%\Programs\Pyre\tools\outfit\bin\{outfit.exe,outfit-core.exe}  (-WithTools)
   %LOCALAPPDATA%\Pyre        node state (pyred default; -State overrides)
   %APPDATA%\Pyre             config: client.json, release-allowed-signers (pin), keys.toml
 There are no shims: -EditPath adds ...\Pyre\current\bin to the user PATH
@@ -60,8 +62,25 @@ Windows nodes (internal/cloud/startup.ps1) do this with a one-shot logon task
 "pyre-first-install" that runs this script as the dev user with
 -EnrollTicketFile and deletes the ticket file afterwards.
 
--PyredArg ARG adds ARG to the task's `pyred run` command line (e.g.
---trust-dir=DIR, --tool-path=DIR); never a secret.
+-PyredArg A,B adds A and B to the task's `pyred run` command line (e.g.
+--trust-dir=DIR, --tool-path=DIR); never a secret. -Permissions MODE is short
+for -PyredArg --permissions=MODE. With bypass (either way) install.ps1 also
+records in %USERPROFILE%\.claude\settings.json that the owner accepted
+Claude's bypass-permissions warning (skipDangerousModePermissionPrompt: true,
+merged into the existing settings; a file that is not a JSON object is left
+alone with a warning), so the node's first bypass launch does not fail.
+
+-WithTools installs the bundled Outfit for Windows from
+pyre-tools-<V>-windows-<arch>.zip (default: beside -Zip, checked against the
+same verified SHA256SUMS; -ToolsZip FILE; or an unpacked -ToolsFrom DIR) into
+%LOCALAPPDATA%\Programs\Pyre\tools\outfit\bin: outfit.exe and outfit-core.exe,
+the command the Outfit Claude/Codex plugin's MCP server and hooks run. Pyre
+sessions find it there without a PATH change (pyred adds the directory to
+their PATH); -EditPath also puts it on the user PATH. An outfit or
+outfit-core already on PATH is left alone and the bundled copy is skipped
+unless -ToolsAlongside (installed for Pyre, no PATH change). Hive and Rota are
+not bundled for Windows. Tools persist across upgrades; re-run with
+-WithTools to update them.
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 refused (a non-Pyre file is in the way,
 or the release signature/checksum did not verify).
@@ -91,6 +110,11 @@ param(
   [string]$EnrollTicketFile = "",
   [string[]]$PyredArg = @(),
   [string]$PyredArgsFile = "",
+  [ValidateSet("", "ask", "bypass")][string]$Permissions = "",
+  [switch]$WithTools,
+  [string]$ToolsZip = "",
+  [string]$ToolsFrom = "",
+  [switch]$ToolsAlongside,
   [ValidateSet("", "amd64", "arm64")][string]$Arch = "",
   [string]$Root = "",
   [switch]$DryRun
@@ -164,6 +188,25 @@ function Invoke-Native([string]$exe, [string[]]$argv, [string]$stdinFile = "", [
   $p.StandardInput.Close()
   $p.WaitForExit()
   return [pscustomobject]@{ Code = $p.ExitCode; Out = $outTask.Result; Err = $errTask.Result }
+}
+
+# Invoke-NativeFileStdin EXE ARGS STDINFILE TIMEOUTMS: like Invoke-Native, but
+# STDINFILE itself is the child's stdin (a file handle, not a pipe). Windows
+# OpenSSH's ssh-keygen never sees EOF on a redirected stdin pipe and hangs
+# (OpenSSH_for_Windows_9.5, Windows 11 26200); a file handle works.
+function Invoke-NativeFileStdin([string]$exe, [string[]]$argv, [string]$stdinFile, [int]$timeoutMs) {
+  $out = [System.IO.Path]::GetTempFileName(); $err = [System.IO.Path]::GetTempFileName()
+  try {
+    $p = Start-Process -FilePath $exe -ArgumentList (($argv | ForEach-Object { Quote-Arg $_ }) -join " ") `
+      -RedirectStandardInput $stdinFile -RedirectStandardOutput $out -RedirectStandardError $err -NoNewWindow -PassThru
+    $null = $p.Handle  # cache the handle now, or ExitCode reads as $null after exit
+    if (-not $p.WaitForExit($timeoutMs)) {
+      try { $p.Kill() } catch { }
+      return [pscustomobject]@{ Code = -1; Out = ""; Err = "$exe timed out after $($timeoutMs / 1000)s" }
+    }
+    $p.WaitForExit()
+    return [pscustomobject]@{ Code = $p.ExitCode; Out = [System.IO.File]::ReadAllText($out); Err = [System.IO.File]::ReadAllText($err) }
+  } finally { Remove-Item -LiteralPath $out, $err -ErrorAction SilentlyContinue }
 }
 
 # Set-PrivateAcl DIR: protected DACL, full control for the current user and
@@ -248,13 +291,90 @@ function Verify-Sums([string]$dir, [string]$sumsFile) {
   if ($n -eq 0) { Die "checksum file $sumsFile is empty" }
   return $n
 }
-# ssh-keygen with -Y support (OpenSSH >= 8.1), or "".
+# ssh-keygen on PATH, or "". Whether it supports -Y (OpenSSH >= 8.1) is learnt
+# from the verify call itself: a bare `ssh-keygen -Y` probe never exits on some
+# Windows OpenSSH builds (9.5 on Windows 11 26200, run over sshd).
 function Find-SshKeygen {
   $c = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
   if ($null -eq $c) { return "" }
-  $r = Invoke-Native $c.Source @("-Y")
-  if (($r.Out + $r.Err) -match 'option -- .?Y') { return "" }  # "unknown/illegal option -- Y"
   return $c.Source
+}
+
+# Bypass-Requested ARGS: the node runs Claude with --permissions bypass.
+function Bypass-Requested([string[]]$a) {
+  $prev = ""
+  foreach ($x in @($a)) {
+    if ($x -eq "--permissions=bypass" -or ($prev -eq "--permissions" -and $x -eq "bypass")) { return $true }
+    $prev = $x
+  }
+  return $false
+}
+# Accept-ClaudeBypass: pyred refuses a bypass Claude launch until the owner
+# accepted Claude's one-time warning (skipDangerousModePermissionPrompt in
+# %USERPROFILE%\.claude\settings.json). Bypass is the owner's standing choice
+# on his nodes, so asking for it records the acceptance: merged into the
+# existing settings, never replacing them.
+function Accept-ClaudeBypass {
+  $key = "skipDangerousModePermissionPrompt"
+  $shown = Join-Path $env:USERPROFILE ".claude\settings.json"
+  $f = Under-Root $shown
+  if ($DryRun) { Write-Output "[dry-run] set ${key}: true in $shown (merge)"; return }
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  if (-not (Test-Path -LiteralPath $f)) {
+    [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f))
+    [System.IO.File]::WriteAllText($f, "{`n  `"$key`": true`n}`n", $utf8)
+    Note "Claude bypass-permissions warning recorded as accepted: wrote $shown"
+    return
+  }
+  $raw = [System.IO.File]::ReadAllText($f)
+  $doc = $null
+  try { if ($raw.Trim() -eq "") { $doc = [pscustomobject]@{} } else { $doc = $raw | ConvertFrom-Json } } catch { $doc = $null }
+  if ($null -eq $doc -or -not ($doc -is [System.Management.Automation.PSCustomObject])) {
+    Warn "$shown is not a JSON object; left unchanged: add `"${key}`": true yourself (bypass launches fail until then)"
+    return
+  }
+  $cur = $doc.PSObject.Properties[$key]
+  # pyred wants a JSON boolean: a "true" string is not an acceptance.
+  if ($null -ne $cur -and $cur.Value -is [bool] -and $cur.Value) { Note "Claude bypass-permissions warning already accepted in $shown"; return }
+  if ($null -ne $cur) { $cur.Value = $true } else { $doc | Add-Member -NotePropertyName $key -NotePropertyValue $true }
+  $json = Settings-Json $raw $doc
+  if ($null -eq $json) {
+    Warn "$shown could not be rewritten safely on this PowerShell (arrays or empty objects would change); left unchanged: add `"${key}`": true yourself"
+    return
+  }
+  $tmp = "$f.pyre-$PID"
+  try {
+    [System.IO.File]::WriteAllText($tmp, $json, $utf8)
+    [System.IO.File]::Replace($tmp, $f, [NullString]::Value)  # keeps the file's ACL
+  } catch {
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    Warn "could not update ${shown}: $($_.Exception.Message); left unchanged: add `"${key}`": true yourself (bypass launches fail until then)"
+    return
+  }
+  Note "Claude bypass-permissions warning recorded as accepted in $shown ($key`: true, other settings kept)"
+}
+
+# Settings-Json RAW DOC: DOC (RAW parsed, one key added) as JSON, or $null
+# when the round trip would change anything but that key. Windows PowerShell
+# 5.1's ConvertTo-Json can turn arrays into {"value":[...],"Count":n} objects
+# and collapse empty containers; the result is parsed again and compared
+# structurally with the original, so a lossy rewrite is never written.
+function Settings-Json([string]$raw, $doc) {
+  $out = ($doc | ConvertTo-Json -Depth 100) + "`n"
+  try { $back = $out | ConvertFrom-Json; $orig = $raw | ConvertFrom-Json } catch { return $null }
+  if ($null -eq $orig) { $orig = [pscustomobject]@{} }
+  $orig.PSObject.Properties.Remove("skipDangerousModePermissionPrompt")  # the one key that may change
+  $a = ($orig | ConvertTo-Json -Depth 100 -Compress)
+  $back.PSObject.Properties.Remove("skipDangerousModePermissionPrompt")
+  $b = ($back | ConvertTo-Json -Depth 100 -Compress)
+  if ($a -ne $b) { return $null }
+  # Shapes the 5.1 serializer is known to mangle, checked on the text itself.
+  if ($out -match '"Count"\s*:\s*\d+' -and $raw -notmatch '"Count"') { return $null }
+  foreach ($ch in @('\[', '\{')) {
+    # Same number of arrays and objects (the added key adds neither).
+    if (([regex]::Matches($raw, $ch)).Count -ne ([regex]::Matches($out, $ch)).Count) { return $null }
+  }
+  return $out
 }
 
 # ---- paths ----
@@ -267,21 +387,22 @@ function Abs([string]$p) { if ($p -eq "") { return "" }; return $ExecutionContex
 $Zip = Abs $Zip; $From = Abs $From; $Sums = Abs $Sums; $Sig = Abs $Sig; $AllowedSigners = Abs $AllowedSigners
 $State = Abs $State; $Credential = Abs $Credential; $Root = Abs $Root
 $EnrollTicketFile = Abs $EnrollTicketFile
+$ToolsZip = Abs $ToolsZip; $ToolsFrom = Abs $ToolsFrom
+if ($ToolsZip -ne "" -and $ToolsFrom -ne "") { Die "-ToolsZip and -ToolsFrom are exclusive" 2 }
+if ($ToolsZip -ne "" -or $ToolsFrom -ne "") { $WithTools = $true }
 # -PyredArgsFile FILE: a JSON array of extra pyred run arguments (a string
 # array cannot be passed through `powershell -File`; used by cloud nodes).
 if ($PyredArgsFile -ne "") {
   if (-not (Test-Path -LiteralPath $PyredArgsFile -PathType Leaf)) { Die "-PyredArgsFile $PyredArgsFile not found" 2 }
   $PyredArg = @($PyredArg) + @((Get-Content -Raw -LiteralPath $PyredArgsFile | ConvertFrom-Json) | ForEach-Object { [string]$_ })
 }
-# The enrollment ticket is read before any child process runs; never echoed.
-$Ticket = ""
-if ($EnrollTicketFile -ne "") {
-  if (-not (Test-Path -LiteralPath $EnrollTicketFile -PathType Leaf)) { Die "-EnrollTicketFile $EnrollTicketFile not found" 2 }
-  $Ticket = [System.IO.File]::ReadAllText($EnrollTicketFile).Trim()
-} elseif ($Service -eq "node" -and [Console]::IsInputRedirected) {
-  $Ticket = [Console]::In.ReadToEnd().Trim()
-}
-if ($Ticket -ne "" -and $Service -ne "node") { Die "an enrollment ticket needs -Service node" 2 }
+if ($Permissions -ne "") { $PyredArg = @($PyredArg) + @("--permissions=$Permissions") }
+# `powershell -File` hands "-PyredArg A,B" over as the single string "A,B":
+# split a value whose comma-separated pieces are all flags back into them.
+$PyredArg = @($PyredArg | ForEach-Object {
+  $parts = @(([string]$_).Split(","))
+  if ($parts.Count -gt 1 -and @($parts | Where-Object { -not $_.StartsWith("--") }).Count -eq 0) { $parts } else { $_ }
+})
 $LocalAppData = $env:LOCALAPPDATA
 $AppData = $env:APPDATA
 if (-not $LocalAppData -or -not $AppData) { Die "LOCALAPPDATA/APPDATA are not set: run as the owning user in a normal Windows session" }
@@ -289,6 +410,18 @@ $Prefix = Join-Path $LocalAppData "Programs\Pyre"
 $ConfigDir = Join-Path $AppData "Pyre"
 $StateDefault = Join-Path $LocalAppData "Pyre"
 if ($State -eq "") { $State = $StateDefault }
+# The enrollment ticket is read before any child process runs; never echoed.
+# stdin is read only for a node that is not enrolled yet: an upgrade over ssh
+# has a redirected stdin that never reaches EOF, and ReadToEnd would hang.
+$Ticket = ""
+$Enrolled = ($Credential -ne "") -or (Test-Path -LiteralPath (Under-Root (Join-Path $State "node-credential.json"))) -or (Test-Path -LiteralPath (Under-Root (Join-Path $Prefix "node-credential.json")))
+if ($EnrollTicketFile -ne "") {
+  if (-not (Test-Path -LiteralPath $EnrollTicketFile -PathType Leaf)) { Die "-EnrollTicketFile $EnrollTicketFile not found" 2 }
+  $Ticket = [System.IO.File]::ReadAllText($EnrollTicketFile).Trim()
+} elseif ($Service -eq "node" -and -not $Enrolled -and [Console]::IsInputRedirected) {
+  $Ticket = [Console]::In.ReadToEnd().Trim()
+}
+if ($Ticket -ne "" -and $Service -ne "node") { Die "an enrollment ticket needs -Service node" 2 }
 $Pin = Join-Path $ConfigDir "release-allowed-signers"
 $CheckoutSigners = Join-Path $Here "..\..\packaging\release-allowed-signers"
 $CurBin = Join-Path $Prefix "current\bin"
@@ -336,15 +469,17 @@ try {
           Copy-Item -LiteralPath $Sig -Destination "$vs.sig"
           $kg = Find-SshKeygen
           $installed = Under-Root (Join-Path $CurBin "pyred.exe")
+          $r = $null
           if ($kg -ne "") {
-            $r = Invoke-Native $kg @("-Y", "verify", "-f", $Trust, "-I", $Namespace, "-n", $Namespace, "-s", "$vs.sig") $vs
+            $r = Invoke-NativeFileStdin $kg @("-Y", "verify", "-f", $Trust, "-I", $Namespace, "-n", $Namespace, "-s", "$vs.sig") $vs 60000
             $how = "ssh-keygen"
-          } elseif (Test-Path -LiteralPath $installed) {
+            # An ssh-keygen without -Y ("unknown/illegal option -- Y") cannot verify: fall back.
+            if ($r.Code -ne 0 -and ($r.Out + $r.Err) -match 'option -- .?Y') { $r = $null }
+          }
+          if ($null -eq $r -and (Test-Path -LiteralPath $installed)) {
             # The installed (previously trusted) pyred verifies; never the candidate's.
             $r = Invoke-Native $installed @("verify-release", "--allowed-signers", $Trust, "--sums", $vs, "--sig", "$vs.sig")
             $how = "installed pyred verify-release"
-          } else {
-            $r = $null
           }
           if ($null -eq $r) {
             if (-not $AllowUnsigned) { Refuse "cannot verify the release signature: no ssh-keygen with -Y (Windows OpenSSH >= 8.1: Settings > Optional features > OpenSSH Client) and no installed pyred.exe to verify with" }
@@ -410,6 +545,56 @@ try {
   $rootNote = ""
   if ($Root -ne "") { $rootNote = " (fake root $Root)" }
   Note "Pyre $Version for windows/$T_Arch -> $Prefix$rootNote"
+
+  # ---- bundled tools: locate and verify before anything is installed ----
+  $ToolsDir = ""
+  if ($WithTools) {
+    $tname = "pyre-tools-$Version-windows-$T_Arch"
+    if ($ToolsZip -eq "" -and $ToolsFrom -eq "") {
+      if ($Zip -ne "") {
+        $c = Join-Path (Split-Path -Parent $Zip) "$tname.zip"
+        if (Test-Path -LiteralPath $c -PathType Leaf) { $ToolsZip = $c }
+      } else {
+        foreach ($c in @((Join-Path (Split-Path -Parent $From) $tname), (Join-Path (Split-Path -Parent $From) "tools\$tname"))) {
+          if (Test-Path -LiteralPath $c -PathType Container) { $ToolsFrom = $c; break }
+        }
+      }
+    }
+    if ($ToolsZip -eq "" -and $ToolsFrom -eq "") { Die "-WithTools: no $tname.zip beside the zip (or $tname\ beside -From); pass -ToolsZip FILE or -ToolsFrom DIR" }
+    if ($ToolsZip -ne "") {
+      if (-not (Test-Path -LiteralPath $ToolsZip -PathType Leaf)) { Die "tools zip $ToolsZip not found" }
+      $tzName = Split-Path -Leaf $ToolsZip
+      if ($Zip -ne "" -and $Sums -ne "") {
+        $want = Sums-Lookup $Sums $tzName
+        if ($want -eq "") { Refuse "$tzName is not listed in $Sums" }
+        $got = Sha256 $ToolsZip
+        if ($got -ne $want) { Refuse "tools zip checksum mismatch (expected $want, got $got)" }
+        Note "tools zip checksum verified against SHA256SUMS"
+      } elseif ($Zip -ne "") {
+        Warn "tools zip provenance not verified (-AllowUnsigned)"
+      } else {
+        Note "-ToolsZip with -From: not verified (local build)"
+      }
+      if ($Work -eq "") {
+        $Work = Join-Path ([System.IO.Path]::GetTempPath()) ("pyre-install." + [guid]::NewGuid().ToString("N").Substring(0, 12))
+        [void](New-Item -ItemType Directory -Path $Work)
+      }
+      $tx = Join-Path $Work "tools"
+      Expand-Archive -LiteralPath $ToolsZip -DestinationPath $tx
+      $ttop = @(Get-ChildItem -LiteralPath $tx -Directory)
+      if ($ttop.Count -ne 1) { Die "tools zip must have exactly one top-level directory" }
+      $ToolsDir = $ttop[0].FullName
+    } else {
+      if (-not (Test-Path -LiteralPath $ToolsFrom -PathType Container)) { Die "-ToolsFrom $ToolsFrom is not a directory" }
+      $ToolsDir = (Resolve-Path -LiteralPath $ToolsFrom).Path
+      Note "-ToolsFrom ${ToolsDir}: a directory carries no release signature (local build)"
+    }
+    if (Test-Path -LiteralPath (Join-Path $ToolsDir "SHA256SUMS")) {
+      $n = Verify-Sums $ToolsDir (Join-Path $ToolsDir "SHA256SUMS")
+      Note "tools contents verified ($n files, $ToolsDir\SHA256SUMS)"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $ToolsDir "outfit\bin\outfit.exe") -PathType Leaf)) { Die "$ToolsDir has no outfit\bin\outfit.exe (a Windows tools bundle)" }
+  }
 
   # ---- refuse to clobber non-Pyre files ----
   $refused = $false
@@ -523,24 +708,81 @@ try {
     Note "staged only (-NoActivate); current stays $cv"
   }
 
+  # ---- bundled tools ----
+  # Outside the version directories (<prefix>\tools), so upgrades and pruning
+  # keep them. An existing outfit/outfit-core is never replaced.
+  $ToolsBin = Join-Path $Prefix "tools\outfit\bin"
+  $toolsOnPath = $false
+  if ($WithTools) {
+    $TDir = Join-Path $Prefix "tools"
+    $existing = ""
+    if ($Root -eq "") {
+      foreach ($n in @("outfit-core.exe", "outfit.exe")) {
+        $cmd = @(Get-Command $n -CommandType Application -ErrorAction SilentlyContinue) | Where-Object { -not $_.Source.StartsWith($TDir, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+        if ($null -ne $cmd) { $existing = $cmd.Source; break }
+      }
+    }
+    if ($existing -ne "" -and -not $ToolsAlongside) {
+      Note "outfit: existing install ($existing) left untouched and still used; bundled outfit not installed (-ToolsAlongside adds it for Pyre without a PATH change)"
+    } else {
+      $tstage = Join-Path (Under-Root $TDir) ".staging-outfit-$PID"
+      $tdest = Under-Root (Join-Path $TDir "outfit")
+      Act "install $TDir\outfit (outfit.exe, outfit-core.exe)" {
+        [void](New-Item -ItemType Directory -Force -Path (Under-Root $TDir))
+        if (Test-Path -LiteralPath $tstage) { Remove-Item -LiteralPath $tstage -Recurse -Force }
+        Copy-Item -LiteralPath (Join-Path $ToolsDir "outfit") -Destination $tstage -Recurse
+        $core = Join-Path $tstage "bin\outfit-core.exe"
+        if (-not (Test-Path -LiteralPath $core)) { Copy-Item -LiteralPath (Join-Path $tstage "bin\outfit.exe") -Destination $core }
+        if (Test-Path -LiteralPath $tdest) {
+          # Leftovers of an earlier update whose binaries were in use.
+          foreach ($left in @(Get-ChildItem -LiteralPath $tdest -Recurse -File -Force -Filter "*.old-*")) { Remove-Item -LiteralPath $left.FullName -Force -ErrorAction SilentlyContinue }
+          # A running outfit-core.exe (the plugin's MCP server in an open
+          # session) cannot be deleted, but it can be renamed aside.
+          foreach ($old in @(Get-ChildItem -LiteralPath $tdest -Recurse -File -Force)) {
+            try { Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop }
+            catch { Move-Item -LiteralPath $old.FullName -Destination ($old.FullName + ".old-$PID") -Force }
+          }
+          Copy-Item -Path (Join-Path $tstage "*") -Destination $tdest -Recurse -Force
+          Remove-Item -LiteralPath $tstage -Recurse -Force
+        } else {
+          [System.IO.Directory]::Move($tstage, $tdest)
+        }
+        $tv = "unknown"
+        if (Test-Path -LiteralPath (Join-Path $ToolsDir "VERSION")) { $tv = ([System.IO.File]::ReadAllText((Join-Path $ToolsDir "VERSION"))).Trim() }
+        [System.IO.File]::WriteAllText((Join-Path (Under-Root $TDir) ".pyre-tools"), "${Marker}: bundled tools (install.ps1 -WithTools), $tv`nDelete with scripts/install/uninstall.ps1.`n")
+      }
+      if ($existing -ne "") {
+        Note "outfit: installed $TDir\outfit for Pyre (its integration prefers it); $existing untouched, no PATH change"
+      } else {
+        $toolsOnPath = $true
+        Note "outfit: installed $ToolsBin (outfit.exe, outfit-core.exe); Pyre sessions find it without a PATH change"
+      }
+    }
+  }
+
   # ---- PATH ----
   $userPath = ""
   if ($Root -eq "") { $userPath = [string](Get-Item "HKCU:\Environment").GetValue("Path", "", "DoNotExpandEnvironmentNames") }
-  $onPath = @($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $CurBin }).Count -gt 0
-  if ($EditPath -and $Root -eq "") {
-    if ($onPath) { Note "$CurBin already on the user PATH" }
-    else {
-      $new = $CurBin
-      if ($userPath.Trim(';') -ne "") { $new = $userPath.TrimEnd(';') + ";" + $CurBin }
-      Act "add $CurBin to the user PATH (HKCU\Environment)" {
-        [Microsoft.Win32.Registry]::SetValue("HKEY_CURRENT_USER\Environment", "Path", $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-        # A no-op user-variable change broadcasts WM_SETTINGCHANGE for new shells.
-        [Environment]::SetEnvironmentVariable("PYRE_PATH_REFRESH", $null, "User")
+  $pathDirs = @($CurBin)
+  if ($toolsOnPath) { $pathDirs += $ToolsBin }
+  foreach ($pd in $pathDirs) {
+    $onPath = @($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $pd }).Count -gt 0
+    if ($EditPath -and $Root -eq "") {
+      if ($onPath) { Note "$pd already on the user PATH" }
+      else {
+        $new = $pd
+        if ($userPath.Trim(';') -ne "") { $new = $userPath.TrimEnd(';') + ";" + $pd }
+        Act "add $pd to the user PATH (HKCU\Environment)" {
+          [Microsoft.Win32.Registry]::SetValue("HKEY_CURRENT_USER\Environment", "Path", $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+          # A no-op user-variable change broadcasts WM_SETTINGCHANGE for new shells.
+          [Environment]::SetEnvironmentVariable("PYRE_PATH_REFRESH", $null, "User")
+        }
+        if (-not $DryRun) { $userPath = $new }
+        Note "added $pd to the user PATH (new shells pick it up; uninstall.ps1 removes it)"
       }
-      Note "added $CurBin to the user PATH (new shells pick it up; uninstall.ps1 removes it)"
+    } elseif (-not $onPath -and $Root -eq "") {
+      Note "$pd is not on the user PATH. Add it yourself, or re-run with -EditPath"
     }
-  } elseif (-not $onPath -and $Root -eq "") {
-    Note "$CurBin is not on the user PATH. Add it yourself, or re-run with -EditPath"
   }
 
   # ---- harness prerequisites (warn only) ----
@@ -616,6 +858,7 @@ try {
   if ($DevMock) { $runArgs += "--dev-mock" }
   if ($NoIntegrations) { $runArgs += "--no-integrations" }
   foreach ($a in $PyredArg) { if ($a -ne "") { $runArgs += $a } }
+  if (Bypass-Requested $PyredArg) { Accept-ClaudeBypass }
   if ($Credential -eq "" -and -not (Test-Path -LiteralPath (Under-Root (Join-Path $State "node-credential.json")))) {
     Warn "no node credential yet: pyred will run standalone until you enroll it (pyre enroll-node, then pyred enroll)"
   }

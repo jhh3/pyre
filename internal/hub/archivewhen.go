@@ -46,6 +46,11 @@ type archiveWhenState struct {
 	wake      chan struct{}
 }
 
+// auditWhenDone marks (audit to_val) the stop and the archive this worker
+// performs, so readers (child reports: archivedBy, endedCleanly) tell them
+// from other stops and archives without parsing reasons.
+const auditWhenDone = "archive when done"
+
 func hasArchiveWhenDone(s contracts.Session) bool {
 	return slices.Contains(s.Tags, contracts.TagArchiveWhenDone)
 }
@@ -193,7 +198,8 @@ func (h *Hub) advanceArchive(ctx context.Context, sessionID string) error {
 			h.opt.StopTTL, contracts.ObjectRef{Kind: contracts.KindRun, ID: r.RunID}); err != nil {
 			return err
 		}
-		h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionStopped, Actor: pyreActor, NodeID: r.NodeID, SessionID: r.SessionID, RunID: r.RunID, Reason: reason})
+		h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionStopped, Actor: pyreActor, NodeID: r.NodeID, SessionID: r.SessionID, RunID: r.RunID, Reason: reason,
+			To: auditWhenDone})
 		return nil
 	})
 	if err == nil {
@@ -223,12 +229,12 @@ func (h *Hub) turnEnded(s contracts.Session, r contracts.Run) bool {
 // revokes its agent tokens.
 func (h *Hub) finishArchive(ctx context.Context, sessionID, why string) error {
 	done := false
+	node := ""
 	err := h.tx(ctx, func(tx *sql.Tx) error {
 		s, err := h.getSession(ctx, tx, sessionID)
 		if err != nil || s.Archived || !hasArchiveWhenDone(s) {
 			return err
 		}
-		node := ""
 		if r, err := h.getRun(ctx, tx, s.CurrentRunID); err == nil {
 			node = r.NodeID
 		}
@@ -241,7 +247,7 @@ func (h *Hub) finishArchive(ctx context.Context, sessionID, why string) error {
 			return err
 		}
 		h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionArchived, Actor: pyreActor, NodeID: node, SessionID: sessionID,
-			Reason: "archived when done: " + why})
+			Reason: "archived when done: " + why, To: auditWhenDone})
 		done = true
 		return nil
 	})
@@ -251,6 +257,10 @@ func (h *Hub) finishArchive(ctx context.Context, sessionID, why string) error {
 	h.awd.mu.Lock()
 	delete(h.awd.scheduled, sessionID)
 	h.awd.mu.Unlock()
+	h.requestCleanup(node, []string{sessionID}) // W-lifecycle: its processes and clean worktrees
+	if root := h.cascadeRootOf(ctx, sessionID); root != "" {
+		h.cascadeArchive(ctx, sessionID, root) // archivecascade.go: its live descendants follow
+	}
 	if h.cfg.Tokens != nil {
 		return h.cfg.Tokens.RevokeSessionTokens(ctx, sessionID)
 	}

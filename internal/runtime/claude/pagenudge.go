@@ -26,7 +26,8 @@ import (
 // PageNudgeText is the Stop-hook block reason.
 const PageNudgeText = "You lead this project and did work this turn, but you have not updated its page (the owner's main view " +
 	"of the project in the web app) in 3 hours. Check it with mcp__pyre__get_project_page; if it is missing or stale, " +
-	"rewrite it with mcp__pyre__update_project_page (goal, current status, results with links, open decisions, what's next). " +
+	"rewrite it with mcp__pyre__update_project_page (goal, current status, results with links, open decisions, what's next) and set its status card " +
+	"(status: progress, phase, in_flight, ready_for_owner, shipped, blocked). " +
 	"If it is current, just end your turn."
 
 // evPageNudged records that the Stop hook blocked a stop with PageNudgeText.

@@ -239,6 +239,13 @@ func (h *Hub) mergeAccounts(ctx context.Context, fromID, intoID, reason string) 
 		if into.Plan == "" {
 			into.Plan = from.Plan
 		}
+		if from.Reserve() && !into.Reserve() {
+			// The owner put this person's account in reserve: the
+			// survivor stays there.
+			into.Tier = contracts.TierReserve
+			h.auditTx(ctx, tx, auditRec{Action: contracts.AuditAccountTierChanged, Automatic: true, AccountID: intoID,
+				From: string(contracts.TierNormal), To: string(contracts.TierReserve), Reason: "folded from " + fromID + " (reserve)"})
+		}
 		// PerMachineIndependent stays the survivor's: a token needs no fleet
 		// lease anyway, and a rota login behind it keeps its exclusivity.
 		if err := h.putAccountTx(ctx, tx, into); err != nil { // account.changed

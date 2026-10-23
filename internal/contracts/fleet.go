@@ -48,6 +48,24 @@ type HarnessInfo struct {
 	// never a credential. Nil when there is none or it is unreadable.
 	// Clients match it to an account (rota_ref = email, or provider_ref).
 	Login *HarnessLogin `json:"login,omitempty"`
+	// Models and Efforts (additive) list the models and reasoning efforts
+	// the harness offers on this node, for start forms (pyre start --model
+	// / --effort). Empty when unknown; free text is always allowed.
+	Models  []ModelChoice `json:"models,omitempty"`
+	Efforts []string      `json:"efforts,omitempty"`
+	// Usage (additive) is the own login's subscription usage as the
+	// harness itself reports it, for a harness whose login Pyre does not
+	// manage (agy: `agy -p /usage`). Percentages and resets only; nil when
+	// not read.
+	Usage *HarnessUsage `json:"usage,omitempty"`
+}
+
+// HarnessUsage is a reading of a machine's own harness login: the usage
+// windows ("five_hour", "seven_day") and when they were read.
+type HarnessUsage struct {
+	Windows    []UsageWindow `json:"windows"`
+	ObservedAt time.Time     `json:"observed_at"`
+	Source     string        `json:"source,omitempty"` // e.g. "agy:/usage"
 }
 
 // HarnessLogin is the nonsecret identity of a machine's own harness login.

@@ -3,10 +3,17 @@
 // keyboard cursor. A tiny external store (no extra dependency).
 import { useSyncExternalStore } from 'react';
 import { local } from './local';
-import type { AnswerMode } from './types';
+import type { AnswerMode, Thread } from './types';
 import type { Filter } from '@/hooks/route';
 
-export type Answering = { phase: 'sending' | 'error'; option_id: string; mode: AnswerMode; op: string; message?: string };
+export type Answering = {
+  phase: 'sending' | 'error';
+  option_id: string;
+  items?: Record<string, string>; // batched asks: the option per item
+  mode: AnswerMode;
+  op: string;
+  message?: string;
+};
 export type PendingReply = { key: string; text: string; at: string; phase: 'sending' | 'error'; message?: string };
 
 export type UI = {
@@ -22,6 +29,7 @@ export type UI = {
   box: 'open' | 'done'; // the list the thread view sits beside
   filter: Filter;
   showInactive: boolean; // list projects with no live sessions and no open asks
+  dismissing: Thread | null; // the open ask waiting on "Dismiss?" confirmation (DismissDialog)
 };
 
 let state: UI = {
@@ -37,6 +45,7 @@ let state: UI = {
   box: 'open',
   filter: {},
   showInactive: local.get('showInactive', '') === '1',
+  dismissing: null,
 };
 const listeners = new Set<() => void>();
 

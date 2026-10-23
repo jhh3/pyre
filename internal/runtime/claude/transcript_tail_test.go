@@ -388,3 +388,24 @@ func TestTailReadConcurrent(t *testing.T) {
 	<-done
 	assertSameReads(t, &c, p)
 }
+
+// Prompts nobody typed read as "system", never "user" (the hub reads a
+// "user" entry as the owner answering: internal/hub/asks_chat.go).
+func TestTranscriptEntryOriginNotTyped(t *testing.T) {
+	for line, want := range map[string]string{
+		`{"type":"user","timestamp":"2026-10-19T17:00:00Z","origin":{"kind":"human"},"message":{"role":"user","content":"ship it"}}`:                                 "user",
+		`{"type":"user","timestamp":"2026-10-19T17:00:00Z","message":{"role":"user","content":"ship it"}}`:                                                           "user",
+		`{"type":"user","timestamp":"2026-10-19T17:00:00Z","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification>x"}}`:        "system",
+		`{"type":"user","timestamp":"2026-10-19T17:00:00Z","origin":{"kind":"plugin","name":"x"},"message":{"role":"user","content":"The x plugin sent a message"}}`: "system",
+		`{"type":"user","timestamp":"2026-10-19T17:00:00Z","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued"}}`:           "system",
+		`{"type":"user","timestamp":"2026-10-19T17:00:00Z","origin":"odd","message":{"role":"user","content":"ship it"}}`:                                            "user",
+	} {
+		var r transcriptRecord
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("%s: %v", line, err)
+		}
+		if e, ok := transcriptEntry("run_synth", r, 1); !ok || e.Kind != want {
+			t.Errorf("%s: kind %q, want %q", line, e.Kind, want)
+		}
+	}
+}

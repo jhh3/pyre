@@ -159,16 +159,28 @@ func TestMCPArchiveSession(t *testing.T) {
 	if out, isErr = cl.tool("archive_session", map[string]any{"session": "ses_synth-fbx", "force": true}); !isErr {
 		t.Fatalf("force must not be an MCP argument: %s", out)
 	}
+	// An agent archiving a live session it did not start: filed for the
+	// owner's approval, a result (not a tool error) that says so.
+	agent := c.Principal{Kind: c.PrincipalSession, ID: "ses_synth-a"}
+	ab := mock.New(mock.Options{Clock: mock.NewOffsetClock(mock.FixtureEpoch), DefaultPrincipal: &agent})
+	acl := startMCP(t, &Ops{API: ab, Self: Identity{SessionID: "ses_synth-a"}, PollInterval: 10 * time.Millisecond})
+	acl.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "test", "version": "0"}})
+	out, isErr = acl.tool("archive_session", map[string]any{"session": "ses_synth-b"})
+	res = ArchiveResult{}
+	if isErr || json.Unmarshal(out, &res) != nil || res.Archived || res.SessionID != "ses_synth-b" || !strings.Contains(res.Note, "needs the owner's approval") {
+		t.Fatalf("approval result: %v %s", isErr, out)
+	}
 }
 
-// An agent may archive its own session and the sessions it started, not an
-// unrelated one (W-childnotify).
+// An agent may archive its own session and the sessions it started; an
+// unrelated one is filed for the owner's approval (W-childnotify, owner
+// actions): exit 8, said plainly.
 func TestAgentArchiveScope(t *testing.T) {
 	h := newHub(t)
 	agentA := newEnv(t, h).with(EnvToken, "", EnvSessionToken, sessAToken, EnvSessionID, "ses_synth-a", EnvNodeID, "node_synth-mac")
 	r := run(t, agentA, nil, "sessions", "archive", "ses_synth-fbx", "--force")
-	if r.code == 0 || !strings.Contains(r.stderr, "archive only its own session") {
-		t.Fatalf("agent archived an unrelated session: %s", r)
+	if r.code != ExitPending || !strings.Contains(r.stderr, "archive ses_synth-fbx: needs the owner's approval") || strings.Contains(r.stderr, "approval_requested") {
+		t.Fatalf("agent archiving an unrelated session: %s", r)
 	}
 	r = run(t, agentA, nil, "--json", "start", "--harness", "claude", "--cwd", "/home/synth/child", "--title", "synthetic child")
 	expectCode(t, r, 0)

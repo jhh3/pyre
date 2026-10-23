@@ -10,6 +10,8 @@
 //	pyred supervise [--log FILE] [--hide-console] -- run <flags>
 //	pyred service install|uninstall|status|start|stop  (Windows logon task)
 //	pyred verify-release --allowed-signers F --sums SHA256SUMS --sig SIG [--file F]
+//	pyred sentinel run|status|test-alert [--config FILE] [--once] [--dry-run]
+//	pyred maintenance [NODE] [30m | clear] [--reason X]   (also --for 30m, --clear)
 //	pyred version [--json]
 //
 // Stopping pyred never stops runs: they live in Pyre-owned tmux servers
@@ -20,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	_ "time/tzdata" // Pacific times in notes on hosts without a tz database (Windows)
 
 	"github.com/jhh3/pyre/internal/buildinfo"
 	"github.com/jhh3/pyre/internal/contracts"
@@ -40,6 +43,10 @@ commands:
             (macOS/Linux: scripts/install/install.sh --service node)
   verify-release
             verify a release SHA256SUMS signature (installers without ssh-keygen -Y)
+  sentinel  hub-independent watchdog: run|status|test-alert (docs/operations.md "Sentinel")
+  maintenance
+            [NODE] 30m|clear [--reason X]: silence sentinels watching this machine
+            (or NODE, over the sentinel config's ssh); --for 30m / --clear also work
   version   print the version
 `)
 }
@@ -70,6 +77,10 @@ func main() {
 		err = cmdService(args)
 	case "verify-release":
 		err = cmdVerifyRelease(args)
+	case "sentinel":
+		err = cmdSentinel(args)
+	case "maintenance":
+		err = cmdMaintenance(args)
 	case "version", "--version", "-v":
 		if len(args) > 0 && args[0] == "--json" {
 			b, _ := json.Marshal(map[string]any{"version": buildinfo.Version, "protocol": contracts.ProtocolVersion, "min_protocol": contracts.MinProtocolVersion})

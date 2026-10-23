@@ -124,3 +124,51 @@ func TestReadableMarketplacesUntouched(t *testing.T) {
 		t.Fatalf("settings copy changed: %s", b)
 	}
 }
+
+// The probe reads the marketplace manifest Claude reads: a listable folder
+// whose .claude-plugin/marketplace.json cannot be read is unreadable; a
+// readable one (Full Disk Access granted) is kept.
+func TestMarketplaceProbeReadsManifest(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "synthetic-mkt")
+	writeIn(t, dir, ".claude-plugin/marketplace.json", `{"name":"synthetic"}`)
+	if err := readDirProbe(dir); err != nil {
+		t.Fatalf("readable marketplace: %v", err)
+	}
+	if err := readDirProbe(t.TempDir()); err != nil {
+		t.Fatalf("empty folder: %v", err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	manifest := filepath.Join(dir, ".claude-plugin", "marketplace.json")
+	if err := os.Chmod(manifest, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(manifest, 0o600)
+	if err := readDirProbe(dir); err == nil {
+		t.Fatal("unreadable manifest passed the probe")
+	}
+}
+
+// Concurrent launches share one probe: a second caller waits for the first
+// probe's answer instead of reading "still blocked" (which dropped a
+// readable marketplace from the profile during bursts).
+func TestConcurrentProbesShareTheAnswer(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "synthetic-mkt")
+	writeIn(t, dir, ".claude-plugin/marketplace.json", `{"name":"synthetic"}`)
+	release := make(chan struct{})
+	old := readDirProbe
+	readDirProbe = func(d string) error { <-release; return old(d) }
+	defer func() { readDirProbe = old }()
+	errs := make(chan error, 2)
+	go func() { errs <- probeReadable(dir) }()
+	time.Sleep(50 * time.Millisecond)
+	go func() { errs <- probeReadable(dir) }()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("probe %d: %v", i, err)
+		}
+	}
+}

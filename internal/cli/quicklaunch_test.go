@@ -34,7 +34,11 @@ func TestNewStartsInMainCheckoutByDefault(t *testing.T) {
 	r := run(t, e, nil, "--json", "new", "notes", "fix", "the", "share", "link")
 	expectCode(t, r, 0)
 	res := mustJSON[QuickLaunchResult](t, r)
-	if res.Session.Session.Harness != c.HarnessClaude || res.Session.NodeName != "synth-mac" || res.Session.Run.Cwd != "/Users/demo/code/notes-app" || res.Worktrees != nil {
+	// Both machines hold notes-app: the least loaded one wins (placement.go).
+	if res.Placement == nil || res.Placement.NodeName != res.Session.NodeName || res.Placement.Reason == "" {
+		t.Fatalf("placement: %+v (session on %s)", res.Placement, res.Session.NodeName)
+	}
+	if res.Session.Session.Harness != c.HarnessClaude || res.Session.NodeName != "demo-studio" || res.Session.Run.Cwd != "/Users/demo/code/notes-app" || res.Worktrees != nil {
 		t.Fatalf("default launch: harness=%s node=%s run=%+v wt=%+v", res.Session.Session.Harness, res.Session.NodeName, res.Session.Run, res.Worktrees)
 	}
 	if len(res.Repos) != 1 || res.Repos[0].Name != "notes-app" {
@@ -64,11 +68,12 @@ func TestNewMachineChoice(t *testing.T) {
 	if res.Session.NodeName != "synth-linux" || res.Session.Run.Cwd != "/home/demo/src/atlas" {
 		t.Fatalf("@machine: %s %s", res.Session.NodeName, res.Session.Run.Cwd)
 	}
-	// Without @machine, the machine it was used on most recently wins.
+	// Without @machine, the least loaded machine holding it wins; the run
+	// still starting on synth-linux counts as load there (placement.go).
 	r = run(t, e, nil, "--json", "new", "atlas", "shell")
 	expectCode(t, r, 0)
-	if res = mustJSON[QuickLaunchResult](t, r); res.Session.NodeName != "synth-linux" {
-		t.Fatalf("most recently used machine: %s", res.Session.NodeName)
+	if res = mustJSON[QuickLaunchResult](t, r); res.Session.NodeName != "demo-laptop" || res.Placement == nil || !strings.Contains(res.Placement.Reason, "synth-linux: ") || !strings.Contains(res.Placement.Reason, "starting") {
+		t.Fatalf("placed machine: %s %+v", res.Session.NodeName, res.Placement)
 	}
 	// A repository not on the named machine is cloned there first (a
 	// confirmation line on stderr), unless --no-clone.

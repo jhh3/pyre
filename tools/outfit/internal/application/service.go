@@ -653,16 +653,22 @@ func (service Service) SyncSkills(ctx context.Context) ([]skillmanager.Receipt, 
 	return service.Skills.Sync(ctx, host, active, packages, tools, allowed)
 }
 
-func (service Service) CreateBackup(ctx context.Context, path, passphrase string) error {
-	payload, err := backup.Build(ctx, service.State, service.Vault, service.Tools, service.Skills)
+// CreateBackup writes an encrypted backup. Connections whose vault secret is
+// missing are left out and returned so the caller can warn about them.
+func (service Service) CreateBackup(ctx context.Context, path, passphrase string, options backup.BuildOptions) ([]backup.SkippedConnection, error) {
+	payload, skipped, err := backup.Build(ctx, service.State, service.Vault, service.Tools, service.Skills, options)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := backup.Write(path, passphrase, payload); err != nil {
-		return err
+		return nil, err
 	}
-	_ = service.State.Audit(ctx, "", "backup.create", "admin", "ok", map[string]any{"connections": len(payload.Connections), "credentials": len(payload.Credentials)})
-	return nil
+	skippedNames := make([]string, 0, len(skipped))
+	for _, item := range skipped {
+		skippedNames = append(skippedNames, item.Name)
+	}
+	_ = service.State.Audit(ctx, "", "backup.create", "admin", "ok", map[string]any{"connections": len(payload.Connections), "credentials": len(payload.Credentials), "skipped": skippedNames})
+	return skipped, nil
 }
 
 func (service Service) RestoreBackup(ctx context.Context, path, passphrase string, replace bool, progress Progress) error {
@@ -725,31 +731,50 @@ func (service Service) RestoreBackupSelected(ctx context.Context, path, passphra
 	}
 	type priorConnection struct {
 		connection state.Connection
-		fields     map[string]string
+		tools      []state.Tool
 	}
 	prior := map[string]priorConnection{}
 	for _, item := range payload.Connections {
-		if existing, existingErr := service.State.Connection(ctx, item.Name); existingErr == nil && !replace {
-			return fmt.Errorf("connection %s already exists; inspect the backup and restore with replace enabled", existing.Name)
-		} else if existingErr == nil {
-			fields := map[string]string{}
-			if existing.CredentialRef != "" {
-				fields, err = service.Vault.Get(ctx, existing.CredentialRef)
-				if err != nil {
-					return fmt.Errorf("preflight local credential %s: %w", existing.Name, err)
-				}
-			}
-			for key, value := range existing.SafeIdentity {
-				if strings.HasPrefix(key, "setting.") {
-					fields[strings.TrimPrefix(key, "setting.")] = value
-				}
-			}
-			prior[item.Name] = priorConnection{connection: existing, fields: fields}
-		} else if existingErr != nil && !state.IsNotFound(existingErr) {
+		existing, existingErr := service.State.Connection(ctx, item.Name)
+		switch {
+		case existingErr != nil && !state.IsNotFound(existingErr):
 			return existingErr
+		case existingErr != nil || existing.Status == "removed":
+			// Absent, or a removed row that only keeps the name as history:
+			// setup replaces it, so it never blocks a restore.
+		case !replace:
+			return fmt.Errorf("connection %s already exists; inspect the backup and restore with replace enabled", existing.Name)
+		default:
+			tools, err := service.State.Tools(ctx, existing.ID)
+			if err != nil {
+				return err
+			}
+			prior[item.Name] = priorConnection{connection: existing, tools: tools}
+		}
+	}
+	// Probe the vault before anything else: restoring verifies accounts and
+	// may refresh OAuth grants at the provider, and a vault that then cannot
+	// store the result (a keychain refusing writes over ssh) would lose the
+	// refreshed token.
+	if len(payload.Credentials) > 0 {
+		probe, err := service.Vault.Put(ctx, map[string]string{"probe": "outfit-restore"})
+		if err != nil {
+			return fmt.Errorf("this machine's vault cannot store secrets, nothing was restored: %w", err)
+		}
+		if err := service.Vault.Delete(ctx, probe); err != nil {
+			return fmt.Errorf("this machine's vault cannot delete secrets, nothing was restored: %w", err)
 		}
 	}
 	for _, item := range payload.Packages {
+		trust := item.Trust
+		if trust == "builtin" {
+			// The target installs its own built-in packages; the backup's
+			// copy (possibly older) is neither validated nor installed.
+			if _, err := service.State.Package(ctx, item.Manifest.Key); err == nil {
+				continue
+			}
+			trust = "trusted"
+		}
 		if issues := kit.Validate(item.Manifest); len(issues) > 0 {
 			return fmt.Errorf("backup package %s is invalid: %s", item.Manifest.Key, strings.Join(issues, "; "))
 		}
@@ -758,13 +783,6 @@ func (service Service) RestoreBackupSelected(ctx context.Context, path, passphra
 			return err
 		}
 		digest := sha256.Sum256(raw)
-		trust := item.Trust
-		if trust == "builtin" {
-			if _, err := service.State.Package(ctx, item.Manifest.Key); err == nil {
-				continue
-			}
-			trust = "trusted"
-		}
 		if err := service.State.InstallPackage(ctx, kit.Loaded{Package: item.Manifest, Raw: raw, Digest: hex.EncodeToString(digest[:]), Source: "backup:" + item.Source}, trust); err != nil {
 			return err
 		}
@@ -777,28 +795,84 @@ func (service Service) RestoreBackupSelected(ctx context.Context, path, passphra
 	if err != nil {
 		return err
 	}
+	// Replaced connections keep their old secret until the restore commits,
+	// so putting one back is a state switch, not a new setup.
+	restoring := service
+	restoring.Connections.DeferSecretCleanup = true
+	// Putting things back must finish even after Ctrl-C or a timeout.
+	repairContext := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	}
+	// revert puts one connection back the way it was before this restore:
+	// the prior local connection (its credential and secret, unverified),
+	// else nothing at all (no removed row left behind to hold the name).
+	revert := func(name string) error {
+		rctx, cancel := repairContext()
+		defer cancel()
+		current, currentErr := service.State.Connection(rctx, name)
+		if currentErr != nil && !state.IsNotFound(currentErr) {
+			return currentErr
+		}
+		present := currentErr == nil && current.Status != "removed"
+		if old, ok := prior[name]; ok {
+			if !present {
+				return fmt.Errorf("connection %s disappeared during the restore", name)
+			}
+			if current.CredentialRef == old.connection.CredentialRef && current.CredentialID == old.connection.CredentialID && current.SelectedMode == old.connection.SelectedMode && current.CredentialMethod == old.connection.CredentialMethod {
+				return nil // setup failed before switching; the prior connection is intact
+			}
+			switched, err := service.State.RevertConnection(rctx, name, current.CredentialRef, fmt.Sprintf("clean_revert_%s_%d", old.connection.ID, time.Now().UnixNano()), old.connection, old.tools)
+			if err != nil {
+				return err
+			}
+			if !switched {
+				return fmt.Errorf("connection %s changed concurrently", name)
+			}
+			return nil
+		}
+		if present {
+			if err := service.Connections.Remove(rctx, name); err != nil {
+				return err
+			}
+		}
+		if currentErr == nil {
+			return service.State.PurgeRemovedConnection(rctx, name)
+		}
+		return nil
+	}
 	var completed []string
-	restoredCredentials := map[string]string{}
 	rollback := func(cause error) error {
 		var rollbackFailures []string
 		for index := len(completed) - 1; index >= 0; index-- {
-			name := completed[index]
-			if old, ok := prior[name]; ok {
-				if _, rollbackErr := service.ApplySetup(ctx, SetupRequest{Name: old.connection.Name, Connector: old.connection.ConnectorKey, Mode: old.connection.SelectedMode, CredentialMethod: old.connection.CredentialMethod, Fields: old.fields}, nil); rollbackErr != nil {
-					rollbackFailures = append(rollbackFailures, name+": "+rollbackErr.Error())
-				}
-			} else if rollbackErr := service.RemoveConnection(ctx, name); rollbackErr != nil {
-				rollbackFailures = append(rollbackFailures, name+": "+rollbackErr.Error())
+			if rollbackErr := revert(completed[index]); rollbackErr != nil {
+				rollbackFailures = append(rollbackFailures, completed[index]+": "+rollbackErr.Error())
 			}
 		}
+		rctx, cancel := repairContext()
+		defer cancel()
 		_ = service.Skills.ImportPreferences(oldPreferences)
-		_, _ = service.SyncSkills(ctx)
+		_ = service.Connections.SweepSecrets(rctx)
+		_, _ = service.SyncSkills(rctx)
 		if len(rollbackFailures) > 0 {
 			return fmt.Errorf("%w; restore rollback needs repair: %s", cause, strings.Join(rollbackFailures, "; "))
 		}
 		return cause
 	}
-	for _, item := range payload.Connections {
+	// Each connection restores on its own: one that fails (a CLI that does
+	// not install on this platform, an expired account) is put back and
+	// reported, and the rest still restore. A failure of the vault itself,
+	// or cancellation, stops the restore: the remaining connections are not
+	// attempted.
+	var failures []RestoreFailure
+	var notAttempted []string
+	restoredCredentials := map[string]string{}
+	for index, item := range payload.Connections {
+		if ctx.Err() != nil {
+			for _, rest := range payload.Connections[index:] {
+				notAttempted = append(notAttempted, rest.Name)
+			}
+			break
+		}
 		progress("connection", "Restoring "+item.Name)
 		fields := map[string]string{}
 		for key, value := range credentialFields[item.CredentialID] {
@@ -811,35 +885,113 @@ func (service Service) RestoreBackupSelected(ctx context.Context, path, passphra
 		}
 		var restored state.Connection
 		var err error
-		if localCredentialID := restoredCredentials[item.CredentialID]; localCredentialID != "" {
-			restored, err = service.ReuseCredential(ctx, localCredentialID, item.Name, item.SelectedMode, fields)
+		if localCredentialID := restoredCredentials[item.CredentialID]; localCredentialID != "" && prior[item.Name].connection.ID == "" {
+			restored, err = restoring.ReuseCredential(ctx, localCredentialID, item.Name, item.SelectedMode, fields)
 		} else {
-			restored, err = service.ApplySetup(ctx, SetupRequest{Name: item.Name, Connector: item.ConnectorKey, Mode: item.SelectedMode, CredentialMethod: item.CredentialMethod, Fields: fields}, progress)
-			if err == nil {
+			// A replaced connection that shared its credential in the
+			// backup is set up from the same fields (its own credential
+			// record), since reuse only attaches new connections.
+			restored, err = restoring.ApplySetup(ctx, SetupRequest{Name: item.Name, Connector: item.ConnectorKey, Mode: item.SelectedMode, CredentialMethod: item.CredentialMethod, Fields: fields}, progress)
+			if err == nil && restoredCredentials[item.CredentialID] == "" {
 				restoredCredentials[item.CredentialID] = restored.CredentialID
 			}
 		}
 		if err != nil {
-			return rollback(fmt.Errorf("restore %s: %w", item.Name, err))
+			failure := RestoreFailure{Name: item.Name, Err: err}
+			if revertErr := revert(item.Name); revertErr != nil {
+				failure.RevertErr = revertErr
+			}
+			progress("failed", item.Name+": "+err.Error())
+			failures = append(failures, failure)
+			if vault.IsWriteError(err) || ctx.Err() != nil {
+				for _, rest := range payload.Connections[index+1:] {
+					notAttempted = append(notAttempted, rest.Name)
+				}
+				break
+			}
+			continue
 		}
 		completed = append(completed, item.Name)
 	}
 	preferencesToImport := payload.Skills
-	if len(only) > 0 {
-		preferencesToImport = oldPreferences
-		for key, enabled := range payload.Skills {
+	if len(only) > 0 || len(failures) > 0 || len(notAttempted) > 0 {
+		left := map[string]bool{}
+		for _, failure := range failures {
+			left[failure.Name] = true
+		}
+		for _, name := range notAttempted {
+			left[name] = true
+		}
+		preferencesToImport = make(map[string]bool, len(oldPreferences)+len(payload.Skills))
+		for key, enabled := range oldPreferences {
 			preferencesToImport[key] = enabled
+		}
+		for key, enabled := range payload.Skills {
+			if connection, _, _ := strings.Cut(key, "|"); !left[connection] {
+				preferencesToImport[key] = enabled
+			}
 		}
 	}
 	if err := service.Skills.ImportPreferences(preferencesToImport); err != nil {
 		return rollback(err)
 	}
-	_, err = service.SyncSkills(ctx)
-	if err != nil {
+	finish, cancel := repairContext()
+	defer cancel()
+	if _, err := service.SyncSkills(finish); err != nil {
 		return rollback(err)
 	}
-	_ = service.State.Audit(ctx, "", "backup.restore", "admin", "ok", map[string]any{"connections": len(payload.Connections), "selective": len(only) > 0})
+	// Committed: now destroy the secrets the restore superseded (and those
+	// of connections put back).
+	_ = service.Connections.SweepSecrets(finish)
+	outcome := "ok"
+	if len(failures) > 0 || len(notAttempted) > 0 {
+		outcome = "partial"
+	}
+	failedNames := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		failedNames = append(failedNames, failure.Name)
+	}
+	_ = service.State.Audit(finish, "", "backup.restore", "admin", outcome, map[string]any{"connections": len(completed), "failed": failedNames, "notAttempted": notAttempted, "selective": len(only) > 0})
+	if len(failures) > 0 || len(notAttempted) > 0 {
+		return &RestoreIncompleteError{Restored: completed, Failures: failures, NotAttempted: notAttempted}
+	}
 	return nil
+}
+
+// RestoreFailure is one connection a restore could not bring over.
+// RevertErr is set when putting the connection back also failed.
+type RestoreFailure struct {
+	Name      string
+	Err       error
+	RevertErr error
+}
+
+// RestoreIncompleteError reports a restore in which some connections were
+// not restored: they failed (and were put back as they were) or, after a
+// vault failure or cancellation, were not attempted.
+type RestoreIncompleteError struct {
+	Restored     []string
+	Failures     []RestoreFailure
+	NotAttempted []string
+}
+
+func (e *RestoreIncompleteError) Error() string {
+	parts := make([]string, 0, len(e.Failures)+1)
+	for _, failure := range e.Failures {
+		part := failure.Name + ": " + failure.Err.Error()
+		if failure.RevertErr != nil {
+			part += " (putting it back also failed and needs repair: " + failure.RevertErr.Error() + ")"
+		}
+		parts = append(parts, part)
+	}
+	message := fmt.Sprintf("restored %d connection(s); %d failed", len(e.Restored), len(e.Failures))
+	if len(parts) > 0 {
+		message += ": " + strings.Join(parts, "; ")
+	}
+	if len(e.NotAttempted) > 0 {
+		message += fmt.Sprintf("; not attempted (restore stopped): %s", strings.Join(e.NotAttempted, ", "))
+	}
+	return message
 }
 
 func (service Service) InstallTool(ctx context.Context, id string) (toolchain.Receipt, error) {

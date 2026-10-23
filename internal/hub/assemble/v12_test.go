@@ -230,9 +230,23 @@ func TestConnectionInvokeRoutedByHub(t *testing.T) {
 	invoke := func() (c.NodeActionResult, error) {
 		return st.Hub.InvokeNodeAction(ctx, c.NodeActionRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)}, Action: c.ActionConnInvoke, Params: params, TimeoutSeconds: 5})
 	}
+	// Owner default: a connection verified on the session's node needs no grant.
 	report("verified")
+	if res, err := invoke(); err != nil || res.Outcome != c.OutcomeSucceeded || gotNode != n.nodeID {
+		t.Fatalf("verified, no grant: %+v %v", res, err)
+	}
+	// Only the named session or the owner may invoke: a node credential (or
+	// another session) naming this session is refused.
+	for _, p := range []c.Principal{{Kind: c.PrincipalNode, ID: n.nodeID}, {Kind: c.PrincipalSession, ID: c.NewID(c.PrefixSession)}} {
+		_, err := st.Hub.InvokeNodeAction(c.WithPrincipal(context.Background(), p), c.NodeActionRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)}, Action: c.ActionConnInvoke, Params: params, TimeoutSeconds: 5})
+		if !c.IsCode(err, c.ErrForbidden) {
+			t.Fatalf("%s invoking for %s: %v", p.Kind, sid, err)
+		}
+	}
+	// Nothing verified and no grant: refused.
+	report("unknown")
 	if _, err := invoke(); !c.IsCode(err, c.ErrForbidden) {
-		t.Fatalf("no grant: %v", err)
+		t.Fatalf("unverified, no grant: %v", err)
 	}
 	if _, err := st.Connections.Grant(context.Background(), ownerP, connGrantReq(conn, n.nodeID, sid)); err != nil {
 		t.Fatal(err)

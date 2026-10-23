@@ -64,6 +64,7 @@ type countRecord struct {
 	IsAPIError       bool   `json:"isApiErrorMessage,omitempty"`
 	DurationMs       int64  `json:"durationMs,omitempty"`
 	SourceToolAssist string `json:"sourceToolAssistantUUID,omitempty"`
+	IsCompactSummary bool   `json:"isCompactSummary,omitempty"`
 }
 
 func countsAsRecord(line []byte) bool {

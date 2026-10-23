@@ -85,7 +85,7 @@ func (a *Adapter) Harness() contracts.Harness { return contracts.HarnessShell }
 func Capabilities() []string {
 	return []string{
 		contracts.CapAttachNative, contracts.CapAttachReadOnly,
-		contracts.CapStop, contracts.CapScreen,
+		contracts.CapStop, contracts.CapScreen, contracts.CapLaunchEnvFile,
 	}
 }
 

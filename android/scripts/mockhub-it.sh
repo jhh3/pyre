@@ -3,14 +3,14 @@
 # MOCK BACKEND — results are mock evidence only, never runtime evidence.
 #
 #   bash android/scripts/mockhub-it.sh            (from anywhere)
-# Env: GO (default ~/sdk/go1.27.1/bin/go or go), PORT (default 7788).
+# Env: GO (default ~/sdk/go1.27.3/bin/go or go), PORT (default 7788).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ANDROID="$(dirname "$HERE")"
 REPO="$(dirname "$ANDROID")"
 PORT="${PORT:-7788}"
-GO="${GO:-$HOME/sdk/go1.27.1/bin/go}"
+GO="${GO:-$HOME/sdk/go1.27.3/bin/go}"
 [ -x "$GO" ] || GO=go
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pyre-mockhub-it.XXXXXX")"
 LOG="$WORK/mockhub.log"

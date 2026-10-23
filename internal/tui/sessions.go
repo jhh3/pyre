@@ -290,7 +290,7 @@ func (m *Model) keySessions(k tea.KeyPressMsg) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return m.dismissMessage(s)
+		return m.dismissForYou(s) // attention_flag.go
 	case "M":
 		if !ok {
 			return nil

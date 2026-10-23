@@ -400,7 +400,7 @@ func TestOpenAITokenRegistersButIsNotSelected(t *testing.T) {
 	if TokenEnvVar(contracts.HarnessCodex) != "CODEX_ACCESS_TOKEN" {
 		t.Fatal("codex token variable")
 	}
-	_, err := e.svc.ResolveFor(ctx, ResolveRequest{Harness: contracts.HarnessCodex, Policy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: "acct_cx1"}, RunID: "run_x", SessionID: "ses_x"})
+	_, err := e.svc.ResolveFor(ctx, ResolveRequest{Harness: contracts.HarnessCodex, Policy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: "acct_cx1", Strict: true}, RunID: "run_x", SessionID: "ses_x"})
 	if err == nil || !strings.Contains(err.Error(), "not verified yet") {
 		t.Fatalf("codex token selected: %v", err)
 	}

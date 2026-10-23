@@ -195,6 +195,17 @@ func validateMode(connector string, mode Mode, methods map[string]CredentialMeth
 	if len(mode.Executor.Headers) > 0 && mode.Executor.Kind != "http" {
 		issues = append(issues, prefix+": executor headers are supported only for http modes")
 	}
+	if (mode.Executor.ErrorField != "" || len(mode.Executor.ErrorStatus) > 0) && mode.Executor.Kind != "cli" {
+		issues = append(issues, prefix+": executor errorField and errorStatus are supported only for cli modes; HTTP operations declare errorField")
+	}
+	if len(mode.Executor.ErrorStatus) > 0 && mode.Executor.ErrorField == "" {
+		issues = append(issues, prefix+": executor errorStatus needs an errorField")
+	}
+	for key, status := range mode.Executor.ErrorStatus {
+		if strings.TrimSpace(key) == "" || status < 400 || status > 599 {
+			issues = append(issues, prefix+": executor errorStatus "+key+" must map to a 4xx or 5xx status")
+		}
+	}
 	for name, value := range mode.Executor.Headers {
 		if !headerNamePattern.MatchString(name) || strings.Contains(value, "{{") || strings.ContainsAny(value, "\r\n") {
 			issues = append(issues, prefix+": executor header "+name+" needs a token name and a fixed single-line value")
@@ -358,11 +369,17 @@ func validateHTTPArguments(prefix string, operation Operation) []string {
 	if contract.PathArgument != "" && strings.ContainsAny(contract.Path, "?#") {
 		issues = append(issues, prefix+": a raw-path operation needs a plain path prefix")
 	}
+	// A fixed method is the author's choice (OpenAPI imports declare HEAD and
+	// OPTIONS); only an argument-chosen method is held to the allow-list.
 	methods := []string{strings.ToUpper(contract.Method)}
 	if contract.MethodArgument != "" {
 		methods = nil
 		for _, method := range contract.Methods {
-			methods = append(methods, strings.ToUpper(method))
+			method = strings.ToUpper(method)
+			methods = append(methods, method)
+			if !contains([]string{"GET", "POST", "PUT", "PATCH", "DELETE"}, method) {
+				issues = append(issues, prefix+": unsupported argument-chosen HTTP method "+method)
+			}
 		}
 		if len(methods) == 0 {
 			issues = append(issues, prefix+": methodArgument needs a non-empty methods list")
@@ -370,12 +387,12 @@ func validateHTTPArguments(prefix string, operation Operation) []string {
 	} else if len(contract.Methods) > 0 {
 		issues = append(issues, prefix+": methods need a methodArgument")
 	}
-	for _, method := range methods {
-		if !contains([]string{"GET", "POST", "PUT", "PATCH", "DELETE"}, method) {
-			issues = append(issues, prefix+": unsupported HTTP method "+method)
-		}
-		if operation.Class == "read" && method != "GET" && (contract.PathArgument != "" || contract.MethodArgument != "") {
-			issues = append(issues, prefix+": a read operation with an argument-chosen path or method must use GET")
+	if operation.Class == "read" && (contract.PathArgument != "" || contract.MethodArgument != "") {
+		for _, method := range methods {
+			if method != "GET" {
+				issues = append(issues, prefix+": a read operation with an argument-chosen path or method must use GET")
+				break
+			}
 		}
 	}
 	return issues
@@ -539,6 +556,14 @@ func validateBinding(prefix, executorKind string, binding CredentialBinding) []s
 	}
 	if binding.Target == "temporary-file" && strings.TrimSpace(binding.Path) == "" {
 		issues = append(issues, prefix+": temporary-file binding needs a path template")
+	}
+	if binding.WhenArgument != "" && binding.UnlessArgument != "" {
+		issues = append(issues, prefix+": credential binding may declare whenArgument or unlessArgument, not both")
+	}
+	for _, argument := range []string{binding.WhenArgument, binding.UnlessArgument} {
+		if argument != "" && !namePattern.MatchString(argument) {
+			issues = append(issues, prefix+": credential binding condition "+argument+" must be a lowercase argument name")
+		}
 	}
 	if executorKind != "" {
 		allowed := map[string][]string{

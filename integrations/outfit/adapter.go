@@ -25,6 +25,7 @@ import (
 	"github.com/jhh3/pyre/integrations/bundled"
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/credentials"
+	"github.com/jhh3/pyre/internal/winenv"
 )
 
 // Options configure an Adapter. Zero values are production defaults.
@@ -117,13 +118,20 @@ func (a *Adapter) binary() (string, error) {
 	return path, nil
 }
 
+// systemEnv returns the Windows system variables (APPDATA, LOCALAPPDATA,
+// USERPROFILE, SystemRoot, TEMP, PATHEXT, ...); nil elsewhere. A variable so
+// tests can exercise the Windows set on any platform.
+var systemEnv = winenv.SystemEnv
+
 // childEnv is the minimal environment for Outfit. Outfit needs HOME/config
-// dirs, PATH for executor-custody CLIs (gh, gws), and the session bus for the
-// Linux keyring; it must not inherit Pyre session tokens or unrelated secrets.
+// dirs (on Windows %AppData% and the profile variables), PATH for
+// executor-custody CLIs (gh, gws), the session bus for the Linux keyring, and
+// its own OUTFIT_* settings (vault backend, home); it must not inherit Pyre
+// session tokens or unrelated secrets.
 func (a *Adapter) childEnv(extra ...string) []string {
 	keep := []string{"HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "LANG", "LC_ALL", "TZ", "SHELL",
 		"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
-		"DISPLAY", "WAYLAND_DISPLAY", "SSH_AUTH_SOCK", "OUTFIT_VAULT_BACKEND",
+		"DISPLAY", "WAYLAND_DISPLAY", "SSH_AUTH_SOCK",
 		// Outfit resolves harness skill roots from these, falling back to HOME.
 		"CODEX_HOME", "CLAUDE_CONFIG_DIR"}
 	var env []string
@@ -132,14 +140,23 @@ func (a *Adapter) childEnv(extra ...string) []string {
 			env = append(env, k+"="+v)
 		}
 	}
+	env = append(env, systemEnv()...)
+	for _, k := range outfitEnvForwarded {
+		if v, ok := os.LookupEnv(k); ok && !(k == "OUTFIT_HOME" && a.opt.Home != "") {
+			env = append(env, k+"="+v)
+		}
+	}
 	if a.opt.Home != "" {
 		env = append(env, "OUTFIT_HOME="+a.opt.Home)
-	} else if v, ok := os.LookupEnv("OUTFIT_HOME"); ok {
-		env = append(env, "OUTFIT_HOME="+v)
 	}
 	env = append(env, a.opt.ExtraEnv...)
 	return append(env, extra...)
 }
+
+// outfitEnvForwarded are the OUTFIT_* settings pyred passes on from its own
+// environment (an allowlist: a future secret-bearing OUTFIT_* variable is
+// never forwarded by accident).
+var outfitEnvForwarded = []string{"OUTFIT_HOME", "OUTFIT_VAULT_BACKEND"}
 
 type runResult struct {
 	stdout, stderr []byte

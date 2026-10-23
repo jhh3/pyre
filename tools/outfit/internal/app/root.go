@@ -62,7 +62,7 @@ func Execute(build BuildInfo) error {
 	}
 	root.Version = build.Version
 	root.SetVersionTemplate(fmt.Sprintf("outfit %s (%s, %s)\n", build.Version, build.Commit, build.Date))
-	root.AddCommand(versionCommand(build), setupCommand(), tuiCommand(), workspaceCommand(), workspaceLockCommand(), workspaceApplyCommand(), connectorCommand(), credentialCommand(), toolCommand(), skillCommand(), backupCommand(), listCommand(), searchCommand(), cacheCommand(), describeCommand(), explainCommand(), runCommand(false), runCommand(true), getCommand(), workflowCommand(), execCommand(), logCommand(), contextCommand(), sessionCommand(), profileCommand(), pluginCommand(), mcpCommand(), adminCommand(), doctorCommand(), kitCommand())
+	root.AddCommand(versionCommand(build), setupCommand(), tuiCommand(), workspaceCommand(), workspaceLockCommand(), workspaceApplyCommand(), connectorCommand(), credentialCommand(), toolCommand(), skillCommand(), backupCommand(), listCommand(), searchCommand(), cacheCommand(), describeCommand(), explainCommand(), runCommand(false), runCommand(true), getCommand(), workflowCommand(), execCommand(), logCommand(), contextCommand(), sessionCommand(), profileCommand(), pluginCommand(), mcpCommand(), adminCommand(), doctorCommand(), kitCommand(), vaultCommand())
 	if wantsDynamicConnectionCommands(root, os.Args[1:]) {
 		registerDynamicConnectionCommands(root)
 	}
@@ -760,19 +760,47 @@ func backupCommand() *cobra.Command {
 }
 
 func backupCreateCommand() *cobra.Command {
-	return &cobra.Command{Use: "create PATH", Short: "Encrypt connections, credentials, tool pins, and skill preferences into one portable file", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	var allowMissing, excludeOAuth bool
+	command := &cobra.Command{Use: "create PATH", Short: "Encrypt connections, credentials, tool pins, and skill preferences into one portable file", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		passphrase, err := backupPassphrase(cmd, true)
 		if err != nil {
 			return err
 		}
 		return withBaseEnvironment(cmd, func(env *environment) error {
-			if err := applicationFor(env).CreateBackup(cmd.Context(), args[0], passphrase); err != nil {
+			skipped, err := applicationFor(env).CreateBackup(cmd.Context(), args[0], passphrase, backup.BuildOptions{ExcludeOAuth: excludeOAuth})
+			if err != nil {
 				return err
 			}
+			var missing, oauth []string
+			for _, item := range skipped {
+				if item.Kind == backup.SkipOAuth {
+					oauth = append(oauth, item.Name)
+				} else {
+					missing = append(missing, item.Name)
+				}
+			}
+			if len(oauth) > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "left out (OAuth, --exclude-oauth): %s\n", strings.Join(oauth, ", "))
+			}
+			if len(missing) > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: %d connection(s) left out because their secret is missing from the vault; reconnect them with `outfit credential replace NAME`:\n", len(missing))
+				for _, item := range skipped {
+					if item.Kind != backup.SkipOAuth {
+						fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", item.Name, item.Reason)
+					}
+				}
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "encrypted outfit backup written to %s\n", args[0])
+			if len(missing) > 0 && !allowMissing {
+				return fmt.Errorf("backup is incomplete: not copied (secret missing): %s; pass --allow-missing to accept", strings.Join(missing, ", "))
+			}
 			return nil
 		})
 	}}
+	addPassphraseFileFlag(command)
+	command.Flags().BoolVar(&allowMissing, "allow-missing", false, "succeed even when connections are left out because their secret is missing")
+	command.Flags().BoolVar(&excludeOAuth, "exclude-oauth", false, "leave out connections whose credential is an Outfit-managed OAuth grant (copies of one refresh token invalidate each other)")
+	return command
 }
 
 func backupInspectCommand() *cobra.Command {
@@ -801,6 +829,10 @@ func backupRestoreCommand() *cobra.Command {
 				selected = strings.Split(only, ",")
 			}
 			if err := applicationFor(env).RestoreBackupSelected(cmd.Context(), args[0], passphrase, replace, selected, progress); err != nil {
+				var incomplete *application.RestoreIncompleteError
+				if errors.As(err, &incomplete) && len(incomplete.Restored) > 0 {
+					fmt.Fprintf(cmd.OutOrStdout(), "restored: %s\n", strings.Join(incomplete.Restored, ", "))
+				}
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "backup restored; credentials were reverified and connector skills synchronized")
@@ -809,10 +841,30 @@ func backupRestoreCommand() *cobra.Command {
 	}}
 	command.Flags().BoolVar(&replace, "replace", false, "replace matching local connections after backup preflight")
 	command.Flags().StringVar(&only, "only", "", "restore only these comma-separated connection names")
+	addPassphraseFileFlag(command)
 	return command
 }
 
+func addPassphraseFileFlag(command *cobra.Command) {
+	command.Flags().String("passphrase-file", "", "read the backup passphrase from this file (first line) instead of OUTFIT_BACKUP_PASSPHRASE or a prompt")
+}
+
+// backupPassphrase reads the passphrase from --passphrase-file, then
+// OUTFIT_BACKUP_PASSPHRASE, then an interactive prompt. It never takes the
+// passphrase itself as an argument, which would expose it in process lists.
 func backupPassphrase(cmd *cobra.Command, confirm bool) (string, error) {
+	if path, _ := cmd.Flags().GetString("passphrase-file"); path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read passphrase file: %w", err)
+		}
+		passphrase, _, _ := strings.Cut(string(raw), "\n")
+		passphrase = strings.TrimSuffix(passphrase, "\r")
+		if passphrase == "" {
+			return "", errors.New("passphrase file is empty")
+		}
+		return passphrase, nil
+	}
 	if passphrase := os.Getenv("OUTFIT_BACKUP_PASSPHRASE"); passphrase != "" {
 		return passphrase, nil
 	}
@@ -2828,6 +2880,11 @@ func doctorCommand() *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "WARN secret cleanup: %v\n", err)
 				}
 			}
+			backend, source := vault.BackendSource(env.state.Paths())
+			results = append(results, map[string]any{"component": "vault", "status": "ok", "detail": backend + " (" + source + ")"})
+			if !jsonOutput && !agentio.Enabled(cmd.OutOrStdout()) {
+				fmt.Fprintf(cmd.OutOrStdout(), "vault\t%s (%s)\n", backend, source)
+			}
 			connections, _ := env.state.Connections(cmd.Context())
 			for _, item := range connections {
 				if !env.service.Allows(item.Name) {
@@ -2838,6 +2895,8 @@ func doctorCommand() *cobra.Command {
 				status := "ok"
 				if !ok || item.Status != "active" {
 					status = "repair required"
+				} else if err := credentialHealth(cmd.Context(), env.vault, item); err != nil {
+					status = err.Error()
 				} else if mode.Executor.Kind == "cli" {
 					if err := cliExecutorHealth(installed.Package, mode, env.tools); err != nil {
 						status = err.Error()
@@ -2856,6 +2915,44 @@ func doctorCommand() *cobra.Command {
 	}}
 	command.Flags().BoolVar(&jsonOutput, "json", false, "return the stable agent result envelope")
 	return command
+}
+
+// credentialHealth reports a connection whose stored secret is missing or
+// unreadable. It reads the vault but never prints or returns the value.
+func credentialHealth(ctx context.Context, secrets vault.Store, connection state.Connection) error {
+	if connection.CredentialRef == "" {
+		return nil
+	}
+	if _, err := secrets.Get(ctx, connection.CredentialRef); vault.IsNotFound(err) {
+		return fmt.Errorf("credential missing: its secret is not in the vault; run `outfit credential replace %s`", connection.Name)
+	} else if err != nil {
+		return fmt.Errorf("credential unreadable: %v", err)
+	}
+	return nil
+}
+
+func vaultCommand() *cobra.Command {
+	root := &cobra.Command{Use: "vault", Short: "Show or choose where new credential secrets are stored"}
+	root.AddCommand(&cobra.Command{Use: "status", Short: "Print the vault backend for new secrets and where that choice comes from", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		paths, err := state.ResolvePaths()
+		if err != nil {
+			return err
+		}
+		backend, source := vault.BackendSource(paths)
+		fmt.Fprintf(cmd.OutOrStdout(), "vault: %s (%s)\n", backend, source)
+		return nil
+	}}, &cobra.Command{Use: "use file|keyring", Short: "Record the vault backend for runs without OUTFIT_VAULT_BACKEND (existing secrets stay readable where they are)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		paths, err := state.ResolvePaths()
+		if err != nil {
+			return err
+		}
+		if err := vault.SetBackend(paths, args[0]); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "new secrets go to the %s vault\n", args[0])
+		return nil
+	}})
+	return root
 }
 
 func cliExecutorHealth(pkg kit.Package, mode kit.Mode, tools toolchain.Manager) error {

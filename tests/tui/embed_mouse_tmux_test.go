@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -83,7 +84,13 @@ func TestEmbeddedMouseRealTmux(t *testing.T) {
 		}
 	})
 	script := "stty raw -echo; PYRE_TEST_MOUSE_ECHO=1 exec " + tmux.ShellQuote(self) + " -test.run='^TestHelperMouseEcho$'"
-	if out, err := exec.Command(bin, "-L", name, "-f", "/dev/null", "new-session", "-d", "-s", "embed", "-x", "50", "-y", "10", "/bin/sh", "-c", script).CombinedOutput(); err != nil {
+	// Mouse off explicitly: tmux 3.8 (Homebrew on the macOS runner)
+	// defaults it on.
+	conf := filepath.Join(t.TempDir(), "old.conf")
+	if err := os.WriteFile(conf, []byte("set-option -g mouse off\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(bin, "-L", name, "-f", conf, "new-session", "-d", "-s", "embed", "-x", "50", "-y", "10", "/bin/sh", "-c", script).CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %v: %s", err, out)
 	}
 	a := &mouseAPI{bin: bin, sock: run("display", "-p", "#{socket_path}")}

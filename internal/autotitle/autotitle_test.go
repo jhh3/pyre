@@ -168,3 +168,13 @@ func TestValidIcon(t *testing.T) {
 		}
 	}
 }
+
+func TestScannerAgyFirstPrompt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript_full.jsonl")
+	_ = os.WriteFile(path, []byte(`{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nFix the synthetic tile cache\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: now.\n</ADDITIONAL_METADATA>"}`+"\n"), 0o600)
+	s := NewScanner(FormatAgy)
+	s.Feed([]string{path})
+	if title, src := s.Best(); src != SourcePrompt || !strings.Contains(strings.ToLower(title), "tile cache") || strings.Contains(title, "METADATA") {
+		t.Fatalf("title %q source %q", title, src)
+	}
+}

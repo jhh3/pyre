@@ -278,3 +278,29 @@ func TestRankRelevanceRecencyAndSessionCap(t *testing.T) {
 		t.Fatalf("limit %d %v", len(r), cut)
 	}
 }
+
+// agy transcripts (transcript_full.jsonl): user requests without agy's
+// metadata, Pyre messages, replies and tool calls; every step advances Seq
+// as the agy adapter's sessions.read numbers them.
+func TestParseAgyTranscript(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transcript_full.jsonl")
+	lines := []string{
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-18T16:45:26Z","content":"<USER_REQUEST>\nfind the synthetic flake\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: now.\n</ADDITIONAL_METADATA>"}`,
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-18T16:45:27Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"go test ./synthetic/..."}}]}`,
+		`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-10-18T16:45:28Z","content":"tool output"}`,
+		`{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-18T16:45:29Z","content":"the flake is a race"}`,
+		`{"step_index":4,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-18T16:46:00Z","content":"<USER_REQUEST>\n[pyre-msg:msg_synth] status?\n</USER_REQUEST>"}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	es, err := ParseFile(path, FormatAgy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 4 || es[0].Kind != "user" || es[0].Text != "find the synthetic flake" || es[1].Kind != "tool" || es[1].Text != "run_command: go test ./synthetic/..." ||
+		es[2].Kind != "assistant" || es[2].Seq != 4 || es[3].Kind != "message" || es[3].Seq != 5 {
+		t.Fatalf("entries %+v", es)
+	}
+}

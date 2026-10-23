@@ -8,17 +8,24 @@
 // (<prefix>/<version>/bin/pyred). Integrations prefer a bundled tool and fall
 // back to their usual lookup (PATH, plugin caches) when none is installed, so
 // nodes with separately installed tools behave exactly as before.
+//
+// On Windows (install.ps1 -WithTools, Outfit only) the executable is
+// <prefix>\tools\<tool>\bin\<tool>.exe, with <prefix> = %LOCALAPPDATA%\Programs\Pyre.
 package bundled
 
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Marker is the file install.sh writes into <prefix>/tools.
 const Marker = ".pyre-tools"
 
-var executable = os.Executable
+var (
+	executable = os.Executable
+	goos       = runtime.GOOS
+)
 
 // Path returns the bundled executable for tool ("hive", "outfit", "rota"), or
 // "" when this Pyre installation has none.
@@ -42,6 +49,14 @@ func PathFrom(exe, tool string) string {
 	dir := filepath.Join(prefix, "tools")
 	if fi, err := os.Stat(filepath.Join(dir, Marker)); err != nil || !fi.Mode().IsRegular() {
 		return ""
+	}
+	if goos == "windows" {
+		// No exec bit on Windows: the .exe suffix makes it runnable.
+		p := filepath.Join(dir, tool, "bin", tool+".exe")
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+			return ""
+		}
+		return p
 	}
 	p := filepath.Join(dir, tool, "bin", tool)
 	fi, err := os.Stat(p)

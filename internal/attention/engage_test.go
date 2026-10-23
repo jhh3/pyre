@@ -233,3 +233,40 @@ func TestReadMessageStopsFlaggingReadApprovalDoesNot(t *testing.T) {
 		t.Fatalf("after read: %d %+v", n, f)
 	}
 }
+
+// Owner report 2026-10-19: "Message from <finished session>" items stayed
+// open for days. Archiving the sender withdraws its messages the owner has
+// read; an unread one stays (archives are mostly automatic, and a final
+// report must not vanish), and nobody else's changes.
+func TestArchivingTheSenderClosesItsReadMessages(t *testing.T) {
+	e := newEnv(t)
+	e.ownerMessage("msg_synth-1", "", "ses_synth-a")
+	e.ownerMessage("msg_synth-2", "thr_synth-x", "ses_synth-a")
+	e.ownerMessage("msg_synth-3", "", "ses_synth-b")
+	e.drain()
+	var read string
+	for _, it := range e.list() {
+		if it.GroupKey == "message:thr_synth-x" {
+			read = it.AttentionID
+		}
+	}
+	if _, err := e.store.UpdateAttention(ownerCtx(), contracts.UpdateAttentionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-read-x"},
+		AttentionID: read, State: contracts.AttnRead}); err != nil {
+		t.Fatal(err)
+	}
+	e.archived("ses_synth-a")
+	e.drain()
+	all := e.list(contracts.AttnOpen, contracts.AttnRead, contracts.AttnWithdrawn)
+	if len(all) != 3 {
+		t.Fatalf("items: %+v", all)
+	}
+	for _, it := range all {
+		want := contracts.AttnOpen
+		if it.AttentionID == read {
+			want = contracts.AttnWithdrawn
+		}
+		if it.State != want {
+			t.Fatalf("%s (%s) from %s: %s, want %s", it.AttentionID, it.GroupKey, it.SessionID, it.State, want)
+		}
+	}
+}

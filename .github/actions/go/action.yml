@@ -1,0 +1,89 @@
+name: Go toolchain and caches
+description: >
+  mode restore: installs go.mod's toolchain line from dl.google.com
+  (checksum-verified, about 3 s; GOTOOLCHAIN=local) and restores the module
+  and build caches, newest first. mode save: drops entries unused for two
+  days and saves, only on main or when restore found no cache, so branch
+  runs never spend time uploading.
+
+inputs:
+  mode:
+    description: restore or save
+    required: true
+  name:
+    description: Cache name, one per kind of job (its contents differ)
+    required: true
+  hash:
+    description: Hash of the files that invalidate the cache (go.sum, tool pins)
+    required: true
+  extra-paths:
+    description: More cached paths, one per line
+    default: ""
+  matched-key:
+    description: "mode save: the restore step's matched-key output"
+    default: ""
+
+outputs:
+  matched-key:
+    description: The cache key restored ("" when none)
+    value: ${{ steps.restore.outputs.cache-matched-key }}
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.mode == 'restore'
+      name: Go (go.mod's toolchain line)
+      shell: bash
+      run: |
+        set -euo pipefail
+        v=$(sed -n 's/^toolchain go//p' go.mod)
+        [ -n "$v" ] || v=$(sed -n 's/^go //p' go.mod)
+        case "$RUNNER_OS" in Linux) os=linux ;; macOS) os=darwin ;; *) echo "unsupported $RUNNER_OS" >&2; exit 1 ;; esac
+        case "$RUNNER_ARCH" in X64) arch=amd64 ;; ARM64) arch=arm64 ;; *) echo "unsupported $RUNNER_ARCH" >&2; exit 1 ;; esac
+        f="go$v.$os-$arch.tar.gz"
+        get() { curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors "$@"; }
+        if get -o "$RUNNER_TEMP/$f" "https://dl.google.com/go/$f" &&
+          sum=$(get "https://dl.google.com/go/$f.sha256"); then
+          echo "$sum  $RUNNER_TEMP/$f" | sha256sum -c --quiet -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP"
+          rm "$RUNNER_TEMP/$f"
+          echo "$RUNNER_TEMP/go/bin" >>"$GITHUB_PATH"
+          echo "GOTOOLCHAIN=local" >>"$GITHUB_ENV"
+          "$RUNNER_TEMP/go/bin/go" version
+        elif command -v go >/dev/null; then
+          # dl.google.com failed (seen: a stream stalled for 4 minutes). The
+          # image's go fetches the toolchain from the module proxy instead,
+          # checked against the checksum database.
+          echo "::warning::dl.google.com failed; using GOTOOLCHAIN=go$v through the module proxy"
+          echo "GOTOOLCHAIN=go$v" >>"$GITHUB_ENV"
+          GOTOOLCHAIN="go$v" go version
+        else
+          exit 1
+        fi
+    - if: inputs.mode == 'restore'
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ${{ inputs.extra-paths }}
+        key: go2-${{ inputs.name }}-${{ runner.os }}-${{ inputs.hash }}-${{ github.sha }}
+        restore-keys: |
+          go2-${{ inputs.name }}-${{ runner.os }}-${{ inputs.hash }}-
+          go2-${{ inputs.name }}-${{ runner.os }}-
+    - if: inputs.mode == 'save' && (github.ref == 'refs/heads/main' || inputs.matched-key == '')
+      name: Drop cache entries unused for two days
+      shell: bash
+      run: |
+        for d in ~/.cache/go-build ~/.cache/golangci-lint; do
+          if [ -d "$d" ]; then find "$d" -type f -mmin +2880 -delete; fi
+        done
+    - if: inputs.mode == 'save' && (github.ref == 'refs/heads/main' || inputs.matched-key == '')
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ${{ inputs.extra-paths }}
+        key: go2-${{ inputs.name }}-${{ runner.os }}-${{ inputs.hash }}-${{ github.sha }}

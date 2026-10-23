@@ -344,7 +344,10 @@ func (d *Daemon) applyRelaunchSpec(ctx context.Context, sc *contracts.StartRunCo
 		sc.InitialPrompt = spec.InitialPrompt
 	}
 	if len(sc.Args) == 0 {
-		sc.Args = spec.Args
+		// A headless (pyre run) start is never relaunched as one: its
+		// command already ran without Pyre. The session continues as an
+		// ordinary run, like any resume of it.
+		sc.Args, _, _, _ = splitExecArgs(spec.Args)
 	}
 	if sc.EnvProfile == "" {
 		sc.EnvProfile = spec.EnvProfile
@@ -362,4 +365,77 @@ func (d *Daemon) applyRelaunchSpec(ctx context.Context, sc *contracts.StartRunCo
 		sc.AccountPolicy = spec.AccountPolicy
 	}
 	return true
+}
+
+// InterruptedLaunchReason is the error of a start_run/resume command that
+// was executing when pyred stopped and provably created nothing: no run
+// record, no run dir, no tmux session or process for the run.
+const InterruptedLaunchReason = "launch interrupted by a pyred restart; the run never started"
+
+// RecoverCommand resolves a start_run/resume command that was executing
+// when pyred stopped (transport.NodeLinkConfig.RecoverCommand; it runs
+// after Start, so recoverRuns has reconciled every run record):
+//
+//   - the run has a record: the command's result is the run as it stands
+//     now (adopted, failed as never started, or orphaned/unknown), exactly
+//     like a duplicate start_run; observation reports it from here;
+//   - nothing exists for the run (the restart came before the launching
+//     record committed, e.g. during account placement): the command failed
+//     and nothing ran, so the hub fails the run and the parent is told;
+//   - anything else (something exists without a record, or absence cannot
+//     be proved) stays indeterminate.
+//
+// Other command kinds are left indeterminate.
+func (d *Daemon) RecoverCommand(ctx context.Context, cmd contracts.NodeCommand) (contracts.CommandResult, bool) {
+	var sc contracts.StartRunCommand
+	switch cmd.Kind {
+	case contracts.CmdStartRun:
+		v, err := decode[contracts.StartRunCommand](cmd.Payload)
+		if err != nil {
+			return contracts.CommandResult{}, false
+		}
+		sc = v
+	case contracts.CmdResume:
+		v, err := decode[contracts.ResumeCommand](cmd.Payload)
+		if err != nil {
+			return contracts.CommandResult{}, false
+		}
+		sc = v.StartRunCommand
+	default:
+		return contracts.CommandResult{}, false
+	}
+	runID := sc.RunID
+	if !contracts.ValidID(runID, contracts.PrefixRun) {
+		return contracts.CommandResult{}, false
+	}
+	rec, ok, err := d.st.run(ctx, runID)
+	if err != nil {
+		return contracts.CommandResult{}, false
+	}
+	if ok {
+		if lr, live := d.getLive(runID); live {
+			rec, _ = lr.snapshot()
+		}
+		res, err := okResult(contracts.OutcomeSucceeded, rec.Run)
+		return res, err == nil
+	}
+	if launchMayHaveStarted(d.runDir(runID)) {
+		return contracts.CommandResult{}, false // adapter state without a record: cannot prove nothing ran
+	}
+	if found, _ := runProcessFound(runID); found {
+		return contracts.CommandResult{}, false
+	}
+	if a := d.byHarness[sc.Session.Harness]; a != nil {
+		h := contracts.RunHandle{RunID: runID, SessionID: sc.Session.SessionID, Adapter: a.Name(), Harness: sc.Session.Harness,
+			TmuxTarget: runID, StateDir: d.runDir(runID)}
+		rctx, cancel := context.WithTimeout(ctx, d.cfg.Poll.Timeout)
+		_, rerr := a.Recover(rctx, h)
+		cancel()
+		if !contracts.IsCode(rerr, contracts.ErrNotFound) {
+			return contracts.CommandResult{}, false // it exists, or tmux could not answer
+		}
+	}
+	d.releaseAccount(runID) // an account bound before the restart is not held for nothing
+	d.cfg.Logger.Warn("interrupted launch left nothing behind; reporting it failed", "run", runID, "session", sc.Session.SessionID, "command", cmd.CommandID)
+	return contracts.CommandResult{Outcome: contracts.OutcomeFailed, Error: contracts.Errorf(contracts.ErrUnavailable, "%s", InterruptedLaunchReason)}, true
 }

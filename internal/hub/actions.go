@@ -241,6 +241,7 @@ var sessionActions = map[string]bool{
 	contracts.ActionMemorySearch: true, contracts.ActionMemoryGet: true, contracts.ActionMemoryStatus: true,
 	contracts.ActionDirList: true, contracts.ActionInventory: true, contracts.ActionUpdateList: true, contracts.ActionAccountList: true,
 	contracts.ActionTranscriptSearch: true, // read-only, like sessions.read (W-search)
+	contracts.ActionAccountSelect:    true, // dry run: the Codex launch preflight (cli harnessPreflight)
 }
 
 // InvokeNodeAction routes a typed action to a node and waits up to
@@ -254,6 +255,15 @@ func (h *Hub) InvokeNodeAction(ctx context.Context, req contracts.NodeActionRequ
 	}
 	if err := requireOp(req.Mutation); err != nil {
 		return contracts.NodeActionResult{}, err
+	}
+	if req.Action == contracts.ActionConnInvoke {
+		// A connection is used by the session itself or by the owner; no
+		// other principal (a node credential included) may act for a session.
+		var cp contracts.ConnectionInvokeParams
+		_ = json.Unmarshal(req.Params, &cp)
+		if !isOwner(p) && (p.Kind != contracts.PrincipalSession || cp.SessionID != p.ID) {
+			return contracts.NodeActionResult{}, contracts.Errorf(contracts.ErrForbidden, "connection.invoke may be sent only by the session it names or the owner (caller: %s)", p.Kind)
+		}
 	}
 	if req.Action == contracts.ActionConnInvoke && req.NodeID == "" {
 		// Route to the node holding the connection (catalog RouteInvoke).

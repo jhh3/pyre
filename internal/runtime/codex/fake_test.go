@@ -74,7 +74,8 @@ type fThread struct {
 	turns    []*fTurn
 	active   *fTurn
 	subs     map[*fConn]bool
-	unloaded bool // thread/archive unloaded it (the real app-server keeps threads loaded otherwise)
+	unloaded bool            // thread/archive unloaded it (the real app-server keeps threads loaded otherwise)
+	bg       map[string]*fBg // background commands (FAKE_BG_MS) still running, by item id
 }
 
 type fakeServer struct {
@@ -220,6 +221,26 @@ func (s *fakeServer) fail(fc *fConn, id json.RawMessage, msg string) {
 	fc.send(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32600, "message": msg}})
 }
 
+// fakeTurnStartFault logs a turn/start's clientUserMessageId to
+// $CODEX_HOME/fake-turnstart.log and returns the next fault scripted in
+// $CODEX_HOME/fake-turnstart-faults (one per line: "rpc" refuses, "drop"
+// closes the connection unanswered, "" passes), consuming it.
+func fakeTurnStartFault(cid string) string {
+	home := os.Getenv("CODEX_HOME")
+	if f, err := os.OpenFile(filepath.Join(home, "fake-turnstart.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		fmt.Fprintln(f, cid)
+		f.Close()
+	}
+	path := filepath.Join(home, "fake-turnstart-faults")
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	first, rest, _ := strings.Cut(string(b), "\n")
+	_ = os.WriteFile(path, []byte(rest), 0o600)
+	return strings.TrimSpace(first)
+}
+
 // fakeConfigLog records "<method> <config JSON>" for thread/start and
 // thread/resume (per-thread config overrides).
 var fakeConfigLog string
@@ -238,6 +259,53 @@ func logConfig(method string, p map[string]any) {
 }
 
 var fSleepRe = regexp.MustCompile(`FAKE_SLEEP_MS=(\d+)`)
+
+// FAKE_BG_MS=<ms>:<name> starts a background command (codex 0.163 unified
+// exec) in the turn: item/started now, item/completed for it, carrying the
+// turn that started it, after <ms> even when that turn has ended.
+var fBgRe = regexp.MustCompile(`FAKE_BG_MS=(\d+):([a-z0-9]+)`)
+
+type fBg struct {
+	timer *time.Timer
+	turn  string
+	item  map[string]any
+}
+
+func (s *fakeServer) startBg(t *fThread, tr *fTurn, text string) {
+	for _, m := range fBgRe.FindAllStringSubmatch(text, -1) {
+		ms, _ := strconv.Atoi(m[1])
+		name, id := m[2], "exec-bg-"+m[2]
+		it := map[string]any{"type": "commandExecution", "id": id, "command": "/bin/zsh -lc 'bg-" + name + "'",
+			"commandActions": []any{map[string]any{"type": "unknown", "command": "bg-" + name}}, "cwd": "/fake/work",
+			"status": "inProgress", "source": "unifiedExecStartup"}
+		s.broadcast(t, "item/started", map[string]any{"item": it, "threadId": t.id, "turnId": tr.ID})
+		s.mu.Lock()
+		if t.bg == nil {
+			t.bg = map[string]*fBg{}
+		}
+		t.bg[id] = &fBg{turn: tr.ID, item: it, timer: time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+			s.endBg(t, id, 0, "completed", "bg "+name+" done\n")
+		})}
+		s.mu.Unlock()
+	}
+}
+
+// endBg reports a background command's exit (once).
+func (s *fakeServer) endBg(t *fThread, id string, exit int, status, out string) {
+	s.mu.Lock()
+	b := t.bg[id]
+	delete(t.bg, id)
+	s.mu.Unlock()
+	if b == nil {
+		return
+	}
+	done := map[string]any{}
+	for k, v := range b.item {
+		done[k] = v
+	}
+	done["status"], done["exitCode"], done["aggregatedOutput"], done["durationMs"] = status, exit, out, 1234
+	s.broadcast(t, "item/completed", map[string]any{"item": done, "threadId": t.id, "turnId": b.turn})
+}
 
 func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 	var p map[string]any
@@ -345,6 +413,13 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 			text, _ = in[0].(map[string]any)["text"].(string)
 		}
 		cid, _ := p["clientUserMessageId"].(string)
+		if fail := fakeTurnStartFault(cid); fail == "rpc" {
+			s.fail(fc, m.ID, "synthetic refusal")
+			return
+		} else if fail == "drop" { // outcome unknown to the client
+			_ = fc.c.CloseNow()
+			return
+		}
 		s.mu.Lock()
 		active := t.active
 		s.mu.Unlock()
@@ -399,7 +474,23 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 		default:
 		}
 	case "thread/backgroundTerminals/clean":
+		// Kills the thread's background commands: each reports its exit.
+		var kill []string
+		if t != nil {
+			s.mu.Lock()
+			for id, b := range t.bg {
+				b.timer.Stop()
+				kill = append(kill, id)
+			}
+			s.mu.Unlock()
+		}
 		s.reply(fc, m.ID, map[string]any{})
+		// Like codex's exit watcher, the exits arrive after the reply.
+		time.AfterFunc(100*time.Millisecond, func() {
+			for _, id := range kill {
+				s.endBg(t, id, -1, "failed", "")
+			}
+		})
 	case "thread/loaded/list":
 		s.mu.Lock()
 		ids := []string{}
@@ -448,6 +539,7 @@ func (s *fakeServer) finish(t *fThread, tr *fTurn, status string, errObj any) {
 }
 
 func (s *fakeServer) runTurn(t *fThread, tr *fTurn, text string) {
+	s.startBg(t, tr, text)
 	if m := fSleepRe.FindStringSubmatch(text); m != nil {
 		n, _ := strconv.Atoi(m[1])
 		s.addItem(t, tr, map[string]any{"type": "commandExecution", "id": "exec-1", "command": "sleep", "status": "inProgress"})

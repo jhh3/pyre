@@ -39,15 +39,64 @@ func (s *Store) SessionAttentionRun(ctx context.Context, sessionID string, run *
 	if err != nil {
 		return 0, nil, err
 	}
+	failed, err := s.failedMemberItems(ctx, sessionID)
+	if err != nil {
+		return 0, nil, err
+	}
+	items := append(failed, itemsOf(rows)...)
 	n := 0
-	items := make([]contracts.AttentionItem, 0, len(rows))
-	for _, r := range rows {
-		if r.item.State == contracts.AttnOpen {
+	for _, it := range items {
+		if it.State == contracts.AttnOpen {
 			n++
 		}
-		items = append(items, r.item)
 	}
 	return n, sessionflag.ComputeRun(items, run), nil
+}
+
+func itemsOf(rows []itemRow) []contracts.AttentionItem {
+	out := make([]contracts.AttentionItem, len(rows))
+	for i, r := range rows {
+		out[i] = r.item
+	}
+	return out
+}
+
+// failedMemberItems returns the open or read failure group item a session
+// is in (members.go), titled for that session alone ("'x' failed to start:
+// working folder missing"), so it still flags the session as its own
+// failure item did. Capacity groups do not flag their sessions.
+func (s *Store) failedMemberItems(ctx context.Context, sessionID string) ([]contracts.AttentionItem, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT m.attention_id, m.label FROM attention_members m JOIN attention_items i ON i.attention_id=m.attention_id
+		WHERE m.session_id=? AND i.group_key LIKE ? AND i.state IN (?,?)`, sessionID, failedPrefix+"%", string(contracts.AttnOpen), string(contracts.AttnRead))
+	if err != nil {
+		return nil, err
+	}
+	labels := map[string]string{}
+	var ids []string
+	for rows.Next() {
+		var id, label string
+		if err := rows.Scan(&id, &label); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		labels[id] = firstNonEmpty(label, sessionID)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []contracts.AttentionItem
+	for _, id := range ids {
+		r, err := s.getQ(ctx, s.db, id)
+		if err != nil {
+			return nil, err
+		}
+		r.item.Title, _ = renderGroup(r.item.GroupKey, []string{labels[id]})
+		r.item.SessionID = sessionID
+		out = append(out, r.item)
+	}
+	return out, nil
 }
 
 // OwnerEngaged marks the session's active items of the given kinds handled

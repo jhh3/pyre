@@ -40,7 +40,7 @@ type ExhaustedPayload struct {
 //     account.cross_account_resume and both profiles share the transcript
 //     store (every Pyre Claude profile on a node does: sharedstore.go),
 //     otherwise a handoff successor. The successor's first prompt is a
-//     short "continue where you left off (account switched from X to Y
+//     short "continue where you left off (switched from account "X" to account "Y"
 //     because of the usage limit)", so the work goes on unattended; the
 //     daemon reports which continuation it actually used;
 //  4. if none is eligible: waiting (earliest reset) or intervention, plus an
@@ -54,6 +54,17 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 	defer s.fbmu.Unlock()
 	if p, err := getFallback(ctx, s.db, runID); err != nil {
 		return contracts.FallbackPlan{}, err
+	} else if p != nil && p.Outcome == outcomePending && s.now().Sub(p.PlannedAt) > moveTimeout+time.Minute {
+		// A proactive move's claim that never finished (pyred stopped
+		// mid-move): the limit is handled as usual.
+		if err := deleteFallback(ctx, s.db, runID); err != nil {
+			return contracts.FallbackPlan{}, err
+		}
+	} else if p != nil && p.Outcome == outcomePending {
+		// A proactive move holds the run: handle the limit once it lets go
+		// (rebalance.go unclaim), so the event is not lost.
+		s.deferLimit(sessionID, runID, ev)
+		return *p, nil
 	} else if p != nil {
 		return *p, nil
 	}
@@ -178,6 +189,9 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 			}
 		}
 		plan.ToAccountID, plan.NewRunID = c.acct.AccountID, res.NewRunID
+		if err := carryPinned(ctx, s.db, runID, res.NewRunID); err != nil {
+			s.log.Warn("accounts: carry pin to successor", "run", res.NewRunID, "err", err)
+		}
 		reason := fmt.Sprintf("%s on %s; %s; %s", ev.Kind, asg.AccountID, c.acct.AccountID+" "+c.why, why)
 		if plan.UncertainWork {
 			reason += "; a turn was in flight: its instruction is not replayed"
@@ -251,8 +265,10 @@ func continuePrompt(from, to, kind string, uncertain bool) string {
 		cause = "because of a rate limit"
 	case LimitAuthInvalid:
 		cause = "because its login stopped working"
+	case "proactive":
+		cause = "to stay ahead of its usage limit"
 	}
-	p := fmt.Sprintf("[pyre] Continue where you left off (account switched from %s to %s %s).", from, to, cause)
+	p := fmt.Sprintf("[pyre] Continue where you left off (switched from %s to %s %s).", acctRef(from), acctRef(to), cause)
 	if uncertain {
 		p += " Your last step was cut off: check its effects before repeating anything."
 	}

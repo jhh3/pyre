@@ -369,6 +369,7 @@ func TestAuditNodeAutomationAndEventHook(t *testing.T) {
 	auto(contracts.AutomationTrustAccepted)
 	auto(contracts.AutomationTrustAccepted) // reported twice: one entry
 	auto(contracts.AutomationExitConfirmed)
+	auto(contracts.AutomationOnboardingAnswered)
 	auto("something_else") // unknown: ignored
 	// Another node cannot claim this run's automation.
 	x.connect(nodeLin, 0)
@@ -387,6 +388,10 @@ func TestAuditNodeAutomationAndEventHook(t *testing.T) {
 	if n := countAudit(es, contracts.AuditNodeExitConfirmed); n != 1 {
 		t.Fatalf("exit entries = %d", n)
 	}
+	if n := countAudit(es, contracts.AuditNodeOnboardingAnswered); n != 1 {
+		t.Fatalf("onboarding entries = %d", n)
+	}
+	wantSummary(t, findAudit(t, es, contracts.AuditNodeOnboardingAnswered), "answered Claude's first-run screen for 'work' — /home/synth/work")
 
 	// Events appended by other domains (fleet enrollment) reach the log
 	// through the append hook, with the owner as actor.

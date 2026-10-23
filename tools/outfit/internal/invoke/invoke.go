@@ -51,6 +51,9 @@ type Failure struct {
 	Hint       string `json:"hint,omitempty"`
 	Correction string `json:"correction,omitempty"`
 	Retryable  bool   `json:"retryable,omitempty"`
+	// ProviderCode is the provider's own error code, such as Stripe's
+	// resource_missing, when the provider returned one.
+	ProviderCode string `json:"provider_code,omitempty"`
 }
 
 type Envelope struct {
@@ -366,7 +369,12 @@ func Classify(err error, code, hint string) *Failure {
 			code = "operation_failed"
 		}
 	}
-	return &Failure{Code: code, Message: message, Hint: hint, Retryable: code == "provider_timeout"}
+	failure := &Failure{Code: code, Message: message, Hint: hint, Retryable: code == "provider_timeout"}
+	var provider *runtime.ProviderError
+	if errors.As(err, &provider) {
+		failure.ProviderCode = provider.Code
+	}
+	return failure
 }
 
 // FriendlyOperationName is the stable short spelling generated from the

@@ -22,6 +22,16 @@ const localStatusPath = "/v1/local/status"
 // one elsewhere gets ssh. Lookup order: $PYRE_SOCKET, then
 // $PYRE_STATE_DIR/pyred.sock, then the platform default state dir.
 func discoverLocalNode(getenv func(string) string) string {
+	for _, sock := range localSockets(getenv) {
+		if id := localNodeID(sock); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// localSockets are the places a pyred on this machine serves its socket.
+func localSockets(getenv func(string) string) []string {
 	var socks []string
 	if s := getenv(EnvSocket); s != "" {
 		socks = append(socks, s)
@@ -40,12 +50,7 @@ func discoverLocalNode(getenv func(string) string) string {
 			socks = append(socks, filepath.Join(home, ".local", "state", "pyre", "pyred.sock"))
 		}
 	}
-	for _, sock := range socks {
-		if id := localNodeID(sock); id != "" {
-			return id
-		}
-	}
-	return ""
+	return socks
 }
 
 func localNodeID(sock string) string {

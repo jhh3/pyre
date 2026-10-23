@@ -26,6 +26,24 @@ type transcriptRecord struct {
 	DurationMs       int64           `json:"durationMs,omitempty"`
 	ToolUseResult    json.RawMessage `json:"toolUseResult,omitempty"`
 	SourceToolAssist string          `json:"sourceToolAssistantUUID,omitempty"`
+	// Origin says who wrote a user record (2.1.29x): kind "human" for a
+	// prompt typed (or pasted) into the TUI; "plugin", "task-notification"
+	// and others are the harness or a plugin, not the person.
+	// Raw, so an unexpected shape never fails the record's decode.
+	Origin           json.RawMessage `json:"origin,omitempty"`
+	IsCompactSummary bool            `json:"isCompactSummary,omitempty"`
+}
+
+// notTyped reports a prompt record nobody typed: meta, a compaction
+// summary, or one whose origin is not a human.
+func (r transcriptRecord) notTyped() bool {
+	if r.IsMeta || r.IsCompactSummary {
+		return true
+	}
+	var o struct {
+		Kind string `json:"kind"`
+	}
+	return len(r.Origin) > 0 && json.Unmarshal(r.Origin, &o) == nil && o.Kind != "" && o.Kind != "human"
 }
 
 type tMessage struct {
@@ -147,8 +165,8 @@ func transcriptEntry(runID string, r transcriptRecord, seq int64) (contracts.Tra
 	case r.Type == "user" && r.isPromptRecord():
 		e.Kind = "user"
 		e.Text = r.text()
-		if r.IsMeta {
-			e.Kind = "system"
+		if r.notTyped() {
+			e.Kind = "system" // e.g. a task notification, a plugin's message (internal/hub/asks_chat.go reads "user" as the owner)
 		}
 		if ms := findMarkers(e.Text); len(ms) > 0 {
 			e.MessageID = ms[0]

@@ -54,7 +54,7 @@ func Score(query string, r contracts.Repo) (int, bool) {
 	return total, true
 }
 
-// wordPrefix: t matches the initials of name's words ("vw" ~ "voyager-web").
+// wordPrefix: t matches the initials of name's words ("vw" ~ "vortex-web").
 func wordPrefix(name, t string) bool {
 	words := strings.FieldsFunc(name, func(r rune) bool { return r == '-' || r == '_' || r == '.' || r == ' ' })
 	if len(words) < 2 {
@@ -149,6 +149,11 @@ func RepoKey(r contracts.Repo) string {
 	if i := strings.IndexByte(u, '@'); i >= 0 {
 		u = u[i+1:]
 	}
-	u = strings.Replace(u, ":", "/", 1)
+	if i := strings.IndexByte(u, ':'); i >= 0 {
+		u = u[:i] + "/" + strings.TrimPrefix(u[i+1:], "/") // host:o/n and host:/o/n alike
+	}
+	if rest, ok := strings.CutPrefix(u, "github/"); ok {
+		u = "github.com/" + rest // an unresolved "github:o/n" ssh alias (older indexes)
+	}
 	return "remote:" + filepath.ToSlash(u)
 }

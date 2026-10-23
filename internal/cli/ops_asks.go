@@ -46,7 +46,15 @@ type AskParams struct {
 	Reopen          bool          `json:"reopen,omitempty"`
 	ConfirmNew      bool          `json:"confirm_new,omitempty"`
 	Project         string        `json:"project,omitempty"`
-	OperationID     string        `json:"operation_id,omitempty"`
+	// Action (W-grants) names the go-ahead asked for; a standing grant for
+	// exactly it may answer the ask at once (it must offer the grant's
+	// option, have a default and not be irreversible).
+	Action string `json:"action,omitempty"`
+	// Irreversible: never answered by a standing grant.
+	Irreversible bool `json:"irreversible,omitempty"`
+	// Items (W-grants) makes a batched ask: the options apply to each.
+	Items       []c.AskItem `json:"items,omitempty"`
+	OperationID string      `json:"operation_id,omitempty"`
 }
 
 // Ask creates (or merges into) an ask. Options without an id get a, b, c,
@@ -57,7 +65,8 @@ func (o *Ops) Ask(ctx context.Context, p AskParams) (c.CreateAskResponse, error)
 		return c.CreateAskResponse{}, err
 	}
 	req := c.CreateAskRequest{Mutation: mut(p.OperationID), TopicKey: strings.TrimSpace(p.TopicKey), Title: strings.TrimSpace(p.Title),
-		Context: strings.TrimSpace(p.Context), Urgent: p.Urgent, Reopen: p.Reopen, ConfirmNew: p.ConfirmNew}
+		Context: strings.TrimSpace(p.Context), Urgent: p.Urgent, Reopen: p.Reopen, ConfirmNew: p.ConfirmNew, Action: strings.TrimSpace(p.Action),
+		Irreversible: p.Irreversible}
 	switch {
 	case req.TopicKey == "":
 		return c.CreateAskResponse{}, usagef("topic_key is required: a short stable slug for the decision (e.g. \"db-migration-strategy\"); a later ask on the same topic merges into this one")
@@ -69,6 +78,22 @@ func (o *Ops) Ask(ctx context.Context, p AskParams) (c.CreateAskResponse, error)
 		return c.CreateAskResponse{}, usagef("give %d–%d options (got %d)", c.AskMinOptions, c.AskMaxOptions, len(p.Options))
 	case p.DeadlineMinutes < 0:
 		return c.CreateAskResponse{}, usagef("deadline_minutes must be positive")
+	case len(p.Items) > c.AskMaxItems:
+		return c.CreateAskResponse{}, usagef("a batched ask has at most %d items (got %d); split it", c.AskMaxItems, len(p.Items))
+	}
+	seenItem := map[string]bool{}
+	for _, it := range p.Items {
+		it.ID, it.Label, it.Detail, it.URL = strings.TrimSpace(it.ID), strings.TrimSpace(it.Label), strings.TrimSpace(it.Detail), strings.TrimSpace(it.URL)
+		switch {
+		case it.ID == "":
+			return c.CreateAskResponse{}, usagef("every item needs a short id (e.g. \"pr-12\")")
+		case it.Label == "":
+			return c.CreateAskResponse{}, usagef("item %s needs a label", it.ID)
+		case seenItem[strings.ToLower(it.ID)]:
+			return c.CreateAskResponse{}, usagef("item id %q is repeated", it.ID)
+		}
+		seenItem[strings.ToLower(it.ID)] = true
+		req.Items = append(req.Items, it)
 	}
 	seen := map[string]bool{}
 	for i, op := range p.Options {
@@ -175,6 +200,13 @@ func (o *Ops) WithdrawAsk(ctx context.Context, p WithdrawAskParams) (c.Ask, erro
 		Reason: strings.TrimSpace(p.Reason), SupersededBy: strings.TrimSpace(p.SupersededBy)})
 }
 
+// DismissAsk is the owner archiving an open ask: withdrawn with
+// contracts.AskDismissReason (no option, the default never applies), and
+// the asking session is told.
+func (o *Ops) DismissAsk(ctx context.Context, askID, opID string) (c.Ask, error) {
+	return o.WithdrawAsk(ctx, WithdrawAskParams{AskID: askID, Reason: c.AskDismissReason, OperationID: opID})
+}
+
 // AnswerAsks answers one or more asks in one call (owner only).
 func (o *Ops) AnswerAsks(ctx context.Context, items []c.AnswerAskItem, opID string) (c.AnswerAsksResponse, error) {
 	api, err := o.asks()
@@ -196,6 +228,13 @@ func askMCPTools() []MCPTool {
 			"label":  str("the choice, a few words"),
 			"detail": str("required, one line: what happens if chosen"),
 		}}
+	item := map[string]any{"type": "object", "additionalProperties": false, "required": []string{"id", "label"},
+		"properties": map[string]any{
+			"id":     str("short stable id, e.g. \"pr-12\""),
+			"label":  str("what the item is, a few words"),
+			"detail": str("one line: what and why, its state"),
+			"url":    str("link to it (PR, doc)"),
+		}}
 	topic := str("short stable slug for the decision, e.g. \"auth-token-storage\"; the same key merges into the open ask instead of new mail, and a decided topic returns its answer")
 	return []MCPTool{
 		compactly(tool("ask_owner", "Ask the owner",
@@ -210,7 +249,11 @@ func askMCPTools() []MCPTool {
 				"reopen":           boo("ask again on a decided topic because something changed (say what in context)"),
 				"confirm_new":      boo("create it even though a similar open ask exists under another topic"),
 				"project":          str("project ID or name (default: this session's project)"),
-				"operation_id":     opIDProp}, "topic_key", "title", "context", "options"),
+				"action":           str("the go-ahead asked for in one word (merge, deploy); a standing grant for exactly this action answers at once when the ask offers its option and has a default"),
+				"irreversible":     boo("cannot be undone: never answered by a standing grant (give no default)"),
+				"items": map[string]any{"type": "array", "maxItems": c.AskMaxItems, "items": item,
+					"description": "batch several like decisions into one ask (e.g. the PRs to merge): the options apply to each item; the owner answers per item or all at once"},
+				"operation_id": opIDProp}, "topic_key", "title", "context", "options"),
 			hints("Ask the owner", additive, false),
 			func(ctx context.Context, o *Ops, p AskParams) (c.CreateAskResponse, error) { return o.Ask(ctx, p) }),
 			func(rc *renderCtx, r c.CreateAskResponse) string { return askCreateText(r, rc.now) }),
@@ -281,10 +324,28 @@ func askOutcome(a c.Ask) string {
 		return "open; no default (expires unanswered)"
 	case c.AskSuperseded:
 		return "superseded by " + orDash(a.SupersededBy)
-	case c.AskWithdrawn, c.AskExpired:
+	case c.AskWithdrawn:
+		if an := a.Answer; an != nil && an.By.Kind == c.PrincipalOwner {
+			if an.Text == c.AskDismissReason {
+				return "dismissed by you (no option, no default)"
+			}
+			return "withdrawn by you"
+		}
+		return string(a.State)
+	case c.AskExpired:
 		return string(a.State)
 	}
 	s := string(a.State)
+	if a.GrantID != "" {
+		s += " by standing grant " + a.GrantID
+	}
+	if an := a.Answer; an != nil && an.Source == c.AskSourceChat {
+		s += " in chat: " + clip(an.Text, 200)
+		if len(an.With) > 0 {
+			s += " (also answered " + strings.Join(an.With, ", ") + ")"
+		}
+		return s
+	}
 	if an := a.Answer; an != nil {
 		if an.OptionID != "" {
 			s += " " + askOptionText(a, an.OptionID)
@@ -342,6 +403,19 @@ func askCreateText(r c.CreateAskResponse, now time.Time) string {
 			b.WriteString("  " + askLine(x, now) + "\n")
 		}
 		b.WriteString("If one covers your question, ask_owner with its topic_key (your text merges into it); otherwise call again with confirm_new: true.\n")
+	case c.AskGranted:
+		if a == nil {
+			break
+		}
+		opt := ""
+		if a.Answer != nil {
+			opt = askOptionText(*a, a.Answer.OptionID)
+		}
+		fmt.Fprintf(&b, "granted, the owner was not asked: %s (topic %s) is answered %s by standing grant %s", a.AskID, a.TopicKey, opt, a.GrantID)
+		if a.Answer != nil && a.Answer.Text != "" {
+			fmt.Fprintf(&b, " — %s", clip(a.Answer.Text, 400))
+		}
+		b.WriteString(".\nGo ahead; the owner gets an FYI. The decision also arrives as a Pyre message.\n")
 	case c.AskRedirected:
 		fmt.Fprintf(&b, "not sent to the owner: only top-level sessions ask the owner. Your question went to your parent session as %s", orDash(r.MessageID))
 		if r.MessageID != "" {
@@ -453,6 +527,27 @@ func askDetail(w io.Writer, a c.Ask, now time.Time) {
 	if a.DefaultOption != "" {
 		fmt.Fprintln(w, "  (* default)")
 	}
+	if len(a.Items) > 0 {
+		fmt.Fprintf(w, "  items (%d; the options apply to each):\n", len(a.Items))
+		for _, it := range a.Items {
+			fmt.Fprintf(w, "    %-10s %s", it.ID, it.Label)
+			if it.Detail != "" {
+				fmt.Fprintf(w, " — %s", it.Detail)
+			}
+			if it.URL != "" {
+				fmt.Fprintf(w, " <%s>", it.URL)
+			}
+			if a.State.Decided() && a.Answer != nil {
+				if o := askAnswerItem(a, it.ID); o != "" {
+					fmt.Fprintf(w, "  → %s", o)
+				}
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	if a.GrantID != "" {
+		fmt.Fprintf(w, "  answered by standing grant %s (the owner was not asked)\n", a.GrantID)
+	}
 	for _, u := range a.Updates {
 		fmt.Fprintf(w, "  update %d %s: %s\n", u.Seq, agoFrom(now, u.At), clip(u.Text, 300))
 	}
@@ -464,6 +559,9 @@ func askDetail(w io.Writer, a c.Ask, now time.Time) {
 		fmt.Fprintln(w)
 	} else {
 		fmt.Fprintf(w, "  answer: pyre ask answer %s <option> [--text ...]\n", a.AskID)
+		if len(a.Items) > 0 {
+			fmt.Fprintf(w, "  per item: pyre ask answer %s [<option for the rest>] --item %s=<option> ...\n", a.AskID, a.Items[0].ID)
+		}
 	}
 	if a.MessageID != "" {
 		fmt.Fprintf(w, "  message %s", a.MessageID)
@@ -472,6 +570,17 @@ func askDetail(w io.Writer, a c.Ask, now time.Time) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// askAnswerItem is the option chosen for one item of a decided ask.
+func askAnswerItem(a c.Ask, itemID string) string {
+	if a.Answer == nil {
+		return ""
+	}
+	if o, ok := a.Answer.Items[itemID]; ok {
+		return o
+	}
+	return a.Answer.OptionID
 }
 
 func printAsks(w io.Writer, as []c.Ask, now time.Time) {
@@ -531,13 +640,16 @@ func (a *App) addAskCommands(root *cobra.Command) {
 		})
 	}
 	ask := &cobra.Command{
-		Use:     "ask [ls|show|answer|withdraw|new|find]",
+		Use:     "ask [ls|show|answer|dismiss|withdraw|new|find]",
 		Aliases: []string{"asks"},
 		Short:   "Structured questions from sessions to the owner, with options, a default and a deadline",
 		Long: `Asks are decisions sessions need from the owner: a topic, context, 2–4
 options, a default applied at the deadline (1 h; a deadline at night moves to
 the morning) and one open ask per topic. Answer several at once with
-` + "`pyre ask answer <id> <option> <id> <option> ...`" + `.`,
+` + "`pyre ask answer <id> <option> <id> <option> ...`" + `.
+Writing to the session itself (typing into it, or ` + "`pyre send`" + ` to it, not a
+thread reply) answers its open asks with your words; ` + "`pyre ask dismiss`" + `
+archives one without an answer.`,
 		Args: cobra.NoArgs,
 		RunE: a.run(ls),
 	}
@@ -573,15 +685,19 @@ the morning) and one open ask per topic. Answer several at once with
 	})
 
 	var optFlag, text string
+	var itemFlags []string
 	answer := &cobra.Command{
-		Use:   "answer <ask_id> [<option>] [<ask_id> [<option>] ...] [--option ID] [--text TEXT]",
+		Use:   "answer <ask_id> [<option>] [<ask_id> [<option>] ...] [--option ID] [--text TEXT] [--item ITEM=OPTION ...]",
 		Short: "Answer one or more asks in one call (each commits independently)",
 		Long: `Answer asks by option ID: ` + "`pyre ask answer ask_A b ask_B a`" + ` or ` + "`ask_A=b ask_B=a`" + `.
 --option applies to every ask named without one; --text adds free text to
-each answer (or is the answer when no option is given).`,
+each answer (or is the answer when no option is given).
+A batched ask (one with items) takes per-item answers: --item pr-12=approve
+--item pr-13=hold; items left out take the ask's option (without one, answer
+every item).`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
-			items, err := parseAskAnswers(args, optFlag, text)
+			items, err := parseAskAnswers(args, optFlag, text, itemFlags...)
 			if err != nil {
 				return err
 			}
@@ -621,6 +737,7 @@ each answer (or is the answer when no option is given).`,
 	}
 	answer.Flags().StringVar(&optFlag, "option", "", "option `ID` for every ask named without one")
 	answer.Flags().StringVar(&text, "text", "", "free-text answer (with or instead of an option)")
+	answer.Flags().StringArrayVar(&itemFlags, "item", nil, "batched ask: an item's answer as `ITEM=OPTION` (repeatable; one ask only)")
 	ask.AddCommand(answer)
 
 	var wp WithdrawAskParams
@@ -646,8 +763,26 @@ each answer (or is the answer when no option is given).`,
 	withdraw.Flags().StringVar(&wp.SupersededBy, "superseded-by", "", "the ask that replaces it")
 	ask.AddCommand(withdraw)
 
+	ask.AddCommand(&cobra.Command{
+		Use:     "dismiss <ask_id>",
+		Aliases: []string{"archive"},
+		Short:   "Dismiss an open ask (owner): no option is chosen, its default never applies, and the session is told",
+		Args:    cobra.ExactArgs(1),
+		RunE: a.run(func(cmd *cobra.Command, args []string) error {
+			ops, err := a.connect()
+			if err != nil {
+				return err
+			}
+			as, err := ops.DismissAsk(cmd.Context(), args[0], a.opID)
+			if err != nil {
+				return err
+			}
+			return a.emit(as, func(w io.Writer) { fmt.Fprint(w, askWithdrawText(as)) })
+		}),
+	})
+
 	var np AskParams
-	var opts []string
+	var opts, itemArgs []string
 	var deadline time.Duration
 	newCmd := &cobra.Command{
 		Use:   "new --topic KEY --title TEXT --context TEXT --option id=label[|detail]... [--default ID]",
@@ -672,6 +807,21 @@ irreversible actions) and keep working on the default path where safe.
 				}
 				label, detail, _ := strings.Cut(rest, "|")
 				p.Options = append(p.Options, c.AskOption{ID: id, Label: label, Detail: detail})
+			}
+			for _, s := range itemArgs {
+				id, rest, ok := strings.Cut(s, "=")
+				if !ok {
+					return usagef("--item %q: give it as id=label[|detail[|url]]", s)
+				}
+				parts := strings.SplitN(rest, "|", 3)
+				it := c.AskItem{ID: id, Label: parts[0]}
+				if len(parts) > 1 {
+					it.Detail = parts[1]
+				}
+				if len(parts) > 2 {
+					it.URL = parts[2]
+				}
+				p.Items = append(p.Items, it)
 			}
 			if deadline > 0 {
 				p.DeadlineMinutes = int((deadline + time.Minute - 1) / time.Minute)
@@ -699,6 +849,9 @@ irreversible actions) and keep working on the default path where safe.
 	nf.BoolVar(&np.Reopen, "reopen", false, "ask again on a decided topic because something changed")
 	nf.BoolVar(&np.ConfirmNew, "confirm-new", false, "create it even though a similar open ask exists")
 	nf.StringVar(&np.Project, "project", "", "project (default: this session's)")
+	nf.StringVar(&np.Action, "action", "", "the go-ahead asked for (merge); a standing grant for exactly it may answer at once")
+	nf.BoolVar(&np.Irreversible, "irreversible", false, "cannot be undone: never answered by a standing grant")
+	nf.StringArrayVar(&itemArgs, "item", nil, "batched ask: an item as id=label[|detail[|url]] (repeatable; the options apply to each)")
 	ask.AddCommand(newCmd)
 
 	var fp FindAsksParams
@@ -735,8 +888,9 @@ irreversible actions) and keep working on the default path where safe.
 }
 
 // parseAskAnswers reads "ask_A b ask_B a", "ask_A=b ask_B=a" or
-// "ask_A ask_B --option b" into answer items.
-func parseAskAnswers(args []string, option, text string) ([]c.AnswerAskItem, error) {
+// "ask_A ask_B --option b" into answer items; perItem ("pr-12=approve")
+// answers the items of a batched ask (one ask only).
+func parseAskAnswers(args []string, option, text string, perItem ...string) ([]c.AnswerAskItem, error) {
 	var items []c.AnswerAskItem
 	open := -1 // index of an item still waiting for its option
 	for _, arg := range args {
@@ -757,10 +911,50 @@ func parseAskAnswers(args []string, option, text string) ([]c.AnswerAskItem, err
 		items[open].OptionID = arg
 		open = -1
 	}
+	if len(perItem) > 0 {
+		if len(items) != 1 {
+			return nil, usagef("--item answers the items of one batched ask; name exactly one ask")
+		}
+		items[0].Items = map[string]string{}
+		for _, s := range perItem {
+			id, opt, ok := strings.Cut(strings.TrimSpace(s), "=")
+			if !ok || strings.TrimSpace(id) == "" || strings.TrimSpace(opt) == "" {
+				return nil, usagef("--item %q: give it as ITEM=OPTION (e.g. pr-12=approve)", s)
+			}
+			items[0].Items[strings.TrimSpace(id)] = strings.TrimSpace(opt)
+		}
+	}
 	for _, it := range items {
-		if it.OptionID == "" && strings.TrimSpace(it.Text) == "" {
+		if it.OptionID == "" && strings.TrimSpace(it.Text) == "" && len(it.Items) == 0 {
 			return nil, usagef("%s: give an option (pyre ask show %s lists them) or --text", it.AskID, it.AskID)
 		}
 	}
 	return items, nil
+}
+
+// DismissAttention is the owner archiving an inbox item: an open ask's
+// item dismisses the ask (DismissAsk; the deriver then closes the item),
+// any other item is marked handled.
+func (o *Ops) DismissAttention(ctx context.Context, id, opID string) (c.AttentionItem, error) {
+	it, err := o.API.GetAttention(ctx, c.GetRequest{ID: strings.TrimSpace(id)})
+	if err != nil {
+		return it, err
+	}
+	if it.Kind == c.AttnAsk && it.Object.Kind == c.KindAsk && it.Object.ID != "" {
+		if api, err := o.asks(); err == nil {
+			if a, err := api.GetAsk(ctx, c.GetRequest{ID: it.Object.ID}); err == nil && a.State == c.AskOpen {
+				if _, err := o.DismissAsk(ctx, a.AskID, opID); err != nil && !c.IsCode(err, c.ErrConflict) {
+					return it, err
+				}
+				if after, err := o.API.GetAttention(ctx, c.GetRequest{ID: it.AttentionID}); err == nil && after.State != c.AttnOpen && after.State != c.AttnRead {
+					return after, nil
+				}
+			}
+		}
+	}
+	op := opID
+	if op != "" {
+		op += "-attn"
+	}
+	return o.API.UpdateAttention(ctx, c.UpdateAttentionRequest{Mutation: mut(op), AttentionID: it.AttentionID, State: c.AttnHandled})
 }

@@ -1,6 +1,6 @@
- Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts › Project                               anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+ Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts › Project             claude 5h 61% · wk 41% (2/3) !1   codex wk — (0/1) ! · none ready   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Synthetic Outfit  ·  [Overview]  Docs   Artifacts   Discussion   Sessions
+Synthetic Outfit  ·  [Overview]  Docs   Artifacts   Discussion   Sessions   Grants
 
 Repos        none (a project needs no repository)                        │ Brief
 Updated      8h ago                                                      │ revision 2 · 2m ago · by coordinator

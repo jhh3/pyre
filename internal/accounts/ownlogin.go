@@ -31,8 +31,40 @@ func (s *Service) OwnLogin(h contracts.Harness) *contracts.HarnessLogin {
 			p = filepath.Join(filepath.Dir(s.cfg.UserClaudeDir), ".claude.json")
 		}
 		return claudeOwnLogin(p)
+	case contracts.HarnessAgy:
+		return agyOwnLogin(s.cfg.UserAgyDir)
 	}
 	return nil
+}
+
+// agyOwnLogin reads the identity of agy's sign-in: the email claim of the
+// id_token in <dir>/antigravity-oauth-token (decoded locally; the access and
+// refresh tokens are never used, kept or logged).
+func agyOwnLogin(dir string) *contracts.HarnessLogin {
+	if dir == "" {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "antigravity-oauth-token"))
+	if err != nil {
+		return nil
+	}
+	var t struct {
+		IDToken string `json:"id_token"`
+	}
+	if json.Unmarshal(b, &t) != nil || t.IDToken == "" {
+		return nil
+	}
+	c := jwtClaims(t.IDToken)
+	if c == nil {
+		return nil
+	}
+	l := &contracts.HarnessLogin{}
+	l.Email, _ = c["email"].(string)
+	l.ProviderRef, _ = c["sub"].(string)
+	if l.Email == "" && l.ProviderRef == "" {
+		return nil
+	}
+	return l
 }
 
 func codexOwnLogin(home string) *contracts.HarnessLogin {

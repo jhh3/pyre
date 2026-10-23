@@ -1,12 +1,12 @@
- Pyre  [S Sessions 2] v sidenav · P Projects · M Machines · A Accounts · ● 2 asks                      anthropic 1 ready · 1 at limit   openai 0 ready   ● live
+ Pyre  [S Sessions 2] v sidenav · P Projects · M Machines · A Accounts · ● 2 asks    claude 5h 61% · wk 41% (2/3) !1   codex wk — (0/1) ! · none ready   ● live
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   STATUS       SESSION                         MACHINE     HARNESS  AGE  │ coordinator · ● working · Claude on synth-mac · ambient login               needs you
-  Synthetic Outfit 8 · ● 2 asks · ◆ 1 waiting · • 1 new · ◌ 1 working    │ read-only snapshot · MOCK backend: there is no live terminal; showing transcript/scr…
-› ! needs you  coordinator ▾1         ● asks 2 synth-mac   claude   30s  │
-  ● working    └ migration work                synth-mac   claude   30s  │ [mock screen] coordinator — running
-▎ ○ idle       api work (handoff succes… • new synth-linux codex    now  │ Working on it (synthetic).
-  ○ idle       pairing session ▾2    ◆ waiting synth-mac   claude   30s  │ >
-  ! approval   ├ deploy prep                   synth-mac   claude   30s  │
+  Synthetic Outfit 8 · ● 2 asks · ◆ 1 waiting · • 1 new · ◌ 1 working    │ ! Run the synthetic schema migration now? — m reply · d dismiss
+› ! needs you  coordinator ▾1         ● asks 2 synth-mac   claude   30s  │ read-only snapshot · MOCK backend: there is no live terminal; showing transcript/scr…
+  ● working    └ migration work                synth-mac   claude   30s  │
+▎ ○ idle       api work (handoff succes… • new synth-linux codex    now  │ [mock screen] coordinator — running
+  ○ idle       pairing session ▾2    ◆ waiting synth-mac   claude   30s  │ Working on it (synthetic).
+  ! approval   ├ deploy prep                   synth-mac   claude   30s  │ >
   ! needs you  └ worker                        synth-linux claude   30s  │
   ○ idle       scratch (standalo… ▾1 ◌ working synth-mac   claude   30s  │
   ● working    └ outfit API client             synth-linux claude   30s  │

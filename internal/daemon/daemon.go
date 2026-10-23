@@ -53,6 +53,7 @@ type Daemon struct {
 	runStats  *sysstats.RunSampler
 
 	adapters  map[string]contracts.RuntimeAdapter // by adapter name
+	execs     execClaims                          // headless runs waiting for their CLI (execrun.go)
 	byHarness map[contracts.Harness]contracts.RuntimeAdapter
 
 	mu        sync.Mutex
@@ -83,6 +84,12 @@ type Daemon struct {
 	search      *searchState  // transcript search index (search.go); nil if disabled
 	repos       *repoState    // repo index and session worktrees (repos.go)
 	inboxWait   inboxWaiters  // local doorbell waits (inboxwait.go, W-localwait)
+
+	// Runs recoverRuns found dead that Start resumes (crashresume.go), and
+	// the previous pyred's last alive stamp.
+	crashResume []runRecord
+	aliveAt     time.Time
+	crash       crashSet // candidates being resumed, for stops aimed at them
 }
 
 // liveRun is the in-memory state of a run the daemon supervises.
@@ -160,6 +167,9 @@ func New(cfg Config) (*Daemon, error) {
 		if _, ok := d.byHarness[a.Harness()]; !ok {
 			d.byHarness[a.Harness()] = a
 		}
+	}
+	for _, a := range cfg.ExecAdapters {
+		d.adapters[a.Name()] = a
 	}
 	d.rep = cfg.Reporter
 	if d.rep == nil {
@@ -274,7 +284,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return err
 	}
 	d.refreshProbes(ctx)
-	loops := []func(context.Context){d.engine.Run, d.pollLoop, d.heartbeatLoop, d.outboxLoop, d.maintenanceLoop, d.searchLoop, d.repoLoop, d.githubLoop}
+	loops := []func(context.Context){d.engine.Run, d.pollLoop, d.heartbeatLoop, d.outboxLoop, d.maintenanceLoop, d.searchLoop, d.repoLoop, d.githubLoop, d.aliveLoop}
+	if recs := d.crashResume; len(recs) > 0 {
+		d.crashResume = nil
+		aliveAt := d.aliveAt
+		loops = append(loops, func(ctx context.Context) { d.crashResumeAll(ctx, recs, aliveAt) })
+	}
 	for _, p := range d.cfg.Periodic {
 		p := p
 		loops = append(loops, func(ctx context.Context) { d.periodicLoop(ctx, p) })
@@ -332,8 +347,13 @@ const deliveryDrain = 10 * time.Second
 // recoverRuns reloads supervised runs. Live runs are re-attached through
 // adapter.Recover (never Launch); runs interrupted mid-launch are adopted
 // when their process exists, failed when provably never started, otherwise
-// orphaned/unknown (launchrecover.go). None is ever relaunched.
+// orphaned/unknown (launchrecover.go). None is relaunched in place: a live
+// session whose process died underneath pyred is ended and queued for a
+// native-resume continuation (a new run, crashresume.go).
 func (d *Daemon) recoverRuns(ctx context.Context) error {
+	if v, err := d.st.meta(ctx, metaAliveAt); err == nil && v != "" {
+		d.aliveAt, _ = sqlitex.ParseTime(v)
+	}
 	// Orphaned records (an earlier start could not prove the outcome) are
 	// re-examined every start: their process may have appeared, or the
 	// never-started proof may now hold (records from older pyred builds).
@@ -383,6 +403,14 @@ func (d *Daemon) recoverRuns(ctx context.Context) error {
 			}
 		case contracts.IsCode(rerr, contracts.ErrNotFound):
 			d.endRun(ctx, lr, contracts.RunExited, "run process not found after pyred restart (exit not observed)", nil)
+			if ok, why := d.crashResumeCandidate(rec); ok {
+				// Registered before the hub link starts, so a stop the hub
+				// queued for this run always finds it (crashStop).
+				d.crash.add(rec.Run.RunID)
+				d.crashResume = append(d.crashResume, rec)
+			} else {
+				d.cfg.Logger.Info("run gone after restart; not resumed", "run", rec.Run.RunID, "session", rec.Run.SessionID, "reason", why)
+			}
 			continue
 		default:
 			lr.rec.Run.State = contracts.RunUnknown
@@ -545,10 +573,16 @@ func (d *Daemon) harnessInfo(ctx context.Context) []contracts.HarnessInfo {
 	at := d.probedAt
 	d.mu.Unlock()
 	for h, p := range probes {
+		if p.Absent {
+			continue // not installed here: not offered (agy on machines without it)
+		}
 		hi := contracts.HarnessInfo{Harness: h, Version: p.Version, Executable: p.Executable, Available: p.Available,
-			Reason: p.Reason, Capabilities: p.Capabilities, ProbedAt: at}
+			Reason: p.Reason, Capabilities: p.Capabilities, ProbedAt: at, Models: p.Models, Efforts: p.Efforts}
 		if d.cfg.OwnLogin != nil && p.Available {
 			hi.Login = d.cfg.OwnLogin(h)
+		}
+		if d.cfg.OwnUsage != nil && p.Available {
+			hi.Usage = d.cfg.OwnUsage(h)
 		}
 		out = append(out, hi)
 	}
@@ -718,6 +752,7 @@ func (d *Daemon) maintenanceLoop(ctx context.Context) {
 		if _, err := d.db.ExecContext(ctx, `DELETE FROM daemon_outbox WHERE state != 'pending' AND updated_at < ?`, ftime(d.now().Add(-7*24*time.Hour))); err != nil && ctx.Err() == nil {
 			d.noteErr("prune outbox: %v", err)
 		}
+		d.sweepRunTmp(ctx)
 	}
 }
 

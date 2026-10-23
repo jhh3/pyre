@@ -345,3 +345,42 @@ func TestRotateCredentialSecretMovesConsumersAndJournalsOldRef(t *testing.T) {
 		t.Fatalf("stale rotation won: %t %v", rotated, err)
 	}
 }
+
+// A replaced connection switches back to its old credential and secret: the
+// old secret's pending cleanup is cancelled and the replacement's scheduled.
+func TestRevertConnectionRestoresThePriorCredential(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	paths := Paths{Root: root, Database: filepath.Join(root, "outfit.db"), Packages: filepath.Join(root, "packages"), Skills: filepath.Join(root, "skills"), Locks: filepath.Join(root, "locks"), Vault: filepath.Join(root, "vault")}
+	store, err := Open(ctx, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pkg := kit.Package{APIVersion: kit.APIVersion, Key: "acme", Display: "Acme", Version: "1", CredentialMethods: []kit.CredentialMethod{{ID: "token", Label: "Token", Description: "Token", Recommended: true, Custody: "outfit"}}, Modes: []kit.Mode{{ID: "api", Label: "API", Description: "API", Recommendation: kit.Recommendation{Rank: 1, Reason: "API"}, Executor: kit.Executor{Kind: "http", BaseURL: "https://api.example.com/"}, CredentialMethods: []string{"token"}, DefaultCredentialMethod: "token"}}, Skill: kit.Skill{Summary: "Acme"}}
+	if err := store.InstallPackage(ctx, kit.Loaded{Package: pkg, Digest: "digest", Source: "test", Raw: []byte(`{}`)}, "trusted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateConnection(ctx, Connection{ID: "c1", Name: "acme", ConnectorKey: "acme", SelectedMode: "api", CredentialMethod: "token", Status: "active", CredentialRef: "outfitsec_old", SafeIdentity: map[string]string{"account": "old"}}); err != nil {
+		t.Fatal(err)
+	}
+	prior, _ := store.Connection(ctx, "acme")
+	if switched, cleanupOld, err := store.SwitchConnection(ctx, "acme", "outfitsec_old", "api", "token", "outfitsec_new", "active", "clean_1", map[string]string{"account": "new"}, nil); err != nil || !switched || !cleanupOld {
+		t.Fatalf("switch: %v %v %v", switched, cleanupOld, err)
+	}
+	if ok, err := store.RevertConnection(ctx, "acme", "outfitsec_new", "clean_2", prior, nil); err != nil || !ok {
+		t.Fatalf("revert: %v %v", ok, err)
+	}
+	got, _ := store.Connection(ctx, "acme")
+	if got.CredentialRef != "outfitsec_old" || got.CredentialID != prior.CredentialID || got.SafeIdentity["account"] != "old" {
+		t.Fatalf("after revert: %#v", got)
+	}
+	credential, err := store.Credential(ctx, prior.CredentialID)
+	if err != nil || credential.Status != "active" {
+		t.Fatalf("prior credential: %#v %v", credential, err)
+	}
+	cleanups, _ := store.Cleanups(ctx)
+	if len(cleanups) != 1 || cleanups[0].CredentialRef != "outfitsec_new" {
+		t.Fatalf("cleanups = %+v", cleanups)
+	}
+}

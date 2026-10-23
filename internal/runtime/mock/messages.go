@@ -8,6 +8,7 @@ import (
 	"time"
 
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/ownermail"
 )
 
 // Body markers that steer the mock's simulated runtime outcome.
@@ -48,6 +49,12 @@ func (b *Backend) SendMessage(ctx context.Context, req c.SendMessageRequest) (c.
 }
 
 func (b *Backend) sendLocked(p c.Principal, req c.SendMessageRequest, reissues string) (c.MessageView, error) {
+	return b.sendMailLocked(p, req, reissues, false)
+}
+
+// sendMailLocked stores a message; carrier marks an ask's owner message,
+// which closes with its ask (never an update).
+func (b *Backend) sendMailLocked(p c.Principal, req c.SendMessageRequest, reissues string, carrier bool) (c.MessageView, error) {
 	mode := req.Mode
 	if mode == "" {
 		mode = c.ModeQueue
@@ -163,6 +170,14 @@ func (b *Backend) sendLocked(p c.Principal, req c.SendMessageRequest, reissues s
 			st.RuntimeReason = b.waitReason(rcpt.ID, mode)
 		}
 	}
+	// Owner mail that asks nothing of him is stored acknowledged, as on the
+	// hub (internal/messaging/ownermail).
+	update := !carrier && rcpt.Kind == c.AddrOwner && ownermail.Update(env, func() bool {
+		return orig != nil && orig.Envelope.Sender.Kind == c.PrincipalOwner || b.ownerWaitsOnLocked(p, now)
+	})
+	if update {
+		st.Ack, st.AckRef = c.AckAcknowledged, c.AckRefUpdate
+	}
 	b.msgSeq++
 	mv := &c.MessageView{Envelope: env, Status: st, Cursor: b.msgSeq}
 	b.messages[msgID] = mv
@@ -183,7 +198,7 @@ func (b *Backend) sendLocked(p c.Principal, req c.SendMessageRequest, reissues s
 		b.engageLocked(rcpt.ID, "Replied.", c.AttnMessage, c.AttnFlag, c.AttnWaiting)
 		b.ownerActiveLocked(p, rcpt.ID)
 	}
-	if rcpt.Kind == c.AddrOwner {
+	if rcpt.Kind == c.AddrOwner && !update {
 		sid := ""
 		title := "Message from " + principalName(p)
 		if p.Kind == c.PrincipalSession {
@@ -199,6 +214,26 @@ func (b *Backend) sendLocked(p c.Principal, req c.SendMessageRequest, reissues s
 		b.raiseAttentionLocked(c.AttnMessage, sev, "message:"+msgID, ref(c.KindMessage, msgID), sid, projectID, title, truncate(req.Body.Text, 120))
 	}
 	return *mv, nil
+}
+
+// ownerWaitsOnLocked: the owner wrote to session p within a day and after
+// its last message to him, so what it sends him now answers him (the
+// hub's store.ownerWaitsOnTx).
+func (b *Backend) ownerWaitsOnLocked(p c.Principal, now time.Time) bool {
+	if p.Kind != c.PrincipalSession {
+		return false
+	}
+	var lastOwner, lastMine int64
+	for _, m := range b.messages {
+		e := m.Envelope
+		switch {
+		case e.Sender.Kind == c.PrincipalOwner && e.Recipient.Kind == c.AddrSession && e.Recipient.ID == p.ID && now.Sub(e.CreatedAt) <= 24*time.Hour:
+			lastOwner = max(lastOwner, m.Cursor)
+		case e.Recipient.Kind == c.AddrOwner && e.Sender.Kind == c.PrincipalSession && e.Sender.ID == p.ID:
+			lastMine = max(lastMine, m.Cursor)
+		}
+	}
+	return lastOwner > lastMine
 }
 
 func recipientSession(m *c.MessageView) string {
@@ -252,10 +287,18 @@ func (b *Backend) GetMessage(ctx context.Context, req c.GetRequest) (c.MessageVi
 			return c.MessageView{}, notFound(c.KindMessage, req.ID)
 		}
 		if p.Kind == c.PrincipalOwner && m.Envelope.Recipient.Kind == c.AddrOwner && m.Envelope.Sender.Kind == c.PrincipalSession {
-			// The owner viewed a session's message to them.
-			b.engageLocked(m.Envelope.Sender.ID, "Read.", c.AttnMessage, c.AttnWaiting)
+			// The owner viewed a session's message to them: that message is read.
+			b.engageItemsLocked(m.Envelope.Sender.ID, "Read.", c.AttnMessage, c.AttnWaiting)
+			b.ackOwnerMailLocked(c.AckRefEngaged, func(o *c.MessageView) bool {
+				for _, a := range b.askMap() {
+					if a.MessageID == o.Envelope.MessageID {
+						return false // closes with its ask
+					}
+				}
+				return o.Envelope.MessageID == req.ID && !c.ValidID(o.Envelope.ThreadID, c.PrefixAsk)
+			})
 		}
-		return *m, nil
+		return *b.messages[req.ID], nil
 	})
 }
 
@@ -382,6 +425,31 @@ func (b *Backend) AckMessage(ctx context.Context, req c.AckMessageRequest) (c.Me
 		}
 		b.withdrawAttentionLocked("message:"+req.MessageID, c.AttnHandled)
 		return *m, nil
+	})
+}
+
+// ackOwnerMailLocked acknowledges, on Pyre's behalf, unacknowledged mail
+// to the owner that match selects (the hub's store.AckOwnerMail).
+func (b *Backend) ackOwnerMailLocked(why string, match func(m *c.MessageView) bool) {
+	now := b.now()
+	for _, id := range sortedKeys(b.messages) {
+		m := b.messages[id]
+		if m.Envelope.Recipient.Kind != c.AddrOwner || m.Status.Ack != c.AckNone || !match(m) {
+			continue
+		}
+		m.Status.Ack, m.Status.AckRef, m.Status.UpdatedAt = c.AckAcknowledged, why, now
+		b.emit(c.EvMessageAck, ref(c.KindMessage, id), "", m.Envelope.ProjectID, m)
+		b.withdrawAttentionLocked("message:"+id, c.AttnHandled)
+	}
+}
+
+// ackAskMailLocked: a closed ask's carrier leaves the owner's inbox.
+func (b *Backend) ackAskMailLocked(a *c.Ask) {
+	if a.MessageID == "" {
+		return
+	}
+	b.ackOwnerMailLocked(c.AckRefAskClosed, func(m *c.MessageView) bool {
+		return m.Envelope.MessageID == a.MessageID || (a.ThreadID != "" && m.Envelope.ThreadID == a.ThreadID)
 	})
 }
 

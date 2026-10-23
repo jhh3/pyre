@@ -50,6 +50,13 @@ func (h *Hub) Search(ctx context.Context, req contracts.SearchRequest) (contract
 		hits = append(hits, hs...)
 		mu.Unlock()
 	}
+	// addStatus: transcript goroutines of earlier nodes append while the
+	// loop records offline or skipped nodes.
+	addStatus := func(st contracts.SearchNodeStatus) {
+		mu.Lock()
+		statuses = append(statuses, st)
+		mu.Unlock()
+	}
 	nodeLimit := min(req.Limit*2, 200)
 	for _, n := range nodes {
 		if req.NodeID != "" && n.NodeID != req.NodeID {
@@ -58,7 +65,7 @@ func (h *Hub) Search(ctx context.Context, req contracts.SearchRequest) (contract
 		st := contracts.SearchNodeStatus{NodeID: n.NodeID, Name: n.Name}
 		if c, _ := h.nodeConnected(ctx, h.db, n.NodeID); !c {
 			st.State, st.Detail = contracts.SearchNodeOffline, "not searched (offline)"
-			statuses = append(statuses, st)
+			addStatus(st)
 			continue
 		}
 		if search.WantSource(req, contracts.SearchSourceTranscript) {
@@ -87,13 +94,11 @@ func (h *Hub) Search(ctx context.Context, req contracts.SearchRequest) (contract
 						mu.Unlock()
 					}
 				}
-				mu.Lock()
-				statuses = append(statuses, st)
-				mu.Unlock()
+				addStatus(st)
 			}(st)
 		} else {
 			st.State = contracts.SearchNodeSkipped
-			statuses = append(statuses, st)
+			addStatus(st)
 		}
 		if search.WantSource(req, contracts.SearchSourceMemory) {
 			wg.Add(1)

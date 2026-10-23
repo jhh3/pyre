@@ -148,7 +148,7 @@ func (d *Daemon) searchSources(ctx context.Context) []search.Source {
 		}
 		if format == "" {
 			format = string(rec.Run.Harness)
-			if rec.Run.Harness != contracts.HarnessCodex {
+			if rec.Run.Harness != contracts.HarnessCodex && rec.Run.Harness != contracts.HarnessAgy {
 				format = search.FormatClaude
 			}
 		}

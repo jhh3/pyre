@@ -10,9 +10,9 @@ import (
 	"github.com/jhh3/pyre/internal/contracts"
 )
 
-// "Waiting on you" (owner request 2026-10-14): one item per top-level
-// session, raised by the hub at turn end, resolved by the session moving on
-// or the owner engaging.
+// "Waiting on you" (owner request 2026-10-14): an item per question of a
+// top-level session (one active at a time), raised by the hub at turn end,
+// resolved by the session moving on or the owner engaging.
 
 const waitSID = "ses_synth-lead"
 
@@ -52,7 +52,7 @@ func TestWaitingRaiseFlagsAndRepeatUpdates(t *testing.T) {
 	if _, f := e.flag(waitSID); f == nil || f.Reason != "waiting" {
 		t.Fatalf("read flag = %+v", f)
 	}
-	// A repeat updates the one item (and reopens it).
+	// A raise while it is active updates the item (and reopens it).
 	e.clock.Advance(time.Minute)
 	again := e.raiseWaiting(strings.Repeat("Pick A or B? ", 20))
 	if again.AttentionID != it.AttentionID || again.Count != 2 || again.State != contracts.AttnOpen || !again.UpdatedAt.After(it.UpdatedAt) ||
@@ -83,11 +83,16 @@ func TestWaitingResolvedByNextTurnAskEngageArchiveAndEnd(t *testing.T) {
 	if _, f := e.flag(waitSID); f != nil {
 		t.Fatalf("flag after next turn: %+v", f)
 	}
-	// A later turn asks again: the same item reopens (one per session).
+	// A later turn asks something new: a new item, its own conversation
+	// (owner report 2026-10-19: one item reopened for weeks showed the
+	// session's whole history as one thread); the old one stays withdrawn.
 	e.clock.Advance(time.Second)
 	again := e.raiseWaiting("Ship it now?")
-	if again.AttentionID != it.AttentionID || again.Count != 2 || again.State != contracts.AttnOpen {
-		t.Fatalf("reopen: %+v", again)
+	if again.AttentionID == it.AttentionID || again.Count != 1 || again.State != contracts.AttnOpen || !again.CreatedAt.After(it.CreatedAt) {
+		t.Fatalf("new question: %+v", again)
+	}
+	if old, err := e.store.GetAttention(ownerCtx(), contracts.GetRequest{ID: it.AttentionID}); err != nil || old.State != contracts.AttnWithdrawn {
+		t.Fatalf("old item: %+v %v", old, err)
 	}
 	// The session files an ask: withdrawn.
 	e.log.AppendPayload(contracts.EvAskChanged, contracts.ObjectRef{Kind: contracts.KindAsk, ID: "ask_synth-w"}, waitSID, nil,
@@ -114,12 +119,129 @@ func TestWaitingResolvedByNextTurnAskEngageArchiveAndEnd(t *testing.T) {
 		e.clock.Advance(time.Second)
 		e.raiseWaiting("Ship it later?")
 		resolve()
-		if g := e.byGroup("waiting:" + waitSID); len(g) != 1 || (g[0].State != contracts.AttnHandled && g[0].State != contracts.AttnWithdrawn) {
-			t.Fatalf("not resolved: %+v", g)
+		for _, g := range e.byGroup("waiting:" + waitSID) {
+			if g.State != contracts.AttnHandled && g.State != contracts.AttnWithdrawn {
+				t.Fatalf("not resolved: %+v", g)
+			}
 		}
 	}
 	// Explicit stale-raise withdrawal is idempotent.
 	if ok, err := e.store.WithdrawWaiting(context.Background(), waitSID, "x"); err != nil || ok {
 		t.Fatalf("withdraw with nothing active: %v %v", ok, err)
+	}
+}
+
+// A turn that repeats the same question neither counts nor reopens: an
+// active item stays, a handled one stays handled, and one withdrawn when
+// the session moved on comes back open (no push, no count).
+func TestWaitingRepeatLeavesItAsIs(t *testing.T) {
+	e := newEnv(t)
+	if _, ok, err := e.store.RepeatWaiting(context.Background(), waitSID, ""); err != nil || ok {
+		t.Fatalf("no item: %v %v", ok, err)
+	}
+	it := e.raiseWaiting("Still waiting on your yes to publish the synthetic post.")
+	since := it.AttentionID // the hub remembers the item it raised
+	same, ok, err := e.store.RepeatWaiting(context.Background(), waitSID, since)
+	if err != nil || !ok || same.Count != 1 || same.State != contracts.AttnOpen || !same.UpdatedAt.Equal(it.UpdatedAt) {
+		t.Fatalf("active repeat: %v %v %+v", ok, err, same)
+	}
+	// The next turn starts (withdrawn); it ends with the same request.
+	e.clock.Advance(time.Second)
+	e.runAt(contracts.RunRunning, e.clock.Now())
+	e.drain()
+	e.clock.Advance(time.Second)
+	back, ok, err := e.store.RepeatWaiting(context.Background(), waitSID, since)
+	if err != nil || !ok || back.AttentionID != it.AttentionID || back.State != contracts.AttnOpen || back.Count != 1 {
+		t.Fatalf("restored: %v %v %+v", ok, err, back)
+	}
+	if _, f := e.flag(waitSID); f == nil || f.Reason != "waiting" {
+		t.Fatalf("flag = %+v", f)
+	}
+	// The owner dismisses it: a repeat leaves it dismissed.
+	if _, err := e.store.UpdateAttention(ownerCtx(), contracts.UpdateAttentionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-dismiss"},
+		AttentionID: it.AttentionID, State: contracts.AttnHandled}); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Advance(time.Second)
+	if got, ok, _ := e.store.RepeatWaiting(context.Background(), waitSID, since); !ok || got.State != contracts.AttnHandled {
+		t.Fatalf("dismissed repeat: %+v", got)
+	}
+	if _, f := e.flag(waitSID); f != nil && f.Reason == "waiting" {
+		t.Fatalf("dismissed item flags: %+v", f)
+	}
+}
+
+// Acknowledging an older unthreaded message leaves the sender's item open
+// when it stands for a newer one (PR #25 review: a phone view of an old
+// message cleared a newer question).
+func TestOlderMessageAckLeavesNewerItem(t *testing.T) {
+	e := newEnv(t)
+	msg := func(id string, ack contracts.AckState) contracts.MessageView {
+		return contracts.MessageView{Envelope: contracts.MessageEnvelope{MessageID: id, Sender: contracts.Principal{Kind: contracts.PrincipalSession, ID: waitSID},
+			Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"}, Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: "Should I ship " + id + "?"}},
+			Status: contracts.DeliveryStatus{Ack: ack}}
+	}
+	emit := func(kind contracts.EventKind, v contracts.MessageView) {
+		b, _ := json.Marshal(v)
+		e.log.Append(contracts.Event{Origin: "hub", Kind: kind, Object: contracts.ObjectRef{Kind: contracts.KindMessage, ID: v.Envelope.MessageID}, Payload: b, OccurredAt: e.clock.Now()})
+		e.drain()
+	}
+	emit(contracts.EvMessageStored, msg("msg_synth-old", contracts.AckNone))
+	e.clock.Advance(time.Second)
+	emit(contracts.EvMessageStored, msg("msg_synth-new", contracts.AckNone))
+	group := "message:from:session:" + waitSID
+	emit(contracts.EvMessageAck, msg("msg_synth-old", contracts.AckAcknowledged))
+	if g := e.byGroup(group); len(g) != 1 || g[0].State != contracts.AttnOpen {
+		t.Fatalf("older ack handled the item: %+v", g)
+	}
+	emit(contracts.EvMessageAck, msg("msg_synth-new", contracts.AckAcknowledged))
+	if g := e.byGroup(group); g[0].State != contracts.AttnHandled {
+		t.Fatalf("newest ack: %+v", g)
+	}
+}
+
+// A repeat acts on the item raised for the question. When the hub has no
+// item for it (a question recorded before items were linked) and the
+// session's latest item is withdrawn, that item may have stood for earlier
+// questions too (reopened in place before 2026-10-19: the live item had 56
+// reopenings since Oct 15), so it is not brought back with that history;
+// the hub raises a new item. An item other than the latest is never
+// restored; a handled one stays handled.
+func TestWaitingRepeatOfAnOlderItem(t *testing.T) {
+	e := newEnv(t)
+	old := e.raiseWaiting("Should I create the synthetic sub-issues?")
+	e.clock.Advance(time.Second)
+	e.runAt(contracts.RunRunning, e.clock.Now())
+	e.drain()
+	e.clock.Advance(time.Second)
+	if got, ok, err := e.store.RepeatWaiting(context.Background(), waitSID, ""); err != nil || ok {
+		t.Fatalf("unlinked withdrawn item came back: %v %v %+v", ok, err, got)
+	}
+	fresh := e.raiseWaiting("Should I create the synthetic sub-issues?")
+	if fresh.AttentionID == old.AttentionID || fresh.Count != 1 {
+		t.Fatalf("raise after the repeat: %+v", fresh)
+	}
+	// The owner dismisses the old item later (its updated_at moves past
+	// the fresh one's): a repeat still judges the fresh item.
+	e.clock.Advance(time.Second)
+	e.runAt(contracts.RunRunning, e.clock.Now())
+	e.drain()
+	e.clock.Advance(time.Second)
+	if _, err := e.store.UpdateAttention(ownerCtx(), contracts.UpdateAttentionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-dismiss-old"},
+		AttentionID: old.AttentionID, State: contracts.AttnHandled}); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Advance(time.Second)
+	back, ok, err := e.store.RepeatWaiting(context.Background(), waitSID, fresh.AttentionID)
+	if err != nil || !ok || back.AttentionID != fresh.AttentionID || back.State != contracts.AttnOpen {
+		t.Fatalf("linked withdrawn item: %v %v %+v", ok, err, back)
+	}
+	// A repeat naming an item that is no longer the latest finds nothing.
+	if _, ok, _ := e.store.RepeatWaiting(context.Background(), waitSID, old.AttentionID); ok {
+		t.Fatal("a repeat restored an older item")
+	}
+	// Unlinked, an active or handled latest item is left as it is.
+	if got, ok, _ := e.store.RepeatWaiting(context.Background(), waitSID, ""); !ok || got.AttentionID != fresh.AttentionID || got.Count != 1 {
+		t.Fatalf("unlinked active item: %v %+v", ok, got)
 	}
 }

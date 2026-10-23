@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/store"
 )
 
 // Hello negotiates the protocol. A client outside [MinProtocolVersion,
@@ -28,7 +29,7 @@ func (h *Hub) Hello(ctx context.Context, req contracts.HelloRequest) (contracts.
 
 func (h *Hub) features() []string {
 	f := []string{"system", "sessions", "runs", "leases", "approvals", "messages", "events", "accounts", "node_actions", "connections",
-		contracts.FeatureSessionsGetMany, contracts.FeatureAsks, contracts.FeatureAskHold}
+		contracts.FeatureSessionsGetMany, contracts.FeatureAsks, contracts.FeatureAskHold, contracts.FeatureGrants, contracts.FeatureIssues}
 	add := func(ok bool, name string) {
 		if ok {
 			f = append(f, name)
@@ -38,6 +39,7 @@ func (h *Hub) features() []string {
 	add(h.cfg.Projects != nil, "projects")
 	add(h.cfg.Documents != nil, "documents")
 	add(h.cfg.Documents != nil, contracts.FeatureProjectPage)
+	add(h.cfg.Documents != nil, contracts.FeatureProjectPageStatus)
 	add(h.cfg.Artifacts != nil, "artifacts")
 	add(h.cfg.Reviews != nil, "reviews")
 	add(h.cfg.Notes != nil, "notes")
@@ -73,19 +75,25 @@ func (h *Hub) SendMessage(ctx context.Context, req contracts.SendMessageRequest)
 		h.withDelivery(ctx, &mv) // W-stuckmail
 		if p, ok := contracts.PrincipalFrom(ctx); ok && mv.Envelope.Recipient.Kind == contracts.AddrSession {
 			h.ownerActive(p, mv.Envelope.Recipient.ID) // owner activity: a message (or reply) to the session
+			h.answerChatMessage(ctx, p, mv.Envelope)   // asks_chat.go: the owner's chat answers its open asks
+			// Messaging it engages with it: its mail to him so far is read (the
+			// deriver answers its items from the event).
+			h.ownerEngaged(p, mv.Envelope.Recipient.ID, "You messaged the session.")
 		}
 	}
 	return mv, err
 }
 
 // GetMessage: the owner viewing a session's message to them answers that
-// session's message flag.
+// session's message flag and acknowledges that message (pyre msg show, the
+// phone opening a message; listing does not count).
 func (h *Hub) GetMessage(ctx context.Context, req contracts.GetRequest) (contracts.MessageView, error) {
 	mv, err := h.msgs.GetMessage(ctx, req)
 	if err == nil {
 		env := mv.Envelope
 		if p, ok := contracts.PrincipalFrom(ctx); ok && env.Recipient.Kind == contracts.AddrOwner && env.Sender.Kind == contracts.PrincipalSession {
-			h.ownerEngaged(p, env.Sender.ID, "Read.", readKinds...)
+			// Viewing it is reading that message (only that one).
+			h.ownerEngagedMail(p, env.Sender.ID, "Read.", store.OwnerMail{MessageID: env.MessageID, SkipAsks: true}, readKinds...)
 		}
 		h.withDelivery(ctx, &mv) // W-stuckmail
 	}

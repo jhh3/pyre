@@ -66,10 +66,15 @@ transferable.`,
 	root.AddCommand(send)
 
 	var ip InboxParams
+	var allMail bool
 	inbox := &cobra.Command{
-		Use:   "inbox [--unacked] [--wait SECS] [--after CURSOR]",
+		Use:   "inbox [--unacked|--all] [--wait SECS] [--after CURSOR]",
 		Short: "List messages addressed to you (this session inside an agent, else the owner)",
-		Args:  cobra.NoArgs,
+		Long: `List messages addressed to you: this session's inside an agent, else the
+owner's. The owner's inbox lists only mail still waiting on him (not
+acknowledged or replied to); --all adds what is done, including updates
+(reports that asked nothing of him, stored acknowledged; ACK "update").`,
+		Args: cobra.NoArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
 			if err != nil {
@@ -78,18 +83,30 @@ transferable.`,
 			if ip.WaitSeconds > 60 {
 				ip.WaitSeconds = 60
 			}
-			page, err := ops.Inbox(cmd.Context(), ip)
+			p := ip
+			ownerView := !allMail && !cmd.Flags().Changed("unacked") && p.Thread == "" && (p.Box == "" || p.Box == "inbox") &&
+				p.AfterCursor == 0 && p.WaitSeconds == 0 && (p.Session == "owner" || p.Session == "" && ops.Self.SessionID == "")
+			if ownerView {
+				p.Unacked = true
+			}
+			page, err := ops.Inbox(cmd.Context(), p)
 			if err != nil {
 				return err
 			}
-			return a.emit(page, func(w io.Writer) { printMessages(w, page.Items) })
+			return a.emit(page, func(w io.Writer) {
+				printMessages(w, page.Items)
+				if ownerView {
+					fmt.Fprintln(a.Stderr, "(mail waiting on you; --all also lists updates and mail you already handled)")
+				}
+			})
 		}),
 	}
 	inf := inbox.Flags()
 	inf.StringVar(&ip.Session, "session", "", `mailbox: a session, or "owner" (default: this session, else owner)`)
 	inf.StringVar(&ip.Box, "box", "inbox", "inbox, outbox or all")
 	inf.StringVar(&ip.Thread, "thread", "", "a whole thread instead of a mailbox")
-	inf.BoolVar(&ip.Unacked, "unacked", false, "only messages not yet acknowledged or replied to")
+	inf.BoolVar(&ip.Unacked, "unacked", false, "only messages not yet acknowledged or replied to (the owner's default)")
+	inf.BoolVar(&allMail, "all", false, "the owner's whole mailbox: also acknowledged mail and updates")
 	inf.StringSliceVar(&ip.States, "delivery", nil, "filter by runtime delivery state (e.g. indeterminate)")
 	inf.IntVar(&ip.WaitSeconds, "wait", 0, "long-poll up to SECS (max 60) for a new message")
 	inf.Int64Var(&ip.AfterCursor, "after", 0, "only messages after this inbox cursor")
@@ -406,8 +423,11 @@ func printMessages(w io.Writer, ms []c.MessageView) {
 	var rows [][]string
 	for _, m := range ms {
 		ack := string(m.Status.Ack)
-		if m.Status.Ack == c.AckNone && m.Envelope.RequestAck {
+		switch {
+		case m.Status.Ack == c.AckNone && m.Envelope.RequestAck:
 			ack = "requested"
+		case m.Status.AckRef == c.AckRefUpdate:
+			ack = "update"
 		}
 		rows = append(rows, []string{fmt.Sprint(m.Cursor), m.Envelope.MessageID, principalText(m.Envelope.Sender), addrText(m.Envelope.Recipient),
 			orDash(m.Envelope.ThreadID), ago(m.Envelope.CreatedAt), deliveryShort(m), ack, clip(m.Envelope.Body.Text, 50)})

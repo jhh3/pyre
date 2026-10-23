@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,9 +39,6 @@ func TestRestartRecoversRunsWithoutRelaunch(t *testing.T) {
 	ad.RuntimeAdapter.(*mock.Adapter).Vanish("run_b1")
 
 	n = n.restart()
-	if ad.launches.Load() != 2 {
-		t.Fatalf("launches = %d, want 2 (no relaunch on restart)", ad.launches.Load())
-	}
 	a := n.run("run_a1")
 	if a.Phase != phaseLive || a.Run.State.Terminal() {
 		t.Fatalf("recovered run = %+v", a.Run)
@@ -49,20 +47,39 @@ func TestRestartRecoversRunsWithoutRelaunch(t *testing.T) {
 	if b.Phase != phaseEnded || b.Run.State != contracts.RunExited || !strings.Contains(b.Run.StateReason, "not found") {
 		t.Fatalf("vanished run = %+v / %s", b.Run, b.Phase)
 	}
+	// run_b1 was a live session whose process died underneath pyred: it is
+	// never relaunched in place, but pyred resumes the session natively in a
+	// new run (crashresume.go). The live run_a1 is only re-attached.
+	var b2 runRecord
+	waitFor(t, "crash resume of ses_b", func() bool {
+		b2 = n.latestRun("ses_b")
+		return b2.Run.RunID != "run_b1" && b2.Phase == phaseLive
+	})
+	if b2.Run.PreviousRunID != "run_b1" || b2.Run.ContinuationKind != contracts.ContinuationNativeResume {
+		t.Fatalf("ses_b continuation = %+v", b2.Run)
+	}
+	n.d.WaitLaunches()
+	if ad.launches.Load() != 3 {
+		t.Fatalf("launches = %d, want 3 (run_a1 re-attached, not relaunched; ses_b resumed once)", ad.launches.Load())
+	}
 	// A re-sent start_run for the live run returns it; never a second process.
 	res := n.do(command(contracts.CmdStartRun, startCmd("ses_a", "run_a1", contracts.HarnessMock, cwd)))
 	if res.Error != nil || res.Outcome != contracts.OutcomeSucceeded {
 		t.Fatalf("resent start = %+v", res)
 	}
 	n.d.WaitLaunches()
-	if ad.launches.Load() != 2 {
+	if ad.launches.Load() != 3 {
 		t.Fatalf("launches after resend = %d", ad.launches.Load())
 	}
 	hello, err := n.d.Hello(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hello.LiveRuns) != 1 || hello.LiveRuns[0].RunID != "run_a1" || hello.NodeID != "node_test" {
+	var liveIDs []string
+	for _, r := range hello.LiveRuns {
+		liveIDs = append(liveIDs, r.RunID)
+	}
+	if len(liveIDs) != 2 || !slices.Contains(liveIDs, "run_a1") || !slices.Contains(liveIDs, b2.Run.RunID) || hello.NodeID != "node_test" {
 		t.Fatalf("hello live runs = %+v", hello.LiveRuns)
 	}
 	// Observation keeps working on the recovered run.
@@ -734,7 +751,7 @@ func TestEnvironmentGenerationAndPinnedExecutable(t *testing.T) {
 			return LaunchPrepResult{Env: map[string]string{"GH_TOKEN": "x"}, Manifest: json.RawMessage(`{"env":["GH_TOKEN"]}`)}, nil
 		}})
 	sc := startCmd("ses_env", "run_env", contracts.HarnessClaude, t.TempDir())
-	sc.Args = []string{"--model", "opus"}
+	sc.Args = []string{"--add-dir", "/work/extra"}
 	n.start(sc)
 	run := n.run("run_env").Run
 	if run.EnvGenerationID != "env_gen1" || run.Runtime.Executable != "/tools/claude/2.1.289/bin/claude" || run.Runtime.Version != "2.1.289" {
@@ -745,7 +762,7 @@ func TestEnvironmentGenerationAndPinnedExecutable(t *testing.T) {
 	}
 	p, _ := w.Proc("run_env")
 	l := p.Launch
-	if l.EnvGeneration != "env_gen1" || l.Executable != run.Runtime.Executable || len(l.Args) != 4 || l.Args[0] != "--settings" || l.Args[2] != "--model" {
+	if l.EnvGeneration != "env_gen1" || l.Executable != run.Runtime.Executable || len(l.Args) != 3 || l.Args[0] != "--settings" || l.Args[2] != "--add-dir=/work/extra" {
 		t.Fatalf("launch = %+v", l)
 	}
 	if l.Env["PYRE_ENV_GENERATION"] != "env_gen1" || l.Env["GH_TOKEN"] != "x" {
@@ -1005,5 +1022,35 @@ func TestUnavailableActionSaysWhy(t *testing.T) {
 	if res.Outcome != contracts.OutcomeUnsupported || res.Error == nil ||
 		!strings.Contains(res.Error.Message, `"update.list" is not available on this node: pyred runs with --no-integrations`) {
 		t.Fatalf("result = %+v err=%+v", res, res.Error)
+	}
+}
+
+// dir.list (folder pickers): dot-folders only when asked (never .git);
+// the node's home and worktree root ride along.
+func TestDirListHiddenHomeAndWorktreeRoot(t *testing.T) {
+	root := t.TempDir()
+	n := startNode(t, t.TempDir(), Config{Adapters: []contracts.RuntimeAdapter{mock.NewAdapter()}, WorktreeRoot: root})
+	dir := t.TempDir()
+	for _, d := range []string{"sub", ".config", ".git"} {
+		os.Mkdir(filepath.Join(dir, d), 0o755)
+	}
+	list := func(hidden bool) contracts.DirListResult {
+		params, _ := json.Marshal(contracts.DirListParams{Path: dir, Hidden: hidden})
+		res := n.do(command(contracts.CmdAction, contracts.NodeActionRequest{Action: contracts.ActionDirList, Params: params}))
+		var dl contracts.DirListResult
+		json.Unmarshal(res.Result, &dl)
+		return dl
+	}
+	plain := list(false)
+	if strings.Join(plain.Dirs, ",") != "sub" || plain.Hidden || !plain.IsGit {
+		t.Fatalf("plain dir.list = %+v", plain)
+	}
+	all := list(true)
+	if strings.Join(all.Dirs, ",") != ".config,sub" || !all.Hidden {
+		t.Fatalf("hidden dir.list = %+v", all)
+	}
+	home, _ := os.UserHomeDir()
+	if all.Home != home || all.WorktreeRoot != root {
+		t.Fatalf("home/worktree root = %q %q", all.Home, all.WorktreeRoot)
 	}
 }

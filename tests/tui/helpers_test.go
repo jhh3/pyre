@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/tui"
@@ -32,6 +33,30 @@ func start(t *testing.T, w, ht int, wrap func(contracts.API) contracts.API, mod 
 	h.WaitFor("initial sessions", 5e9, func() bool { return h.M.Loaded("sessions") && h.M.Loaded("nodes") && h.M.Loaded("attention") })
 	h.Settle()
 	return h, api
+}
+
+// stateHas waits until the TUI state file, which the TUI writes in the
+// background, contains every want string.
+func stateHas(t *testing.T, h *tuitest.Harness, path string, want ...string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, err := os.ReadFile(path)
+		missing := ""
+		for _, w := range want {
+			if !strings.Contains(string(b), w) {
+				missing = w
+				break
+			}
+		}
+		if missing == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state file lacks %s: %s %v", missing, b, err)
+		}
+		h.SettleFor(10*time.Millisecond, 20*time.Millisecond)
+	}
 }
 
 // golden compares the rendered view against tests/tui/golden/<name>.txt.

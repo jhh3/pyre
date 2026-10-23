@@ -59,8 +59,18 @@ func msgTime(m c.MessageView) time.Time {
 	return m.Envelope.CreatedAt
 }
 
-// newer reports whether a is at least as current as b.
-func newer(a, b c.MessageView) bool { return !a.Status.UpdatedAt.Before(b.Status.UpdatedAt) }
+// newer reports whether a is at least as current as b. On a tie (a hub
+// clock that did not advance between the two) an acknowledgement is never
+// undone: the message.stored event, carrying the unacknowledged status,
+// can arrive after the ack was applied and would reopen the thread.
+func newer(a, b c.MessageView) bool {
+	if !a.Status.UpdatedAt.Equal(b.Status.UpdatedAt) {
+		return a.Status.UpdatedAt.After(b.Status.UpdatedAt)
+	}
+	return ackedState(a.Status.Ack) || !ackedState(b.Status.Ack)
+}
+
+func ackedState(s c.AckState) bool { return s == c.AckAcknowledged || s == c.AckReplied }
 
 // apply merges one message (newest status wins).
 func (x *mailIndex) apply(m c.MessageView) {

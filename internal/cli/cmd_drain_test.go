@@ -112,7 +112,7 @@ func TestDrainTagsAndIDs(t *testing.T) {
 			t.Errorf("invalid message ID %q", id)
 		}
 	}
-	if drainMessageID("node_a", "ses_b", 7) != drainMessageID("node_a", "ses_b", 7) {
+	if a, b := drainMessageID("node_a", "ses_b", 7), drainMessageID("node_a", "ses_b", 7); a != b {
 		t.Fatal("message ID not stable")
 	}
 }

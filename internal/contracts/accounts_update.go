@@ -15,6 +15,9 @@ type UpdateAccountRequest struct {
 	AccountID string  `json:"account_id"`
 	Label     *string `json:"label,omitempty"`
 	Disabled  *bool   `json:"disabled,omitempty"`
+	// Tier sets Account.Tier ("normal" or "reserve"). Additive: a hub that
+	// predates tiers answers a tier-only request with "nothing to update".
+	Tier *AccountTier `json:"tier,omitempty"`
 }
 
 // AccountUpdateAPI is implemented by hubs (and the mock backend, the

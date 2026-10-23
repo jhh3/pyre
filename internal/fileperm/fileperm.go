@@ -57,6 +57,21 @@ func MkdirAll(dir string, mode os.FileMode) error {
 	return protectNewDir(dir)
 }
 
+// UserOnlyDir creates dir (and missing parents) and makes it private to the
+// current user alone, also when it already exists. On Unix that is mode 0700
+// (as Restrict). On Windows it is stricter than Restrict: a protected DACL
+// with a single ACE, full control for the current user inherited by new
+// files and subdirectories (OI)(CI), and the user as owner — no LocalSystem
+// entry. Codex's app-server refuses a socket directory with any other ACL
+// ("socket directory is not private to the current user"). A directory that
+// already has exactly that ACL is left alone.
+func UserOnlyDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return userOnlyDir(dir)
+}
+
 // OpenNoFollow opens path read-only and refuses a symbolic link (Unix
 // O_NOFOLLOW; Windows: any reparse point — symlink or junction) as the final
 // path component.

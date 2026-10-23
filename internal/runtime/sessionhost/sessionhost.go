@@ -115,6 +115,11 @@ func (spec SessionSpec) Validate() error {
 	if len(spec.Argv) == 0 || spec.Argv[0] == "" {
 		return errors.New("tmux: empty argv")
 	}
+	for i, a := range spec.Argv {
+		if strings.IndexByte(a, 0) >= 0 {
+			return fmt.Errorf("tmux: argv[%d] contains a NUL byte", i)
+		}
+	}
 	for k, v := range spec.Env {
 		if !ValidEnvKey(k) {
 			return fmt.Errorf("tmux: invalid environment variable name %q", k)

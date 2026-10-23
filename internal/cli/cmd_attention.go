@@ -163,7 +163,7 @@ func (a *App) addAttentionCommands(root *cobra.Command) {
 		return a.emit(page, func(w io.Writer) { printAttention(w, page.Items) })
 	}
 	attn := &cobra.Command{
-		Use:     "attention [ls|show <id>|read <id>|handle <id>|snooze <id>]",
+		Use:     "attention [ls|show <id>|read <id>|handle <id>|dismiss <id>|snooze <id>]",
 		Aliases: []string{"attn"},
 		Short:   "The durable inbox of things that need you (approvals, failures, reviews, ...)",
 		Args:    cobra.NoArgs,
@@ -235,6 +235,23 @@ func (a *App) addAttentionCommands(root *cobra.Command) {
 		}
 		attn.AddCommand(sub)
 	}
+	attn.AddCommand(&cobra.Command{
+		Use:     "dismiss <attention_id>",
+		Aliases: []string{"archive"},
+		Short:   "Dismiss an item: handled; an open ask's item dismisses the ask (no option, no default; the session is told)",
+		Args:    cobra.ExactArgs(1),
+		RunE: a.run(func(cmd *cobra.Command, args []string) error {
+			ops, err := a.connect()
+			if err != nil {
+				return err
+			}
+			it, err := ops.DismissAttention(cmd.Context(), args[0], a.opID)
+			if err != nil {
+				return err
+			}
+			return a.emit(it, func(w io.Writer) { fmt.Fprintf(w, "%s: %s\n", it.AttentionID, it.State) })
+		}),
+	})
 	attn.AddCommand(a.flagCommand())
 	root.AddCommand(attn)
 

@@ -522,6 +522,12 @@ func (rc *renderCtx) sessionLine(sv c.SessionView) string {
 	} else if sv.Attention > 0 {
 		parts = append(parts, fmt.Sprintf("attention %d", sv.Attention))
 	}
+	if n := len(sv.Monitors); n > 0 {
+		parts = append(parts, fmt.Sprintf("watching %d", n))
+	}
+	if t := s.MonitorTarget(); t != "" {
+		parts = append(parts, "monitor for "+t)
+	}
 	if s.Archived {
 		parts = append(parts, "archived")
 	}
@@ -564,6 +570,9 @@ func renderSession(rc *renderCtx, sv c.SessionView) string {
 	if s.Lineage.ForkedFrom != "" || s.Lineage.HandoffNoteID != "" {
 		fmt.Fprintf(&b, "lineage: forked from %s, handoff %s\n", orDash(s.Lineage.ForkedFrom), orDash(s.Lineage.HandoffNoteID))
 	}
+	for _, m := range sv.Monitors {
+		fmt.Fprintf(&b, "monitor %s %s (%s)\n", m.SessionID, clip(m.Title, 60), orDash(string(m.State)))
+	}
 	if r := sv.Run; r != nil {
 		fmt.Fprintf(&b, "run %s on node %s · cwd %s", r.RunID, r.NodeID, orDash(r.Cwd))
 		if r.Checkout != nil {
@@ -581,6 +590,9 @@ func renderSession(rc *renderCtx, sv c.SessionView) string {
 		}
 		if p := r.AdapterData["pyre.permissions"]; p != "" {
 			b.WriteString("permissions: " + p + "\n")
+		}
+		if m, e := r.AdapterData["pyre.model"], r.AdapterData["pyre.effort"]; m != "" || e != "" {
+			b.WriteString("model: " + modelDesc(m, e) + "\n")
 		}
 		for _, sa := range r.Subagents {
 			fmt.Fprintf(&b, "subagent %s %s %s\n", sa.ID, sa.State, clip(sa.Summary, 60))

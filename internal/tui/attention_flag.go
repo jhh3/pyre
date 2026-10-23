@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -281,4 +282,151 @@ func (m *Model) dismissMessage(s contracts.SessionView) tea.Cmd {
 			return tea.Batch(m.setToast("message dismissed", toneMuted), m.reload(ownerInboxKey, nil),
 				m.reload("sessions", nil), m.reload("attention", nil))
 		})
+}
+
+// dismissForYou is d on a session (owner request 2026-10-19: sessions stuck
+// "needs you" and asks that could not be archived): its message for you is
+// acknowledged; else what its flag shows goes: its open asks after a
+// confirmation (no option, the default never applies, the session is told)
+// when the flag shows an ask, else its "waiting on you" and its own flag
+// (handled), else its open asks. Each d takes the next.
+func (m *Model) dismissForYou(s contracts.SessionView) tea.Cmd {
+	if _, ok := m.messageForYou(s); ok {
+		return m.dismissMessage(s)
+	}
+	sid, api := s.Session.SessionID, m.api
+	open := m.sessionOpenAsks(sid)
+	if _, reason := sessionAttention(s); reason == "ask" {
+		if len(open) == 0 { // its flag is newer than the loaded asks
+			return tea.Batch(m.loadAsks(true), m.reload("attention", nil), m.setToast("asks loading — press d again", toneMuted))
+		}
+		return m.confirmDismissAsks(s, open)
+	}
+	var items []contracts.AttentionItem
+	for _, a := range m.attention() {
+		if a.SessionID == sid && (a.Kind == contracts.AttnWaiting || a.Kind == contracts.AttnFlag) && (a.State == contracts.AttnOpen || a.State == contracts.AttnRead) {
+			items = append(items, a)
+		}
+	}
+	if len(items) > 0 {
+		reqs := make([]contracts.UpdateAttentionRequest, len(items))
+		for i, it := range items {
+			reqs[i] = contracts.UpdateAttentionRequest{Mutation: contracts.Mutation{OperationID: contracts.NewID(contracts.PrefixOperation)}, AttentionID: it.AttentionID, State: contracts.AttnHandled}
+		}
+		what := "waiting on you"
+		if items[0].Kind == contracts.AttnFlag {
+			what = "its flag"
+		}
+		return m.do(func(ctx context.Context) (any, error) {
+			for _, r := range reqs {
+				if _, err := api.UpdateAttention(ctx, r); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		}, func(m *Model, v any, err error) tea.Cmd {
+			if err != nil {
+				return m.errToast("dismiss failed", err)
+			}
+			return tea.Batch(m.setToast("dismissed "+what, toneMuted), m.reload("attention", nil), m.reload("sessions", nil))
+		})
+	}
+	if len(open) > 0 {
+		return m.confirmDismissAsks(s, open)
+	}
+	if sessionMessages(s) > 0 {
+		return tea.Batch(m.loadOwnerInbox(), m.setToast("message loading — press d again", toneMuted))
+	}
+	return m.setToast(trunc(s.Session.Title, 40)+" has nothing for you to dismiss", toneMuted)
+}
+
+// dismissLine is "! <why it needs you> — m reply · d dismiss" for a
+// session whose flag d dismisses (dismissableReason), "" otherwise.
+func (m *Model) dismissLine(s contracts.SessionView, w int) string {
+	if s.Session.Archived || !sessionFlagged(s) {
+		return ""
+	}
+	_, reason := sessionAttention(s)
+	if !dismissableReason(reason) {
+		return ""
+	}
+	text := "needs you"
+	if s.Flag != nil && s.Flag.Text != "" {
+		text = m.humanIDs(s.Flag.Text)
+	}
+	keys := m.th.dim.Render(" — m reply · d dismiss")
+	return trunc(m.th.tone(toneWarn, "! "+trunc(text, max(8, w-2-width(keys))))+keys, w)
+}
+
+// dismissableReason: flag reasons d dismisses (dismissForYou): a lead
+// waiting on you in its chat, its own flag, its open asks.
+func dismissableReason(reason string) bool {
+	return reason == "waiting" || reason == "asked" || reason == "ask"
+}
+
+// sessionOpenAsks are sid's open asks: the loaded asks, and the asks its
+// open inbox items name (the asks list may not be loaded yet).
+func (m *Model) sessionOpenAsks(sid string) []contracts.Ask {
+	var out []contracts.Ask
+	seen := map[string]bool{}
+	for _, a := range m.asks() {
+		if a.SessionID == sid && a.State == contracts.AskOpen && !seen[a.AskID] {
+			seen[a.AskID] = true
+			out = append(out, a)
+		}
+	}
+	for _, it := range m.attention() {
+		if it.SessionID == sid && it.Kind == contracts.AttnAsk && it.Object.Kind == contracts.KindAsk && it.Object.ID != "" && !seen[it.Object.ID] &&
+			(it.State == contracts.AttnOpen || it.State == contracts.AttnRead) {
+			seen[it.Object.ID] = true
+			out = append(out, contracts.Ask{AskID: it.Object.ID, SessionID: sid, Title: it.Title, State: contracts.AskOpen})
+		}
+	}
+	return out
+}
+
+// confirmDismissAsks asks before dismissing a session's open asks.
+func (m *Model) confirmDismissAsks(s contracts.SessionView, open []contracts.Ask) tea.Cmd {
+	asksAPI, ok := m.asksAPI()
+	if !ok {
+		return m.setToast("this hub has no asks", toneMuted)
+	}
+	body := []string{}
+	for i, a := range open {
+		if i == 5 {
+			body = append(body, fmt.Sprintf("  … and %d more", len(open)-5))
+			break
+		}
+		body = append(body, "  • "+trunc(a.Title, 70))
+	}
+	body = append(body, "", "No option is chosen and their defaults never apply.", trunc(s.Session.Title, 40)+" is told you dismissed them.")
+	ids := make([]string, len(open))
+	for i, a := range open {
+		ids[i] = a.AskID
+	}
+	m.overlay = &confirmOverlay{
+		sid:   s.Session.SessionID,
+		title: fmt.Sprintf("Dismiss %s from %s?", plural(len(open), "open ask", "open asks"), trunc(s.Session.Title, 30)),
+		body:  body,
+		yes: func(m *Model) tea.Cmd {
+			reqs := make([]contracts.WithdrawAskRequest, len(ids))
+			for i, id := range ids {
+				reqs[i] = contracts.WithdrawAskRequest{Mutation: contracts.Mutation{OperationID: m.opID("dismiss-ask:" + id)}, AskID: id, Reason: contracts.AskDismissReason}
+			}
+			return m.do(func(ctx context.Context) (any, error) {
+				for _, r := range reqs {
+					if _, err := asksAPI.WithdrawAsk(ctx, r); err != nil && !contracts.IsCode(err, contracts.ErrConflict) {
+						return nil, err
+					}
+				}
+				return nil, nil
+			}, func(m *Model, v any, err error) tea.Cmd {
+				if err != nil {
+					return tea.Batch(m.errToast("dismiss failed", err), m.asksRefresh(true))
+				}
+				return tea.Batch(m.setToast("dismissed "+plural(len(ids), "ask", "asks"), toneMuted), m.asksRefresh(true), m.reload("attention", nil), m.reload("sessions", nil))
+			})
+		},
+	}
+	return nil
 }

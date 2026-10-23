@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -27,6 +28,7 @@ type ClientConn struct {
 	readOnly bool
 	fit      bool
 	once     sync.Once
+	closing  atomic.Bool // Close was called: a read error is the detach
 
 	buf     []byte // Read goroutine only
 	lastErr *contracts.Error
@@ -140,7 +142,10 @@ func (c *ClientConn) Read(p []byte) (int, error) {
 		if c.lastErr != nil {
 			return 0, c.lastErr
 		}
-		if isNormalClose(err) || c.ctx.Err() != nil {
+		// The close handshake can shut the connection under a blocked
+		// Read before the context is cancelled ("use of closed network
+		// connection"); after Close that is still the detach.
+		if isNormalClose(err) || c.ctx.Err() != nil || c.closing.Load() {
 			return 0, io.EOF
 		}
 		return 0, err
@@ -203,6 +208,7 @@ func (c *ClientConn) TakeWindowSize() (cols, rows int, ok bool) {
 
 // Close detaches without waiting for the close handshake.
 func (c *ClientConn) Close() error {
+	c.closing.Store(true)
 	c.once.Do(func() {
 		go func() {
 			_ = c.ws.Close(websocket.StatusNormalClosure, "detached")

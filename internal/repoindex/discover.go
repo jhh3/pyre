@@ -218,7 +218,7 @@ func readRepo(path string) (contracts.Repo, bool) {
 }
 
 // remoteURL returns origin's URL (or the first remote's) with any
-// credentials removed.
+// credentials removed and an ssh host alias resolved (CanonicalRemote).
 func remoteURL(configPath string) string {
 	f, err := os.Open(configPath)
 	if err != nil {
@@ -247,7 +247,7 @@ func remoteURL(configPath string) string {
 	if origin == "" {
 		origin = first
 	}
-	return StripCredentials(origin)
+	return CanonicalRemote(StripCredentials(origin))
 }
 
 // StripCredentials removes user:password from URL-form remotes.

@@ -227,8 +227,21 @@ func TestSessionLifecycle(t *testing.T) {
 	if !waitFor(t, 3*time.Second, func() bool { p, _ := s.Pane(ctx, "run_a"); return p.Dead }) {
 		t.Fatal("pane not dead after EOF")
 	}
+	// tmux 3.4 (Ubuntu 24.04's, the CI runner's) now and then reaps a
+	// loaded pane's process without recording its status: the process is
+	// gone, pane_dead_status stays empty for good (reproduced ~1 in 15
+	// under CPU load in an ubuntu:24.04 container; never with 3.6). Pane
+	// then reports no status, which callers treat as unknown; only that
+	// version may do so here.
+	lostStatus := func(p PaneInfo) bool {
+		if p.Dead && p.ExitStatus == nil && v.Major == 3 && v.Minor == 4 {
+			t.Logf("tmux %s lost the pane's exit status (upstream bug)", v)
+			return true
+		}
+		return false
+	}
 	p, _ = s.Pane(ctx, "run_a")
-	if p.ExitStatus == nil || *p.ExitStatus != 0 {
+	if (p.ExitStatus == nil || *p.ExitStatus != 0) && !lostStatus(p) {
 		t.Fatalf("exit status %+v", p)
 	}
 	if err := s.RespawnPane(ctx, "run_a", SessionSpec{Argv: []string{"sh", "-c", "exit 7"}}); err != nil {
@@ -238,7 +251,9 @@ func TestSessionLifecycle(t *testing.T) {
 		p, _ := s.Pane(ctx, "run_a")
 		return p.Dead && p.ExitStatus != nil && *p.ExitStatus == 7
 	}) {
-		t.Fatal("respawned pane status")
+		if p, _ := s.Pane(ctx, "run_a"); !lostStatus(p) {
+			t.Fatalf("respawned pane status %+v", p)
+		}
 	}
 	names, err := s.ListSessions(ctx)
 	if err != nil || len(names) != 1 || names[0] != "run_a" {

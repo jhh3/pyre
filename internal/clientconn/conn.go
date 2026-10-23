@@ -36,6 +36,7 @@ const (
 	EnvConfig       = "PYRE_CONFIG"        // client config file path
 	EnvStateDir     = "PYRE_STATE_DIR"     // drafts and artifact cache
 	EnvSessionID    = "PYRE_SESSION_ID"    // set inside agent sessions
+	EnvHarness      = "PYRE_HARNESS"       // the session's harness (claude, codex, agy, shell), set by pyred
 	EnvRunID        = "PYRE_RUN_ID"
 	EnvNodeID       = "PYRE_NODE_ID"
 	EnvWebURL       = "PYRE_WEB_URL" // the web app the TUI links to (overrides web_url)

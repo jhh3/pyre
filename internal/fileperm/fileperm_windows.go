@@ -21,6 +21,9 @@ const (
 	tokenOwnerClass          = 4 // TOKEN_INFORMATION_CLASS TokenOwner
 )
 
+// fileAllAccess is FILE_ALL_ACCESS (SDDL "FA", icacls "F").
+const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1FF
+
 type identity struct {
 	user  *windows.SID
 	owner *windows.SID // the token's default owner for new objects
@@ -155,6 +158,21 @@ func foreignOwner(path string, _ os.FileInfo) (string, bool) {
 	return describe(owner), true
 }
 
+// ownedByUser reports whether path's owner is the current user itself (not
+// merely the token's default owner).
+func ownedByUser(path string) bool {
+	id := current()
+	if id.err != nil {
+		return false
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := sd.Owner()
+	return err == nil && owner != nil && owner.Equals(id.user)
+}
+
 // privateSDDL is the protected owner-only DACL: full control for the current
 // user and LocalSystem; directories pass it to new files and subdirectories.
 func privateSDDL(dir bool) (string, error) {
@@ -169,6 +187,10 @@ func privateSDDL(dir bool) (string, error) {
 	return fmt.Sprintf("D:P(A;%s;FA;;;SY)(A;%s;FA;;;%s)", inherit, inherit, id.user.String()), nil
 }
 
+// setPrivate applies the owner-only DACL and makes the current user the
+// owner. An elevated administrator (e.g. over sshd) creates files owned by
+// BUILTIN\Administrators; the same user's non-elevated logon session (where
+// the node task runs) would then refuse them as foreign-owned.
 func setPrivate(path string, dir bool) error {
 	sddl, err := privateSDDL(dir)
 	if err != nil {
@@ -183,7 +205,8 @@ func setPrivate(path string, dir bool) error {
 		return err
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		current().user, nil, dacl, nil); err != nil {
 		return fmt.Errorf("fileperm: set owner-only ACL on %s: %w", path, err)
 	}
 	return nil
@@ -208,10 +231,8 @@ func restrict(path string, mode os.FileMode) error {
 	// Already private (e.g. the profile's user+SYSTEM+Administrators ACL, or
 	// ours from an earlier start): leave it, so a large state directory is
 	// not re-propagated on every daemon start.
-	if _, bad := exposed(path, st); !bad {
-		if _, foreign := foreignOwner(path, st); !foreign {
-			return nil
-		}
+	if _, bad := exposed(path, st); !bad && ownedByUser(path) {
+		return nil
 	}
 	return setPrivate(path, st.IsDir())
 }
@@ -266,3 +287,75 @@ func fixHint(path string, dir bool) string {
 }
 
 func protectNewDir(dir string) error { return setPrivate(dir, true) }
+
+// userOnlySDDL is the protected DACL Codex requires on its socket directory:
+// one ACE, full control (FILE_ALL_ACCESS) for the current user, (OI)(CI).
+func userOnlySDDL() (string, error) {
+	id := current()
+	if id.err != nil {
+		return "", id.err
+	}
+	return "D:P(A;OICI;FA;;;" + id.user.String() + ")", nil
+}
+
+// isUserOnly reports whether dir has exactly the user-only security
+// descriptor: owner the current user, a protected DACL whose only ACE is an
+// access-allowed (OI)(CI) FILE_ALL_ACCESS entry for the current user. It is
+// the check codex-rs/uds windows_socket_validation.rs applies.
+func isUserOnly(dir string) (bool, error) {
+	id := current()
+	if id.err != nil {
+		return false, id.err
+	}
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || !owner.Equals(id.user) {
+		return false, nil
+	}
+	control, _, err := sd.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+		return false, nil
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil || dacl.AceCount != 1 {
+		return false, nil
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		return false, nil
+	}
+	sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	return ace.Header.AceType == aceAccessAllowed &&
+		ace.Header.AceFlags == windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE &&
+		ace.Mask == fileAllAccess && sid.Equals(id.user), nil
+}
+
+func userOnlyDir(dir string) error {
+	if ok, err := isUserOnly(dir); err != nil {
+		return fmt.Errorf("fileperm: read ACL of %s: %w", dir, err)
+	} else if ok {
+		return nil
+	}
+	sddl, err := userOnlySDDL()
+	if err != nil {
+		return err
+	}
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		current().user, nil, dacl, nil); err != nil {
+		return fmt.Errorf("fileperm: set user-only ACL on %s: %w", dir, err)
+	}
+	return nil
+}

@@ -1,11 +1,14 @@
 package claude
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
 )
@@ -68,7 +71,19 @@ func (a *Adapter) NativeThreadOnNode(prev contracts.Run) bool {
 // nothing when the transcript is already there (or nowhere on this node).
 func (a *Adapter) importTranscript(configDir, cwd, sid string) error {
 	dst := guessTranscriptPath(configDir, cwd, sid)
-	if dst == "" || isFile(dst) {
+	if dst == "" {
+		return nil
+	}
+	if isFile(dst) {
+		// A copy made by an earlier adoption may be stale: the owner went
+		// on with the conversation outside Pyre. A newer transcript that
+		// extends this copy replaces it (never one that diverged).
+		if src := newerExtension(a.transcriptHomes(), cwd, sid, dst); src != "" {
+			if err := os.Remove(dst); err != nil {
+				return err
+			}
+			return copyFile(src, dst)
+		}
 		return nil
 	}
 	src := findTranscript(a.transcriptHomes(), cwd, sid)
@@ -86,6 +101,109 @@ func (a *Adapter) importTranscript(configDir, cwd, sid string) error {
 		return copyTree(side, filepath.Join(filepath.Dir(dst), sid))
 	}
 	return nil
+}
+
+// allTranscripts returns every distinct transcript file of sid under homes.
+func allTranscripts(homes []string, cwd, sid string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p == "" || !isFile(p) {
+			return
+		}
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			real = p
+		}
+		if !seen[real] {
+			seen[real] = true
+			out = append(out, p)
+		}
+	}
+	for _, h := range homes {
+		if h == "" {
+			continue
+		}
+		add(guessTranscriptPath(h, cwd, sid))
+		m, _ := filepath.Glob(filepath.Join(h, "projects", "*", sid+".jsonl"))
+		for _, p := range m {
+			add(p)
+		}
+	}
+	return out
+}
+
+// newerExtension returns a transcript of sid elsewhere on the node that is
+// newer and longer than dst and begins with dst's bytes ("" when none).
+func newerExtension(homes []string, cwd, sid, dst string) string {
+	di, err := os.Stat(dst)
+	if err != nil {
+		return ""
+	}
+	dreal, _ := filepath.EvalSymlinks(dst)
+	best := ""
+	var bestT int64
+	for _, p := range allTranscripts(homes, cwd, sid) {
+		if real, _ := filepath.EvalSymlinks(p); real == dreal {
+			continue
+		}
+		fi, err := os.Stat(p)
+		if err != nil || fi.Size() <= di.Size() || !fi.ModTime().After(di.ModTime()) {
+			continue
+		}
+		if fi.ModTime().UnixNano() > bestT && hasPrefixFile(p, dst, di.Size()) {
+			best, bestT = p, fi.ModTime().UnixNano()
+		}
+	}
+	return best
+}
+
+// hasPrefixFile reports whether file p begins with the n bytes of prefix.
+func hasPrefixFile(p, prefix string, n int64) bool {
+	a, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer a.Close()
+	b, err := os.Open(prefix)
+	if err != nil {
+		return false
+	}
+	defer b.Close()
+	ba, bb := make([]byte, 64<<10), make([]byte, 64<<10)
+	for n > 0 {
+		k := int64(len(ba))
+		if n < k {
+			k = n
+		}
+		if _, err := io.ReadFull(a, ba[:k]); err != nil {
+			return false
+		}
+		if _, err := io.ReadFull(b, bb[:k]); err != nil {
+			return false
+		}
+		if !bytes.Equal(ba[:k], bb[:k]) {
+			return false
+		}
+		n -= k
+	}
+	return true
+}
+
+// ConversationInUse reports whether conversation sid looks live outside
+// Pyre: a transcript written in the last 30 seconds, or (Linux /proc;
+// macOS lsof) a process holding one open. Adopting it then would give the
+// conversation two writers.
+func (a *Adapter) ConversationInUse(cwd, sid string) (bool, string) {
+	for _, p := range allTranscripts(a.transcriptHomes(), cwd, sid) {
+		if fi, err := os.Stat(p); err == nil && time.Since(fi.ModTime()) < 30*time.Second {
+			return true, p + " was written in the last 30 seconds"
+		}
+		if pid := fileHolder(p); pid > 0 {
+			return true, fmt.Sprintf("process %d has %s open", pid, p)
+		}
+	}
+	return false, ""
 }
 
 func isFile(p string) bool {

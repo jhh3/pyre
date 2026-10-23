@@ -53,7 +53,7 @@ func requireOwner(ctx context.Context, what string) (contracts.Principal, error)
 // heldTx reads the queue, oldest hold first.
 func (h *Hub) heldTx(ctx context.Context, q queryer) (contracts.HeldAnswers, error) {
 	out := contracts.HeldAnswers{Items: []contracts.HeldAnswer{}}
-	rows, err := q.QueryContext(ctx, `SELECT ask_id, option_id, text, held_at FROM ask_held ORDER BY held_at, ask_id`)
+	rows, err := q.QueryContext(ctx, `SELECT ask_id, option_id, items, text, held_at FROM ask_held ORDER BY held_at, ask_id`)
 	if err != nil {
 		return out, err
 	}
@@ -61,9 +61,12 @@ func (h *Hub) heldTx(ctx context.Context, q queryer) (contracts.HeldAnswers, err
 	var newest time.Time
 	for rows.Next() {
 		var it contracts.HeldAnswer
-		var at string
-		if err := rows.Scan(&it.AskID, &it.OptionID, &it.Text, &at); err != nil {
+		var at, items string
+		if err := rows.Scan(&it.AskID, &it.OptionID, &items, &it.Text, &at); err != nil {
 			return out, err
+		}
+		if items != "" {
+			_ = persistence.FromJSON(items, &it.Items)
 		}
 		it.HeldAt = persistence.ParseTime(at)
 		if it.HeldAt.After(newest) {
@@ -124,9 +127,9 @@ func (h *Hub) HoldAnswer(ctx context.Context, req contracts.HoldAnswerRequest) (
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO ask_held(ask_id,option_id,text,held_by,held_at) VALUES(?,?,?,?,?)
-			ON CONFLICT(ask_id) DO UPDATE SET option_id=excluded.option_id, text=excluded.text, held_by=excluded.held_by, held_at=excluded.held_at`,
-			a.AskID, item.OptionID, item.Text, persistence.JSON(p), persistence.Time(h.now())); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ask_held(ask_id,option_id,items,text,held_by,held_at) VALUES(?,?,?,?,?,?)
+			ON CONFLICT(ask_id) DO UPDATE SET option_id=excluded.option_id, items=excluded.items, text=excluded.text, held_by=excluded.held_by, held_at=excluded.held_at`,
+			a.AskID, item.OptionID, heldItemsArg(item.Items), item.Text, persistence.JSON(p), persistence.Time(h.now())); err != nil {
 			return nil, err
 		}
 		return h.emitHeldTx(ctx, tx, a.AskID)
@@ -195,17 +198,20 @@ func (h *Hub) flushHeld(ctx context.Context, only map[string]bool) (contracts.An
 	h.heldMu.Lock() // one flush at a time (maintenance and FlushHeldAnswers)
 	defer h.heldMu.Unlock()
 	out := contracts.AnswerAsksResponse{Results: []contracts.AnswerAskResult{}}
-	rows, err := h.db.QueryContext(ctx, `SELECT ask_id, option_id, text, held_by, held_at FROM ask_held ORDER BY held_at, ask_id`)
+	rows, err := h.db.QueryContext(ctx, `SELECT ask_id, option_id, items, text, held_by, held_at FROM ask_held ORDER BY held_at, ask_id`)
 	if err != nil {
 		return out, err
 	}
 	var all []heldRow
 	for rows.Next() {
 		var r heldRow
-		var by string
-		if err := rows.Scan(&r.item.AskID, &r.item.OptionID, &r.item.Text, &by, &r.heldAt); err != nil {
+		var by, items string
+		if err := rows.Scan(&r.item.AskID, &r.item.OptionID, &items, &r.item.Text, &by, &r.heldAt); err != nil {
 			rows.Close()
 			return out, err
+		}
+		if items != "" {
+			_ = persistence.FromJSON(items, &r.item.Items)
 		}
 		if only != nil && !only[r.item.AskID] {
 			continue

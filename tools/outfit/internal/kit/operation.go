@@ -1,7 +1,9 @@
 package kit
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -320,9 +322,28 @@ func schemaValueMatches(kind string, value any) bool {
 		_, ok := value.(bool)
 		return ok
 	case "integer":
+		// A manifest that went through JSON (a backup, the state database)
+		// carries whole numbers as float64 or json.Number; they are still
+		// integers.
+		switch number := value.(type) {
+		case json.Number:
+			if _, err := number.Int64(); err == nil {
+				return true
+			}
+			parsed, err := number.Float64()
+			return err == nil && wholeNumber(parsed)
+		case float64:
+			return wholeNumber(number)
+		case float32:
+			return wholeNumber(float64(number))
+		}
 		valueKind := reflect.TypeOf(value)
 		return valueKind != nil && ((valueKind.Kind() >= reflect.Int && valueKind.Kind() <= reflect.Int64) || (valueKind.Kind() >= reflect.Uint && valueKind.Kind() <= reflect.Uint64))
 	case "number":
+		if number, ok := value.(json.Number); ok {
+			_, err := number.Float64()
+			return err == nil
+		}
 		valueKind := reflect.TypeOf(value)
 		return valueKind != nil && (valueKind.Kind() >= reflect.Int && valueKind.Kind() <= reflect.Float64)
 	case "object":
@@ -334,6 +355,10 @@ func schemaValueMatches(kind string, value any) bool {
 	default:
 		return false
 	}
+}
+
+func wholeNumber(value float64) bool {
+	return !math.IsInf(value, 0) && !math.IsNaN(value) && value == math.Trunc(value)
 }
 
 func containsSchemaValue(values []any, wanted any) bool {

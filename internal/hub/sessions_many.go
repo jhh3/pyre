@@ -67,5 +67,6 @@ func (h *Hub) GetManySessions(ctx context.Context, req contracts.GetManySessions
 		}
 		out.Items = append(out.Items, v)
 	}
+	h.attachMonitors(ctx, h.db, out.Items)
 	return out, nil
 }

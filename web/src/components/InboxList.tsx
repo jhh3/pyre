@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { archiveThread, archiveThreads, useHeld, useInbox, useProjects } from '@/hooks/data';
 import { listHref, useRoute, type Filter } from '@/hooks/route';
-import { canArchive, heldItems, outcome, plainPreview, threadHref } from '@/lib/model';
+import { archiveDismisses, canArchive, canBulkArchive, heldItems, isOpenAsk, outcome, plainPreview, threadHref } from '@/lib/model';
 import { dayKey } from '@/lib/time';
 import type { Box, HeldAnswers, Thread } from '@/lib/types';
 import { setUI, useUI } from '@/lib/ui-store';
@@ -59,9 +59,11 @@ function Row({ t, held, box, selected, cursor }: { t: Thread; held: HeldAnswers;
   const decided = t.ask && t.ask.state !== 'open' ? outcome(t.ask) : null;
   // The outcome chip, unless the preview already says the same thing.
   const out = decided && !preview.startsWith(decided.text) ? decided : null;
-  // Open message threads get an archive button (hover on desktop, always
-  // on touch); open asks end by an answer, not by archiving.
+  // Open threads get an archive button (hover on desktop, always on
+  // touch); for an open ask or a session item it dismisses (an open ask
+  // confirms first).
   const archivable = box === 'open' && canArchive(t);
+  const dismiss = archiveDismisses(t);
   useEffect(() => {
     if (cursor) ref.current?.scrollIntoView({ block: 'nearest' });
   }, [cursor]);
@@ -106,6 +108,11 @@ function Row({ t, held, box, selected, cursor }: { t: Thread; held: HeldAnswers;
                   Waiting for your reply
                 </Chip>
               )}
+              {t.kind === 'attention' && t.needs_reply && (
+                <Chip tone="brand" icon={<MessageCircle />}>
+                  {t.attention?.kind === 'waiting' ? 'Waiting on you in its chat' : 'Needs you'}
+                </Chip>
+              )}
               {out && <Chip tone={out.tone === 'ok' ? 'ok' : 'neutral'}>{out.text}</Chip>}
             </div>
           )}
@@ -116,15 +123,15 @@ function Row({ t, held, box, selected, cursor }: { t: Thread; held: HeldAnswers;
           <TooltipTrigger asChild>
             <button
               type="button"
-              aria-label={`Archive ${t.title}`}
+              aria-label={`${dismiss ? 'Dismiss' : 'Archive'} ${t.title}`}
               onClick={() => archiveThread(t)}
               className="absolute top-8 right-2 flex size-8 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-[opacity,color,background-color] group-hover:opacity-100 hover:bg-background hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none pointer-coarse:opacity-100"
             >
-              <Archive className="size-4" />
+              {dismiss ? <X className="size-4" /> : <Archive className="size-4" />}
             </button>
           </TooltipTrigger>
           <TooltipContent>
-            Archive <Kbd>E</Kbd>
+            {isOpenAsk(t) ? 'Dismiss (no option, no default)' : dismiss ? 'Dismiss' : 'Archive'} <Kbd>E</Kbd>
           </TooltipContent>
         </Tooltip>
       )}
@@ -137,7 +144,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** "Archive all older than 1 day" under the Open list, with a confirmation. */
 function ArchiveOlder({ threads }: { threads: Thread[] }) {
   const [open, setOpen] = useState(false);
-  const older = threads.filter((t) => canArchive(t) && Date.now() - Date.parse(t.last_at) > DAY_MS);
+  const older = threads.filter((t) => canBulkArchive(t) && Date.now() - Date.parse(t.last_at) > DAY_MS);
   if (!older.length) return null;
   const n = older.length;
   const noun = `conversation${n === 1 ? '' : 's'}`;

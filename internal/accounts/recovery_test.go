@@ -248,7 +248,7 @@ func TestClaudeRotaRecoversAfterResetWithoutWaitingForPoll(t *testing.T) {
 		t.Fatalf("expired snapshot observation %+v", o)
 	}
 	var sel contracts.AccountSelection
-	sel, err = r.svc.Select(ctx, contracts.AccountSelectParams{Provider: contracts.ProviderAnthropic, Policy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: "acct_synth-e"}})
+	sel, err = r.svc.Select(ctx, contracts.AccountSelectParams{Provider: contracts.ProviderAnthropic, Policy: contracts.AccountPolicy{Mode: contracts.AccountExplicit, AccountID: "acct_synth-e", Strict: true}})
 	if err != nil || sel.AccountID != "acct_synth-e" {
 		b, _ := json.Marshal(sel)
 		t.Fatalf("explicit select of expired account: %s %v", b, err)

@@ -41,9 +41,9 @@ const (
 // (Update goroutine only).
 type localTmux struct {
 	bin, socket string
-	looked      bool                 // bin looked up on PATH
-	opened      int                  // read-only views opened locally (tests)
-	statAt      time.Time            // when the socket was last looked at (views ask every frame)
+	looked      bool      // bin looked up on PATH
+	opened      int       // read-only views opened locally (tests)
+	statAt      time.Time // when the socket was last looked at (views ask every frame)
 	statOK      bool
 	bad         map[string]time.Time // run -> use the hub until
 }

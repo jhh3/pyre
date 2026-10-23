@@ -14,6 +14,7 @@ type GrantSession struct {
 	NodeID    string // node of the session's current run ("" if none)
 	ProjectID string // "" for standalone sessions
 	Archived  bool
+	RunActive bool // the current run exists and has not ended
 }
 
 // CheckConnectionGrant decides from current hub state whether a session may
@@ -72,6 +73,7 @@ func (h *Hub) grantSession(ctx context.Context, sessionID string) (GrantSession,
 				return gs, err
 			}
 			gs.NodeID = r.NodeID
+			gs.RunActive = err == nil && !r.State.Terminal()
 		}
 	}
 	return gs, nil

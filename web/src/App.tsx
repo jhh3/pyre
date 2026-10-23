@@ -1,5 +1,6 @@
 import { Loader2 } from 'lucide-react';
 import { useEffect } from 'react';
+import { DismissDialog } from '@/components/DismissDialog';
 import { HelpDialog } from '@/components/HelpDialog';
 import { HeldBar } from '@/components/HeldBar';
 import { InboxList } from '@/components/InboxList';
@@ -72,6 +73,7 @@ export default function App() {
         </div>
       )}
       <HelpDialog />
+      <DismissDialog />
       <Toaster position="top-center" />
     </div>
   );

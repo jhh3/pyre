@@ -53,6 +53,14 @@ type Executor struct {
 	// Headers are fixed, non-secret request headers an HTTP provider requires
 	// on every call (for example Discord's mandatory User-Agent shape).
 	Headers map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	// ErrorField names a top-level field of a CLI executor's JSON output that
+	// marks the call as failed when present, for CLIs that print a provider
+	// error object and still exit 0 (Stripe CLI prints {"error": {...}}).
+	ErrorField string `json:"errorField,omitempty" yaml:"errorField,omitempty"`
+	// ErrorStatus maps a provider error's code or type (looked up in that
+	// order inside ErrorField) to the HTTP status the provider returned, for
+	// CLIs whose output omits the status.
+	ErrorStatus map[string]int `json:"errorStatus,omitempty" yaml:"errorStatus,omitempty"`
 }
 
 type CredentialMethod struct {
@@ -98,6 +106,13 @@ type CredentialBinding struct {
 	Path           string `json:"path,omitempty" yaml:"path,omitempty"`
 	Mode           uint32 `json:"mode,omitempty" yaml:"mode,omitempty"`
 	ClearInherited bool   `json:"clearInherited,omitempty" yaml:"clearInherited,omitempty"`
+	// WhenArgument applies the binding only when the named boolean operation
+	// argument is true; UnlessArgument only when it is absent or false. They
+	// let one connection hold two credentials (Stripe's test and live keys)
+	// and pick one per call. A selected binding whose secret is not stored
+	// fails the call instead of falling back to the other credential.
+	WhenArgument   string `json:"whenArgument,omitempty" yaml:"whenArgument,omitempty"`
+	UnlessArgument string `json:"unlessArgument,omitempty" yaml:"unlessArgument,omitempty"`
 }
 
 type CommandTemplate struct {

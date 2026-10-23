@@ -9,7 +9,7 @@ make build          # bin/pyre, bin/pyred, bin/pyre-hub, bin/pyre-mockhub (Go 1.
 make help           # every target
 ```
 
-The Makefile uses `~/sdk/go1.27.1/bin/go` when it exists, otherwise `go` on your PATH. Override it with `make GO=/path/to/go`.
+The Makefile uses `~/sdk/go1.27.3/bin/go` when it exists, otherwise `go` on your PATH. Override it with `make GO=/path/to/go`.
 
 Try your change without any real machines:
 
@@ -24,11 +24,14 @@ PYRE_HUB=http://127.0.0.1:7788 PYRE_TOKEN=dev-token bin/pyre sessions
 ```sh
 make test vet                                   # Go tests and go vet
 make check                                      # pre-merge gate: gofmt check, vet, golangci-lint, tests
+make test-fast                                  # short suite as parallel test processes (what CI runs)
 go test ./internal/tui/... ./tests/tui/...      # one area
 go test ./tests/tui -run TestGoldenScreens -update   # regenerate TUI goldens after an intended UI change
 android/gradlew -p android testDebugUnitTest    # Android unit + Robolectric tests
 python3 scripts/check_docs.py                   # Markdown links and planning-doc consistency
 ```
+
+CI has two workflows, both started by hand (`gh workflow run CI --ref <branch>`): `CI` is the one-minute check (ubuntu: tidy, vet, generated files, build, golangci-lint for linux and darwin, and the short suite sharded by `tools/testshard`; it also runs on each merge to main to refresh the caches), and `CI full` holds the slow gates (the full suite with `-race` on ubuntu and macOS, govulncheck, the reproducible release build). `tools/testshard` balances shards with `tools/testshard/weights.json`; when tests move a lot, refresh it with `make test-weights`, then set `assignSeed` in `tools/testshard/main.go` to the seed `go run ./tools/testshard -plan -shards 6` prints (both reshuffle the shards once, so the next CI runs rebuild their caches).
 
 Tests must be hermetic. They use isolated config homes, state directories, tmux sockets, databases and ports, plus obviously synthetic credentials (`sk-ant-oat01-pyre-synthetic-…`). A test must never touch your real `~/.config/pyre`, your default tmux server, your `~/.claude` or `~/.codex` logins, or your keychain. Tests that need real hosts or real Claude/Codex logins skip unless their environment variables are set (see `tests/e2e/`).
 

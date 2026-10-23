@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
@@ -455,5 +458,133 @@ func TestSSHBootstrapPlanAndExecute(t *testing.T) {
 	abs, err := SSHBootstrapPlan("mac-mini", "/bin/pyred", "", "", tk, "/opt/pyre/")
 	if err != nil || abs.RemoteBinary != "/opt/pyre/bin/pyred" || abs.Steps[1].Argv[3] != "mac-mini:/opt/pyre/bin/.pyred.new" {
 		t.Fatalf("abs dir: %+v %v", abs, err)
+	}
+}
+
+// decodePS reverses EncodePowerShell (for assertions on the remote script).
+func decodePS(t *testing.T, argv string) string {
+	t.Helper()
+	enc, ok := strings.CutPrefix(argv, "powershell -NoProfile -NonInteractive -EncodedCommand ")
+	if !ok {
+		t.Fatalf("not an encoded PowerShell step: %q", argv)
+	}
+	b, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil || len(b)%2 != 0 {
+		t.Fatalf("bad encoding: %v", err)
+	}
+	u := make([]uint16, len(b)/2)
+	for i := range u {
+		u[i] = binary.LittleEndian.Uint16(b[2*i:])
+	}
+	return string(utf16.Decode(u))
+}
+
+// A Windows target gets PowerShell steps (no mkdir -p, chmod or "$HOME"),
+// installs where install.ps1 looks for a bootstrap (%LOCALAPPDATA%\Programs\Pyre)
+// and still passes the secret on stdin only.
+func TestSSHBootstrapPlanWindows(t *testing.T) {
+	sec, _ := transport.NewSecret(transport.PrefixEnrollSecret)
+	pin := strings.Repeat("cd", 32)
+	tk := contracts.EnrollmentTicket{NodeID: "node_01WIN", Secret: sec, HubURL: "https://hub.tail:7443", HubCertSHA256: pin}
+	plan, err := SSHBootstrapPlanFor(TargetWindows, "synth-win", "/tmp/build/pyred-windows-amd64.exe", "https://hub.synthetic:7443", "", tk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Target != TargetWindows || plan.RemoteBinary != "~/AppData/Local/Programs/Pyre/bin/pyred.exe" || plan.CredentialFile != "~/AppData/Local/Programs/Pyre/node-credential.json" {
+		t.Fatalf("plan: %+v", plan)
+	}
+	if len(plan.Steps) != 4 {
+		t.Fatalf("steps = %d", len(plan.Steps))
+	}
+	if got := plan.Steps[1].Argv; strings.Join(got, " ") != "scp -q /tmp/build/pyred-windows-amd64.exe synth-win:AppData/Local/Programs/Pyre/bin/.pyred.new" {
+		t.Fatalf("copy step: %q", got)
+	}
+	for _, i := range []int{0, 2, 3} {
+		s := plan.Steps[i]
+		if len(s.Argv) != 3 || s.Argv[0] != "ssh" || s.Argv[1] != "synth-win" {
+			t.Fatalf("step %d argv %q", i, s.Argv)
+		}
+		script := decodePS(t, s.Argv[2])
+		for _, bad := range []string{"mkdir -p", "chmod", `"$HOME"`, sec[4:]} {
+			if strings.Contains(script, bad) || strings.Contains(s.Argv[2], bad) {
+				t.Fatalf("step %d carries %q: %s", i, bad, script)
+			}
+		}
+		if !strings.Contains(script, `Join-Path $env:USERPROFILE 'AppData\Local\Programs\Pyre'`) || !strings.HasPrefix(s.Display, "ssh synth-win powershell: ") {
+			t.Fatalf("step %d script: %s", i, script)
+		}
+	}
+	if s := decodePS(t, plan.Steps[2].Argv[2]); !strings.Contains(s, `Move-Item -Force -LiteralPath (Join-Path $r 'bin\.pyred.new') -Destination $b`) || !strings.Contains(s, "bin\\pyred.exe") {
+		t.Fatalf("install script: %s", s)
+	}
+	enroll := decodePS(t, plan.Steps[3].Argv[2])
+	for _, want := range []string{"[Console]::In.ReadLine()", "enroll --hub 'https://hub.synthetic:7443' --pin " + pin, "--node-id node_01WIN", "--credential-file (Join-Path $r 'node-credential.json') --secret-stdin"} {
+		if !strings.Contains(enroll, want) {
+			t.Fatalf("enroll script lacks %q: %s", want, enroll)
+		}
+	}
+	if plan.Steps[3].Stdin != sec+"\n" || plan.Steps[0].Stdin != "" {
+		t.Fatal("the secret must travel on the enroll step's stdin only")
+	}
+	if out := plan.String(); strings.Contains(out, sec[4:]) || !strings.Contains(out, "powershell: ") || strings.Contains(out, "EncodedCommand") {
+		t.Fatalf("printed plan: %s", out)
+	}
+	if p2, err := SSHBootstrapPlanFor(TargetWindows, "synth-win", "pyred.exe", "", "", tk, "~/pyre/"); err != nil || p2.RemoteBinary != "~/pyre/bin/pyred.exe" {
+		t.Fatalf("custom dir: %+v %v", p2, err)
+	}
+	for _, bad := range []string{"/opt/pyre", "C:/pyre", "~/a b", "~/../x", "~"} {
+		if _, err := SSHBootstrapPlanFor(TargetWindows, "synth-win", "pyred.exe", "", "", tk, bad); err == nil {
+			t.Fatalf("accepted Windows remote dir %q", bad)
+		}
+	}
+	if _, err := SSHBootstrapPlanFor("plan9", "synth-win", "pyred.exe", "", "", tk, ""); err == nil {
+		t.Fatal("accepted an unknown target")
+	}
+}
+
+type probeRunner struct {
+	uname, ps string // output; "" = the command fails
+	calls     []string
+}
+
+func (r *probeRunner) Run(_ context.Context, argv []string, _ io.Reader, stdout, _ io.Writer) error {
+	r.calls = append(r.calls, strings.Join(argv, " "))
+	out := r.ps
+	if strings.Contains(argv[len(argv)-1], "uname") {
+		out = r.uname
+	}
+	if out == "" {
+		return errors.New("exit status 1")
+	}
+	io.WriteString(stdout, out)
+	return nil
+}
+
+func TestProbeTarget(t *testing.T) {
+	for _, tc := range []struct {
+		uname, ps, want string
+	}{
+		{"Linux\n", "", TargetUnix},
+		{"Darwin\n", "", TargetUnix},
+		{"MINGW64_NT-10.0-26100\n", "", TargetWindows},
+		{"", "Win32NT\r\n", TargetWindows},        // cmd.exe or PowerShell login shell: no uname
+		{"Windows_NT\n", "", TargetWindows},       // busybox-w32 / uutils uname on PATH
+		{"Plan9\n", "Win32NT\r\n", TargetWindows}, // unknown uname: PowerShell decides
+		{"Plan9\n", "", TargetUnix},
+	} {
+		r := &probeRunner{uname: tc.uname, ps: tc.ps}
+		got, err := ProbeTarget(context.Background(), r, "box")
+		if err != nil || got != tc.want {
+			t.Fatalf("probe %+v = %q, %v (calls %q)", tc, got, err, r.calls)
+		}
+		if r.calls[0] != "ssh box uname -s" {
+			t.Fatalf("first probe %q", r.calls[0])
+		}
+	}
+	if _, err := ProbeTarget(context.Background(), &probeRunner{}, "box"); err == nil {
+		t.Fatal("an unreachable host must fail the probe")
+	}
+	if _, err := ProbeTarget(context.Background(), &probeRunner{}, "-oProxyCommand=x"); err == nil {
+		t.Fatal("accepted an option as alias")
 	}
 }

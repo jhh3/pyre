@@ -46,7 +46,7 @@ func (h cloudHub) FindNode(ctx context.Context, name string) (*c.Node, error) {
 }
 
 func (h cloudHub) NodeSessions(ctx context.Context, nodeID string) ([]c.SessionView, error) {
-	page, err := h.ops.ListSessions(ctx, SessionFilter{Node: nodeID, IncludeArchived: true})
+	page, err := h.ops.ListSessions(ctx, SessionFilter{Node: nodeID, IncludeArchived: true, IncludeMonitors: true})
 	if err != nil {
 		return nil, err
 	}

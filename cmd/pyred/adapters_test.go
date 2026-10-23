@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -42,7 +43,7 @@ func TestBuildAdaptersSharedSocket(t *testing.T) {
 	for _, a := range b.list {
 		names[a.Harness()] = a.Name()
 	}
-	for _, h := range []contracts.Harness{contracts.HarnessClaude, contracts.HarnessCodex, contracts.HarnessShell, contracts.HarnessMock} {
+	for _, h := range []contracts.Harness{contracts.HarnessClaude, contracts.HarnessCodex, contracts.HarnessAgy, contracts.HarnessShell, contracts.HarnessMock} {
 		if names[h] == "" {
 			t.Fatalf("missing %s adapter: %v", h, names)
 		}
@@ -110,5 +111,46 @@ func TestClaudeAdvertisesInputMonitorOnlyWhenEnabled(t *testing.T) {
 	}
 	if c, _ := caps(runOpts{state: state, noDoorbell: true}); contracts.HasCap(c, contracts.CapInputMonitor) {
 		t.Fatal("--no-doorbell advertised input.monitor")
+	}
+}
+
+// The Codex background-command wake asks the hub whether the session may
+// still be woken: not when archived, archiving when done, or unknown.
+func TestWakeAllowed(t *testing.T) {
+	var view contracts.SessionView
+	var err error
+	allowed := wakeAllowed(func(_ context.Context, r contracts.GetRequest) (contracts.SessionView, error) {
+		if r.ID != "ses_synth" {
+			t.Fatalf("asked about %q", r.ID)
+		}
+		return view, err
+	})
+	ctx := context.Background()
+	if !allowed(ctx, "ses_synth") {
+		t.Error("a live session must be woken")
+	}
+	view.Session.Tags = []string{contracts.TagArchiveWhenDone}
+	if allowed(ctx, "ses_synth") {
+		t.Error("a session archiving when done must not be woken")
+	}
+	view.Session.Tags, view.Session.Archived = nil, true
+	if allowed(ctx, "ses_synth") {
+		t.Error("an archived session must not be woken")
+	}
+	err = contracts.Errorf(contracts.ErrNotFound, "no session")
+	if allowed(ctx, "ses_synth") {
+		t.Error("an unknown session must not be woken")
+	}
+	err = contracts.Errorf(contracts.ErrUnavailable, "hub down")
+	if !allowed(ctx, "ses_synth") {
+		t.Error("an unreachable hub must not block the wake")
+	}
+	var r wakeRelay
+	if !r.call(ctx, "ses_synth") {
+		t.Error("an unset relay allows")
+	}
+	r.set(func(context.Context, string) bool { return false })
+	if r.call(ctx, "ses_synth") {
+		t.Error("relay ignores its handler")
 	}
 }

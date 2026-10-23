@@ -185,3 +185,21 @@ func TestHeadroomWords(t *testing.T) {
 		t.Errorf("weekly only %q", got)
 	}
 }
+
+// A node where agy is installed shows one "your own login" card under
+// google (agy has no Pyre-managed logins); nodes without agy show none.
+func TestCardsAgyOwnLogin(t *testing.T) {
+	nodes := []contracts.Node{
+		{NodeID: "node_synth-b", Name: "synth-linux", Harnesses: []contracts.HarnessInfo{{Harness: contracts.HarnessClaude, Available: true}, {Harness: contracts.HarnessAgy, Available: true}}},
+		{NodeID: "node_synth-a", Name: "synth-mac", Harnesses: []contracts.HarnessInfo{{Harness: contracts.HarnessClaude, Available: true}}},
+	}
+	var google []Card
+	for _, c := range Cards(nil, nodes, now) {
+		if c.Provider == contracts.ProviderGoogle {
+			google = append(google, c)
+		}
+	}
+	if len(google) != 1 || google[0].NodeID != "node_synth-b" || google[0].State != Ambient || google[0].Label() != "your own login (not managed)" {
+		t.Fatalf("google cards %+v", google)
+	}
+}

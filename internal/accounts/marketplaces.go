@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,6 +31,13 @@ import (
 // the profile's per-launch copies only. The owner's files are untouched and
 // the gap is reported (ProfileInfo.Unavailable, logged), not silent.
 
+// A readable marketplace is always kept (with Full Disk Access granted to
+// Pyre, laptop 2026-10, a ~/Documents marketplace reads fine and its
+// plugins, development channels included, work in every profile). The
+// probe reads what Claude reads: the directory and, for a directory
+// marketplace, its .claude-plugin/marketplace.json (on laptop the folder
+// listed while that manifest blocked).
+
 // marketplaceProbeTimeout bounds one readability probe.
 var marketplaceProbeTimeout = 2 * time.Second
 
@@ -46,46 +54,67 @@ var readDirProbe = func(dir string) error {
 		}
 		return err
 	}
-	if _, err = f.Readdirnames(1); errors.Is(err, io.EOF) {
-		return nil // empty directory
+	if _, err = f.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	m, err := os.Open(filepath.Join(dir, ".claude-plugin", "marketplace.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // empty directory or no manifest (Claude reports that itself)
+	}
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+	if _, err = m.Read(make([]byte, 1)); errors.Is(err, io.EOF) {
+		return nil
 	}
 	return err
 }
 
+// probeCall is one in-flight probe of a path; every caller waits on it.
+type probeCall struct {
+	done    chan struct{}
+	err     error
+	started time.Time
+}
+
 var probes = struct {
 	mu       sync.Mutex
-	inflight map[string]chan error
-}{inflight: map[string]chan error{}}
+	inflight map[string]*probeCall
+}{inflight: map[string]*probeCall{}}
 
-// probeReadable reports whether path can be read within the timeout. A
-// probe still blocked from an earlier call reports unreadable at once, so a
-// stuck path costs at most one goroutine however many launches ask.
+// probeReadable reports whether path can be read within the timeout.
+// Concurrent callers (launches binding the same account at once) share one
+// probe and its answer, so a probe another launch started a moment earlier
+// is not mistaken for a blocked path; a probe still blocked after the
+// timeout costs at most one goroutine however many launches ask.
 func probeReadable(path string) error {
 	// The probe goroutine may outlive this call (that is its point), so it
 	// gets the probe function now instead of reading the package variable
 	// later, unsynchronised with whoever replaces it (tests do).
 	probe := readDirProbe
 	probes.mu.Lock()
-	ch, busy := probes.inflight[path]
+	pc, busy := probes.inflight[path]
 	if !busy {
-		ch = make(chan error, 1)
-		probes.inflight[path] = ch
+		pc = &probeCall{done: make(chan struct{}), started: time.Now()}
+		probes.inflight[path] = pc
 		go func() {
-			err := probe(path)
+			pc.err = probe(path)
 			probes.mu.Lock()
 			delete(probes.inflight, path)
 			probes.mu.Unlock()
-			ch <- err
+			close(pc.done)
 		}()
 	}
 	probes.mu.Unlock()
-	if busy {
+	wait := marketplaceProbeTimeout - time.Since(pc.started)
+	if wait <= 0 {
 		return fmt.Errorf("still blocked from an earlier read (macOS privacy prompt or hung mount?)")
 	}
 	select {
-	case err := <-ch:
-		return err
-	case <-time.After(marketplaceProbeTimeout):
+	case <-pc.done:
+		return pc.err
+	case <-time.After(wait):
 		return fmt.Errorf("no answer within %s (macOS privacy prompt or hung mount?)", marketplaceProbeTimeout)
 	}
 }

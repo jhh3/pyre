@@ -136,8 +136,9 @@ Repeat for each subscription. Each token is read from stdin (or the macOS keycha
 `pyre accounts login --help` covers device-code logins.
 
 How the pool picks an account: each machine sticks to its "home" account while that account is under 80% on
-its 5-hour and weekly windows; otherwise it picks the account with the most headroom that no other machine is
-using. When a Claude account hits its limit mid-session, Pyre hands the session to another Claude account and
+its 5-hour window and under 70% weekly; otherwise it picks the account with the most headroom (the window closest
+to its limit decides) that no other machine is using. Idle sessions on an account past 85% weekly move to one with
+room between turns. When a Claude account hits its limit mid-session, Pyre hands the session to another Claude account and
 says so. It never silently switches Claude work to Codex or to a paid API key. If no usable account is left,
 the session waits for the reset and you get notified.
 
@@ -154,9 +155,13 @@ pyre                                                 # open the TUI
 (`pyre new myrepo shell`).
 
 Or press `n` in the TUI and type `myrepo add a --verbose flag`. The launcher line is
-`repo[+repo] [@machine] [claude|codex|shell] first prompt…`; `ctrl+f` starts the session in a fresh git
+`repo[+repo] [@machine] [claude|codex|agy|shell] first prompt…`; `ctrl+f` starts the session in a fresh git
 worktree on a branch named after the prompt, and several repos (`api+web`) get side-by-side worktrees in one
-folder. `pyre start --node … --cwd …` runs in any directory. `pyre keys` prints every key.
+folder. `pyre start --node … --cwd …` runs in any directory; without `--node` (and without `--cwd`) Pyre picks the least
+loaded connected machine with the harness and says which. `pyre monitor add --every 10m --cmd '…'` wakes a
+session only when a shell check's output changes (session lists show it as "watching N" on that session; Claude
+Code sessions can use Claude's own Monitor tool instead; a Codex session can leave a command running in the
+background and end its turn, and Pyre wakes it when the command finishes). `pyre keys` prints every key.
 
 ## Troubleshooting
 

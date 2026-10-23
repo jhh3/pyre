@@ -7,14 +7,23 @@
 // results, errors, or logs; they stay in Outfit or a node's OS store
 // (internal/credentials).
 //
-// Grant model. A grant is a tuple (node?, project?, session?) on one
-// connection; each non-empty field must match the using session's context.
-// The empty tuple is an explicit owner-broad grant. A session may use a
-// connection only while some active grant matches it, and every use
-// (connection.invoke, launch provisioning) re-checks the CURRENT grants, so a
-// revocation takes effect on the next use rather than when a cached label
-// expires. Revoking removes a grant; it never broadens access (no grants means
-// no access).
+// Access model. Every session belongs to the owner, and the owner's
+// default is that his sessions do not need him to use the connections his
+// machines hold: a session with an active run may use a connection verified
+// on its own node, and one verified for remote_invoke on another node,
+// without a grant. The default applies only to connections the owner never
+// granted: once a connection has any grant record (active or revoked), its
+// grants alone decide, so scoped grants and revokes keep restricting it.
+// Connections nobody verified still need a grant. Launch provisioning
+// (credentials injected into a run's environment) never uses the default.
+//
+// A grant is a tuple (node?, project?, session?) on one connection; each
+// non-empty field must match the using session's context. The empty tuple is
+// an explicit owner-broad grant. Every use (connection.invoke, launch
+// provisioning) re-checks the CURRENT state, so a revocation or a lost
+// verification takes effect on the next use rather than when a cached label
+// expires. Revoking removes a grant; it never broadens access. A hub opened
+// with Options.RequireGrants keeps the strict model: no grant, no access.
 package connections
 
 import (
@@ -81,13 +90,17 @@ CREATE TABLE connection_availability (
 type Options struct {
 	Events contracts.EventSink // optional; events are appended inside mutations
 	Clock  contracts.Clock     // default SystemClock
+	// RequireGrants turns off the owner default (see the package comment):
+	// every use then needs a matching grant.
+	RequireGrants bool
 }
 
 // Catalog is the hub-side connection catalog.
 type Catalog struct {
-	db     *sql.DB
-	events contracts.EventSink
-	clock  contracts.Clock
+	db            *sql.DB
+	events        contracts.EventSink
+	clock         contracts.Clock
+	requireGrants bool
 }
 
 // Open migrates (ops + connections namespaces) and returns the catalog.
@@ -98,7 +111,7 @@ func Open(ctx context.Context, db *sql.DB, opt Options) (*Catalog, error) {
 	if opt.Clock == nil {
 		opt.Clock = contracts.SystemClock{}
 	}
-	return &Catalog{db: db, events: opt.Events, clock: opt.Clock}, nil
+	return &Catalog{db: db, events: opt.Events, clock: opt.Clock, requireGrants: opt.RequireGrants}, nil
 }
 
 // ConnectionSpec creates or updates catalog metadata (owner action).
@@ -140,6 +153,9 @@ type SessionContext struct {
 	NodeID    string // node the session runs on
 	ProjectID string // "" for projectless sessions
 	Archived  bool
+	// RunActive: the session's current run exists and has not ended. Only
+	// such sessions get the owner default (no grant needed).
+	RunActive bool
 }
 
 // SessionLookup resolves a session's authoritative context (implemented by
@@ -629,6 +645,30 @@ func (c *Catalog) CheckGrant(ctx context.Context, connectionID string, sc Sessio
 		}
 	}
 	if bestScore < 0 {
+		if !c.requireGrants {
+			managed, err := c.hasGrantHistory(ctx, connectionID)
+			if err != nil {
+				return d, err
+			}
+			switch {
+			case managed:
+				d.Reason = "no active grant matches this session (node, project, session); this connection's access is managed by grants"
+				return d, nil
+			case !sc.RunActive || sc.NodeID == "":
+				d.Reason = "session has no active run; the no-grant default applies only to running sessions"
+				return d, nil
+			}
+			reason, err := c.ownerDefault(ctx, connectionID, sc.NodeID)
+			if err != nil {
+				return d, err
+			}
+			if reason != "" {
+				d.Allowed, d.Reason = true, reason
+				return d, nil
+			}
+			d.Reason = "no node has verified this connection (run connection.check on the node that holds it) and no grant matches this session"
+			return d, nil
+		}
 		d.Reason = "no active grant matches this session (node, project, session)"
 		return d, nil
 	}
@@ -644,6 +684,48 @@ func (c *Catalog) CheckGrant(ctx context.Context, connectionID string, sc Sessio
 		d.Reason = "owner-broad grant"
 	}
 	return d, nil
+}
+
+// hasGrantHistory reports whether the owner ever granted this connection
+// (active or revoked grants). Such a connection is managed explicitly: its
+// grants and revokes decide, and the owner default does not apply.
+func (c *Catalog) hasGrantHistory(ctx context.Context, connectionID string) (bool, error) {
+	var n int
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM connection_grants WHERE connection_id=?`, connectionID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ownerDefault is the no-grant-needed decision: the connection is verified
+// on the session's own node (any mode), or verified for remote_invoke on
+// another node. It returns the reason, or "" when neither holds.
+func (c *Catalog) ownerDefault(ctx context.Context, connectionID, nodeID string) (string, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT node_id, mode FROM connection_availability WHERE connection_id=? AND state='verified' ORDER BY node_id, mode`, connectionID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	remote := ""
+	for rows.Next() {
+		var node, mode string
+		if err := rows.Scan(&node, &mode); err != nil {
+			return "", err
+		}
+		if nodeID != "" && node == nodeID {
+			return "verified on this session's node; no grant needed", nil
+		}
+		if mode == "remote_invoke" && remote == "" {
+			remote = node
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if remote != "" {
+		return "owner session; verified for remote use on " + remote + "; no grant needed", nil
+	}
+	return "", nil
 }
 
 // Checker returns a GrantChecker backed by the catalog and the hub's session

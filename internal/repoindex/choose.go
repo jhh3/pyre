@@ -156,7 +156,7 @@ func ParseLine(fields []string) (repos []string, node, harness, prompt string) {
 			node = a[1:]
 			continue
 		}
-		if harness == "" && (lower == "claude" || lower == "codex" || lower == "shell") {
+		if harness == "" && (lower == "claude" || lower == "codex" || lower == "agy" || lower == "shell") {
 			harness = lower
 			continue
 		}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/agentguide"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/repoindex"
 )
 
 // expandHome expands a leading "~/".
@@ -55,6 +56,19 @@ func recreateTempDir(p string) bool {
 		}
 	}
 	return false
+}
+
+// defaultCwd: a start with no folder (a remote start, e.g. onto a Windows
+// node, where the caller's cwd means nothing) runs in the node user's home.
+// A worktree checkout still needs its source repository.
+func defaultCwd(cmd *contracts.StartRunCommand) {
+	req := cmd.Checkout
+	if cmd.Cwd != "" || (req != nil && (req.Mode == contracts.CheckoutWorktree || req.Path != "")) {
+		return
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		cmd.Cwd = h
+	}
 }
 
 // validateDir requires an absolute existing directory.
@@ -99,6 +113,7 @@ var branchSafe = regexp.MustCompile(`[^A-Za-z0-9._/-]+`)
 // run (restart mid-launch) reuses an existing worktree at the same path.
 func (d *Daemon) resolveCheckout(ctx context.Context, cmd contracts.StartRunCommand) (string, *contracts.CheckoutBinding, error) {
 	req := cmd.Checkout
+	defaultCwd(&cmd)
 	if req == nil {
 		cwd, err := validateDir(cmd.Cwd)
 		if err != nil {
@@ -191,7 +206,16 @@ func (d *Daemon) resolveCheckout(ctx context.Context, cmd contracts.StartRunComm
 			return "", nil, err
 		}
 	} else {
-		if _, err := git(ctx, top, "worktree", "add", "-b", branch, path, "HEAD"); err != nil {
+		// A new branch starts at origin's default branch, fetched now, and
+		// tracks nothing (repoindex.FreshBase); HEAD only without origin.
+		start, err := repoindex.FreshBase(ctx, top, d.ghBinary())
+		if err != nil {
+			return "", nil, err
+		}
+		if start.Warning != "" {
+			d.cfg.Logger.Warn("fresh worktree: "+start.Warning, "run", cmd.RunID, "repo", top, "branch", branch)
+		}
+		if _, err := git(ctx, top, "worktree", "add", "--no-track", "-b", branch, path, start.Ref); err != nil {
 			return "", nil, err
 		}
 	}
@@ -234,6 +258,7 @@ func (d *Daemon) runEnv(base map[string]string, cmd contracts.StartRunCommand, r
 		env[k] = v
 	}
 	env["PYRE_SESSION_ID"] = cmd.Session.SessionID
+	env["PYRE_HARNESS"] = string(cmd.Session.Harness)
 	env["PYRE_RUN_ID"] = cmd.RunID
 	env["PYRE_NODE_ID"] = d.nodeID
 	env["PYRE_SOCKET"] = d.SocketPath()
@@ -253,6 +278,7 @@ func (d *Daemon) runEnv(base map[string]string, cmd contracts.StartRunCommand, r
 	if cmd.SessionToken != "" {
 		env["PYRE_SESSION_TOKEN"] = cmd.SessionToken
 	}
+	d.setRunTmp(env, cmd.RunID) // TMPDIR on the data disk (runtmp.go)
 	path := env["PATH"]
 	if path == "" {
 		path = os.Getenv("PATH")

@@ -40,12 +40,11 @@ const (
 	exitExecRequest  = 75 // EX_TEMPFAIL: "run the requested pyred next"
 )
 
-// Trampoline settings read (and removed from the environment, so runs and
-// hooks never inherit them) when `pyred run` starts.
-var trampolineFile, trampolinePID string
-
+// takeTrampolineEnv reads the trampoline settings (keepTrampoline; only
+// Windows uses them) and removes them from the environment, so runs and
+// hooks never inherit them, when `pyred run` starts.
 func takeTrampolineEnv() {
-	trampolineFile, trampolinePID = os.Getenv(envTrampoline), os.Getenv(envTrampolinePID)
+	keepTrampoline(os.Getenv(envTrampoline), os.Getenv(envTrampolinePID))
 	_ = os.Unsetenv(envTrampoline)
 	_ = os.Unsetenv(envTrampolinePID)
 }

@@ -42,3 +42,28 @@ func TestPathFrom(t *testing.T) {
 		}
 	}
 }
+
+// install.ps1 -WithTools: <prefix>\tools\outfit\bin\outfit.exe, found
+// without an exec bit (Windows has none).
+func TestPathFromWindows(t *testing.T) {
+	old := goos
+	goos = "windows"
+	t.Cleanup(func() { goos = old })
+	// PathFrom resolves symlinks (macOS's temp dir is under /var ->
+	// /private/var), so compare against the resolved prefix.
+	prefix, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(prefix, "v1", "bin", "pyred.exe")
+	write(t, exe, 0o644)
+	write(t, filepath.Join(prefix, "tools", Marker), 0o644)
+	if got := PathFrom(exe, "outfit"); got != "" {
+		t.Fatalf("no outfit.exe yet: got %q", got)
+	}
+	outfit := filepath.Join(prefix, "tools", "outfit", "bin", "outfit.exe")
+	write(t, outfit, 0o644)
+	if got := PathFrom(exe, "outfit"); got != outfit {
+		t.Fatalf("outfit: got %q, want %q", got, outfit)
+	}
+}

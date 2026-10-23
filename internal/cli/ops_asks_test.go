@@ -65,6 +65,7 @@ func (f *fakeAsks) WithdrawAsk(_ context.Context, req c.WithdrawAskRequest) (c.A
 	}
 	a := synthAsk(req.AskID, st)
 	a.SupersededBy = req.SupersededBy
+	a.Answer = &c.AskAnswer{Text: req.Reason, By: testOwner, At: time.Now()}
 	return a, nil
 }
 
@@ -260,7 +261,7 @@ func TestAskCLIAnswerBatchAndOwnerCommands(t *testing.T) {
 		t.Fatalf("want one batch call, got %d", len(f.answered))
 	}
 	got := f.answered[0].Answers
-	if len(got) != 3 || got[0] != (c.AnswerAskItem{AskID: "ask_synth-1", OptionID: "b", Text: "ship it"}) ||
+	if len(got) != 3 || got[0].AskID != "ask_synth-1" || got[0].OptionID != "b" || got[0].Text != "ship it" || got[0].Items != nil ||
 		got[1].OptionID != "a" || got[2].OptionID != "" || got[2].Text != "ship it" {
 		t.Fatalf("answers: %+v", got)
 	}
@@ -329,5 +330,63 @@ func TestAskWhenShowsZoneAndRelative(t *testing.T) {
 	}
 	if askWhen(nil, now) != "no deadline" {
 		t.Fatal("nil deadline")
+	}
+}
+
+// fakeAttn adds attention items to fakeAsks.
+type fakeAttn struct {
+	*fakeAsks
+	items   map[string]c.AttentionItem
+	updated []c.UpdateAttentionRequest
+}
+
+func (f *fakeAttn) GetAttention(_ context.Context, req c.GetRequest) (c.AttentionItem, error) {
+	it, ok := f.items[req.ID]
+	if !ok {
+		return it, c.Errorf(c.ErrNotFound, "no item %s", req.ID)
+	}
+	return it, nil
+}
+
+func (f *fakeAttn) UpdateAttention(_ context.Context, req c.UpdateAttentionRequest) (c.AttentionItem, error) {
+	f.updated = append(f.updated, req)
+	it := f.items[req.AttentionID]
+	it.State = req.State
+	f.items[req.AttentionID] = it
+	return it, nil
+}
+
+// Owner request 2026-10-19: asks and inbox items can be dismissed.
+func TestAskAndAttentionDismiss(t *testing.T) {
+	e := newEnv(t, nil)
+	f := &fakeAttn{fakeAsks: &fakeAsks{asks: []c.Ask{synthAsk("ask_synth-1", c.AskOpen)}}, items: map[string]c.AttentionItem{
+		"att_synth-ask":  {AttentionID: "att_synth-ask", Kind: c.AttnAsk, State: c.AttnOpen, Object: c.ObjectRef{Kind: c.KindAsk, ID: "ask_synth-1"}},
+		"att_synth-wait": {AttentionID: "att_synth-wait", Kind: c.AttnWaiting, State: c.AttnOpen, Object: c.ObjectRef{Kind: c.KindSession, ID: "ses_synth-a"}},
+	}}
+	r := run(t, e, &App{API: f}, "ask", "dismiss", "ask_synth-1")
+	expectCode(t, r, 0)
+	if len(f.withdrawn) != 1 || f.withdrawn[0].Reason != c.AskDismissReason || !strings.Contains(r.stdout, "dismissed by you") {
+		t.Fatalf("ask dismiss: %+v\n%s", f.withdrawn, r)
+	}
+	// A waiting item is marked handled.
+	r = run(t, e, &App{API: f}, "attention", "dismiss", "att_synth-wait")
+	expectCode(t, r, 0)
+	if len(f.updated) != 1 || f.updated[0].State != c.AttnHandled || !strings.Contains(r.stdout, "att_synth-wait: handled") {
+		t.Fatalf("waiting dismiss: %+v\n%s", f.updated, r)
+	}
+	// An open ask's item dismisses the ask itself (its default must not
+	// fire later), then the item.
+	r = run(t, e, &App{API: f}, "attention", "archive", "att_synth-ask")
+	expectCode(t, r, 0)
+	if len(f.withdrawn) != 2 || f.withdrawn[1].AskID != "ask_synth-1" || f.withdrawn[1].Reason != c.AskDismissReason {
+		t.Fatalf("ask item dismiss: %+v", f.withdrawn)
+	}
+}
+
+func TestAskOutcomeInChat(t *testing.T) {
+	a := synthAsk("ask_synth-1", c.AskAnswered)
+	a.Answer = &c.AskAnswer{Text: "ship it", Source: c.AskSourceChat, With: []string{"ask_synth-2"}, By: testOwner}
+	if got := askOutcome(a); got != "answered in chat: ship it (also answered ask_synth-2)" {
+		t.Fatalf("chat outcome: %q", got)
 	}
 }

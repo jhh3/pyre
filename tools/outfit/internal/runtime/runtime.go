@@ -77,6 +77,10 @@ func (e Executor) PlanWithCredentials(mode kit.Mode, operation kit.Operation, ar
 	if err := validateArguments(operation, arguments); err != nil {
 		return Plan{}, err
 	}
+	credentials, err := credentials.ForArguments(arguments, nil)
+	if err != nil {
+		return Plan{}, err
+	}
 	plan := Plan{Executor: mode.Executor.Kind, Arguments: cloneStrings(arguments), Class: operation.Class, CredentialBoundary: "no credential is required"}
 	redacted := map[string]string{}
 	for _, field := range credentials.Method.Fields {
@@ -223,6 +227,13 @@ func (e Executor) RunWithCredentialsIO(ctx context.Context, mode kit.Mode, opera
 	if _, err := e.PlanWithCredentials(mode, operation, arguments, credentials); err != nil {
 		return Result{}, err
 	}
+	if secret == nil {
+		secret = map[string]string{}
+	}
+	credentials, err := credentials.ForArguments(arguments, secret)
+	if err != nil {
+		return Result{}, err
+	}
 	if len(operation.Compose) > 0 {
 		return e.runCompose(ctx, mode, operation, arguments, secret, credentials)
 	}
@@ -258,6 +269,10 @@ func (e Executor) runCommandTemplateOnce(ctx context.Context, template kit.Comma
 	}
 	if binary == "" {
 		return Result{}, errors.New("command template has no resolved binary")
+	}
+	credentials, err := credentials.ForArguments(fields, fields)
+	if err != nil {
+		return Result{}, err
 	}
 	args := make([]string, 0, len(template.Args))
 	for _, argument := range template.Args {
@@ -495,18 +510,19 @@ func (e Executor) runHTTP(ctx context.Context, mode kit.Mode, operation kit.Oper
 			return result, fmt.Errorf("upstream returned %s (rate limited; retry after %s)", response.Status, delay.Round(time.Millisecond))
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			if operation.HTTP != nil {
-				if payload, ok := result.Data.(map[string]any); ok {
-					detail := providerErrorText(payload[operation.HTTP.ErrorField])
-					if detail == "" {
-						detail = providerErrorText(payload["message"])
-					}
-					if detail != "" {
-						return result, fmt.Errorf("upstream returned %s: %s", response.Status, detail)
-					}
+			failure := &ProviderError{Status: response.StatusCode}
+			if payload, ok := result.Data.(map[string]any); ok {
+				failure.Message = providerErrorText(payload[operation.HTTP.ErrorField])
+				if failure.Message == "" {
+					failure.Message = providerErrorText(payload["message"])
 				}
+				// Stripe-style {"error": {"code", "type", "message"}} bodies.
+				if failure.Message == "" {
+					failure.Message = providerErrorText(payload["error"])
+				}
+				failure.Code = errorObjectCode(payload["error"])
 			}
-			return result, fmt.Errorf("upstream returned %s", response.Status)
+			return result, failure
 		}
 		if err := providerEnvelopeError(operation, result.Data); err != nil {
 			return result, err
@@ -921,7 +937,12 @@ func (e Executor) runCLI(ctx context.Context, mode kit.Mode, operation kit.Opera
 	if err != nil {
 		return Result{}, err
 	}
-	return decodeResult(output, "application/json", 200), nil
+	result := decodeResult(output, "application/json", 200)
+	if failure := cliProviderError(mode.Executor, result.Data); failure != nil {
+		result.Status = failure.Status
+		return result, failure
+	}
+	return result, nil
 }
 
 func appendCLIOptional(args []string, optionalArgs []kit.CLIOptionalArg, arguments map[string]string) ([]string, error) {
@@ -982,6 +1003,10 @@ func DiscoverMCP(ctx context.Context, mode kit.Mode, secret map[string]string) (
 func DiscoverMCPWithCredentials(ctx context.Context, mode kit.Mode, secret map[string]string, credentials CredentialContext) ([]DiscoveredTool, error) {
 	if mode.Executor.Kind != "mcp" {
 		return nil, errors.New("mode is not MCP")
+	}
+	credentials, err := credentials.ForArguments(nil, secret)
+	if err != nil {
+		return nil, err
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "outfit", Version: "dev"}, nil)
 	transport, cleanup, err := mcpTransport(ctx, mode, nil, secret, credentials)

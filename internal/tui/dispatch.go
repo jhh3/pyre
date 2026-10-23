@@ -210,7 +210,7 @@ func (m *Model) hasPanes() bool {
 		viewMachines, viewAccounts, viewConnections, viewEnvs, viewActivity:
 		return true
 	case viewProject:
-		return m.projTab != tabOverview && m.projTab != tabSessions
+		return m.projTab != tabOverview && m.projTab != tabSessions && m.projTab != tabGrants
 	case viewDoc:
 		return m.docRevs
 	}

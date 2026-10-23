@@ -184,13 +184,101 @@ func Merged(ctx context.Context, repo, branch, def string) bool {
 	return false
 }
 
-// Pushed reports that the branch tip is on some remote-tracking branch.
+// Pushed reports that the branch tip is contained in the branch's own
+// remote branch: its configured upstream, else origin/<branch>. A tip that
+// merely appears on some other remote-tracking branch does not count.
 func Pushed(ctx context.Context, repo, branch string) bool {
-	if branch == "" {
+	up := Upstream(ctx, repo, branch)
+	if up == "" {
 		return false
 	}
-	out, err := Git(ctx, repo, "for-each-ref", "--contains", "refs/heads/"+branch, "--format=%(refname)", "refs/remotes")
-	return err == nil && strings.TrimSpace(out) != ""
+	_, err := Git(ctx, repo, "merge-base", "--is-ancestor", "refs/heads/"+branch, up)
+	return err == nil
+}
+
+// Upstream returns the remote-tracking ref of branch: its configured
+// upstream, else refs/remotes/origin/<branch> when it exists ("" if none).
+func Upstream(ctx context.Context, repo, branch string) string {
+	if branch == "" {
+		return ""
+	}
+	if up, err := Git(ctx, repo, "rev-parse", "--symbolic-full-name", branch+"@{upstream}"); err == nil && strings.HasPrefix(up, "refs/remotes/") {
+		return up
+	}
+	ref := "refs/remotes/origin/" + branch
+	if _, err := Git(ctx, repo, "rev-parse", "--verify", "--quiet", ref); err == nil {
+		return ref
+	}
+	return ""
+}
+
+// ---- session markers (W-lifecycle) ----
+
+// Marker lines after the creation time: claim=<token> (written by Create)
+// and session=<id> (written once by Claim, after the session started).
+const (
+	markerSessionPrefix = "session="
+	markerClaimPrefix   = "claim="
+)
+
+// MarkerSession returns the session recorded in a worktree's pyre-created
+// marker ("" when there is no marker or it names no session yet).
+func MarkerSession(wt string) string {
+	adm, ok := adminDir(wt)
+	if !ok {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(adm, MarkerFile))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if id, ok := strings.CutPrefix(strings.TrimSpace(line), markerSessionPrefix); ok {
+			return id
+		}
+	}
+	return ""
+}
+
+// Claim records sessionID in the markers of the worktrees at paths that
+// Create made with token (its ClaimToken), once: a marker that names a
+// session already, carries another token or none, is left alone. A marker
+// that never names a session is treated as the owner's and is never removed
+// automatically. It returns the worktrees claimed.
+func Claim(paths []string, sessionID, token string) []string {
+	if sessionID == "" || token == "" {
+		return nil
+	}
+	var out []string
+	for _, wt := range paths {
+		adm, ok := adminDir(filepath.Clean(wt))
+		if !ok {
+			continue
+		}
+		mp := filepath.Join(adm, MarkerFile)
+		b, err := os.ReadFile(mp)
+		if err != nil || strings.Contains(string(b), markerSessionPrefix) || !hasLine(string(b), markerClaimPrefix+token) {
+			continue
+		}
+		f, err := os.OpenFile(mp, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			continue
+		}
+		_, werr := f.WriteString(markerSessionPrefix + sessionID + "\n")
+		if f.Close() == nil && werr == nil {
+			out = append(out, wt)
+		}
+	}
+	return out
+}
+
+func hasLine(s, want string) bool {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ScanInput describes a session for Scan.

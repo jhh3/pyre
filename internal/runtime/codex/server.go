@@ -164,6 +164,19 @@ func (hs *homeServer) running(ctx context.Context) (bool, int) {
 	return true, p.PID
 }
 
+// prepareDir creates the socket directory private to the current user, and
+// <StateRoot>/codex above it, re-securing them on every start. 0700 on Unix;
+// on Windows the app-server refuses any socket directory whose ACL is not
+// exactly the user-only one ("socket directory is not private to the current
+// user"), and directories made before this (or by tmux.PrepareDir's
+// user+SYSTEM ACL) carry inherited entries.
+func (hs *homeServer) prepareDir() error {
+	if err := hs.a.userOnlyDir(filepath.Dir(hs.dir)); err != nil {
+		return err
+	}
+	return hs.a.userOnlyDir(hs.dir)
+}
+
 // ensure starts the app-server if needed and returns a connected client.
 func (hs *homeServer) ensure(ctx context.Context, unset []string) (*rpcClient, error) {
 	hs.startMu.Lock()
@@ -184,14 +197,14 @@ func (hs *homeServer) ensure(ctx context.Context, unset []string) (*rpcClient, e
 	}
 	ok, _ := hs.running(ctx)
 	if !ok {
-		if err := tmux.PrepareDir(hs.dir); err != nil {
+		if st, err := os.Lstat(hs.sock); err == nil && st.Mode()&os.ModeType != 0 {
+			_ = os.Remove(hs.sock) // stale socket/symlink from a crashed instance
+		}
+		if err := hs.prepareDir(); err != nil {
 			return nil, err
 		}
 		_ = os.WriteFile(filepath.Join(hs.dir, homeFile), []byte(hs.home), 0o600)
 		_ = hs.a.srv.KillSession(ctx, hs.session) // dead pane, if any
-		if st, err := os.Lstat(hs.sock); err == nil && st.Mode()&os.ModeType != 0 {
-			_ = os.Remove(hs.sock) // stale socket/symlink from a crashed instance
-		}
 		spec := tmux.SessionSpec{Name: hs.session, Cwd: hs.dir, Env: hs.env(), Unset: unset, Argv: hs.argv(), Width: 200, Height: 50}
 		if err := hs.a.srv.NewSession(ctx, spec); err != nil {
 			return nil, fmt.Errorf("start codex app-server: %w", err)
@@ -236,6 +249,11 @@ func (hs *homeServer) ensure(ctx context.Context, unset []string) (*rpcClient, e
 		known = append(known, ts)
 	}
 	hs.mu.Unlock()
+	for _, ts := range known {
+		ts.mu.Lock()
+		ts.runningCmds = nil // a new connection: what ran before is unknown (bgwake.go)
+		ts.mu.Unlock()
+	}
 	// Re-subscribe threads known from before a reconnect (idle threads
 	// unload; pending approvals are re-sent on resume).
 	for _, ts := range known {
@@ -328,6 +346,7 @@ func (hs *homeServer) onNotify(method string, params json.RawMessage) {
 		if ts, child := hs.stateFor(n.ThreadID); ts != nil && !child {
 			ts.mu.Lock()
 			ts.setStatus(n.Status, now)
+			hs.a.armWake(ts) // the thread may have gone idle after turn/completed
 			ts.mu.Unlock()
 		}
 	case "thread/closed":
@@ -345,6 +364,7 @@ func (hs *homeServer) onNotify(method string, params json.RawMessage) {
 			if ts, child := hs.stateFor(n.ThreadID); ts != nil && !child {
 				ts.mu.Lock()
 				ts.activeTurn = n.Turn.ID
+				ts.turnsStarted++
 				if ts.status.Type != "active" {
 					ts.setStatus(threadStatus{Type: "active"}, now)
 					ts.activeTurn = n.Turn.ID
@@ -365,6 +385,8 @@ func (hs *homeServer) onNotify(method string, params json.RawMessage) {
 					}
 				} else {
 					ts.onTurnCompleted(n.Turn, now)
+					ts.dropTurnWakes(n.Turn.ID)
+					hs.a.armWake(ts)
 				}
 				ts.mu.Unlock()
 			}
@@ -381,6 +403,11 @@ func (hs *homeServer) onNotify(method string, params json.RawMessage) {
 		if ts, child := hs.stateFor(n.ThreadID); ts != nil && !child {
 			ts.mu.Lock()
 			ts.onItem(it, n.TurnID, method == "item/started", now)
+			if method == "item/started" {
+				ts.noteCommandStart(it)
+			} else if ts.noteCommandDone(it, n.TurnID, now) {
+				hs.a.armWake(ts)
+			}
 			if it.Type == "subAgentActivity" && it.AgentThreadID != "" {
 				hs.mu.Lock()
 				hs.parent[it.AgentThreadID] = ts.threadID

@@ -1,6 +1,10 @@
 package contracts
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // Session is a durable conversation/work identity. It persists across runs.
 type Session struct {
@@ -89,7 +93,7 @@ type Run struct {
 	RunID              string                `json:"run_id"`
 	SessionID          string                `json:"session_id"`
 	NodeID             string                `json:"node_id"`
-	Adapter            string                `json:"adapter"` // e.g. "claude-tmux", "codex-appserver", "shell-tmux", "mock"
+	Adapter            string                `json:"adapter"` // e.g. "claude-tmux", "codex-appserver", "agy-tmux", "shell-tmux", "mock"
 	Harness            Harness               `json:"harness"`
 	Cwd                string                `json:"cwd"`
 	Checkout           *CheckoutBinding      `json:"checkout,omitempty"`
@@ -140,7 +144,7 @@ type RuntimeVersion struct {
 // NativeRef is the harness's own resumable identity (Claude session id,
 // Codex thread id). It may be replaced on resume; Pyre IDs are stable.
 type NativeRef struct {
-	Kind string `json:"kind"` // "claude_session" | "codex_thread" | "tmux_session"
+	Kind string `json:"kind"` // "claude_session" | "codex_thread" | "agy_conversation" | "tmux_session"
 	ID   string `json:"id"`
 }
 
@@ -193,6 +197,57 @@ type SessionView struct {
 	// (v1.3). Blocking reasons outrank informational messages.
 	Flag      *SessionFlag `json:"flag,omitempty"`
 	Freshness Freshness    `json:"freshness"`
+	// Monitor (additive) marks a monitor session (Session.IsMonitor).
+	Monitor bool `json:"monitor,omitempty"`
+	// Monitors (additive) are the live monitors (run not ended) that wake
+	// this session, oldest first, in sessions.list, sessions.get and
+	// sessions.get_many views.
+	Monitors []MonitorRef `json:"monitors,omitempty"`
+	// ArchiveCascade (additive) is set on the answer to an archive by the
+	// owner or a session (sessions.update archived=true) when sessions sit
+	// under the archived one: the descendants Pyre archives with it and
+	// those it leaves because the owner is using them.
+	ArchiveCascade *ArchiveCascade `json:"archive_cascade,omitempty"`
+}
+
+// ArchiveCascade is what archiving a session does to the sessions under it
+// (its lineage descendants). Archived lists those archived with it: at once
+// when idle or ended, when their current turn ends otherwise. Left lists
+// those the owner started or attached to, messaged or typed into since
+// they were created; they stay as they are.
+type ArchiveCascade struct {
+	Archived []CascadeSession `json:"archived,omitempty"`
+	Left     []CascadeSession `json:"left,omitempty"`
+}
+
+// CascadeSession names one session of an ArchiveCascade.
+type CascadeSession struct {
+	SessionID string `json:"session_id"`
+	Title     string `json:"title,omitempty"`
+}
+
+// Line says what the cascade did in one line ("" when it did nothing):
+// `also archived 3 sessions it started; left 1 the owner is using: "t" (ses_…)`.
+func (c *ArchiveCascade) Line() string {
+	if c == nil || len(c.Archived)+len(c.Left) == 0 {
+		return ""
+	}
+	var parts []string
+	if n := len(c.Archived); n > 0 {
+		noun := "sessions"
+		if n == 1 {
+			noun = "session"
+		}
+		parts = append(parts, fmt.Sprintf("also archived %d %s it started", n, noun))
+	}
+	if n := len(c.Left); n > 0 {
+		names := make([]string, 0, n)
+		for _, s := range c.Left {
+			names = append(names, fmt.Sprintf("%q (%s)", s.Title, s.SessionID))
+		}
+		parts = append(parts, fmt.Sprintf("left %d the owner is using: %s", n, strings.Join(names, ", ")))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // AccountPolicy selects the subscription for a launch. Cross-provider
@@ -201,13 +256,18 @@ type AccountPolicy struct {
 	Mode      AccountPolicyMode `json:"mode"`                 // default "eligible"
 	AccountID string            `json:"account_id,omitempty"` // for "explicit"
 	Prefer    []string          `json:"prefer,omitempty"`     // account IDs in preference order
+	// Strict keeps an explicit account even when it is at its limit or
+	// ineligible (the launch waits/fails). Default false: such an account
+	// falls back to the best eligible same-provider account, and the
+	// assignment reason says so.
+	Strict bool `json:"strict,omitempty"`
 }
 
 type AccountPolicyMode string
 
 const (
 	AccountEligible AccountPolicyMode = "eligible" // any eligible configured subscription of the harness's provider
-	AccountExplicit AccountPolicyMode = "explicit" // exactly this account; fail if ineligible
+	AccountExplicit AccountPolicyMode = "explicit" // this account; when ineligible, the best eligible one (Strict: fail)
 	AccountAmbient  AccountPolicyMode = "ambient"  // the node's existing default login (no Pyre assignment); reported as such
 )
 
@@ -246,12 +306,28 @@ type StartSessionRequest struct {
 const (
 	TagReportParent = "report:parent"
 	TagReportNone   = "report:none"
+	// TagPyreRun marks a headless session recorded by `pyre run` (the
+	// caller ran the command itself): never reports to a parent and never
+	// raises owner attention.
+	TagPyreRun = "pyre run"
 )
 
 // TagArchiveWhenDone (W-archive2, additive) is the reserved session tag
 // the hub sets for UpdateSessionRequest.WhenDone: the session is archived
 // once its current turn ends and its run has been stopped.
 const TagArchiveWhenDone = "archive:when-done"
+
+// Headless-run markers in StartSessionRequest.Args (pyre run, W-pyrerun).
+// ArgPyreExec=<hex SHA-256 of a claim secret> makes the node record the
+// run without starting anything (its harness's exec adapter): the caller
+// claims the account binding over the node's local socket and runs the
+// command itself. ArgPyreExecResume=<id> names the conversation the
+// caller's command resumes. These are the only arguments a node credential
+// may start a session with, and only on itself (hub nodestart.go).
+const (
+	ArgPyreExec       = "--pyre-exec"
+	ArgPyreExecResume = "--pyre-exec-resume"
+)
 
 // NodeSelector is a caller-supplied rule for choosing a node.
 type NodeSelector struct {
@@ -273,6 +349,9 @@ type StartSessionResponse struct {
 	// Command is the node command that will perform the launch; observe the
 	// run state to learn the launch outcome.
 	CommandID string `json:"command_id,omitempty"`
+	// Warnings: launcher notes, e.g. a fresh worktree branched from local
+	// HEAD because its repository has no origin remote (set client-side).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type ListSessionsRequest struct {
@@ -283,6 +362,9 @@ type ListSessionsRequest struct {
 	States          []RunState `json:"states,omitempty"`
 	Query           string     `json:"query,omitempty"`
 	IncludeArchived bool       `json:"include_archived,omitempty"`
+	// IncludeMonitors (additive) also lists monitor sessions; by default
+	// they are left out (contracts/monitors.go).
+	IncludeMonitors bool `json:"include_monitors,omitempty"`
 }
 
 type GetRequest struct {
@@ -387,6 +469,10 @@ type ResumeRequest struct {
 	// AllowHandoff permits a reconstructed (non-native) continuation when
 	// native resume is unsupported. Default false => ErrUnsupported.
 	AllowHandoff bool `json:"allow_handoff,omitempty"`
+	// EnvFile (additive) replaces the session's environment file for this
+	// and later runs (an absolute path on the node), or "none" drops it;
+	// "" keeps the previous run's. Needs harness capability launch.env_file.
+	EnvFile string `json:"env_file,omitempty"`
 }
 
 // AssociateRequest attaches/detaches a session to a project after the fact.

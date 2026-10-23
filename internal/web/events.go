@@ -319,7 +319,7 @@ func (s *Server) onEvent(ev c.Event) {
 			s.invalidatePage(*ev.ProjectID)
 		}
 		project()
-	case c.EvArtifactPublished, c.EvArtifactChanged:
+	case c.EvArtifactPublished, c.EvArtifactChanged, c.EvStandingGrantChanged:
 		project()
 	}
 }

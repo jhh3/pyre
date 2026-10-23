@@ -243,6 +243,15 @@ func (m *Model) viewHeader(w int) string {
 	if width(left) > w-need {
 		left = build(false, true)
 	}
+	// The abbreviated fleet utilization outranks the Sessions view toggle
+	// (v still cycles the view).
+	utils := m.utilSummaries()
+	fits := func(l string) bool { return width(l)+width(utils[utilShort])+width(gap2+gap1)+width(full)+3 <= w }
+	if utils[utilShort] != "" && !fits(left) {
+		if l := build(false, false); fits(l) {
+			left = l
+		}
+	}
 	if (!m.view.topLevel() || m.view == viewDigest) && m.view != viewAccounts && m.view != viewMachines { // tabs: no crumb; the digest is not a tab
 		crumb := m.th.faint.Render(" › ") + m.th.bold.Render(m.view.name())
 		if width(left)+width(crumb) < w-12 {
@@ -254,11 +263,33 @@ func (m *Model) viewHeader(w int) string {
 		filterTag = m.th.accent.Render("/" + trunc(m.filter, 16))
 	}
 	room := w - width(left) - 2
-	pool := m.poolSummary() // usage_view.go
+	// Fleet utilization (usage_view.go) drops its 5-hour window, then
+	// abbreviates, before the filter tag goes, then itself before the
+	// connection words; it keeps at least two cells from the tabs.
+	// Clicking it opens Accounts.
+	type cand struct {
+		sep, filter, util, fresh string
+	}
+	var cands []cand
+	for _, u := range utils {
+		cands = append(cands, cand{gap2 + gap1, filterTag, u, full})
+	}
+	for _, u := range utils {
+		cands = append(cands, cand{gap2 + gap1, "", u, full})
+	}
+	cands = append(cands, cand{gap2, filterTag, "", full}, cand{"", "", "", full}, cand{gap2, filterTag, "", short}, cand{"", "", "", short})
 	var right string
-	for _, cand := range []string{joinNonEmpty(gap2+gap1, filterTag, pool, full), joinNonEmpty(gap2+gap1, pool, full), joinNonEmpty(gap2, filterTag, full), full, joinNonEmpty(gap2, filterTag, short), short} {
-		if width(cand) <= room {
-			right = cand
+	for _, c := range cands {
+		need := width(joinNonEmpty(c.sep, c.filter, c.util, c.fresh))
+		if c.util != "" {
+			need++ // two cells from the tabs, not one
+		}
+		if need <= room {
+			util := c.util
+			if util != "" {
+				util = m.mark(zoneDef{kind: zoneTab, view: viewAccounts}, util)
+			}
+			right = joinNonEmpty(c.sep, c.filter, util, c.fresh)
 			break
 		}
 	}

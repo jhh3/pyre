@@ -24,8 +24,15 @@ import (
 // report loop) then reads the session's last assistant message through its
 // node, outside any transaction and bounded like a child report, and runs
 // askdetect.OwnerQuestion on it. A question, with no open ask the session
-// filed or repeated during that turn, raises or refreshes the session's one
-// "waiting" attention item (attention.Store.RaiseWaiting).
+// filed or repeated during that turn or later, refreshes the session's
+// active "waiting" attention item or raises a new one, its own inbox
+// conversation (attention.Store.RaiseWaiting). A turn that ends
+// on the request already raised (the asking sentence, askdetect.QuestionKey,
+// equal to the last one and specific enough, 6+ words; table
+// lead_wait_questions, with the item raised for it) is not a new
+// question: the item is left as it is (attention.Store.RepeatWaiting), so a
+// coordinator's idle "still waiting on your yes" turns neither count up nor
+// reopen what the owner dismissed (owner report 2026-10-19: 27 reopenings).
 //
 // The check is dropped when the session moved on first (its next turn
 // started, the run ended, it was archived or reparented); a raise that lost
@@ -44,6 +51,15 @@ CREATE TABLE lead_waits (
 	created_at TEXT NOT NULL
 );
 CREATE INDEX lead_waits_due ON lead_waits(not_before);
+`}, {Namespace: "hub_waiting", Version: 2, Name: "lead_wait_questions", SQL: `
+CREATE TABLE lead_wait_questions (
+	session_id TEXT PRIMARY KEY,
+	question_key TEXT NOT NULL, -- askdetect.QuestionKey of the last question raised
+	raised_at TEXT NOT NULL
+);
+`}, {Namespace: "hub_waiting", Version: 3, Name: "lead_wait_questions_item", SQL: `
+-- the item raised for the question ('' for rows recorded before v3)
+ALTER TABLE lead_wait_questions ADD COLUMN attention_id TEXT NOT NULL DEFAULT '';
 `}}
 
 const (
@@ -51,6 +67,10 @@ const (
 	waitingAttempts = 3
 	// waitingRetry is the base delay between attempts.
 	waitingRetry = 10 * time.Second
+	// waitingRepeatWords: a question key repeats the last one only when it
+	// is the same and at least this many words long; a generic "waiting on
+	// your approval" may be about something new each time.
+	waitingRepeatWords = 6
 	// waitingExcerptMax bounds the item summary (runes), starting a little
 	// before the question.
 	waitingExcerptMax  = 300
@@ -61,6 +81,13 @@ const (
 type waitingRaiser interface {
 	RaiseWaiting(ctx context.Context, sessionID string, projectID *string, question, summary string) (contracts.AttentionItem, error)
 	WithdrawWaiting(ctx context.Context, sessionID, summary string) (bool, error)
+}
+
+// waitingRepeater is implemented by the attention store: a turn that ends
+// on the question already raised leaves the item as it is (waiting.go
+// there). Without it a repeat raises again.
+type waitingRepeater interface {
+	RepeatWaiting(ctx context.Context, sessionID, attentionID string) (contracts.AttentionItem, bool, error)
 }
 
 // waitingSink is where "waiting" items go (nil: no attention store).
@@ -95,6 +122,11 @@ func (h *Hub) trackLeadTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSta
 	case r.State == contracts.RunRunning:
 		if turn == 0 || closed >= turn {
 			turn++
+			// asks_chat.go: the prompt that started this turn may answer the
+			// session's open asks (closedAt: when the previous turn ended).
+			if err := h.queueAskChatTx(ctx, tx, sess.SessionID, r.RunID, turn, closedAt, now); err != nil {
+				return err
+			}
 			startedAt = closedAt
 			if !startedAt.Valid {
 				startedAt = sql.NullString{String: persistence.Time(sess.CreatedAt), Valid: true}
@@ -114,6 +146,9 @@ func (h *Hub) trackLeadTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSta
 		}
 		closed = turn
 		closedAt = sql.NullString{String: persistence.Time(now), Valid: true}
+		if _, waiting := h.waitForTurnTx(ctx, tx, sess.SessionID, turn); waiting {
+			break // it waits on its own job, not on the owner (waiting_on.go)
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO lead_waits(session_id,run_id,turn_seq,turn_started_at,not_before,attempts,created_at) VALUES(?,?,?,?,?,0,?)
 			ON CONFLICT(session_id) DO UPDATE SET run_id=excluded.run_id, turn_seq=excluded.turn_seq, turn_started_at=excluded.turn_started_at,
 			not_before=excluded.not_before, attempts=0, created_at=excluded.created_at`,
@@ -228,9 +263,25 @@ func (h *Hub) processLeadWait(ctx context.Context, w leadWait) {
 		return
 	}
 	sctx := h.systemCtx(ctx)
-	if _, err := sink.RaiseWaiting(sctx, w.Session, sess.ProjectID, question, waitingExcerpt(text, question)); err != nil {
-		retry()
-		return
+	key := askdetect.QuestionKey(text)
+	repeated := false
+	if rep, ok := sink.(waitingRepeater); ok {
+		if item, same := h.sameWaitQuestion(ctx, w.Session, key); same {
+			// Still waiting on the same request (an idle report, a child's
+			// report answered): not a new question for the owner.
+			if _, repeated, err = rep.RepeatWaiting(sctx, w.Session, item); err != nil {
+				retry()
+				return
+			}
+		}
+	}
+	if !repeated {
+		it, err := sink.RaiseWaiting(sctx, w.Session, sess.ProjectID, question, waitingExcerpt(text, question))
+		if err != nil {
+			retry()
+			return
+		}
+		h.recordWaitQuestion(ctx, w.Session, key, it.AttentionID)
 	}
 	if !h.leadTurnCurrent(ctx, w) {
 		// It moved on while the item was raised; the deriver may already
@@ -238,6 +289,26 @@ func (h *Hub) processLeadWait(ctx context.Context, w leadWait) {
 		_, _ = sink.WithdrawWaiting(sctx, w.Session, "The session started its next turn.")
 	}
 	done()
+}
+
+// sameWaitQuestion reports whether key (askdetect.QuestionKey) repeats the
+// question last raised for the session: the same words (numbers included,
+// so "merge PR 41" and "merge PR 42" differ), long enough to be specific;
+// item is the attention item raised for it ("" before hub_waiting v3).
+func (h *Hub) sameWaitQuestion(ctx context.Context, session, key string) (item string, same bool) {
+	var last string
+	if key == "" || h.db.QueryRowContext(ctx, `SELECT question_key, attention_id FROM lead_wait_questions WHERE session_id=?`, session).Scan(&last, &item) != nil {
+		return "", false
+	}
+	return item, last == key && len(strings.Fields(key)) >= waitingRepeatWords
+}
+
+// recordWaitQuestion remembers the question just raised for the session
+// and the item raised for it.
+func (h *Hub) recordWaitQuestion(ctx context.Context, session, key, item string) {
+	_, _ = h.db.ExecContext(ctx, `INSERT INTO lead_wait_questions(session_id,question_key,raised_at,attention_id) VALUES(?,?,?,?)
+		ON CONFLICT(session_id) DO UPDATE SET question_key=excluded.question_key, raised_at=excluded.raised_at, attention_id=excluded.attention_id`,
+		session, key, persistence.Time(h.now()), item)
 }
 
 // leadTurnCurrent reports whether w is still the session's latest turn,
@@ -260,11 +331,15 @@ func (h *Hub) leadTurnCurrent(ctx context.Context, w leadWait) bool {
 }
 
 // askedInTurn reports whether the session has an open ask it filed or
-// repeated (merged) during w's turn: the question in chat is that ask.
+// repeated (merged) during w's turn or later: the question in chat is that
+// ask, already in the owner's inbox, so the session never shows both. An
+// older open ask does not hide a new question (the trade-off: a chat
+// question that repeats an old ask raises an item too; the Stop-hook ask
+// nudge asks the session to file it instead).
 func (h *Hub) askedInTurn(ctx context.Context, w leadWait) bool {
 	var n int
-	err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM asks WHERE session_id=? AND state=? AND updated_at>=?`,
-		w.Session, string(contracts.AskOpen), w.TurnStart).Scan(&n)
+	err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM asks WHERE session_id=? AND state=? AND filed_turn>=?`,
+		w.Session, string(contracts.AskOpen), w.Turn).Scan(&n)
 	return err != nil || n > 0 // unknown: do not raise
 }
 

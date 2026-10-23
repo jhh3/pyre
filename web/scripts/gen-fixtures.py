@@ -246,18 +246,88 @@ a9 = ask('ask_fx_rotate', 'studio', 'webhooks', 'Rotate the staging webhook secr
          updates=[{'seq': 1, 'session_id': S['webhooks']['id'], 'text': 'Not needed — the deploy already rotated the secret.', 'at': t(-1440)}])
 threads.append(thread('ask', 'thr_ask_fx_rotate', a9['title'], 'Withdrawn: not needed — the deploy already rotated the secret.', 'studio', 'webhooks', a9, t(-1440), False, m9))
 
+# Open: a batched ask (one answer per item, or one for all).
+ctx11 = """**What's being decided:** which of the three reviewed billing PRs merge before the freeze. Each one is reviewed and CI is green; the options apply to each PR.
+
+- **#2231** only touches invoice PDF fonts.
+- **#2232** retries webhook deliveries with backoff (behind a flag).
+- **#2233** adds the `credits_ledger` table (additive migration, no backfill yet).
+
+Default: merge all three; anything you hold waits until Monday."""
+opts11 = [{'id': 'merge', 'label': 'Merge', 'detail': 'Merges now; I watch CI on main.'},
+          {'id': 'hold', 'label': 'Hold until Monday', 'detail': 'Stays open and rebased.'}]
+a11 = ask('ask_fx_merges', 'studio', 'studio_lead', 'Merge these reviewed billing PRs?', ctx11, opts11, 'merge', t(-6), t(54))
+a11['action'] = 'merge'
+a11['items'] = [
+ {'id': 'pr-2231', 'label': 'Invoice PDF fonts', 'detail': 'Fonts only; CI green', 'url': 'https://example.invalid/pr/2231'},
+ {'id': 'pr-2232', 'label': 'Webhook retries with backoff', 'detail': 'Behind billing.webhook_retries; CI green', 'url': 'https://example.invalid/pr/2232'},
+ {'id': 'pr-2233', 'label': 'credits_ledger table', 'detail': 'Additive migration; CI green', 'url': 'https://example.invalid/pr/2233'},
+]
+m11 = [msg(sfrom('studio_lead'), '**Merge these reviewed billing PRs?**', t(-6), ask_id='ask_fx_merges')]
+m11[0]['message_id'] = 'msg_ask_ask_fx_merges'
+threads.append(thread('ask', 'thr_ask_fx_merges', a11['title'], 'Which of the three reviewed billing PRs merge before the freeze…', 'studio', 'studio_lead', a11, t(-6), True, m11))
+
+# Done: answered by a standing grant (the owner was not asked).
+ctx12 = """**What's being decided:** merge PR #2229 (invoice rounding fix). Reviewed by the billing reviewer, CI green."""
+opts12 = [{'id': 'merge', 'label': 'Merge', 'detail': 'Merges now.'}, {'id': 'wait', 'label': 'Wait', 'detail': 'Stays open.'}]
+a12 = ask('ask_fx_granted', 'studio', 'billing', 'Merge PR #2229 (invoice rounding)?', ctx12, opts12, 'merge', t(-70), t(-10), state='answered',
+          answer={'option_id': 'merge', 'text': 'standing grant sgr_fx_merge (merge → option "merge"; owner: "yes, merge them once reviewed and green" (approved ask_fx_grant_prop); expires Thu Oct 22 9:40 AM PT)',
+                  'by': {'kind': 'system', 'id': 'grants'}, 'at': t(-70)})
+a12['action'] = 'merge'
+a12['grant_id'] = 'sgr_fx_merge'
+del a12['message_id']
+del a12['deadline_at']
+m12 = [msg({'kind': 'session', 'id': S['billing']['id'], 'label': S['billing']['title']}, '**Merge PR #2229 (invoice rounding)?**', t(-70), ask_id='ask_fx_granted')]
+threads.append(thread('ask', 'thr_ask_fx_granted', a12['title'], 'Answered by a standing grant: Merge', 'studio', 'billing', a12, t(-70), False, m12))
+
+# Open: a session proposes a standing go-ahead (approve / reject, no default).
+ctx13 = """**Proposed standing go-ahead** from session "Studio lead" (ses_fx_studio_lead). Nothing is recorded unless you approve.
+
+- Action: `merge` (only asks that name exactly this action)
+- Picks option: "merge" (only asks that offer it, have a default and are not marked irreversible)
+- Holds for: every session in project "Studio billing v2" (prj_fx_studio)
+- Expires: 7 days after you approve (revoke it any time on the project page or with `pyre grant revoke`)
+- Note (the session's words; Pyre never checks it): once reviewed and CI green
+
+Approve: Pyre records the grant with this ask's ID; anything you type with your answer is saved as your words. You get an FYI each time it answers an ask. Reject, or no answer, records nothing.
+
+**Why the session proposes it** (its words):
+
+You merged the last six reviewed, green billing PRs the same way; this saves an ask per PR this week."""
+opts13 = [{'id': 'approve', 'label': 'Approve', 'detail': 'Pyre records it, citing this ask; your typed words, if any, are saved as yours'},
+          {'id': 'reject', 'label': 'Reject', 'detail': 'Nothing is recorded'}]
+a13 = ask('ask_fx_grant_prop', 'studio', 'studio_lead', 'Remember this go-ahead? merge → merge', ctx13, opts13, '', t(-4), t(1436))
+a13['proposal'] = {'kind': 'grant', 'grant': {'scope': 'project', 'action': 'merge', 'option': 'merge', 'condition': 'once reviewed and CI green', 'expires_in_days': 7}, 'state': 'pending'}
+m13 = [msg(sfrom('studio_lead'), '**Remember this go-ahead? merge → merge**', t(-4), ask_id='ask_fx_grant_prop')]
+m13[0]['message_id'] = 'msg_ask_ask_fx_grant_prop'
+threads.append(thread('ask', 'thr_ask_fx_grant_prop', a13['title'], 'Proposed standing go-ahead from session "Studio lead"…', 'studio', 'studio_lead', a13, t(-4), True, m13))
+
 # Done: handled message thread.
 m10 = [msg(sfrom('studio_lead'), 'Nightly summary: 3 PRs merged (billing fixtures, invoice PDF fonts, webhook retries), 0 incidents. Nothing needs you today.', t(-400))]
 ack = msg(ofrom(), 'Thanks!', t(-380), reply_to=m10[0]['message_id']); ack['delivery'] = deliv('read', 'studio_lead', t(-379)); m10.append(ack)
 threads.append(thread('message', 'thr_fx_nightly', 'Nightly summary: 3 PRs merged, nothing needs you', 'You: Thanks!', 'studio', 'studio_lead', None, t(-380), False, m10))
 
+# Open: a lead that ended its turn with a question in its own chat (a
+# "waiting on you" item); reply = chat to it, archive = dismiss.
+w14 = {'attention_id': 'att_fx_waiting_voy', 'kind': 'waiting', 'state': 'open', 'severity': 'normal',
+       'title': 'Waiting on you: Should I start the onboarding email rewrite now or after the funnel numbers land?',
+       'summary': "…The trial funnel export finished. Before I go further: **should I start the onboarding email rewrite now, or wait for Thursday's funnel numbers?** Starting now risks redoing two emails.",
+       'session_id': S['voy_lead']['id'], 'project_id': P['voy']['id'], 'count': 1, 'created_at': t(-25), 'updated_at': t(-25)}
+th14 = thread('attention', 'att_fx_waiting_voy', w14['title'], w14['summary'], 'voy', 'voy_lead', None, t(-25), True, [], needs_reply=True)
+th14['thread']['attention'] = w14
+threads.append(th14)
+
 held = {'items': [{'ask_id': 'ask_fx_hostname', 'option_id': 'ngrok', 'held_at': t(-1)}], 'sends_at': t(4)}
 dump('threads.json', {'held': held, 'threads': threads})
 dump('me.json', {'email': 'owner@example.com'})
 
+# Monitors (pyre monitor) watching for a session: its "watching N" badge.
+WATCH = {'webhooks': ['gh pr checks 1412', 'gh run view 88 --json status']}
+
 def card(s, lead=False, line=None, at=None):
     c = dict(S[s]); c['is_lead'] = lead
     c['last_activity'] = {'line': line, 'at': at} if line else None
+    if s in WATCH: c['watching'] = WATCH[s]
     return c
 
 pages = {
@@ -353,6 +423,15 @@ arts = {
  'voy': [{'id': 'art_fx_4', 'title': 'Trial funnel, last 3 weeks', 'url': '/api/artifacts/art_fx_4/content', 'updated_at': t(-60)}],
  'back': [{'id': 'art_fx_5', 'title': 'Renderer benchmark report', 'url': '/api/artifacts/art_fx_5/content', 'updated_at': t(-185)}],
 }
+grants = {'studio': [
+ {'grant_id': 'sgr_fx_merge', 'scope': 'project', 'project_id': P['studio']['id'], 'action': 'merge', 'option': 'merge',
+  'condition': 'once reviewed and CI green', 'quote': 'yes, merge them once reviewed and green', 'ask_id': 'ask_fx_grant_old',
+  'proposed_by': {'kind': 'session', 'id': S['studio_lead']['id']}, 'recorded_by': OWNER, 'expires_at': t(9660), 'used_count': 3,
+  'last_used_at': t(-70), 'created_at': t(-420)},
+ {'grant_id': 'sgr_fx_tag', 'scope': 'session', 'project_id': P['studio']['id'], 'session_id': S['billing']['id'], 'action': 'tag', 'option': 'tag',
+  'ask_id': 'ask_fx_grant_tag', 'proposed_by': {'kind': 'session', 'id': S['billing']['id']}, 'recorded_by': OWNER, 'expires_at': t(2400),
+  'used_count': 0, 'created_at': t(-200)},
+]}
 live = {k: sum(1 for c in sessions[k] if c['state'] in ('working', 'needs_you', 'idle', 'starting')) for k in P}
 for k, p in P.items():
     lead = leads[k]
@@ -372,7 +451,7 @@ for k, p in P.items():
     else:
         page = {'project_id': p['id'], 'content': ''}
     asks = sorted(asks_by[k], key=lambda a: (a['state'] != 'open', a['created_at']))
-    details[p['id']] = {'project': proj, 'page': page, 'sessions': sessions[k], 'asks': asks, 'artifacts': arts[k]}
+    details[p['id']] = {'project': proj, 'page': page, 'sessions': sessions[k], 'asks': asks, 'artifacts': arts[k], 'grants': grants.get(k, [])}
 cards.sort(key=lambda c: (c['name'].lower(), c['project_id']))
 dump('projects.json', {'projects': cards})
 dump('project-details.json', {'details': details})

@@ -76,7 +76,20 @@ type harness struct {
 	op          int
 }
 
+// newHarness runs the catalog in strict mode (RequireGrants) so the grant
+// mechanics are exercised on their own; newOwnerDefaultHarness runs the
+// production default.
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessWith(t, true)
+}
+
+func newOwnerDefaultHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessWith(t, false)
+}
+
+func newHarnessWith(t *testing.T, requireGrants bool) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := sqlitex.Open(filepath.Join(dir, "hub.db"))
@@ -86,14 +99,14 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(func() { db.Close() })
 	h := &harness{t: t, db: db, events: &memEvents{}, logs: &bytes.Buffer{}, stateFile: filepath.Join(dir, "outfit-state.json"), callLog: filepath.Join(dir, "outfit-calls.log")}
 	h.logger = slog.New(slog.NewJSONHandler(h.logs, nil))
-	h.cat, err = Open(context.Background(), db, Options{Events: h.events})
+	h.cat, err = Open(context.Background(), db, Options{Events: h.events, RequireGrants: requireGrants})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.sessions = map[string]SessionContext{
-		sesA: {NodeID: nodeServer},
-		sesB: {NodeID: nodeServer, ProjectID: prjOne},
-		sesC: {NodeID: nodeMac, ProjectID: prjTwo},
+		sesA: {NodeID: nodeServer, RunActive: true},
+		sesB: {NodeID: nodeServer, ProjectID: prjOne, RunActive: true},
+		sesC: {NodeID: nodeMac, ProjectID: prjTwo, RunActive: true},
 	}
 	verified := time.Now().Add(-time.Minute).UTC()
 	h.state = fakeoutfit.State{Version: "0.10.7", Connections: []fakeoutfit.Connection{{ID: "con_gh", Name: "github-work", Connector: "github", Mode: "rest", Method: "managed-token", Custody: "outfit", Status: "active", Env: []string{"GH_TOKEN"}, Secret: outfitSecret, VerifiedAt: &verified,
@@ -739,5 +752,99 @@ func TestReportWithoutOutfitIncludesProvisions(t *testing.T) {
 	broken, _ := NewNodeService(NodeConfig{NodeID: nodeServer, Outfit: failingOutfit{}, Grants: h.cat.Checker(nil)})
 	if _, err := broken.Report(ctx); err == nil {
 		t.Fatal("an installed Outfit that fails must fail the report (the hub keeps the last good view)")
+	}
+}
+
+// The owner's default: a session uses a connection its own node verified,
+// or one another node verified for remote use, with no grant; nothing
+// unverified, and nothing for archived or unknown sessions.
+func TestOwnerDefaultNeedsNoGrantForVerifiedConnections(t *testing.T) {
+	h := newOwnerDefaultHarness(t)
+	ctx := context.Background()
+	if h.allowed(connGH, sesC) {
+		t.Fatal("a connection no node has verified must still need a grant")
+	}
+	h.report(h.mac, nodeMac)
+
+	// Own node (sesC runs on the Mac that holds the connection).
+	sc := h.sessions[sesC]
+	sc.SessionID = sesC
+	d, err := h.cat.CheckGrant(ctx, connGH, sc)
+	if err != nil || !d.Allowed || d.GrantID != "" || !strings.Contains(d.Reason, "this session's node") {
+		t.Fatalf("own-node decision = %+v %v", d, err)
+	}
+	params := contracts.ConnectionInvokeParams{ConnectionID: connGH, SessionID: sesC, Operation: "get_issue", Args: map[string]string{"number": "7"}}
+	if out, err := h.call(h.mac, contracts.ActionConnInvoke, params); err != nil || !strings.Contains(string(out), "synthetic issue 7") {
+		t.Fatalf("own-node invoke = %s %v", out, err)
+	}
+
+	// Another node (sesA runs on server): routed to the Mac, still no grant.
+	sa := h.sessions[sesA]
+	sa.SessionID = sesA
+	route, err := h.cat.RouteInvoke(ctx, connGH, sa)
+	if err != nil || route.NodeID != nodeMac || !strings.Contains(route.Decision.Reason, "remote use on "+nodeMac) {
+		t.Fatalf("cross-node route = %+v %v", route, err)
+	}
+	if _, err := h.call(h.mac, contracts.ActionConnInvoke, contracts.ConnectionInvokeParams{ConnectionID: connGH, SessionID: sesA, Operation: "get_issue"}); err != nil {
+		t.Fatalf("cross-node invoke = %v", err)
+	}
+
+	// Archived and unknown sessions are still refused.
+	sa.Archived = true
+	if d, _ := h.cat.CheckGrant(ctx, connGH, sa); d.Allowed {
+		t.Fatal("archived session allowed")
+	}
+	if _, err := h.call(h.mac, contracts.ActionConnInvoke, contracts.ConnectionInvokeParams{ConnectionID: connGH, SessionID: "ses_ghost", Operation: "get_issue"}); err == nil {
+		t.Fatal("unknown session allowed")
+	}
+
+	// An owner's explicit revocation pushed to the node still denies there.
+	if _, err := h.call(h.mac, contracts.ActionConnRevoke, contracts.ConnectionGrantParams{ConnectionID: connGH, SessionID: sesC}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.call(h.mac, contracts.ActionConnInvoke, params); !contracts.IsCode(err, contracts.ErrForbidden) {
+		t.Fatalf("pushed revocation = %v", err)
+	}
+
+	// A session whose run ended (not archived), or that has no run, gets
+	// no default.
+	ended := h.sessions[sesC]
+	ended.SessionID, ended.RunActive = sesC, false
+	if d, _ := h.cat.CheckGrant(ctx, connGH, ended); d.Allowed {
+		t.Fatalf("ended session allowed: %+v", d)
+	}
+	if d, _ := h.cat.CheckGrant(ctx, connGH, SessionContext{SessionID: "ses_norun", RunActive: true}); d.Allowed {
+		t.Fatalf("session without a node allowed: %+v", d)
+	}
+
+	// When the node stops holding it, the default no longer applies.
+	if err := h.cat.ApplyReport(ctx, nodeMac, nil); err != nil {
+		t.Fatal(err)
+	}
+	if h.allowed(connGH, sesC) || h.allowed(connGH, sesA) {
+		t.Fatal("a connection no longer verified anywhere must be denied")
+	}
+}
+
+// Once the owner grants a connection (even a grant later revoked), grants
+// alone decide: a scoped grant restricts it and a hub revoke denies.
+func TestOwnerDefaultDoesNotOverrideGrants(t *testing.T) {
+	h := newOwnerDefaultHarness(t)
+	h.report(h.mac, nodeMac)
+	if !h.allowed(connGH, sesA) || !h.allowed(connGH, sesC) {
+		t.Fatal("ungranted verified connection must be usable by default")
+	}
+	h.grant(contracts.ConnectionGrantParams{ConnectionID: connGH, ProjectID: prjOne})
+	if !h.allowed(connGH, sesB) {
+		t.Fatal("matching project grant must allow")
+	}
+	if h.allowed(connGH, sesA) || h.allowed(connGH, sesC) {
+		t.Fatal("a project-scoped grant must restrict the connection to that project")
+	}
+	h.revoke(contracts.ConnectionGrantParams{ConnectionID: connGH, ProjectID: prjOne})
+	for _, ses := range []string{sesA, sesB, sesC} {
+		if h.allowed(connGH, ses) {
+			t.Fatalf("%s allowed after the hub revoke", ses)
+		}
 	}
 }

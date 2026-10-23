@@ -647,6 +647,8 @@ func (m *Model) sessionFacts(s contracts.SessionView, w int) []string {
 		}
 		out = append(out, m.kvFit("Started by", by, lw, w)...)
 	}
+	// Monitors that wake s, or the session a monitor wakes (monitors.go).
+	out = append(out, m.monitorFacts(s, lw, w)...)
 	if at := ownerActive(s); !at.IsZero() { // recently yours (yours.go)
 		out = append(out, m.kvFit("You", "messaged or typed "+ago(now, at), lw, w)...)
 	}
@@ -657,6 +659,15 @@ func (m *Model) sessionFacts(s contracts.SessionView, w int) []string {
 			out = append(out, m.accountSwitchLines(s, lw, w)...)
 			if contracts.HasCap(s.Run.Capabilities, contracts.CapPermissionsBypass) {
 				out = append(out, m.kvFit("Permissions", m.th.tone(toneWarn, "bypass")+m.th.dim.Render(" · no approval prompts, no sandbox"), lw, w)...)
+			}
+			if mo, ef := s.Run.AdapterData["pyre.model"], s.Run.AdapterData["pyre.effort"]; mo != "" || ef != "" {
+				if mo == "" {
+					mo = "default"
+				}
+				if ef != "" {
+					mo += m.th.dim.Render(" · effort ") + ef
+				}
+				out = append(out, m.kvFit("Model", mo, lw, w)...)
 			}
 		}
 		run := s.Run.Adapter
@@ -707,7 +718,11 @@ func (m *Model) sessionFacts(s contracts.SessionView, w int) []string {
 		if s.Flag != nil && s.Flag.Text != "" {
 			text = m.humanIDs(s.Flag.Text)
 		}
-		out = append(out, "", m.th.tone(toneWarn, "! "+trunc(text, vw)))
+		keys := ""
+		if _, reason := sessionAttention(s); dismissableReason(reason) {
+			keys = " — m reply · d dismiss" // dismissForYou (attention_flag.go)
+		}
+		out = append(out, "", m.th.tone(toneWarn, "! "+trunc(text, max(8, vw-width(keys))))+m.th.dim.Render(keys))
 	}
 	if line := m.messageLine(s, w); line != "" {
 		out = append(out, "", line)

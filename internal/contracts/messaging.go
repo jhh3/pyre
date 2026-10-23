@@ -94,6 +94,25 @@ const (
 	AckReplied      AckState = "replied"
 )
 
+// Owner mail that needs nothing from the owner (behaviour change, hub side;
+// owner report 2026-10-19: "why are there a bunch of useless messages in my
+// inbox"). These AckRef values mark a message to the owner acknowledged by
+// Pyre rather than by him:
+//   - AckRefUpdate: stored already acknowledged, an update (a report that
+//     asks nothing of him; rules in internal/messaging/ownermail). It raises
+//     no inbox item and leaves no unacked mail; it stays in his mailbox,
+//     threads, project pages and search.
+//   - AckRefAskClosed: the message carried an ask (or followed up in its
+//     thread) and the ask closed (answered, defaulted, expired, withdrawn,
+//     dismissed, answered in chat, superseded).
+//   - AckRefEngaged: the owner engaged with the sending session (typed into
+//     it, messaged it, or viewed its message).
+const (
+	AckRefUpdate    = "pyre:update"
+	AckRefAskClosed = "pyre:ask-closed"
+	AckRefEngaged   = "pyre:owner-engaged"
+)
+
 // EvidenceCategory says how runtime acceptance was established.
 type EvidenceCategory string
 
@@ -133,6 +152,10 @@ const (
 	// Claude plugin submitted the marked message with $.prompt.submit and
 	// Claude resolved it as entered (its turn started). Acceptance evidence.
 	EvidenceClaudePluginPrompt EvidenceCategory = "claude.plugin.prompt_submit"
+	// EvidenceAgyUserInput (additive): the marked input is a USER_INPUT step
+	// of the agy conversation's transcript (transcript_full.jsonl): agy took
+	// it into a turn. Acceptance and consumption evidence.
+	EvidenceAgyUserInput EvidenceCategory = "agy.transcript.user_input"
 )
 
 // AcceptanceEvidence reports whether an evidence category can establish
@@ -143,7 +166,7 @@ func AcceptanceEvidence(e EvidenceCategory) bool {
 	case EvidenceProtocolAck, EvidenceHookReceipt, EvidenceTranscript, EvidenceMock,
 		EvidenceClaudePromptHook, EvidenceClaudeQueue, EvidenceClaudeUserRecord,
 		EvidenceClaudeChannel, EvidenceClaudeStopHook, EvidenceCodexUserMessage,
-		EvidenceClaudeInboxRead, EvidencePyreRead, EvidenceClaudePluginPrompt:
+		EvidenceClaudeInboxRead, EvidencePyreRead, EvidenceClaudePluginPrompt, EvidenceAgyUserInput:
 		return true
 	}
 	return false
@@ -154,7 +177,8 @@ func AcceptanceEvidence(e EvidenceCategory) bool {
 // record, a Codex userMessage item, or the agent reading the message with
 // the pyre inbox tool. Such a receipt sets DeliveryStatus.ConsumedAt.
 func ConsumptionEvidence(e EvidenceCategory) bool {
-	return e == EvidenceClaudeUserRecord || e == EvidenceCodexUserMessage || e == EvidenceClaudeInboxRead || e == EvidencePyreRead
+	return e == EvidenceClaudeUserRecord || e == EvidenceCodexUserMessage || e == EvidenceClaudeInboxRead || e == EvidencePyreRead ||
+		e == EvidenceAgyUserInput
 }
 
 // PullEvidence reports evidence that the recipient runtime fetched the

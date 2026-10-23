@@ -31,6 +31,10 @@ type Service struct {
 	AllowedConfiguration func(string, string, string) bool
 	ResolveTool          func(kit.ToolRequirement) (string, error)
 	OAuthAuthorize       OAuthAuthorizer
+	// DeferSecretCleanup keeps a replaced connection's old secret (its
+	// cleanup stays pending for SweepSecrets) so a multi-connection
+	// operation such as a restore can switch back to it.
+	DeferSecretCleanup bool
 }
 
 type ExecutionPlan struct {
@@ -228,6 +232,9 @@ func (service Service) ConfigureWithMethod(ctx context.Context, name, connectorK
 		if verifyErr != nil {
 			return state.Connection{}, fmt.Errorf("verify %s: %w", mode.Verify, verifyErr)
 		}
+		if err := service.verifyConditionalCredentials(ctx, mode, operation, fields, credentialContext); err != nil {
+			return state.Connection{}, err
+		}
 		identity["verified"] = "true"
 		identity["status"] = fmt.Sprint(result.Status)
 		mergeSafeIdentity(identity, result.Data)
@@ -270,7 +277,7 @@ func (service Service) ConfigureWithMethod(ctx context.Context, name, connectorK
 		return state.Connection{}, errors.New("connection changed concurrently; retry")
 	}
 	committed = true
-	if cleanupOld && existing.CredentialRef != "" {
+	if cleanupOld && existing.CredentialRef != "" && !service.DeferSecretCleanup {
 		if err := service.Vault.Delete(ctx, existing.CredentialRef); err == nil {
 			_ = service.State.FinishCleanup(ctx, cleanupID)
 		}
@@ -338,7 +345,12 @@ func (service Service) ReuseCredential(ctx context.Context, credentialID, name, 
 	if service.AllowedConfiguration != nil && !service.AllowedConfiguration(name, credential.ConnectorKey, modeID) {
 		return state.Connection{}, fmt.Errorf("connection %s with %s/%s is not declared by this workspace; edit and apply the workspace first", name, credential.ConnectorKey, modeID)
 	}
-	if _, existingErr := service.State.Connection(ctx, name); existingErr == nil {
+	if existing, existingErr := service.State.Connection(ctx, name); existingErr == nil && existing.Status == "removed" {
+		// A removed connection's row does not hold its name.
+		if err := service.State.PurgeRemovedConnection(ctx, name); err != nil {
+			return state.Connection{}, err
+		}
+	} else if existingErr == nil {
 		return state.Connection{}, fmt.Errorf("connection %s already exists", name)
 	} else if !state.IsNotFound(existingErr) {
 		return state.Connection{}, existingErr
@@ -430,6 +442,9 @@ func (service Service) ReuseCredential(ctx context.Context, credentialID, name, 
 		result, verifyErr := service.Executor.RunWithCredentials(ctx, mode, operation, map[string]string{}, fields, credentialContext)
 		if verifyErr != nil {
 			return state.Connection{}, fmt.Errorf("verify %s: %w", mode.Verify, verifyErr)
+		}
+		if err := service.verifyConditionalCredentials(ctx, mode, operation, fields, credentialContext); err != nil {
+			return state.Connection{}, err
 		}
 		identity["verified"], identity["status"] = "true", fmt.Sprint(result.Status)
 		mergeSafeIdentity(identity, result.Data)
@@ -538,7 +553,7 @@ func (service Service) ExecCLI(ctx context.Context, connectionName string, argv 
 		return runtime.Result{}, fmt.Errorf("connection %s does not use a CLI mode", connectionName)
 	}
 	class := "admin"
-	if cliReadOnly(argv) {
+	if cliReadOnly(cliBinaryName(installed.Package, mode), argv) {
 		class = "read"
 	}
 	if class != "read" && !allowWrite {
@@ -557,7 +572,7 @@ func (service Service) ExecCLI(ctx context.Context, connectionName string, argv 
 		return runtime.Result{}, err
 	}
 	operation := kit.Operation{Name: "raw_cli", Description: "Provider CLI command", Class: class, CLI: &kit.CLIOperation{Args: append([]string{}, argv...)}}
-	result, runErr := service.Executor.RunWithCredentials(ctx, mode, operation, map[string]string{}, secret, credentials)
+	result, runErr := service.Executor.RunWithCredentials(ctx, mode, operation, rawCLIConditionArguments(credentials.Bindings, argv), secret, credentials)
 	outcome := "ok"
 	if runErr != nil {
 		outcome = "error"
@@ -569,7 +584,50 @@ func (service Service) ExecCLI(ctx context.Context, connectionName string, argv 
 	return result, runErr
 }
 
-func cliReadOnly(argv []string) bool {
+// cliBinaryName is the executable a CLI mode runs: its fixed binary, or the
+// binary of the managed tool it cites.
+func cliBinaryName(pkg kit.Package, mode kit.Mode) string {
+	if mode.Executor.Binary != "" {
+		return mode.Executor.Binary
+	}
+	for _, tool := range pkg.Tools {
+		if tool.ID == mode.Executor.Tool {
+			return tool.Binary
+		}
+	}
+	return ""
+}
+
+// rawCLIConditionArguments lets a raw command choose a conditional
+// credential binding the way the typed operation does: `--live` (or
+// --live=true) in argv sets the live argument, so a Stripe connection with
+// a separate live key uses it for `outfit exec stripe -- ... --live`.
+func rawCLIConditionArguments(bindings []kit.CredentialBinding, argv []string) map[string]string {
+	arguments := map[string]string{}
+	for _, name := range kit.BindingConditions(bindings) {
+		flag := "--" + strings.ReplaceAll(name, "_", "-")
+		for _, arg := range argv {
+			if arg == flag {
+				arguments[name] = "true"
+			} else if value, ok := strings.CutPrefix(arg, flag+"="); ok {
+				arguments[name] = value
+			}
+		}
+	}
+	return arguments
+}
+
+func cliReadOnly(binary string, argv []string) bool {
+	// gh api takes an endpoint, not a verb, so the generic verb check below
+	// can neither prove it safe nor rule it out; it gets its own rules.
+	if isGHBinary(binary) && argv[0] == "api" {
+		return ghAPIReadOnly(argv)
+	}
+	// The Stripe CLI's reads are a known set of request shapes; everything
+	// else, including subcommands the verb check would pass, needs --write.
+	if isStripeBinary(binary) {
+		return stripeReadOnly(argv)
+	}
 	readVerbs := map[string]bool{"cat": true, "describe": true, "download": true, "export": true, "get": true, "help": true, "inspect": true, "list": true, "logs": true, "read": true, "retrieve": true, "search": true, "show": true, "status": true, "tail": true, "version": true, "whoami": true}
 	for index := len(argv) - 1; index >= 0; index-- {
 		value := strings.ToLower(strings.TrimLeft(argv[index], "-"))
@@ -804,9 +862,45 @@ func (service Service) Verify(ctx context.Context, name string) error {
 	}
 	_, err = service.Executor.RunWithCredentials(ctx, mode, operation, map[string]string{}, secret, credentialContext)
 	if err == nil {
+		err = service.verifyConditionalCredentials(ctx, mode, operation, secret, credentialContext)
+	}
+	if err == nil {
 		_ = service.State.TouchCredential(ctx, connection.CredentialID, true)
 	}
 	return err
+}
+
+var secretReference = regexp.MustCompile(`\{\{secret\.([A-Za-z0-9_]+)\}\}`)
+
+// verifyConditionalCredentials repeats the verification read once for each
+// conditional credential the connection stores (Stripe's optional live key,
+// selected by --live), so a bad second key fails setup and `connector test`
+// instead of the first call that selects it. A condition whose credential
+// is not stored, or that the verification read does not accept, is skipped.
+func (service Service) verifyConditionalCredentials(ctx context.Context, mode kit.Mode, operation kit.Operation, fields map[string]string, credentials runtime.CredentialContext) error {
+	properties, _ := kit.EffectiveInput(operation)["properties"].(map[string]any)
+	for _, name := range kit.BindingConditions(credentials.Bindings) {
+		if _, declared := properties[name]; !declared {
+			continue
+		}
+		stored := false
+		for _, binding := range credentials.Bindings {
+			if binding.WhenArgument != name {
+				continue
+			}
+			stored = true
+			for _, match := range secretReference.FindAllStringSubmatch(binding.Value, -1) {
+				stored = stored && strings.TrimSpace(fields[match[1]]) != ""
+			}
+		}
+		if !stored {
+			continue
+		}
+		if _, err := service.Executor.RunWithCredentials(ctx, mode, operation, map[string]string{name: "true"}, fields, credentials); err != nil {
+			return fmt.Errorf("verify %s with --%s: %w", operation.Name, strings.ReplaceAll(name, "_", "-"), err)
+		}
+	}
+	return nil
 }
 
 func (service Service) SweepSecrets(ctx context.Context) error {
@@ -1062,7 +1156,16 @@ func safeSettings(method kit.CredentialMethod, fields map[string]string) map[str
 }
 
 func credentialEnvironment(fields map[string]string) string {
-	for _, value := range fields {
+	// Sorted so a connection holding a test key and an optional live key
+	// (STRIPE_API_KEY, STRIPE_LIVE_API_KEY) reports its default key's
+	// environment every time.
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := fields[key]
 		switch {
 		case strings.HasPrefix(value, "rk_test_"), strings.HasPrefix(value, "sk_test_"):
 			return "test"

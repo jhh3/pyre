@@ -8,6 +8,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -57,6 +58,12 @@ type Options struct {
 	// ClaudeBin is used when ResolvedLaunch.Executable is empty (default
 	// "claude" on PATH).
 	ClaudeBin string
+	// TmpDir becomes CLAUDE_CODE_TMPDIR for runs whose environment does not
+	// set one (created 0700 at launch). Claude keeps per-session scratch and
+	// background task output there; on hosts where /tmp is RAM-backed tmpfs
+	// with a per-user quota, a disk directory keeps long sessions from filling
+	// memory and failing every command with EDQUOT. Empty: Claude's default.
+	TmpDir string
 	// HookCommand is the argv prefix of the hook command written into
 	// pyre-hooks.json; the adapter appends "<Event> <state-dir>". Typically
 	// []string{"/path/to/pyred", "hook", "claude"}, whose handler calls
@@ -123,7 +130,11 @@ type Options struct {
 	StartupWait time.Duration
 	// StopWait bounds the graceful /exit before kill-session (default 10s).
 	StopWait time.Duration
-	Now      func() time.Time
+	// FirstRunScreenWait is how long after launch a run that has not
+	// started and shows no input box (an unrecognised first-run screen) is
+	// reported as needing a human (default 90s).
+	FirstRunScreenWait time.Duration
+	Now                func() time.Time
 
 	testHook func(point string) error // crash-window injection in tests
 }
@@ -149,6 +160,19 @@ type runEntry struct {
 	rs        *runState
 	meta      *runMeta
 	tpath     atomic.Value // string: transcript path last read (for ChangeStamp, lock-free)
+
+	// startupMu serializes startup-dialog key presses (Launch's
+	// waitStartup and Observe both drive them) and guards onb.
+	startupMu sync.Mutex
+	onb       onboardingPresses
+}
+
+// onboardingPresses tracks Enter presses on Claude's onboarding screens.
+type onboardingPresses struct {
+	step  string    // screen last pressed ("theme", "security")
+	at    time.Time // when
+	n     int       // presses on that screen
+	total int       // presses on all onboarding screens of the run
 }
 
 // runMeta is <state>/run.json.
@@ -166,6 +190,13 @@ type runMeta struct {
 	// InitialPrompt: launched with a prompt, so the run's first
 	// UserPromptSubmit is that prompt, not the owner typing (askNudge).
 	InitialPrompt bool `json:"initial_prompt,omitempty"`
+	// DevChannels are the development channels the session's launch
+	// arguments load (--dangerously-load-development-channels): the owner
+	// asked for them, so the startup warning is confirmed for this run.
+	DevChannels []string `json:"dev_channels,omitempty"`
+	// Bypass: launched with --dangerously-skip-permissions. The owner chose
+	// to let the run do anything, so its folder is trusted (startup dialog).
+	Bypass bool `json:"bypass,omitempty"`
 }
 
 // New validates options. The tmux server starts lazily on first launch.
@@ -195,6 +226,9 @@ func New(o Options) (*Adapter, error) {
 	if o.StopWait <= 0 {
 		o.StopWait = 10 * time.Second
 	}
+	if o.FirstRunScreenWait <= 0 {
+		o.FirstRunScreenWait = 90 * time.Second
+	}
 	if o.DoorbellPasteHold <= 0 {
 		o.DoorbellPasteHold = 3 * time.Minute
 	}
@@ -219,6 +253,7 @@ func (a *Adapter) Capabilities() []string {
 		contracts.CapResumeNative, contracts.CapResumeHandoff,
 		contracts.CapSubagentsObserve, contracts.CapTranscript, contracts.CapScreen,
 		contracts.CapHooks, contracts.CapRequiresTrustDialog,
+		contracts.CapLaunchHarnessArgs, contracts.CapResumeOutside, contracts.CapLaunchEnvFile,
 	}
 	if !a.o.DisableApprovalBroker {
 		caps = append(caps, contracts.CapApprovals, contracts.CapApprovalsRaceTUI)
@@ -309,6 +344,7 @@ func (a *Adapter) Probe(ctx context.Context) (contracts.ProbeResult, error) {
 		pr.Version = strings.TrimSpace(string(out))
 	}
 	pr.Available = true
+	pr.Models, pr.Efforts = Models(), append([]string(nil), Efforts...)
 	tested := false
 	for _, t := range TestedVersions {
 		if t == pr.Version {
@@ -360,10 +396,19 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	// --settings argument; it is merged into the run's own settings file
 	// (Claude Code takes a single --settings) instead of being passed on.
 	managed := ""
-	var args []string
+	var args, appendPrompt, devChannels []string
 	for i := 0; i < len(l.Args); i++ {
 		arg := l.Args[i]
 		name, val, hasVal := strings.Cut(arg, "=")
+		switch {
+		case name == "--append-system-prompt" && hasVal:
+			// A session's own appended prompt joins Pyre's agent guide:
+			// Claude keeps only the last --append-system-prompt.
+			appendPrompt = append(appendPrompt, val)
+			continue
+		case name == "--dangerously-load-development-channels" && hasVal:
+			devChannels = append(devChannels, val)
+		}
 		if name == "--settings" {
 			if !hasVal {
 				if i+1 >= len(l.Args) {
@@ -463,8 +508,17 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	case ownMode:
 		argv = append(argv, "--permission-mode", a.o.PermissionMode)
 	}
-	if l.AgentGuide != "" {
-		argv = append(argv, "--append-system-prompt", l.AgentGuide)
+	if g := strings.Join(append(nonEmpty(l.AgentGuide), appendPrompt...), "\n\n"); g != "" {
+		argv = append(argv, "--append-system-prompt", g)
+	}
+	// A chosen model and effort (pyre start --model/--effort; "" keeps
+	// Claude's default). Claude Code takes aliases (opus, sonnet, ...) or
+	// full model names, and --effort low|medium|high|xhigh|max.
+	if l.Model != "" {
+		argv = append(argv, "--model", l.Model)
+	}
+	if l.Effort != "" {
+		argv = append(argv, "--effort", l.Effort)
 	}
 	var spec claudeplugin.Spec
 	if doorbell {
@@ -491,13 +545,20 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 		env[k] = v
 	}
 	env[StateDirEnv] = l.StateDir
+	if a.o.TmpDir != "" && env[TmpDirEnv] == "" {
+		if err := os.MkdirAll(a.o.TmpDir, 0o700); err != nil {
+			return contracts.RunHandle{}, fmt.Errorf("claude: run temp dir: %w", err)
+		}
+		env[TmpDirEnv] = a.o.TmpDir
+	}
 	if _, ok := env["PYRE_RUN_ID"]; !ok {
 		env["PYRE_RUN_ID"] = l.RunID
 	}
 	if _, ok := env["PYRE_SESSION_ID"]; !ok && l.SessionID != "" {
 		env["PYRE_SESSION_ID"] = l.SessionID
 	}
-	meta := &runMeta{RunID: l.RunID, SessionUUID: sid, Cwd: l.Cwd, Resumed: resumed, LaunchedAt: a.o.Now().UTC(), ConfigMech: "default", ManagedSettings: managed, InitialPrompt: l.InitialPrompt != ""}
+	meta := &runMeta{RunID: l.RunID, SessionUUID: sid, Cwd: l.Cwd, Resumed: resumed, Bypass: bypass, LaunchedAt: a.o.Now().UTC(), ConfigMech: "default", ManagedSettings: managed, InitialPrompt: l.InitialPrompt != "",
+		DevChannels: devChannels}
 	if a.o.ProfileAsConfigDir && l.ProfileDir != "" {
 		env["CLAUDE_CONFIG_DIR"] = l.ProfileDir
 		meta.ConfigDir, meta.ConfigMech = l.ProfileDir, "claude_config_dir"
@@ -606,13 +667,36 @@ func (a *Adapter) waitStartup(ctx context.Context, h contracts.RunHandle) {
 }
 
 // handleStartupDialog drives the workspace-trust dialog when the owner
-// trusts cwd. Returns true if it pressed a key.
+// trusts cwd, the development-channels warning of a run launched to load
+// them, and Claude's first-run onboarding screens. Returns true if it
+// pressed a key.
 func (a *Adapter) handleStartupDialog(ctx context.Context, h contracts.RunHandle, si screenInfo) bool {
-	if si.DialogKind != "trust" || a.o.TrustWorkspace == nil {
+	switch si.DialogKind {
+	case "devchannels", "onboarding", "trust":
+	default:
+		return false
+	}
+	// One caller at a time, judging a screen read after any earlier press:
+	// a key meant for one dialog must never land on the next.
+	e := a.entry(h)
+	e.startupMu.Lock()
+	defer e.startupMu.Unlock()
+	fresh, err := a.screen(ctx, h.TmuxTarget)
+	if err != nil {
+		return false
+	}
+	si = fresh
+	if si.DialogKind == "devchannels" {
+		return a.acceptDevChannels(ctx, h, si)
+	}
+	if si.DialogKind == "onboarding" {
+		return a.answerOnboarding(ctx, h, e, si)
+	}
+	if si.DialogKind != "trust" {
 		return false
 	}
 	meta := a.meta(h)
-	if meta == nil || !a.o.TrustWorkspace(meta.Cwd) {
+	if meta == nil || !(meta.Bypass || (a.o.TrustWorkspace != nil && a.o.TrustWorkspace(meta.Cwd))) {
 		return false
 	}
 	if si.TrustYes {
@@ -624,6 +708,105 @@ func (a *Adapter) handleStartupDialog(ctx context.Context, h contracts.RunHandle
 	}
 	time.Sleep(300 * time.Millisecond)
 	return true
+}
+
+// acceptDevChannels confirms Claude's "Loading development channels"
+// warning for a run whose launch arguments load development channels (the
+// owner passed --dangerously-load-development-channels for the session);
+// any other run leaves it for a human.
+func (a *Adapter) acceptDevChannels(ctx context.Context, h contracts.RunHandle, si screenInfo) bool {
+	meta := a.meta(h)
+	if meta == nil || len(meta.DevChannels) == 0 || a.o.Now().Sub(meta.LaunchedAt) > devChannelsWindow {
+		return false // a startup dialog: never answered later in the run
+	}
+	if si.DevAccept {
+		if a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEnter) == nil {
+			a.automation(h, contracts.AutomationDevChannelsAccepted, strings.Join(meta.DevChannels, ", "))
+		}
+	} else {
+		_ = a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyUp)
+	}
+	time.Sleep(300 * time.Millisecond)
+	return true
+}
+
+// devChannelsWindow bounds when the development-channels warning is
+// answered: it is a startup dialog (shown before the input box).
+const devChannelsWindow = 2 * time.Minute
+
+// answerOnboarding presses Enter on Claude's first-run onboarding screens
+// (the theme picker, keeping the highlighted theme, and the security notes)
+// of a run that has not started: Claude shows them whenever the profile's
+// config lacks hasCompletedOnboarding, and an unattended run otherwise sits
+// there and never runs its prompt. Neither screen is a decision (the theme
+// is cosmetic and changeable with /theme; the notes only continue).
+//
+// Each screen gets one press. A screen still shown is pressed again only
+// after onboardingRepress (a slow redraw, e.g. on Windows, otherwise turns
+// the extra Enter into an answer to the next screen: the workspace-trust
+// dialog, a login method). After maxOnboardingPresses the screen is left
+// for a human (Observe reports it as needs human). Caller holds
+// e.startupMu.
+func (a *Adapter) answerOnboarding(ctx context.Context, h contracts.RunHandle, e *runEntry, si screenInfo) bool {
+	now := time.Now()
+	o := &e.onb
+	if o.step == si.Onboarding {
+		if now.Sub(o.at) < onboardingRepress {
+			return true // pressed; waiting for the next screen to be drawn
+		}
+		if o.n >= maxOnboardingPresses {
+			return false
+		}
+	} else {
+		o.step, o.n = si.Onboarding, 0
+	}
+	if o.total >= 2*maxOnboardingPresses {
+		return false
+	}
+	if a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEnter) != nil {
+		return false // not pressed: not counted
+	}
+	o.at, o.n, o.total = now, o.n+1, o.total+1
+	a.automation(h, contracts.AutomationOnboardingAnswered, "onboarding (theme picker / security notes)")
+	time.Sleep(300 * time.Millisecond)
+	return true
+}
+
+// onboardingRepress is how long a still-shown onboarding screen waits
+// before another Enter; maxOnboardingPresses bounds presses per screen.
+const (
+	onboardingRepress    = 3 * time.Second
+	maxOnboardingPresses = 3
+)
+
+// notStarted reports a run with no hook event at all (not even
+// SessionStart), no input box and no recognised dialog longer than
+// FirstRunScreenWait after launch. firstRun: the screen looks like Claude's
+// first-run onboarding (its "Welcome to Claude Code" banner), a screen that
+// blocks the run until a human answers it.
+func (a *Adapter) notStarted(h contracts.RunHandle, noEvents bool, si screenInfo, now time.Time) (stuck, firstRun bool) {
+	if !noEvents || si.HasInputBox || si.Dialog != "" {
+		return false, false
+	}
+	meta := a.meta(h)
+	if meta == nil || meta.LaunchedAt.IsZero() || now.Sub(meta.LaunchedAt) <= a.o.FirstRunScreenWait {
+		return false, false
+	}
+	all := strings.Join(si.Lines, "\n")
+	return true, strings.Contains(all, "Welcome to Claude Code") || strings.Contains(all, "Let's get started")
+}
+
+// State reasons for notStarted.
+const (
+	firstRunScreenReason = "needs human: Claude first-run screen (attach to answer it)"
+	notStartedReason     = "Claude has not started (no SessionStart after %d s)"
+)
+
+func nonEmpty(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return []string{s}
 }
 
 func (a *Adapter) screen(ctx context.Context, name string) (screenInfo, error) {
@@ -972,6 +1155,9 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 			si = &s
 		}
 	}
+	if si != nil && si.DialogKind == "devchannels" && a.handleStartupDialog(ctx, h, *si) {
+		si = nil // answered (or moving to the answer); the next poll reads the screen again
+	}
 
 	e := a.entry(h)
 	e.mu.Lock()
@@ -1002,7 +1188,7 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 		obs.Subagents = obs.Subagents[len(obs.Subagents)-50:]
 	}
 	obs.Receipts, obs.NextCursor = a.receipts(h, rs, cursor)
-	hasStart, ended := rs.hasStart, rs.ended
+	hasStart, ended, noEvents := rs.hasStart, rs.ended, rs.lastEventAt.IsZero()
 	e.mu.Unlock()
 
 	switch {
@@ -1030,8 +1216,15 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 			if !hasStart {
 				if a.handleStartupDialog(ctx, h, si) {
 					reason = "accepting workspace trust (owner-trusted directory)"
+					if si.DialogKind == "onboarding" {
+						reason = "answering " + si.Dialog
+					}
 				} else if si.Dialog != "" {
 					state, reason = contracts.RunWaitingApproval, "needs human: "+si.Dialog+" (attach to answer it in the terminal)"
+				} else if stuck, firstRun := a.notStarted(h, noEvents, si, now); firstRun {
+					state, reason = contracts.RunWaitingApproval, firstRunScreenReason
+				} else if stuck {
+					reason = fmt.Sprintf(notStartedReason, int(a.o.FirstRunScreenWait.Seconds()))
 				}
 			} else if state == contracts.RunWaitingInput && si.Dialog != "" && !si.HasInputBox {
 				state, reason = contracts.RunWaitingApproval, "needs human: "+si.Dialog+" (attach to answer it in the terminal)"
@@ -1431,16 +1624,32 @@ func (a *Adapter) ResumeSpec(ctx context.Context, prev contracts.Run, sameAccoun
 // ensureFirstRunAnswers adds Claude's non-secret first-run answers to a Pyre
 // profile's .claude.json when they are missing, at every launch: a profile
 // composed before the defaults existed (or rewritten by Claude) otherwise
-// stops at the theme picker and never runs the initial prompt (first GCP
-// Windows node). Existing values are never changed.
+// stops at the onboarding theme picker and never runs the initial prompt
+// (first GCP Windows node; win-home 2026-10-20, whose .claude.json held only
+// "projects"). hasCompletedOnboarding alone gates the onboarding screens
+// (Claude Code 2.1.299-2.1.304). theme is kept for older versions; Claude
+// 2.1.30x keeps the theme in settings.json and drops a default-valued
+// "dark" from .claude.json when it saves, so its absence there is normal.
+// Existing values are never changed. A file Pyre cannot read, parse or
+// write, or a symlinked one, is left alone and logged once (the screen fallback in
+// answerOnboarding still gets the run started).
 func ensureFirstRunAnswers(dir string) {
 	p := filepath.Join(dir, ".claude.json")
+	if fi, err := os.Lstat(p); err == nil && fi.Mode()&osutil.LinkModes != 0 {
+		// The rename would replace the link (and whatever it points to may
+		// be the owner's own config): left alone.
+		firstRunNote(p, "a symlink; left alone")
+		return
+	}
 	cfg := map[string]json.RawMessage{}
 	if b, err := os.ReadFile(p); err == nil {
-		if json.Unmarshal(b, &cfg) != nil {
-			return // unparseable: leave it alone
+		// A UTF-8 byte-order mark (Windows editors, PowerShell 5) is not JSON.
+		if json.Unmarshal(bytes.TrimPrefix(b, utf8BOM), &cfg) != nil || cfg == nil {
+			firstRunNote(p, "unparseable; left alone")
+			return
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
+		firstRunNote(p, "read: "+err.Error())
 		return
 	}
 	changed := false
@@ -1453,7 +1662,25 @@ func ensureFirstRunAnswers(dir string) {
 	if !changed {
 		return
 	}
-	if b, err := json.MarshalIndent(cfg, "", "  "); err == nil {
-		_ = writeFileAtomic(p, b)
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err == nil {
+		err = os.MkdirAll(dir, 0o700) // a profile Claude has not run in yet
+	}
+	if err == nil {
+		err = writeFileAtomic(p, b)
+	}
+	if err != nil {
+		firstRunNote(p, "write: "+err.Error())
+	}
+}
+
+var utf8BOM = []byte("\xef\xbb\xbf")
+
+// firstRunNotes dedupes ensureFirstRunAnswers log lines (path + problem).
+var firstRunNotes sync.Map
+
+func firstRunNote(p, problem string) {
+	if _, seen := firstRunNotes.LoadOrStore(p+"\x00"+problem, true); !seen {
+		log.Printf("claude: first-run answers not added to %s (%s); an onboarding screen at launch is answered on screen instead", p, problem)
 	}
 }

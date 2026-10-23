@@ -356,9 +356,10 @@ func (m *Model) baseLoader(key string) loaderFn {
 	switch key {
 	case "sessions":
 		return func(ctx context.Context) (any, error) {
-			return all(ctx, func(ctx context.Context, cur string) (contracts.Page[contracts.SessionView], error) {
+			ss, err := all(ctx, func(ctx context.Context, cur string) (contracts.Page[contracts.SessionView], error) {
 				return api.ListSessions(ctx, contracts.ListSessionsRequest{PageRequest: contracts.PageRequest{Cursor: cur, Limit: 200}})
 			})
+			return withoutMonitors(ss), err // monitors.go
 		}
 	case "nodes":
 		return func(ctx context.Context) (any, error) {

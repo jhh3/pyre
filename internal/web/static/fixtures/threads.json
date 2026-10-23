@@ -886,6 +886,259 @@
   },
   {
    "thread": {
+    "thread_id": "thr_ask_fx_merges",
+    "kind": "ask",
+    "title": "Merge these reviewed billing PRs?",
+    "preview": "Which of the three reviewed billing PRs merge before the freeze…",
+    "project": {
+     "id": "prj_fx_studio",
+     "name": "Studio billing v2"
+    },
+    "session": {
+     "id": "ses_fx_studio_lead",
+     "title": "Studio lead",
+     "state": "working",
+     "node": "server"
+    },
+    "ask": {
+     "ask_id": "ask_fx_merges",
+     "topic_key": "merges",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_studio_lead",
+     "title": "Merge these reviewed billing PRs?",
+     "context": "**What's being decided:** which of the three reviewed billing PRs merge before the freeze. Each one is reviewed and CI is green; the options apply to each PR.\n\n- **#2231** only touches invoice PDF fonts.\n- **#2232** retries webhook deliveries with backoff (behind a flag).\n- **#2233** adds the `credits_ledger` table (additive migration, no backfill yet).\n\nDefault: merge all three; anything you hold waits until Monday.",
+     "options": [
+      {
+       "id": "merge",
+       "label": "Merge",
+       "detail": "Merges now; I watch CI on main."
+      },
+      {
+       "id": "hold",
+       "label": "Hold until Monday",
+       "detail": "Stays open and rebased."
+      }
+     ],
+     "default_option": "merge",
+     "urgent": false,
+     "deadline_at": "2026-10-15T17:34:00Z",
+     "deadline_rule": "1h",
+     "state": "open",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_merges",
+     "thread_id": "thr_ask_fx_merges",
+     "created_at": "2026-10-15T16:34:00Z",
+     "updated_at": "2026-10-15T16:34:00Z",
+     "action": "merge",
+     "items": [
+      {
+       "id": "pr-2231",
+       "label": "Invoice PDF fonts",
+       "detail": "Fonts only; CI green",
+       "url": "https://example.invalid/pr/2231"
+      },
+      {
+       "id": "pr-2232",
+       "label": "Webhook retries with backoff",
+       "detail": "Behind billing.webhook_retries; CI green",
+       "url": "https://example.invalid/pr/2232"
+      },
+      {
+       "id": "pr-2233",
+       "label": "credits_ledger table",
+       "detail": "Additive migration; CI green",
+       "url": "https://example.invalid/pr/2233"
+      }
+     ]
+    },
+    "held": null,
+    "last_at": "2026-10-15T16:34:00Z",
+    "unread": true,
+    "message_count": 1,
+    "needs_reply": false
+   },
+   "messages": [
+    {
+     "message_id": "msg_ask_ask_fx_merges",
+     "from": {
+      "kind": "session",
+      "id": "ses_fx_studio_lead",
+      "label": "Studio lead"
+     },
+     "text": "**Merge these reviewed billing PRs?**",
+     "at": "2026-10-15T16:34:00Z",
+     "reply_to": "",
+     "delivery": {
+      "state": "delivered",
+      "summary": "Delivered to you"
+     },
+     "ask_id": "ask_fx_merges"
+    }
+   ]
+  },
+  {
+   "thread": {
+    "thread_id": "thr_ask_fx_granted",
+    "kind": "ask",
+    "title": "Merge PR #2229 (invoice rounding)?",
+    "preview": "Answered by a standing grant: Merge",
+    "project": {
+     "id": "prj_fx_studio",
+     "name": "Studio billing v2"
+    },
+    "session": {
+     "id": "ses_fx_billing",
+     "title": "Billing migration",
+     "state": "needs_you",
+     "node": "server"
+    },
+    "ask": {
+     "ask_id": "ask_fx_granted",
+     "topic_key": "granted",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_billing",
+     "title": "Merge PR #2229 (invoice rounding)?",
+     "context": "**What's being decided:** merge PR #2229 (invoice rounding fix). Reviewed by the billing reviewer, CI green.",
+     "options": [
+      {
+       "id": "merge",
+       "label": "Merge",
+       "detail": "Merges now."
+      },
+      {
+       "id": "wait",
+       "label": "Wait",
+       "detail": "Stays open."
+      }
+     ],
+     "default_option": "merge",
+     "urgent": false,
+     "deadline_rule": "1h",
+     "state": "answered",
+     "count": 1,
+     "thread_id": "thr_ask_fx_granted",
+     "created_at": "2026-10-15T15:30:00Z",
+     "updated_at": "2026-10-15T15:30:00Z",
+     "answer": {
+      "option_id": "merge",
+      "text": "standing grant sgr_fx_merge (merge → option \"merge\"; owner: \"yes, merge them once reviewed and green\" (approved ask_fx_grant_prop); expires Thu Oct 22 9:40 AM PT)",
+      "by": {
+       "kind": "system",
+       "id": "grants"
+      },
+      "at": "2026-10-15T15:30:00Z"
+     },
+     "action": "merge",
+     "grant_id": "sgr_fx_merge"
+    },
+    "held": null,
+    "last_at": "2026-10-15T15:30:00Z",
+    "unread": false,
+    "message_count": 1,
+    "needs_reply": false
+   },
+   "messages": [
+    {
+     "message_id": "msg_fx_022",
+     "from": {
+      "kind": "session",
+      "id": "ses_fx_billing",
+      "label": "Billing migration"
+     },
+     "text": "**Merge PR #2229 (invoice rounding)?**",
+     "at": "2026-10-15T15:30:00Z",
+     "reply_to": "",
+     "delivery": {
+      "state": "delivered",
+      "summary": "Delivered to you"
+     },
+     "ask_id": "ask_fx_granted"
+    }
+   ]
+  },
+  {
+   "thread": {
+    "thread_id": "thr_ask_fx_grant_prop",
+    "kind": "ask",
+    "title": "Remember this go-ahead? merge → merge",
+    "preview": "Proposed standing go-ahead from session \"Studio lead\"…",
+    "project": {
+     "id": "prj_fx_studio",
+     "name": "Studio billing v2"
+    },
+    "session": {
+     "id": "ses_fx_studio_lead",
+     "title": "Studio lead",
+     "state": "working",
+     "node": "server"
+    },
+    "ask": {
+     "ask_id": "ask_fx_grant_prop",
+     "topic_key": "grant-prop",
+     "project_id": "prj_fx_studio",
+     "session_id": "ses_fx_studio_lead",
+     "title": "Remember this go-ahead? merge → merge",
+     "context": "**Proposed standing go-ahead** from session \"Studio lead\" (ses_fx_studio_lead). Nothing is recorded unless you approve.\n\n- Action: `merge` (only asks that name exactly this action)\n- Picks option: \"merge\" (only asks that offer it, have a default and are not marked irreversible)\n- Holds for: every session in project \"Studio billing v2\" (prj_fx_studio)\n- Expires: 7 days after you approve (revoke it any time on the project page or with `pyre grant revoke`)\n- Note (the session's words; Pyre never checks it): once reviewed and CI green\n\nApprove: Pyre records the grant with this ask's ID; anything you type with your answer is saved as your words. You get an FYI each time it answers an ask. Reject, or no answer, records nothing.\n\n**Why the session proposes it** (its words):\n\nYou merged the last six reviewed, green billing PRs the same way; this saves an ask per PR this week.",
+     "options": [
+      {
+       "id": "approve",
+       "label": "Approve",
+       "detail": "Pyre records it, citing this ask; your typed words, if any, are saved as yours"
+      },
+      {
+       "id": "reject",
+       "label": "Reject",
+       "detail": "Nothing is recorded"
+      }
+     ],
+     "urgent": false,
+     "deadline_at": "2026-10-16T16:36:00Z",
+     "deadline_rule": "1h",
+     "state": "open",
+     "count": 1,
+     "message_id": "msg_ask_ask_fx_grant_prop",
+     "thread_id": "thr_ask_fx_grant_prop",
+     "created_at": "2026-10-15T16:36:00Z",
+     "updated_at": "2026-10-15T16:36:00Z",
+     "proposal": {
+      "kind": "grant",
+      "grant": {
+       "scope": "project",
+       "action": "merge",
+       "option": "merge",
+       "condition": "once reviewed and CI green",
+       "expires_in_days": 7
+      },
+      "state": "pending"
+     }
+    },
+    "held": null,
+    "last_at": "2026-10-15T16:36:00Z",
+    "unread": true,
+    "message_count": 1,
+    "needs_reply": false
+   },
+   "messages": [
+    {
+     "message_id": "msg_ask_ask_fx_grant_prop",
+     "from": {
+      "kind": "session",
+      "id": "ses_fx_studio_lead",
+      "label": "Studio lead"
+     },
+     "text": "**Remember this go-ahead? merge → merge**",
+     "at": "2026-10-15T16:36:00Z",
+     "reply_to": "",
+     "delivery": {
+      "state": "delivered",
+      "summary": "Delivered to you"
+     },
+     "ask_id": "ask_fx_grant_prop"
+    }
+   ]
+  },
+  {
+   "thread": {
     "thread_id": "thr_fx_nightly",
     "kind": "message",
     "title": "Nightly summary: 3 PRs merged, nothing needs you",
@@ -909,7 +1162,7 @@
    },
    "messages": [
     {
-     "message_id": "msg_fx_021",
+     "message_id": "msg_fx_024",
      "from": {
       "kind": "session",
       "id": "ses_fx_studio_lead",
@@ -924,7 +1177,7 @@
      }
     },
     {
-     "message_id": "msg_fx_022",
+     "message_id": "msg_fx_025",
      "from": {
       "kind": "owner",
       "id": "owner",
@@ -932,13 +1185,51 @@
      },
      "text": "Thanks!",
      "at": "2026-10-15T10:20:00Z",
-     "reply_to": "msg_fx_021",
+     "reply_to": "msg_fx_024",
      "delivery": {
       "state": "read",
       "summary": "Read by Studio lead at 3:21 AM"
      }
     }
    ]
+  },
+  {
+   "thread": {
+    "thread_id": "att_fx_waiting_voy",
+    "kind": "attention",
+    "title": "Waiting on you: Should I start the onboarding email rewrite now or after the funnel numbers land?",
+    "preview": "…The trial funnel export finished. Before I go further: **should I start the onboarding email rewrite now, or wait for Thursday's funnel numbers?** Starting now risks redoing two emails.",
+    "project": {
+     "id": "prj_fx_vortex",
+     "name": "Vortex onboarding"
+    },
+    "session": {
+     "id": "ses_fx_voy_lead",
+     "title": "Vortex lead",
+     "state": "idle",
+     "node": "mbp"
+    },
+    "ask": null,
+    "held": null,
+    "last_at": "2026-10-15T16:15:00Z",
+    "unread": true,
+    "message_count": 0,
+    "needs_reply": true,
+    "attention": {
+     "attention_id": "att_fx_waiting_voy",
+     "kind": "waiting",
+     "state": "open",
+     "severity": "normal",
+     "title": "Waiting on you: Should I start the onboarding email rewrite now or after the funnel numbers land?",
+     "summary": "…The trial funnel export finished. Before I go further: **should I start the onboarding email rewrite now, or wait for Thursday's funnel numbers?** Starting now risks redoing two emails.",
+     "session_id": "ses_fx_voy_lead",
+     "project_id": "prj_fx_vortex",
+     "count": 1,
+     "created_at": "2026-10-15T16:15:00Z",
+     "updated_at": "2026-10-15T16:15:00Z"
+    }
+   },
+   "messages": []
   }
  ]
 }

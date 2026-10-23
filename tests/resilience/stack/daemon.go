@@ -138,7 +138,8 @@ func run(state, hubURL, credFile, ownerCredPath, name string, withShell, withMoc
 	}
 	link, err := transport.NewNodeLink(transport.NodeLinkConfig{HubURL: hubURL, NodeID: cred.NodeID, Token: cred.Token, TLS: tlsCfg, DB: db,
 		Logger: logger.With("component", "nodelink"), Hello: d.Hello, Handler: transport.CommandHandlerFunc(d.HandleCommand),
-		Backoff: transport.BackoffConfig{Initial: 100 * 1e6, Max: 2 * 1e9},
+		RecoverCommand: d.RecoverCommand,
+		Backoff:        transport.BackoffConfig{Initial: 100 * 1e6, Max: 2 * 1e9},
 		OnStateChange: func(s transport.LinkStatus) {
 			if s.State == transport.LinkConnected {
 				d.KickOutbox()

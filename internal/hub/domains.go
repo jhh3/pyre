@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/store"
 )
 
 // Delegation to pluggable domains. A nil domain returns ErrUnsupported.
@@ -25,9 +26,14 @@ func (h *Hub) GetNode(ctx context.Context, req contracts.GetRequest) (contracts.
 	return h.cfg.Fleet.GetNode(ctx, req)
 }
 
+// CreateEnrollment and RevokeNode are owner-only; a session's request is
+// filed for the owner's approval (owneractions.go).
 func (h *Hub) CreateEnrollment(ctx context.Context, req contracts.EnrollmentRequest) (contracts.EnrollmentTicket, error) {
 	if h.cfg.Fleet == nil {
 		return contracts.EnrollmentTicket{}, notConfigured("fleet")
+	}
+	if p, ok := contracts.PrincipalFrom(ctx); ok && p.Kind == contracts.PrincipalSession && !isOwner(p) {
+		return h.enrollApproval(ctx, p, req)
 	}
 	return h.cfg.Fleet.CreateEnrollment(ctx, req)
 }
@@ -35,6 +41,9 @@ func (h *Hub) CreateEnrollment(ctx context.Context, req contracts.EnrollmentRequ
 func (h *Hub) RevokeNode(ctx context.Context, req contracts.RevokeRequest) (contracts.Node, error) {
 	if h.cfg.Fleet == nil {
 		return contracts.Node{}, notConfigured("fleet")
+	}
+	if p, ok := contracts.PrincipalFrom(ctx); ok && p.Kind == contracts.PrincipalSession && !isOwner(p) {
+		return contracts.Node{}, h.revokeApproval(ctx, p, req)
 	}
 	return h.cfg.Fleet.RevokeNode(ctx, req)
 }
@@ -126,6 +135,10 @@ func (h *Hub) ProposeRevision(ctx context.Context, req contracts.ProposeRevision
 	}
 	return h.cfg.Documents.ProposeRevision(ctx, req)
 }
+
+// Fact sheet writes are limited to the owner and the hub applying an
+// approved fact (contracts.FactSheetWriter), enforced by the projects store
+// on the resolved slug of every write path.
 
 func (h *Hub) ListProposals(ctx context.Context, req contracts.ListProposalsRequest) (contracts.Page[contracts.DocumentProposal], error) {
 	if h.cfg.Documents == nil {
@@ -292,7 +305,37 @@ func (h *Hub) UpdateAttention(ctx context.Context, req contracts.UpdateAttention
 	if h.cfg.Attention == nil {
 		return contracts.AttentionItem{}, notConfigured("attention")
 	}
-	return h.cfg.Attention.UpdateAttention(ctx, req)
+	// What the item stood for when he marked it: mail it collected up to
+	// its last update (a message that arrives later is not acknowledged).
+	var before contracts.AttentionItem
+	if req.State == contracts.AttnHandled {
+		before, _ = h.cfg.Attention.GetAttention(ctx, contracts.GetRequest{ID: req.AttentionID})
+	}
+	it, err := h.cfg.Attention.UpdateAttention(ctx, req)
+	if p, ok := contracts.PrincipalFrom(ctx); err == nil && ok && isOwner(p) && it.Kind == contracts.AttnMessage && it.State == contracts.AttnHandled &&
+		before.AttentionID != "" && before.State != contracts.AttnHandled {
+		h.ackMessageItem(ctx, before)
+	}
+	return it, err
+}
+
+// ackMessageItem: the owner marking a message item done (the phone's Done,
+// the web's read) acknowledges the mail it stands for, so no surface still
+// shows it waiting on him. Best effort.
+func (h *Hub) ackMessageItem(ctx context.Context, it contracts.AttentionItem) {
+	var sel store.OwnerMail
+	switch {
+	case it.Object.Kind == contracts.KindThread && !contracts.ValidID(it.Object.ID, contracts.PrefixAsk):
+		sel.ThreadID = it.Object.ID
+	case it.Object.Kind == contracts.KindMessage && it.SessionID != "":
+		sel.FromSession, sel.NoThread = it.SessionID, true // a sender's unthreaded mail is one item
+	case it.Object.Kind == contracts.KindMessage:
+		sel.MessageID = it.Object.ID
+	default:
+		return
+	}
+	sel.Through = it.UpdatedAt
+	_, _ = h.msgs.AckOwnerMail(ctx, sel, contracts.AckRefEngaged)
 }
 
 func (h *Hub) FlagAttention(ctx context.Context, req contracts.FlagAttentionRequest) (contracts.AttentionItem, error) {

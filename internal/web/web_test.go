@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -53,7 +54,7 @@ func newTestEnv(t *testing.T, full bool) *tenv {
 	clk := mock.NewFakeClock(time.Date(2026, 10, 15, 17, 0, 0, 0, time.UTC)) // 10:00 AM PT
 	now := clk.Now()
 	node := c.Node{NodeID: testNode, Name: "synth-box", Platform: "linux", Arch: "amd64",
-		Connection: c.NodeConnection{State: c.ConnConnected}, Harnesses: []c.HarnessInfo{}, Versions: map[string]string{}, Capabilities: []string{}}
+		Connection: c.NodeConnection{State: c.ConnConnected}, Harnesses: []c.HarnessInfo{{Harness: c.HarnessShell, Version: "synth", Available: true, Capabilities: []string{}}}, Versions: map[string]string{}, Capabilities: []string{}}
 	pid := testProject
 	sum := sha256.Sum256([]byte(artContent))
 	bundle := &c.FixtureBundle{SchemaVersion: c.SchemaVersion, Name: "synthetic web inbox", Synthetic: true,
@@ -117,10 +118,12 @@ func (e *tenv) ask(sid, topic, title string) c.Ask {
 	return *r.Ask
 }
 
+// mail is a session's message to the owner that needs him (request_ack;
+// a plain report is an update, see update).
 func (e *tenv) mail(sid, text, replyTo string) c.MessageView {
 	e.t.Helper()
 	mv, err := e.b.SendMessage(sessCtx(sid), c.SendMessageRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)},
-		Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Body: c.MessageBody{Text: text}, InReplyTo: replyTo})
+		Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Body: c.MessageBody{Text: text}, InReplyTo: replyTo, RequestAck: true})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -427,6 +430,23 @@ func TestReadMarksPersistAndReachTheHub(t *testing.T) {
 	if err != nil || got.State != c.AttnRead {
 		t.Fatalf("ask attention should be read at the hub: %v %+v", err, got)
 	}
+	// Reading a message here closes its item (other clients' "read" stays read).
+	items, err := e.b.ListAttention(ownerCtx(), c.ListAttentionRequest{States: []c.AttentionState{c.AttnOpen, c.AttnRead, c.AttnHandled}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, it := range items.Items {
+		if it.Kind == c.AttnMessage && it.SessionID == lead {
+			found = true
+			if it.State != c.AttnHandled {
+				t.Fatalf("message item after reading it here: %+v", it)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no message item for the session")
+	}
 	b, err := os.ReadFile(filepath.Join(e.state, "read.json"))
 	if err != nil || !strings.Contains(string(b), m.Envelope.MessageID) {
 		t.Fatalf("read state file: %v %s", err, b)
@@ -574,6 +594,84 @@ func TestProjectsListAndDetail(t *testing.T) {
 	}
 	if w := e.req("GET", "/api/projects/prj_synth-missing", nil); w.Code != 404 {
 		t.Fatalf("missing project: %d", w.Code)
+	}
+}
+
+// The status card: the lead's part from the hub, the live part from the
+// project's sessions; list cards carry progress, phase and staleness.
+func TestProjectStatusCard(t *testing.T) {
+	e := newTestEnv(t, true)
+	lead := e.start("synth lead", "")
+	e.start("synth helper", lead)
+	pct := 30
+	if _, err := e.b.SetProjectPage(ownerCtx(), c.SetProjectPageRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)}, ProjectID: testProject,
+		Status: &c.ProjectStatus{Progress: &pct, Phase: "synthetic phase", ReadyForOwner: []c.StatusItem{{Title: "synthetic PR", State: "review"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Projects []ProjectCard `json:"projects"`
+	}
+	e.json("GET", "/api/projects", nil, &list)
+	if len(list.Projects) != 1 || list.Projects[0].Progress == nil || *list.Projects[0].Progress != 30 || list.Projects[0].Phase != "synthetic phase" || list.Projects[0].Stale {
+		t.Fatalf("card: %+v", list.Projects)
+	}
+	var d struct {
+		Status StatusCard `json:"status"`
+	}
+	e.json("GET", "/api/projects/"+testProject, nil, &d)
+	sc := d.Status
+	if sc.Lead == nil || len(sc.Lead.ReadyForOwner) != 1 || sc.UpdatedAt == nil || sc.Stale || sc.StaleAfterMinutes != 30 ||
+		sc.Working == nil || sc.NeedsYou == nil || sc.Idle == nil || sc.Stuck == nil {
+		t.Fatalf("status: %+v", sc)
+	}
+}
+
+func TestStatusCardBuckets(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	pid := testProject
+	view := func(id string, parent bool, st c.RunState, at time.Time) c.SessionView {
+		s := c.Session{SessionID: id, ProjectID: &pid, CreatedAt: at}
+		if parent {
+			s.Lineage.ParentSessionID = "ses_synthlead"
+		}
+		return c.SessionView{Session: s, Run: &c.Run{State: st, StartedAt: at}}
+	}
+	views := []c.SessionView{
+		view("ses_synthlead", false, c.RunWaitingInput, now.Add(-time.Minute)),
+		view("ses_synthbusy", true, c.RunRunning, now.Add(-5*time.Minute)),
+		view("ses_synthquiet", true, c.RunRunning, now.Add(-time.Hour)),
+		view("ses_synthdone", true, c.RunWaitingInput, now.Add(-10*time.Minute)),
+		view("ses_synthasks", true, c.RunWaitingApproval, now),
+		view("ses_synthdead", true, c.RunFailed, now),
+	}
+	ids := func(cards []SessionCard) (out []string) {
+		for _, x := range cards {
+			out = append(out, x.ID)
+		}
+		return
+	}
+	old := now.Add(-2 * time.Hour)
+	pg := c.ProjectPage{ProjectID: pid, StatusUpdatedAt: &old}
+	sc := statusCard(pg, views, now)
+	if fmt.Sprint(ids(sc.Working)) != "[ses_synthbusy]" || fmt.Sprint(ids(sc.Stuck)) != "[ses_synthquiet ses_synthdead]" && fmt.Sprint(ids(sc.Stuck)) != "[ses_synthdead ses_synthquiet]" ||
+		fmt.Sprint(ids(sc.Idle)) != "[ses_synthdone]" || fmt.Sprint(ids(sc.NeedsYou)) != "[ses_synthasks]" || !sc.Stale {
+		t.Fatalf("buckets: working %v stuck %v idle %v needs %v stale %v", ids(sc.Working), ids(sc.Stuck), ids(sc.Idle), ids(sc.NeedsYou), sc.Stale)
+	}
+	fresh := now.Add(-10 * time.Minute)
+	if statusCard(c.ProjectPage{StatusUpdatedAt: &fresh}, views, now).Stale {
+		t.Fatal("fresh update is stale")
+	}
+	if statusCard(pg, views[:1], now).Stale {
+		t.Fatal("stale with nothing running")
+	}
+	if statusCard(pg, []c.SessionView{views[0], views[5]}, now).Stale {
+		t.Fatal("stale with only a failed session")
+	}
+	if !statusCard(pg, []c.SessionView{views[2]}, now).Stale {
+		t.Fatal("a quiet working session is running work")
+	}
+	if statusCard(c.ProjectPage{ProjectID: pid}, views, now).Stale {
+		t.Fatal("stale without any page or card")
 	}
 }
 
@@ -886,11 +984,25 @@ func TestArchiveAsks(t *testing.T) {
 	lead := e.start("synth lead", "")
 	a := e.ask(lead, "synth-archive-ask", "Synthetic archive ask")
 	w := e.req("POST", "/api/threads/"+askThreadID(a)+"/archive", map[string]any{})
-	if w.Code != http.StatusConflict || errCode(t, w) != string(c.ErrConflict) || !strings.Contains(w.Body.String(), "open questions can't be archived") {
+	if w.Code != http.StatusConflict || errCode(t, w) != string(c.ErrConflict) || !strings.Contains(w.Body.String(), "dismiss") {
 		t.Fatalf("open ask: %d %s", w.Code, w.Body)
 	}
 	if _, ok := findThread(e.inbox("open").Threads, askThreadID(a)); !ok {
 		t.Fatal("the open ask should stay open")
+	}
+	// Dismissing archives it: withdrawn by the owner, no option, no default.
+	d := e.ask(lead, "synth-dismiss-ask", "Synthetic ask to dismiss")
+	var dr struct {
+		Thread Thread `json:"thread"`
+	}
+	e.json("POST", "/api/threads/"+askThreadID(d)+"/archive", map[string]any{"dismiss": true, "operation_id": "synth-dismiss"}, &dr)
+	if dr.Thread.Ask == nil || dr.Thread.Ask.State != c.AskWithdrawn || dr.Thread.NeedsReply {
+		t.Fatalf("dismissed ask: %+v", dr.Thread)
+	}
+	got, err := e.b.GetAsk(ownerCtx(), c.GetRequest{ID: d.AskID})
+	b, _ := json.Marshal(got)
+	if err != nil || got.State != c.AskWithdrawn || !strings.Contains(string(b), c.AskDismissReason) || (got.Answer != nil && got.Answer.OptionID != "") {
+		t.Fatalf("hub ask after dismiss: %v %s", err, b)
 	}
 	e.json("POST", "/api/asks/"+a.AskID+"/answer", map[string]string{"option_id": "a", "mode": "now"}, nil)
 	waitFor(t, "ask decided", func() bool {
@@ -935,5 +1047,300 @@ func TestArchiveBulk(t *testing.T) {
 	}
 	if w := e.req("POST", "/api/inbox/archive", map[string]any{"thread_ids": []string{}}); w.Code != 400 {
 		t.Fatalf("empty bulk: %d", w.Code)
+	}
+}
+
+// W-grants: a batched ask's items reach the thread view and a per-item
+// answer reaches the hub.
+func TestAnswerBatchedAskPerItem(t *testing.T) {
+	e := newTestEnv(t, false)
+	lead := e.start("synth lead", "")
+	r, err := e.b.CreateAsk(sessCtx(lead), c.CreateAskRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)},
+		TopicKey: "synth-merges", Title: "Merge the synthetic PRs?", Action: "merge",
+		Context: "Synthetic context: three reviewed synthetic PRs. " + strings.Repeat("More synthetic background. ", 12),
+		Options: []c.AskOption{{ID: "a", Label: "Merge", Detail: "merge now"}, {ID: "b", Label: "Hold", Detail: "wait"}},
+		Items:   []c.AskItem{{ID: "pr-1", Label: "Synthetic PR 1"}, {ID: "pr-2", Label: "Synthetic PR 2", URL: "https://example.invalid/2"}}})
+	if err != nil || r.Ask == nil {
+		t.Fatalf("ask: %v %+v", err, r)
+	}
+	a := *r.Ask
+	tr := e.thread(askThreadID(a))
+	if tr.Thread.Ask == nil || len(tr.Thread.Ask.Items) != 2 || tr.Thread.Ask.Items[1].URL != "https://example.invalid/2" {
+		t.Fatalf("thread ask items: %+v", tr.Thread.Ask)
+	}
+	var res struct {
+		Ask c.Ask `json:"ask"`
+	}
+	e.json("POST", "/api/asks/"+a.AskID+"/answer", map[string]any{"items": map[string]string{"pr-1": "a", "pr-2": "b"}}, &res)
+	if res.Ask.State != c.AskAnswered || res.Ask.Answer == nil || res.Ask.Answer.Items["pr-2"] != "b" || res.Ask.Answer.OptionID != "" {
+		t.Fatalf("per-item answer: %+v", res.Ask)
+	}
+}
+
+// Monitors (pyre monitor) are not project sessions: they leave the lists
+// and the status buckets, and the session they wake carries "watching".
+func TestMonitorsAreABadgeNotASession(t *testing.T) {
+	e := newTestEnv(t, true)
+	lead := e.start("synth lead", "")
+	pid := testProject
+	r, err := e.b.StartSession(sessCtx(lead), c.StartSessionRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)},
+		NodeID: testNode, Harness: c.HarnessShell, Title: "monitor: gh pr checks 7", Cwd: "/tmp/synth", ProjectID: &pid, ParentSessionID: lead,
+		Tags: []string{c.TagMonitor, c.TagMonitorToPrefix + lead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.b.Tick()
+	mon := r.Session.Session.SessionID
+	var d struct {
+		Sessions []SessionCard `json:"sessions"`
+		Status   StatusCard    `json:"status"`
+	}
+	e.json("GET", "/api/projects/"+testProject, nil, &d)
+	if len(d.Sessions) != 1 || d.Sessions[0].ID != lead || fmt.Sprint(d.Sessions[0].Watching) != "[gh pr checks 7]" {
+		t.Fatalf("sessions: %+v", d.Sessions)
+	}
+	for _, l := range [][]SessionCard{d.Status.Working, d.Status.NeedsYou, d.Status.Idle, d.Status.Stuck} {
+		for _, s := range l {
+			if s.ID == mon {
+				t.Fatalf("monitor %s in the status card: %+v", mon, d.Status)
+			}
+		}
+	}
+	var list struct {
+		Projects []ProjectCard `json:"projects"`
+	}
+	e.json("GET", "/api/projects", nil, &list)
+	if len(list.Projects) != 1 || list.Projects[0].LiveSessions != 1 {
+		t.Fatalf("live sessions count the monitor: %+v", list.Projects)
+	}
+}
+
+// Owner report 2026-10-19: sessions stuck "needs you" with nothing in the
+// inbox. A session's own flag (and its "waiting on you") is a thread: a
+// reply goes to the session as chat, and archiving dismisses the item.
+func TestSessionItemThreads(t *testing.T) {
+	e := newTestEnv(t, false)
+	lead := e.start("synth lead", "")
+	it, err := e.b.FlagAttention(sessCtx(lead), c.FlagAttentionRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)}, Text: "Synthetic: need the staging key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var th Thread
+	waitFor(t, "flag thread", func() bool {
+		var ok bool
+		th, ok = findThread(e.inbox("open").Threads, it.AttentionID)
+		return ok
+	})
+	if th.Kind != "attention" || th.Attention == nil || th.Attention.Kind != c.AttnFlag || th.Session == nil || th.Session.ID != lead || !th.NeedsReply ||
+		!strings.Contains(th.Title, "staging key") {
+		t.Fatalf("thread: %+v", th)
+	}
+	if r := e.thread(it.AttentionID); r.Thread.ThreadID != it.AttentionID || len(r.Messages) != 0 {
+		t.Fatalf("thread view: %+v", r)
+	}
+	// A reply is chat to the session: no thread, no reply-to.
+	var rr struct {
+		Message Msg `json:"message"`
+	}
+	e.json("POST", "/api/threads/"+it.AttentionID+"/reply", map[string]string{"text": "Synthetic: it is in the vault", "operation_id": "synth-flag-reply"}, &rr)
+	mv, err := e.b.GetMessage(ownerCtx(), c.GetRequest{ID: rr.Message.MessageID})
+	if err != nil || mv.Envelope.Recipient.ID != lead || mv.Envelope.ThreadID != "" || mv.Envelope.InReplyTo != "" {
+		t.Fatalf("reply: %v %+v", err, mv.Envelope)
+	}
+	if r := e.thread(it.AttentionID); len(r.Messages) != 1 || r.Messages[0].MessageID != mv.Envelope.MessageID {
+		t.Fatalf("thread view after the reply: %+v", r.Messages)
+	}
+	// Archive dismisses the item.
+	var ar struct {
+		Thread Thread `json:"thread"`
+	}
+	e.json("POST", "/api/threads/"+it.AttentionID+"/archive", map[string]any{"operation_id": "synth-flag-archive"}, &ar)
+	if ar.Thread.NeedsReply || ar.Thread.Attention == nil || ar.Thread.Attention.State != c.AttnHandled {
+		t.Fatalf("archived: %+v", ar.Thread)
+	}
+	waitFor(t, "flag thread gone", func() bool {
+		_, ok := findThread(e.inbox("open").Threads, it.AttentionID)
+		return !ok
+	})
+	// Other attention IDs are not conversations.
+	if w := e.req("GET", "/api/threads/att_synth-unknown", nil); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown item: %d %s", w.Code, w.Body)
+	}
+}
+
+// Owner report 2026-10-19 ("two messages randomly appear in my inbox with a
+// giant thread of messages"): a session's waiting item was one item reused
+// since Oct 15, so its conversation was everything he sent the session
+// since then. A new question after the last was handled is a new item, and
+// each conversation holds only what he sent between its question and the
+// next one; one item is one row in the list.
+func TestWaitingThreadsPerQuestion(t *testing.T) {
+	e := newTestEnv(t, false)
+	lead := e.start("synth lead", "")
+	send := func(text string) string {
+		t.Helper()
+		e.clk.Advance(time.Second)
+		mv, err := e.b.SendMessage(ownerCtx(), c.SendMessageRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)},
+			Recipient: c.Address{Kind: c.AddrSession, ID: lead}, Body: c.MessageBody{Text: text}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mv.Envelope.MessageID
+	}
+	reply := func(id, text string) string {
+		t.Helper()
+		e.clk.Advance(time.Second)
+		var rr struct {
+			Message Msg `json:"message"`
+		}
+		e.json("POST", "/api/threads/"+id+"/reply", map[string]string{"text": text, "operation_id": c.NewID(c.PrefixOperation)}, &rr)
+		return rr.Message.MessageID
+	}
+	raise := func(q string) c.AttentionItem {
+		t.Helper()
+		e.clk.Advance(time.Second)
+		it, err := e.b.RaiseWaiting(lead, q, "Synthetic report done. "+q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return it
+	}
+	ids := func(id string) []string {
+		t.Helper()
+		var out []string
+		for _, m := range e.thread(id).Messages {
+			out = append(out, m.MessageID)
+		}
+		return out
+	}
+	rows := func() int {
+		t.Helper()
+		n := 0
+		for _, th := range e.inbox("open").Threads {
+			if th.Kind == "attention" && th.Session != nil && th.Session.ID == lead {
+				n++
+			}
+		}
+		return n
+	}
+	earlier := send("Synthetic: an old chat about something else")
+	first := raise("Should I create the 11 synthetic sub-issues?")
+	waitFor(t, "first question listed", func() bool { return rows() == 1 })
+	r1 := reply(first.AttentionID, "Synthetic: yes, create them")
+	r2 := reply(first.AttentionID, "Synthetic: and link them to the epic")
+	if got := ids(first.AttentionID); len(got) != 2 || got[0] != r1 || got[1] != r2 {
+		t.Fatalf("first conversation = %v, want [%s %s] (not %s)", got, r1, r2, earlier)
+	}
+	waitFor(t, "first question handled", func() bool { return rows() == 0 })
+
+	second := raise("Should I publish the synthetic release notes?")
+	if second.AttentionID == first.AttentionID {
+		t.Fatalf("a new question reused the handled item %s", first.AttentionID)
+	}
+	waitFor(t, "second question listed once", func() bool { return rows() == 1 })
+	if got := ids(second.AttentionID); len(got) != 0 {
+		t.Fatalf("new question's conversation carries the old one: %v", got)
+	}
+	r3 := reply(second.AttentionID, "Synthetic: publish them")
+	if got := ids(second.AttentionID); len(got) != 1 || got[0] != r3 {
+		t.Fatalf("second conversation = %v, want [%s]", got, r3)
+	}
+	if got := ids(first.AttentionID); len(got) != 2 {
+		t.Fatalf("first conversation grew with the next question's: %v", got)
+	}
+	// A reply typed in the older thread stays there (review of PR #26).
+	r4 := reply(first.AttentionID, "Synthetic: one more thing about the sub-issues")
+	if got := ids(first.AttentionID); len(got) != 3 || got[2] != r4 {
+		t.Fatalf("reply in the older thread = %v, want it last", got)
+	}
+	if got := ids(second.AttentionID); len(got) != 1 || got[0] != r3 {
+		t.Fatalf("second conversation took the older thread's reply: %v", got)
+	}
+	// Owner chat from elsewhere (pyre send) after the second question is
+	// the second's.
+	r5 := send("Synthetic: and tag the release")
+	waitFor(t, "chat from elsewhere in the second conversation", func() bool {
+		got := ids(second.AttentionID)
+		return len(got) == 2 && got[1] == r5
+	})
+	if got := ids(first.AttentionID); len(got) != 3 {
+		t.Fatalf("first conversation took later chat: %v", got)
+	}
+}
+
+// ---- owner mail that needs nothing, and reading (owner report 2026-10-19) ----
+
+// A session's report that asks nothing is an update: never in the open
+// box, listed under done, still in its thread.
+func TestUpdatesSkipTheInbox(t *testing.T) {
+	e := newTestEnv(t, false)
+	lead := e.start("synth lead", "")
+	upd, err := e.b.SendMessage(sessCtx(lead), c.SendMessageRequest{Mutation: c.Mutation{OperationID: c.NewID(c.PrefixOperation)},
+		Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Body: c.MessageBody{Text: "Synthetic digest: merged two PRs. Nothing urgent."}})
+	if err != nil || upd.Status.AckRef != c.AckRefUpdate {
+		t.Fatalf("update: %v %+v", err, upd.Status)
+	}
+	if _, open := findThread(e.inbox("open").Threads, upd.Envelope.MessageID); open {
+		t.Fatal("an update is in the open box")
+	}
+	if th, ok := findThread(e.inbox("done").Threads, upd.Envelope.MessageID); !ok || th.NeedsReply || th.Unread {
+		t.Fatalf("an update should be in done, read: %+v %v", th, ok)
+	}
+	var tv struct {
+		Messages []Msg `json:"messages"`
+	}
+	e.json("GET", "/api/threads/"+upd.Envelope.MessageID, nil, &tv)
+	if len(tv.Messages) != 1 || !strings.Contains(tv.Messages[0].Text, "Synthetic digest") {
+		t.Fatalf("thread: %+v", tv.Messages)
+	}
+}
+
+// Opening a message thread acknowledges its messages: it moves to done.
+func TestReadAcknowledgesTheThread(t *testing.T) {
+	e := newTestEnv(t, false)
+	lead := e.start("synth lead", "")
+	m := e.mail(lead, "Synthetic: the export fix is ready for your review.", "")
+	if _, ok := findThread(e.inbox("open").Threads, m.Envelope.MessageID); !ok {
+		t.Fatal("a fresh message should be open")
+	}
+	e.json("POST", "/api/threads/"+m.Envelope.MessageID+"/read", map[string]string{"operation_id": "synth-read-1"}, nil)
+	got, err := e.b.GetMessage(sessCtx(lead), c.GetRequest{ID: m.Envelope.MessageID}) // (the owner getting it would acknowledge it)
+	if err != nil || got.Status.Ack != c.AckAcknowledged {
+		t.Fatalf("read message should be acknowledged at the hub: %v %+v", err, got.Status)
+	}
+	if _, open := findThread(e.inbox("open").Threads, m.Envelope.MessageID); open {
+		t.Fatal("a read message is still open")
+	}
+	if _, ok := findThread(e.inbox("done").Threads, m.Envelope.MessageID); !ok {
+		t.Fatal("a read message should be in done")
+	}
+	// An open ask's carrier stays unacknowledged until the ask closes.
+	a := e.ask(lead, "synthetic-read", "Pick the synthetic rollout")
+	e.json("POST", "/api/threads/"+askThreadID(a)+"/read", map[string]string{"operation_id": "synth-read-2"}, nil)
+	if got, _ := e.b.GetMessage(sessCtx(lead), c.GetRequest{ID: a.MessageID}); got.Status.Ack != c.AckNone {
+		t.Fatalf("open ask's carrier acknowledged on read: %+v", got.Status)
+	}
+}
+
+// A stale event with the same timestamp never undoes an acknowledgement
+// (TestArchiveBulk reopened an archived thread when message.stored arrived
+// after the ack on the fake clock).
+func TestMailIndexKeepsAckOnTie(t *testing.T) {
+	at := time.Date(2026, 10, 15, 17, 0, 0, 0, time.UTC)
+	m := c.MessageView{Envelope: c.MessageEnvelope{MessageID: "msg_synth-tie", Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"},
+		Sender: c.Principal{Kind: c.PrincipalSession, ID: "ses_synth-a"}}, Status: c.DeliveryStatus{Ack: c.AckNone, UpdatedAt: at}}
+	acked := m
+	acked.Status.Ack = c.AckAcknowledged
+	var x mailIndex
+	x.apply(acked)
+	x.apply(m)
+	if got := x.msgs["msg_synth-tie"].Status.Ack; got != c.AckAcknowledged {
+		t.Fatalf("ack undone by a same-time stale view: %s", got)
+	}
+	later := m
+	later.Status.UpdatedAt = at.Add(time.Second)
+	x.apply(later)
+	if got := x.msgs["msg_synth-tie"].Status.Ack; got != c.AckNone {
+		t.Fatalf("a newer status must win: %s", got)
 	}
 }

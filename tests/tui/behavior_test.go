@@ -68,20 +68,23 @@ func TestEveryScreenFitsAtAllWidths(t *testing.T) {
 		{":", "C", "o", "n", "n", "enter"}, {":", "E", "n", "v", "enter"}, {"M"},
 	}
 	for _, w := range []int{60, 100, 160} {
-		for _, tour := range tours {
-			h, _ := start(t, w, 28, nil, nil)
-			h.Key(tour...)
-			h.Settle()
-			lines := strings.Split(h.View(), "\n")
-			if len(lines) != 28 {
-				t.Errorf("w=%d tour=%v: %d lines, want 28", w, tour, len(lines))
-			}
-			for i, l := range lines {
-				if n := tuitestWidth(l); n > w {
-					t.Errorf("w=%d tour=%v line %d is %d wide: %q", w, tour, i, n, l)
+		for i, tour := range tours {
+			t.Run(fmt.Sprintf("w%d-tour%d", w, i), func(t *testing.T) {
+				t.Parallel() // independent harnesses; the time is all Settle waits
+				h, _ := start(t, w, 28, nil, nil)
+				h.Key(tour...)
+				h.Settle()
+				lines := strings.Split(h.View(), "\n")
+				if len(lines) != 28 {
+					t.Errorf("w=%d tour=%v: %d lines, want 28", w, tour, len(lines))
 				}
-			}
-			h.Close()
+				for i, l := range lines {
+					if n := tuitestWidth(l); n > w {
+						t.Errorf("w=%d tour=%v line %d is %d wide: %q", w, tour, i, n, l)
+					}
+				}
+				h.Close()
+			})
 		}
 	}
 }

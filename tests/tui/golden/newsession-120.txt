@@ -1,13 +1,12 @@
- Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                                         ○ synced
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     cl 41%~!1   cx —!   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
     ╭─ New session ────────────────────────────────────────────────────────────────────────────────────────────────╮
     │                                                                                                              │
-    │ › Where      tund▏                                                                                           │
-    │              On synth-linux                                                                                  │
-    │                tundra-old              demo/tundra-old              synth-linux         active 14h ago       │
-    │              Other machines                                                                                  │
-    │              › tundra                  demo/tundra                  synth-mac           active 21h ago       │
+    │   Machine    ● synth-linux  1/16 runs · cpu 7% · mem 40%    claude shell  auto                               │
+    │              ○ synth-mac    2/8 runs · cpu 18% · mem 63%    claude codex shell                               │
+    │ › Where      atl▏                                                                                            │
+    │              Repositories on synth-linux                                                                     │
+    │              › atlas                   ~/src/atlas                  demo/atlas          contributed 26h ago  │
     │                                                                                                              │
     │                                                                                                              │
     │                                                                                                              │
@@ -15,20 +14,21 @@
     │                                                                                                              │
     │                                                                                                              │
     │                                                                                                              │
-    │                📁 Browse folders…      any folder, or a new one on synth-linux                               │
     │                                                                                                              │
-    │   Machine    ○ synth-linux · will clone   ● synth-mac · has it   auto                                        │
-    │   Agent      ● Claude   ○ Codex   ○ Shell   auto                                                             │
+    │                ⇣ Clone a GitHub repo here…                          any repository not on synth-linux        │
+    │                📁 Browse folders…                                   any folder on synth-linux, or a new one  │
+    │   Agent      ● Claude   ○ Shell   auto                                                                       │
+    │   Model      ● default                                                                                       │
+    │   Effort     ● default                                                                                       │
     │   Workspace  ● main checkout   ○ fresh worktree   ○ new branch   auto                                        │
     │   Account    ● auto   ○ claude-personal-a   ○ claude-personal-b   ○ claude-work-c                            │
     │   Prompt     optional first prompt (shift+enter: new line)                                                   │
     │   Title      auto (named from the prompt)                                                                    │
     │ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-    │ Claude on synth-mac · demo/tundra · main checkout · account auto                                             │
+    │ Claude on synth-linux · demo/atlas · main checkout · account auto                                            │
     │ enter: next field · ^s or ^⏎: start · esc: cancel · ^a step-by-step                 [ Start ^s ]  [ Cancel ] │
     │                                                                                                              │
     ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-
 
 
  ↑↓ choose   tab next field   + add repo   ^s start   esc cancel   ^a step-by-step

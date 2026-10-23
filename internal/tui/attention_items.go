@@ -281,6 +281,7 @@ func (m *Model) attentionDetail(a contracts.AttentionItem, w int) []string {
 		upd += m.th.dim.Render(" · first " + ago(now, a.CreatedAt))
 	}
 	out = append(out, m.kvl("Updated", upd, lw))
+	out = append(out, m.askDetailLines(a, w, tw)...) // asks.go
 	if isAnswerable(a) {
 		out = append(out, "", m.sectionTitle("Request", w))
 		out = append(out, m.approvalLines(a, tw)...)

@@ -35,7 +35,7 @@ func TestSessionFlagEndToEnd(t *testing.T) {
 	sess := c.WithPrincipal(bg, c.Principal{Kind: c.PrincipalSession, ID: sid})
 	send := func() c.MessageView {
 		t.Helper()
-		m, err := st.Hub.SendMessage(sess, c.SendMessageRequest{Mutation: op(), Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Body: c.MessageBody{Text: "synthetic: watermark done"}})
+		m, err := st.Hub.SendMessage(sess, c.SendMessageRequest{Mutation: op(), Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Body: c.MessageBody{Text: "synthetic: watermark done"}, RequestAck: true})
 		if err != nil {
 			t.Fatal(err)
 		}

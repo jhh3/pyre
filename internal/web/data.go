@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -46,16 +47,32 @@ func (s *Server) heldAPI() (c.HeldAnswersAPI, bool) {
 	return h, ok
 }
 
+func (s *Server) grantsAPI() (c.StandingGrantsAPI, bool) {
+	g, ok := s.api.(c.StandingGrantsAPI)
+	return g, ok
+}
+
 func (s *Server) pageAPI() (c.ProjectPageAPI, bool) {
 	p, ok := s.api.(c.ProjectPageAPI)
 	return p, ok
 }
 
+// getSessions lists the active sessions. Monitors are not among them (the
+// hub leaves them out; a hub older than include_monitors does not, so they
+// are dropped here too): they count only as the "watching" badge of the
+// session they wake, never as project sessions, needs-you or idle.
 func (s *Server) getSessions(ctx context.Context) ([]c.SessionView, error) {
 	return s.sessions.get(ctx, s.now(), func(ctx context.Context) ([]c.SessionView, error) {
-		return all(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
+		ss, err := all(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
 			return s.api.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur, Limit: pageLimit}})
 		})
+		kept := ss[:0]
+		for _, v := range ss {
+			if !v.Session.IsMonitor() {
+				kept = append(kept, v)
+			}
+		}
+		return kept, err
 	})
 }
 
@@ -151,7 +168,15 @@ func (s *Server) getPage(ctx context.Context, projectID string) (c.ProjectPage, 
 			return pageInfo{}, err
 		}
 		doc, rev := d.Document, d.Revision
-		return pageInfo{page: c.ProjectPage{ProjectID: projectID, Document: &doc, Revision: &rev, Content: rev.Content}}, nil
+		pg := c.ProjectPage{ProjectID: projectID, Document: &doc, Revision: &rev, Content: rev.Content}
+		if sd, err := s.api.GetDocument(ctx, c.GetDocumentRequest{ProjectID: projectID, Slug: c.ProjectStatusSlug}); err == nil {
+			var st c.ProjectStatus
+			if json.Unmarshal([]byte(sd.Revision.Content), &st) == nil {
+				at := sd.Revision.CreatedAt
+				pg.Status, pg.StatusUpdatedAt = &st, &at
+			}
+		}
+		return pageInfo{page: pg}, nil
 	})
 	return pi.page, err
 }

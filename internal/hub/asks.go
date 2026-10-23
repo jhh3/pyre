@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/messaging/store"
 	"github.com/jhh3/pyre/internal/persistence"
 	"github.com/jhh3/pyre/internal/search"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
@@ -97,20 +98,25 @@ const (
 // askSystem answers asks at their deadline and withdraws them on archive.
 var askSystem = contracts.Principal{Kind: contracts.PrincipalSystem, ID: "asks"}
 
-const askCols = `ask_id,topic_key,project_id,session_id,title,context,options,default_option,urgent,deadline_at,deadline_rule,state,answer,count,superseded_by,message_id,thread_id,attention_id,decision_message_id,created_at,updated_at`
+const askCols = `ask_id,topic_key,project_id,session_id,title,context,options,default_option,urgent,deadline_at,deadline_rule,state,answer,count,superseded_by,message_id,thread_id,attention_id,decision_message_id,created_at,updated_at,action,items,grant_id,irreversible`
 
 func scanAsk(sc interface{ Scan(...any) error }) (contracts.Ask, error) {
 	var a contracts.Ask
 	var project, deadline, answer sql.NullString
-	var options, state, created, updated string
-	var urgent int
+	var options, state, created, updated, items string
+	var urgent, irreversible int
 	if err := sc.Scan(&a.AskID, &a.TopicKey, &project, &a.SessionID, &a.Title, &a.Context, &options, &a.DefaultOption, &urgent, &deadline,
-		&a.DeadlineRule, &state, &answer, &a.Count, &a.SupersededBy, &a.MessageID, &a.ThreadID, &a.AttentionID, &a.DecisionMessageID, &created, &updated); err != nil {
+		&a.DeadlineRule, &state, &answer, &a.Count, &a.SupersededBy, &a.MessageID, &a.ThreadID, &a.AttentionID, &a.DecisionMessageID, &created, &updated,
+		&a.Action, &items, &a.GrantID, &irreversible); err != nil {
 		return a, err
 	}
 	a.ProjectID = persistence.ProjectPtr(project)
 	_ = persistence.FromJSON(options, &a.Options)
+	if items != "" {
+		_ = persistence.FromJSON(items, &a.Items)
+	}
 	a.Urgent = urgent != 0
+	a.Irreversible = irreversible != 0
 	a.DeadlineAt = persistence.ParseTimePtr(deadline)
 	a.State = contracts.AskState(state)
 	if answer.Valid && answer.String != "" && answer.String != "null" {
@@ -174,16 +180,33 @@ func (h *Hub) CreateAsk(ctx context.Context, req contracts.CreateAskRequest) (co
 	if err := requireOp(req.Mutation); err != nil {
 		return out, err
 	}
+	var asker contracts.Session
+	if p.Kind == contracts.PrincipalSession && !isOwner(p) {
+		if asker, err = h.getSession(ctx, h.db, p.ID); err != nil {
+			return out, err
+		}
+	}
+	orig := req // what the operation ID is recorded against
+	if req.Proposal != nil {
+		// The hub writes a proposal's title, context and options
+		// (proposals.go).
+		if req, err = h.prepareProposal(ctx, p, asker, req); err != nil {
+			return out, err
+		}
+	}
 	in, err := normalizeAsk(req)
 	if err != nil {
 		return out, err
 	}
-	var asker contracts.Session
 	switch {
 	case isOwner(p):
+		asker = contracts.Session{}
 	case p.Kind == contracts.PrincipalSession:
-		s, err := h.getSession(ctx, h.db, p.ID)
-		if err != nil {
+		s := asker
+		// A standing grant the session holds (its own tree's or its
+		// project's) that matches the ask exactly answers it at once, for
+		// children too; topic checks run first (asks_items.go).
+		if out, ok, err := h.grantAsk(ctx, p, s, orig, in); ok || err != nil {
 			return out, err
 		}
 		if parent := s.Parent(); parent != "" {
@@ -198,7 +221,7 @@ func (h *Hub) CreateAsk(ctx context.Context, req contracts.CreateAskRequest) (co
 	}
 	now := h.now()
 	in.deadline, in.rule = askDeadline(now, in.DeadlineSeconds, in.Urgent, h.askQuietPrefs(ctx))
-	err = h.mutate(ctx, req.OperationID, contracts.OpAsksCreate, p, req, &out, func(tx *sql.Tx) (any, error) {
+	err = h.mutate(ctx, req.OperationID, contracts.OpAsksCreate, p, orig, &out, func(tx *sql.Tx) (any, error) {
 		return h.createAskTx(ctx, tx, asker.SessionID, in, now)
 	})
 	if err == nil && out.Status == contracts.AskCreated && out.Ask != nil && out.Ask.MessageID != "" {
@@ -271,6 +294,9 @@ func normalizeAsk(req contracts.CreateAskRequest) (askInput, error) {
 	if req.ProjectID != nil && *req.ProjectID == "" {
 		in.ProjectID = nil
 	}
+	if err := normalizeAskItems(&in); err != nil { // asks_items.go
+		return in, err
+	}
 	return in, nil
 }
 
@@ -327,7 +353,8 @@ func (h *Hub) createAskTx(ctx context.Context, tx *sql.Tx, sessionID string, in 
 			open.AskID, seq, sessionID, in.Context, persistence.Time(now)); err != nil {
 			return contracts.CreateAskResponse{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE asks SET count=count+1, updated_at=? WHERE ask_id=?`, persistence.Time(now), open.AskID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE asks SET count=count+1, updated_at=?, filed_turn=? WHERE ask_id=?`,
+			persistence.Time(now), h.filedTurnTx(ctx, tx, sessionID), open.AskID); err != nil { // asks_chat.go: asked again this turn
 			return contracts.CreateAskResponse{}, err
 		}
 		a, err := h.getAskFull(ctx, tx, open.AskID)
@@ -342,9 +369,11 @@ func (h *Hub) createAskTx(ctx context.Context, tx *sql.Tx, sessionID string, in 
 	case !errors.Is(err, sql.ErrNoRows):
 		return contracts.CreateAskResponse{}, err
 	}
-	// Same topic decided recently: return the decision.
+	// Same topic decided recently: return the decision. An answer a
+	// standing grant gave is not replayed: the grant is checked live
+	// (grantAsk), so a revoked or expired one sends the ask to the owner.
 	if !in.Reopen {
-		d, err := scanAsk(tx.QueryRowContext(ctx, `SELECT `+askCols+` FROM asks WHERE scope=? AND topic_key=? AND state IN (?,?,?) AND decided_at>=? ORDER BY decided_at DESC LIMIT 1`,
+		d, err := scanAsk(tx.QueryRowContext(ctx, `SELECT `+askCols+` FROM asks WHERE scope=? AND topic_key=? AND state IN (?,?,?) AND decided_at>=? AND grant_id='' ORDER BY decided_at DESC LIMIT 1`,
 			scope, in.TopicKey, string(contracts.AskAnswered), string(contracts.AskDefaulted), string(contracts.AskExpired), persistence.Time(now.Add(-askDecidedWindow))))
 		switch {
 		case err == nil:
@@ -377,7 +406,8 @@ func (h *Hub) createAskTx(ctx context.Context, tx *sql.Tx, sessionID string, in 
 	a := contracts.Ask{
 		AskID: contracts.NewID(contracts.PrefixAsk), TopicKey: in.TopicKey, ProjectID: in.ProjectID, SessionID: sessionID,
 		Title: in.Title, Context: in.Context, Options: in.Options, DefaultOption: in.DefaultOption, Urgent: in.Urgent,
-		DeadlineRule: in.rule, State: contracts.AskOpen, Count: 1, CreatedAt: now, UpdatedAt: now,
+		DeadlineRule: in.rule, State: contracts.AskOpen, Count: 1, CreatedAt: now, UpdatedAt: now, Items: in.Items, Action: in.Action,
+		Irreversible: in.Irreversible,
 	}
 	dl := in.deadline
 	a.DeadlineAt = &dl
@@ -385,12 +415,23 @@ func (h *Hub) createAskTx(ctx context.Context, tx *sql.Tx, sessionID string, in 
 	if sessionID != "" { // the owner's own asks are not mailed to the owner
 		a.MessageID = contracts.NewID(contracts.PrefixMessage)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO asks(ask_id,topic_key,scope,project_id,session_id,title,context,options,default_option,urgent,deadline_at,deadline_rule,state,count,message_id,message_pending,thread_id,norm_text,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO asks(ask_id,topic_key,scope,project_id,session_id,title,context,options,default_option,urgent,deadline_at,deadline_rule,state,count,message_id,message_pending,thread_id,norm_text,action,items,irreversible,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?)`,
 		a.AskID, a.TopicKey, scope, persistence.ProjectArg(a.ProjectID), a.SessionID, a.Title, a.Context, persistence.JSON(a.Options), a.DefaultOption,
 		boolInt(a.Urgent), persistence.TimePtr(a.DeadlineAt), a.DeadlineRule, string(a.State), a.MessageID, boolInt(a.MessageID != ""), a.ThreadID, norm,
-		persistence.Time(now), persistence.Time(now)); err != nil {
+		a.Action, askItemsArg(a.Items), boolInt(a.Irreversible), persistence.Time(now), persistence.Time(now)); err != nil {
 		return contracts.CreateAskResponse{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE asks SET filed_turn=? WHERE ask_id=?`, h.filedTurnTx(ctx, tx, sessionID), a.AskID); err != nil { // asks_chat.go
+		return contracts.CreateAskResponse{}, err
+	}
+	if in.Proposal != nil {
+		if err := h.insertProposalTx(ctx, tx, a.AskID, *in.Proposal, now); err != nil { // proposals.go
+			return contracts.CreateAskResponse{}, err
+		}
+		pr := *in.Proposal
+		pr.State, pr.ResultID, pr.Error = contracts.AskProposalPending, "", ""
+		a.Proposal = &pr
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO asks_fts(title,context,options,ask_id) VALUES(?,?,?,?)`, a.Title, a.Context, askOptionsText(a.Options), a.AskID); err != nil {
 		return contracts.CreateAskResponse{}, err
@@ -406,7 +447,10 @@ func (h *Hub) getAskFull(ctx context.Context, q queryer, id string) (contracts.A
 	if err != nil {
 		return a, err
 	}
-	a.Updates, err = h.askUpdates(ctx, q, id)
+	if a.Updates, err = h.askUpdates(ctx, q, id); err != nil {
+		return a, err
+	}
+	a.Proposal, err = h.getProposal(ctx, q, id) // proposals.go
 	return a, err
 }
 
@@ -457,8 +501,14 @@ func (h *Hub) redirectAsk(ctx context.Context, p contracts.Principal, child cont
 	if err != nil {
 		return contracts.CreateAskResponse{}, err
 	}
-	text := "[pyre ask from your child session — only top-level sessions ask the owner; decide it yourself or ask the owner from your session]\n\n" +
-		renderAskBody(contracts.Ask{TopicKey: in.TopicKey, Title: in.Title, Context: in.Context, Options: in.Options, DefaultOption: in.DefaultOption})
+	head := "[pyre ask from your child session — only top-level sessions ask the owner; decide it yourself or ask the owner from your session]\n\n"
+	if in.Proposal != nil {
+		// Only the owner can approve a proposal: answering this message
+		// records nothing.
+		head = "[pyre proposal from your child session — only the owner can approve it; answering this message records nothing. If it should be recorded, propose it to the owner yourself with propose_grant / propose_fact (`pyre propose grant|fact`), quoting why]\n\n"
+	}
+	text := head +
+		renderAskBody(contracts.Ask{TopicKey: in.TopicKey, Title: in.Title, Context: in.Context, Options: in.Options, DefaultOption: in.DefaultOption, Items: in.Items})
 	mv, err := h.msgs.SendMessage(contracts.WithPrincipal(ctx, p), contracts.SendMessageRequest{
 		Mutation:  contracts.Mutation{OperationID: in.OperationID + ":ask-redirect"},
 		Recipient: contracts.Address{Kind: contracts.AddrSession, ID: parent.SessionID},
@@ -479,7 +529,11 @@ func (h *Hub) sendAskMessage(ctx context.Context, a contracts.Ask) {
 	if a.MessageID == "" || a.SessionID == "" {
 		return
 	}
-	_, err := h.msgs.SendMessage(contracts.WithPrincipal(ctx, contracts.Principal{Kind: contracts.PrincipalSession, ID: a.SessionID}), contracts.SendMessageRequest{
+	sender := contracts.Principal{Kind: contracts.PrincipalSession, ID: a.SessionID}
+	if h.isOwnerActionAsk(ctx, a.AskID) {
+		sender = ownerActionSender // owneractions.go: a child requester may not mail the owner
+	}
+	_, err := h.msgs.SendMessage(contracts.WithPrincipal(ctx, sender), contracts.SendMessageRequest{
 		Mutation:  contracts.Mutation{OperationID: "op_ask-" + a.AskID},
 		MessageID: a.MessageID,
 		Recipient: contracts.Address{Kind: contracts.AddrOwner, ID: "owner"},
@@ -492,6 +546,18 @@ func (h *Hub) sendAskMessage(ctx context.Context, a contracts.Ask) {
 		return // maintenance retries
 	}
 	_, _ = h.db.ExecContext(ctx, `UPDATE asks SET message_pending=0 WHERE ask_id=?`, a.AskID)
+	// Stored after the ask closed (repair, or a race with a quick answer):
+	// it is no longer for the owner.
+	// Only the carrier and follow-ups from before the decision: a later one
+	// may ask something new.
+	var state string
+	var decided sql.NullString
+	if h.db.QueryRowContext(ctx, `SELECT state, decided_at FROM asks WHERE ask_id=?`, a.AskID).Scan(&state, &decided) == nil && contracts.AskState(state).Decided() {
+		_, _ = h.msgs.AckOwnerMail(ctx, store.OwnerMail{MessageID: a.MessageID}, contracts.AckRefAskClosed)
+		if decided.Valid {
+			_, _ = h.msgs.AckOwnerMail(ctx, store.OwnerMail{ThreadID: askMailThread(a), Through: persistence.ParseTime(decided.String)}, contracts.AckRefAskClosed)
+		}
+	}
 }
 
 // retryableSend reports whether a failed internal send should be retried
@@ -587,6 +653,9 @@ func (h *Hub) ListAsks(ctx context.Context, req contracts.ListAsksRequest) (cont
 				return out, err
 			}
 		}
+	}
+	if err := h.fillProposals(ctx, out.Items); err != nil { // proposals.go
+		return out, err
 	}
 	h.fillAskAttention(ctx, out.Items)
 	return out, nil
@@ -687,6 +756,7 @@ func (h *Hub) answerAsks(ctx context.Context, p contracts.Principal, items []con
 		decided = append(decided, a)
 		out.Results = append(out.Results, contracts.AnswerAskResult{AskID: item.AskID, Ask: &a})
 	}
+	h.applyApprovedFacts(ctx, decided) // proposals.go: approved facts go to the fact sheet
 	sent := h.sendDecisions(ctx, decided, p)
 	for i := range out.Results {
 		if a := out.Results[i].Ask; a != nil && sent[a.AskID] != "" {
@@ -708,8 +778,12 @@ func checkAnswer(a contracts.Ask, item contracts.AnswerAskItem) (contracts.Answe
 			return item, contracts.Errorf(contracts.ErrInvalid, "%q is not an option of %s", item.OptionID, a.AskID).WithRef(contracts.KindAsk, a.AskID)
 		}
 		item.OptionID = o.ID
-	} else if item.Text == "" {
+	} else if item.Text == "" && len(item.Items) == 0 {
 		return item, contracts.Errorf(contracts.ErrInvalid, "choose an option or give a text answer").WithRef(contracts.KindAsk, a.AskID)
+	}
+	var err error
+	if item.Items, err = checkAnswerItems(a, item.Items, item.OptionID); err != nil { // asks_items.go
+		return item, err
 	}
 	if utf8.RuneCountInString(item.Text) > contracts.AskMaxContext {
 		return item, contracts.Errorf(contracts.ErrInvalid, "answer text is limited to %d characters", contracts.AskMaxContext)
@@ -725,7 +799,11 @@ func (h *Hub) answerAskTx(ctx context.Context, tx *sql.Tx, p contracts.Principal
 	if item, err = checkAnswer(a, item); err != nil {
 		return a, err
 	}
-	return h.decideAskTx(ctx, tx, a, contracts.AskAnswered, contracts.AskAnswer{OptionID: item.OptionID, Text: item.Text, By: p, At: h.now()}, "")
+	a, err = h.decideAskTx(ctx, tx, a, contracts.AskAnswered, contracts.AskAnswer{OptionID: item.OptionID, Items: item.Items, Text: item.Text, By: p, At: h.now()}, "")
+	if err != nil {
+		return a, err
+	}
+	return h.settleProposalTx(ctx, tx, a, p) // proposals.go: approve writes the grant (or queues the fact)
 }
 
 // decideAskTx moves an open ask to a final state (first commit wins: an ask
@@ -750,10 +828,93 @@ func (h *Hub) decideAskTx(ctx context.Context, tx *sql.Tx, a contracts.Ask, stat
 	if err != nil {
 		return a, err
 	}
+	if err := h.settleOwnerActionTx(ctx, tx, a); err != nil { // owneractions.go
+		return a, err
+	}
 	if err := h.dropHeldTx(ctx, tx, a.AskID); err != nil { // asks_hold.go
 		return a, err
 	}
+	// Its mail leaves the owner's inbox with it: the carrier and the
+	// session's follow-ups in its thread (owner report 2026-10-19: 76 ask
+	// messages lingered unacked after their asks were decided).
+	if _, err := h.msgs.AckOwnerMailTx(ctx, tx, store.OwnerMail{ThreadID: askMailThread(a)}, contracts.AckRefAskClosed); err != nil {
+		return a, err
+	}
 	return a, h.emitAsk(ctx, tx, a)
+}
+
+// askMailThread is the thread of an ask's mail (its ID on asks that
+// predate ask threads).
+func askMailThread(a contracts.Ask) string {
+	if a.ThreadID != "" {
+		return a.ThreadID
+	}
+	return a.AskID
+}
+
+// ackClosedAskMail acknowledges owner mail left unacked by asks that were
+// already closed: each closed ask's carrier, whenever it was stored (repair
+// can store it after the close), and the follow-ups in its thread stored
+// before the close (a later one may ask something new). Bounded per call;
+// it reports whether everything is done.
+func (h *Hub) ackClosedAskMail(ctx context.Context) (bool, error) {
+	carriers, err := h.db.QueryContext(ctx, `SELECT m.message_id FROM asks a JOIN messages m ON m.message_id=a.message_id
+		WHERE a.message_id<>'' AND a.state<>? AND m.ack=? LIMIT 100`, string(contracts.AskOpen), string(contracts.AckNone))
+	if err != nil {
+		return false, err
+	}
+	var ids []string
+	for carriers.Next() {
+		var id string
+		if err := carriers.Scan(&id); err != nil {
+			carriers.Close()
+			return false, err
+		}
+		ids = append(ids, id)
+	}
+	carriers.Close()
+	if err := carriers.Err(); err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		if _, err := h.msgs.AckOwnerMail(ctx, store.OwnerMail{MessageID: id}, contracts.AckRefAskClosed); err != nil {
+			return false, err
+		}
+	}
+	if len(ids) == 100 {
+		return false, nil
+	}
+	rows, err := h.db.QueryContext(ctx, `SELECT a.thread_id, MAX(a.decided_at) FROM asks a JOIN messages m ON m.thread_id=a.thread_id
+		WHERE a.thread_id<>'' AND a.state<>? AND a.decided_at IS NOT NULL AND m.recipient_kind=? AND m.ack=? AND m.stored_at<=a.decided_at
+		GROUP BY a.thread_id LIMIT 100`, string(contracts.AskOpen), string(contracts.AddrOwner), string(contracts.AckNone))
+	if err != nil {
+		return false, err
+	}
+	type closed struct {
+		thread  string
+		decided time.Time
+	}
+	var todo []closed
+	for rows.Next() {
+		var c closed
+		var at string
+		if err := rows.Scan(&c.thread, &at); err != nil {
+			rows.Close()
+			return false, err
+		}
+		c.decided = persistence.ParseTime(at)
+		todo = append(todo, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, c := range todo {
+		if _, err := h.msgs.AckOwnerMail(ctx, store.OwnerMail{ThreadID: c.thread, Through: c.decided}, contracts.AckRefAskClosed); err != nil {
+			return false, err
+		}
+	}
+	return len(todo) < 100, nil
 }
 
 // ---- asks.withdraw ----
@@ -882,6 +1043,7 @@ func (h *Hub) resolveAsks(ctx context.Context) error {
 		decided = append(decided, d)
 	}
 	h.sendDecisions(ctx, decided, askSystem)
+	errs = append(errs, h.retryApprovedFacts(ctx)) // proposals.go
 	errs = append(errs, h.repairAskMessages(ctx, now))
 	return errors.Join(errs...)
 }
@@ -924,6 +1086,7 @@ func (h *Hub) repairAskMessages(ctx context.Context, now time.Time) error {
 // owner message. It returns the decision message ID per ask.
 func (h *Hub) sendDecisions(ctx context.Context, asks []contracts.Ask, sender contracts.Principal) map[string]string {
 	sent := map[string]string{}
+	asks = h.finishOwnerActions(ctx, asks, sent) // owneractions.go: approved requests run, then report their outcome
 	var order []string
 	groups := map[string][]contracts.Ask{}
 	for _, a := range asks {
@@ -951,15 +1114,19 @@ func (h *Hub) sendDecisions(ctx context.Context, asks []contracts.Ask, sender co
 			continue
 		}
 		hash := sha256.New()
+		mode := contracts.ModeInfo // answered in chat: the session has the owner's words already (asks_chat.go)
 		for _, a := range g {
 			hash.Write([]byte(a.AskID + ":" + string(a.State) + ";"))
+			if a.Answer == nil || a.Answer.Source != contracts.AskSourceChat {
+				mode = contracts.ModeQueue
+			}
 		}
 		mv, err := h.msgs.SendMessage(contracts.WithPrincipal(ctx, sender), contracts.SendMessageRequest{
 			Mutation:  contracts.Mutation{OperationID: "op_askdecision-" + hex.EncodeToString(hash.Sum(nil))[:32]},
 			Recipient: contracts.Address{Kind: contracts.AddrSession, ID: sid},
 			ProjectID: g[0].ProjectID,
 			InReplyTo: g[0].MessageID,
-			Mode:      contracts.ModeQueue,
+			Mode:      mode,
 			Body:      contracts.MessageBody{Text: renderDecisions(g)},
 		})
 		if err != nil {

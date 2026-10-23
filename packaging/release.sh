@@ -16,7 +16,9 @@
 # Bundled tools: unless --no-tools, packaging/build-tools.sh also stages Hive,
 # Outfit and Rota per platform and each becomes pyre-tools-<V>-<plat>.tar.gz
 # (same deterministic tar, listed in the same signed SHA256SUMS). They are
-# optional: install.sh installs them only with --with-tools.
+# optional: install.sh installs them only with --with-tools. Unless
+# --no-windows, pyre-tools-<V>-windows-<arch>.zip carries Outfit for Windows
+# (outfit.exe and outfit-core.exe) for install.ps1 -WithTools.
 #
 # Windows: unless --no-windows, pyre.exe and pyred.exe are also built for
 # windows/amd64 and windows/arm64 (same CGO_ENABLED=0 -trimpath -ldflags; no
@@ -50,7 +52,7 @@ while [ $# -gt 0 ]; do
     --no-tools) TOOLS=0; shift ;;
     --no-windows) WINDOWS=0; shift ;;
     --strict) STRICT=1; shift ;;
-    *) sed -n '2,34p' "$0"; exit 2 ;;
+    *) sed -n '2,36p' "$0"; exit 2 ;;
   esac
 done
 if [ "$NOSIGN" = 0 ] && [ -z "$SIGNKEY" ] && [ -f "$HOME/.config/pyre/release-signing" ]; then
@@ -168,7 +170,7 @@ for plat in $PLATFORMS; do
   [ -d "$src" ] || { echo "missing $src (did make dist run with VERSION=$VERSION?)" >&2; exit 1; }
   name="pyre-$VERSION-$plat"
   d="$STAGE/$name"
-  mkdir -p "$d/bin" "$d/scripts/install" "$d/scripts/backup" "$d/packaging/launchd" "$d/packaging/systemd"
+  mkdir -p "$d/bin" "$d/scripts/install" "$d/scripts/backup" "$d/packaging/launchd" "$d/packaging/systemd" "$d/packaging/sentinel"
   for b in pyre pyred pyre-hub; do install -m 0755 "$src/$b" "$d/bin/$b"; done
   case "$plat" in darwin-*) darwin_app "$d" "$src" ;; esac
   if [ -n "$SBOMTOOL" ]; then
@@ -182,10 +184,11 @@ for plat in $PLATFORMS; do
       sbom_check "$d/bin/$b" "$d/sbom/$b.cdx.json" || { echo "SBOM for $plat/$b is incomplete" >&2; exit 1; }
     done
   fi
-  for f in install.sh uninstall.sh upgrade.sh bootstrap-node.sh lib.sh; do install -m 0755 "$ROOT/scripts/install/$f" "$d/scripts/install/$f"; done
+  for f in install.sh uninstall.sh upgrade.sh bootstrap-node.sh lib.sh sentinel.sh; do install -m 0755 "$ROOT/scripts/install/$f" "$d/scripts/install/$f"; done
   for f in backup-hub.sh restore-hub.sh; do install -m 0755 "$ROOT/scripts/backup/$f" "$d/scripts/backup/$f"; done
   install -m 0644 "$ROOT"/packaging/launchd/*.plist.in "$d/packaging/launchd/"
   install -m 0644 "$ROOT"/packaging/systemd/*.in "$d/packaging/systemd/"
+  install -m 0644 "$ROOT"/packaging/sentinel/* "$d/packaging/sentinel/"
   sed -e "s/@VERSION@/$VERSION/g" -e "s/@PLATFORM@/$plat/g" "$ROOT/packaging/README.release.md" >"$d/README.md"
   echo "$VERSION" >"$d/VERSION"
   {
@@ -279,6 +282,15 @@ if [ "$TOOLS" = 1 ]; then
     [ -z "$DIRTY" ] || echo "commit: $COMMIT$DIRTY" >>"$STAGE/tools/pyre-tools-$VERSION-$plat/BUILDINFO"
     pack "$STAGE/tools" "pyre-tools-$VERSION-$plat"
   done
+  if [ "$WINDOWS" = 1 ]; then
+    # Windows tools: Outfit only (outfit.exe and outfit-core.exe), as a zip
+    # for install.ps1 -WithTools.
+    GO="$GOBIN" SOURCE_DATE_EPOCH="$EPOCH" bash "$ROOT/packaging/build-tools.sh" --version "$VERSION" --out "$STAGE/tools" --platforms "windows/amd64 windows/arm64"
+    for arch in amd64 arm64; do
+      [ -z "$DIRTY" ] || echo "commit: $COMMIT$DIRTY" >>"$STAGE/tools/pyre-tools-$VERSION-windows-$arch/BUILDINFO"
+      pack_zip "$STAGE/tools" "pyre-tools-$VERSION-windows-$arch"
+    done
+  fi
 fi
 # shellcheck disable=SC2086
 (cd "$OUT" && sha $LIST >SHA256SUMS)

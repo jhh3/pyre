@@ -63,6 +63,9 @@ func (e Env) ToolDirs() []string {
 		e.join("ProgramFiles", "Git", "cmd"),                   // Git for Windows (git.exe)
 		e.join("LOCALAPPDATA", "Programs", "Git", "cmd"),       // per-user Git for Windows
 		e.join("LOCALAPPDATA", "Programs", "Pyre", "current", "bin"),
+		// install.ps1 -WithTools: outfit.exe and outfit-core.exe (the Outfit
+		// plugin's MCP server and hooks run outfit-core).
+		e.join("LOCALAPPDATA", "Programs", "Pyre", "tools", "outfit", "bin"),
 	}
 	var out []string
 	seen := map[string]bool{}

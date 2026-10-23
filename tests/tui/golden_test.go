@@ -49,6 +49,7 @@ func TestGoldenScreens(t *testing.T) {
 		for _, w := range sc.widths {
 			name := fmt.Sprintf("%s-%d", sc.name, w)
 			t.Run(name, func(t *testing.T) {
+				t.Parallel() // each screen has its own harness and mock; the time is all Settle waits
 				h, _ := start(t, w, 30, nil, nil)
 				for _, k := range sc.keys {
 					h.Key(k)

@@ -253,3 +253,18 @@ func TestShellRunsGetGrantedConnections(t *testing.T) {
 		t.Fatalf("revoked grant still applied: %+v %v", sh, err)
 	}
 }
+
+// Launch provisioning uses only explicit pushed grants, never the hub's
+// no-grant owner default (decision I37): without a grant, nothing is
+// injected into a run's environment.
+func TestLaunchProvisioningNeedsAnExplicitGrant(t *testing.T) {
+	in := &integrations{grants: &pushedGrants{active: map[grantKey]bool{}, nodeID: "node_01TESTNODE00000000000000"}}
+	src := launchGrantSource(in)
+	if _, ok := src.(*pushedGrants); !ok {
+		t.Fatalf("launch grant source is %T, want the pushed-grant mirror", src)
+	}
+	got, err := src.GrantedConnections(context.Background(), configuration.GrantScope{SessionID: "ses_1"}, []string{"conn_synth-a"})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("ungranted connection provisioned: %v %v", got, err)
+	}
+}

@@ -326,14 +326,14 @@ func (s *Service) SyncTokenAccounts(ctx context.Context, dir TokenDirectory, ava
 	}
 	for _, l := range locals {
 		if a, ok := hubAccts[l.AccountID]; ok {
-			// The owner's label and disabled flag follow the hub; local
-			// bindings are only filled in, never cleared.
+			// The owner's label, disabled flag and tier follow the hub;
+			// local bindings are only filled in, never cleared.
 			m := l
-			m.Label, m.Disabled = a.Label, a.Disabled
+			m.Label, m.Disabled, m.Tier = a.Label, a.Disabled, a.Tier
 			if m.RotaRef == "" {
 				m.RotaRef = a.RotaRef
 			}
-			if a.Provider == l.Provider && (m.Label != l.Label || m.Disabled != l.Disabled || m.RotaRef != l.RotaRef) {
+			if a.Provider == l.Provider && (m.Label != l.Label || m.Disabled != l.Disabled || m.Tier != l.Tier || m.RotaRef != l.RotaRef) {
 				_ = s.UpsertAccount(ctx, m)
 			}
 			continue

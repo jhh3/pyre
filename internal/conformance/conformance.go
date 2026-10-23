@@ -114,6 +114,7 @@ func Run(t *testing.T, h Harness) {
 		{"PreviewURLMint", testPreviewURL},
 		{"ConnectionGrantCheck", testConnectionGrantCheck},
 		{"AccountLease", testAccountLease},
+		{"NodeStartHeadlessOnly", testNodeStart},
 	}
 	for _, tc := range cases {
 		tc := tc

@@ -130,6 +130,19 @@ func TestDeriveMessageFacts(t *testing.T) {
 	if d := Derive(own, nil, t0); d.State != c.SummaryStored || NeedsRecipient(own) {
 		t.Fatalf("owner: %+v", d)
 	}
+	// A session's question to the owner is told to use an ask; an update
+	// says it is not in his inbox.
+	q := own
+	q.Envelope.Sender = c.Principal{Kind: c.PrincipalSession, ID: "ses_synth"}
+	q.Envelope.Body.Text = "Ready to merge. Should I go ahead?"
+	if d := Derive(q, nil, t0); d.State != c.SummaryStored || !strings.Contains(d.Summary, "ask_owner") {
+		t.Fatalf("owner question: %+v", d)
+	}
+	upd := own
+	upd.Status.Ack, upd.Status.AckRef = c.AckAcknowledged, c.AckRefUpdate
+	if d := Derive(upd, nil, t0); d.State != c.SummaryAcknowledged || !strings.Contains(d.Summary, "not in his inbox") {
+		t.Fatalf("owner update: %+v", d)
+	}
 	pend := queuedMsg(time.Second, "hub unreachable; held in node outbox node_synth")
 	pend.Status.Storage = c.StoragePendingLocal
 	if d := Derive(pend, nil, t0); d.State != c.SummaryPending {

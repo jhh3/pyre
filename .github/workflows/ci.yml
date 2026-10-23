@@ -1,84 +1,120 @@
 name: CI
 
-# PRs and branch pushes run the short suite (real-stack scenarios in
-# tests/resilience and tests/security skip under -short). main, the nightly
-# schedule and manual runs run the full suite.
+# The fast check (about a minute): ubuntu build, vet, lint, generated files
+# and the short test suite, as parallel jobs. Tests run sharded
+# (tools/testshard): many test processes at once, spread over six jobs.
+# The slow gates (macOS, -race, the full real-stack suite, govulncheck, the
+# reproducible release build) are in ci-full.yml ("CI full"), run by hand.
+#
+# Runners: set the repository variable PYRE_CI_RUNNER (for example
+# blacksmith-4vcpu-ubuntu-2404 once the Blacksmith app is installed) to move
+# every job off ubuntu-latest; actions/cache works unchanged there.
+#
+# Go and caches: .github/actions/go installs go.mod's toolchain line and
+# restores the module and build caches saved on main (or on this branch);
+# it saves only on main, or when it found no cache. The build cache holds
+# go test's results too: a test chunk whose package and dependencies match
+# a cached passing run is not run again (CI full runs everything with
+# -count=1).
 on:
-  # Private personal repo: CI runs only when started by hand
-  # (gh workflow run <name>); verify locally before pushing.
+  # Private personal repo: started by hand (gh workflow run CI --ref <branch>).
   workflow_dispatch:
+  # Each merge refreshes the caches every branch restores from (I47).
+  push:
+    branches: [main]
 
 permissions: {}
 
-# One run per branch: a PR event cancels the push run for the same branch.
-# Runs on main are queued, never cancelled, so every merge is tested.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-env:
-  FULL_SUITE: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-
 jobs:
-  go:
-    name: go (${{ matrix.os }})
+  test:
+    name: test (${{ matrix.shard }}/6)
+    runs-on: ${{ vars.PYRE_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: go
+        uses: ./.github/actions/go
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
+          mode: restore
+          name: t${{ matrix.shard }}of6
+          hash: ${{ hashFiles('go.sum') }}
+      - name: Pin file mtimes (go test caches results of tests that read goldens and testdata by mtime)
+        run: go run ./tools/testshard -pin-mtimes
       - name: Install tmux
+        run: command -v tmux || sudo apt-get install -y -q --no-install-recommends tmux || { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tmux; }
+      - name: Test (short suite, sharded)
+        # Environment variables a test reads are part of its go test cache
+        # key. INVOCATION_ID (read by the systemd scope probe) is new in
+        # every job, and the image's PATH differs between runner image
+        # versions (one run's jobs land on several). Neither changes what
+        # the tests do here: the runner is a system service, not a user
+        # unit, so the scope probe says "no" either way.
         run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -q && sudo apt-get install -y -q tmux; else brew install tmux; fi
-      - name: Module graph is tidy
-        run: go mod tidy -diff
-      - name: Vet (all analyzers, incl. stdversion and tests)
-        run: go vet ./...
-      - name: Test
-        run: |
-          if [ "$FULL_SUITE" = "true" ]; then
-            go test -race ./...
-          else
-            go test -race -short ./...
-          fi
-      - name: Generated files are current
-        run: make GO=go check-generated
-      - name: Build
-        run: make GO=go build
+          unset INVOCATION_ID
+          export PATH="$(dirname "$(command -v go)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          go run ./tools/testshard -v -short -shards 6 -index $(( ${{ matrix.shard }} - 1 ))
+      - if: always()
+        uses: ./.github/actions/go
+        with:
+          mode: save
+          name: t${{ matrix.shard }}of6
+          hash: ${{ hashFiles('go.sum') }}
+          matched-key: ${{ steps.go.outputs.matched-key }}
 
   lint:
-    name: golangci-lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: golangci-lint (${{ matrix.goos }})
+    runs-on: ${{ vars.PYRE_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: go
+        uses: ./.github/actions/go
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: gofmt
+          mode: restore
+          name: golangci-${{ matrix.goos }}
+          hash: ${{ hashFiles('go.sum', 'Makefile', '.golangci.yml') }}
+          extra-paths: |
+            ~/.cache/golangci-lint
+            bin/tools
+      - if: matrix.goos == 'linux'
+        name: gofmt
         run: make GO=go fmt-check
-      - name: golangci-lint (pinned; linux and darwin build tags; see .golangci.yml)
-        run: make GO=go lint
+      - name: golangci-lint (pinned; see .golangci.yml)
+        run: make GO=go lint LINT_GOOS=${{ matrix.goos }}
+      - if: always()
+        uses: ./.github/actions/go
+        with:
+          mode: save
+          name: golangci-${{ matrix.goos }}
+          hash: ${{ hashFiles('go.sum', 'Makefile', '.golangci.yml') }}
+          extra-paths: |
+            ~/.cache/golangci-lint
+            bin/tools
+          matched-key: ${{ steps.go.outputs.matched-key }}
 
-  vuln:
-    name: govulncheck
-    runs-on: ubuntu-latest
+  checks:
+    name: tidy, vet, generated, build
+    runs-on: ${{ vars.PYRE_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -86,26 +122,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: go
+        uses: ./.github/actions/go
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: govulncheck (linux and darwin build tags)
-        run: make GO=go vuln
-
-  repro:
-    name: reproducible build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          mode: restore
+          name: checks
+          hash: ${{ hashFiles('go.sum') }}
+      - name: Module graph is tidy
+        run: go mod tidy -diff
+      - name: Vet (all analyzers, incl. stdversion and tests)
+        run: go vet ./...
+      - name: Generated files are current
+        run: make GO=go check-generated
+      - name: Build
+        run: make GO=go build
+      - if: always()
+        uses: ./.github/actions/go
         with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: Build the release twice (release.sh; binaries, tarballs, SHA256SUMS) and compare
-        run: make GO=go verify-repro
+          mode: save
+          name: checks
+          hash: ${{ hashFiles('go.sum') }}
+          matched-key: ${{ steps.go.outputs.matched-key }}

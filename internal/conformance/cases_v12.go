@@ -18,7 +18,7 @@ type ConnectionReporter interface {
 // v1.2: attention.get returns one item in any state, owner only.
 func testAttentionGet(t *testing.T, s *suite) {
 	sv := s.start("asker-get")
-	m, err := s.api.SendMessage(s.session(sv.Session.SessionID), c.SendMessageRequest{Mutation: newOp(), Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Body: c.MessageBody{Text: "status?"}})
+	m, err := s.api.SendMessage(s.session(sv.Session.SessionID), c.SendMessageRequest{Mutation: newOp(), Recipient: c.Address{Kind: c.AddrOwner, ID: "owner"}, Body: c.MessageBody{Text: "Should I ship the synthetic build?"}})
 	s.must(err, "message to owner")
 	att, err := s.api.ListAttention(s.owner(), c.ListAttentionRequest{})
 	s.must(err, "attention")

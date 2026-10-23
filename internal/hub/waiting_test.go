@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 type waitCall struct {
 	op, session, question, summary string
+	item                           string // the item raised, or the one a repeat names
 }
 
 // fakeWaiting records RaiseWaiting/WithdrawWaiting calls.
@@ -25,13 +27,14 @@ type fakeWaiting struct {
 
 func (f *fakeWaiting) RaiseWaiting(ctx context.Context, sessionID string, projectID *string, question, summary string) (contracts.AttentionItem, error) {
 	f.mu.Lock()
-	f.calls = append(f.calls, waitCall{"raise", sessionID, question, summary})
+	id := fmt.Sprintf("att_synth-%d", len(f.calls))
+	f.calls = append(f.calls, waitCall{"raise", sessionID, question, summary, id})
 	hook := f.onRaise
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
 	}
-	return contracts.AttentionItem{Kind: contracts.AttnWaiting, SessionID: sessionID}, nil
+	return contracts.AttentionItem{AttentionID: id, Kind: contracts.AttnWaiting, SessionID: sessionID}, nil
 }
 
 func (f *fakeWaiting) WithdrawWaiting(ctx context.Context, sessionID, summary string) (bool, error) {
@@ -39,6 +42,13 @@ func (f *fakeWaiting) WithdrawWaiting(ctx context.Context, sessionID, summary st
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, waitCall{op: "withdraw", session: sessionID})
 	return true, nil
+}
+
+func (f *fakeWaiting) RepeatWaiting(ctx context.Context, sessionID, attentionID string) (contracts.AttentionItem, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, waitCall{op: "repeat", session: sessionID, item: attentionID})
+	return contracts.AttentionItem{Kind: contracts.AttnWaiting, SessionID: sessionID}, true, nil
 }
 
 func (f *fakeWaiting) got() []waitCall {
@@ -99,18 +109,26 @@ func TestWaitingLeadTurnEndsWithQuestion(t *testing.T) {
 	if n := len(f.w.got()); n != 1 {
 		t.Fatalf("re-processed: %d calls", n)
 	}
-	// The next turn ends with a question again: raised again (the store
-	// refreshes the one item).
+	// The next turn ends on the same request, worded around differently:
+	// a repeat, which leaves the item as it is (no new raise).
+	f.text = "Nothing new from me.\n\nStill waiting on you: should I build the synthetic voice-match score?"
 	f.turn()
 	f.process()
-	if got := f.w.got(); len(got) != 2 || got[1].op != "raise" || got[1].session != f.lead() {
+	if got := f.w.got(); len(got) != 2 || got[1].op != "repeat" || got[1].session != f.lead() || got[1].item != got[0].item || got[0].item == "" {
 		t.Fatalf("repeat: %+v", got)
+	}
+	// A new question is raised (the store makes it a new item).
+	f.text = "Render done. Should I publish the synthetic clip to the staging page?"
+	f.turn()
+	f.process()
+	if got := f.w.got(); len(got) != 3 || got[2].op != "raise" || got[2].question != "Render done. Should I publish the synthetic clip to the staging page?" {
+		t.Fatalf("new question: %+v", got)
 	}
 	// A turn that ends without a question raises nothing.
 	f.text = "Done: the synthetic tests pass."
 	f.turn()
 	f.process()
-	if n := len(f.w.got()); n != 2 {
+	if n := len(f.w.got()); n != 3 {
 		t.Fatalf("no question raised: %+v", f.w.got())
 	}
 	// Mid-turn approvals and the session's first (launch) idle are not turn ends.
@@ -118,7 +136,7 @@ func TestWaitingLeadTurnEndsWithQuestion(t *testing.T) {
 	f.observeLead(contracts.RunRunning)
 	f.observeLead(contracts.RunWaitingApproval)
 	f.process()
-	if n := len(f.w.got()); n != 2 {
+	if n := len(f.w.got()); n != 3 {
 		t.Fatalf("approval wait raised: %+v", f.w.got())
 	}
 }
@@ -154,7 +172,8 @@ func TestWaitingSkippedWhenAskFiledInTurn(t *testing.T) {
 		t.Fatalf("ask filed this turn, still raised: %+v", got)
 	}
 	// A later turn files nothing new but asks in chat again: raised (the
-	// old ask was filed in an earlier turn).
+	// old ask was filed in an earlier turn). The trade-off, deliberately:
+	// an old open ask never hides a new question in chat.
 	f.turn()
 	f.process()
 	if got := f.w.got(); len(got) != 1 {

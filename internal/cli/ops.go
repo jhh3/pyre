@@ -5,11 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -17,6 +20,8 @@ import (
 
 	"github.com/jhh3/pyre/internal/client"
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/harnessargs"
+	"github.com/jhh3/pyre/internal/refs"
 )
 
 // Identity is the calling agent session, from PYRE_SESSION_ID/RUN_ID/NODE_ID.
@@ -39,9 +44,34 @@ func IdentityFromEnv(getenv func(string) string) Identity {
 type Ops struct {
 	API  c.API
 	Self Identity
+	// ClientCredential: the CLI authenticates with a client credential
+	// (PYRE_TOKEN or the client config: the owner's), not as a session.
+	// Self then still names the machine, but a PYRE_SESSION_ID/RUN_ID left
+	// in the environment by an enclosing agent session is not the caller:
+	// a start does not become that session's child (nor join its project)
+	// unless --parent says so.
+	ClientCredential bool
 	// PollInterval paces WaitReply (default 1s).
 	PollInterval time.Duration
+	// Stderr receives progress notes (a start replaying a lost answer); nil
+	// discards them.
+	Stderr io.Writer
+	// StartRecover bounds the replays of a start whose answer was lost
+	// (default startRecoverDefault: delays 2/5/10/15 s within 75 s).
+	StartRecover *StartRecovery
+	// LaunchWait bounds how long start_session waits for the run to leave
+	// "starting" (awaitLaunch); 0 returns once the launch is queued.
+	LaunchWait time.Duration
 }
+
+// StartRecovery paces StartSession's replays: one single-attempt replay
+// after each delay, all within Total.
+type StartRecovery struct {
+	Delays []time.Duration
+	Total  time.Duration
+}
+
+var startRecoverDefault = StartRecovery{Delays: []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 15 * time.Second}, Total: 75 * time.Second}
 
 // mut returns a Mutation, minting the operation ID once per logical
 // operation when the caller gave none (transport retries then reuse it).
@@ -159,7 +189,7 @@ func (o *Ops) ResolveSession(ctx context.Context, ref string) (c.SessionView, er
 		return o.API.GetSession(ctx, c.GetRequest{ID: ref})
 	}
 	page, err := listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
-		return o.API.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur}, Query: ref})
+		return o.API.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur}, Query: ref, IncludeMonitors: true})
 	})
 	if err != nil {
 		return c.SessionView{}, err
@@ -225,60 +255,16 @@ func (o *Ops) sessionID(ctx context.Context, ref string) (string, error) {
 
 // ResolveProject accepts a project ID or exact name.
 func (o *Ops) ResolveProject(ctx context.Context, ref string) (c.Project, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
+	if strings.TrimSpace(ref) == "" {
 		return c.Project{}, usagef("a project is required (see `pyre project ls`)")
 	}
-	if c.ValidID(ref, c.PrefixProject) {
-		return o.API.GetProject(ctx, c.GetRequest{ID: ref})
-	}
-	page, err := listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.Project], error) {
-		return o.API.ListProjects(ctx, c.ListProjectsRequest{PageRequest: c.PageRequest{Cursor: cur}, IncludeArchived: true})
-	})
-	if err != nil {
-		return c.Project{}, err
-	}
-	var hits []c.Project
-	for _, pass := range []func(a, b string) bool{func(a, b string) bool { return a == b }, strings.EqualFold} {
-		for _, p := range page.Items {
-			if pass(p.Name, ref) {
-				hits = append(hits, p)
-			}
-		}
-		if len(hits) > 0 {
-			break
-		}
-	}
-	switch len(hits) {
-	case 0:
-		return c.Project{}, notFoundf(c.KindProject, ref)
-	case 1:
-		return hits[0], nil
-	}
-	ids := make([]string, len(hits))
-	for i, p := range hits {
-		ids[i] = p.ProjectID
-	}
-	return c.Project{}, ambiguous(c.KindProject, ref, ids)
+	return refs.Project(ctx, o.API, ref)
 }
 
-// projectPtr resolves an optional project reference ("" = none given).
+// projectPtr resolves an optional project reference ("" = none given;
+// "none" = explicitly no project: a child otherwise joins its parent's).
 func (o *Ops) projectPtr(ctx context.Context, ref string) (*string, error) {
-	if ref == "" {
-		return nil, nil
-	}
-	if ref == "none" { // explicitly no project (a child otherwise joins its parent's)
-		empty := ""
-		return &empty, nil
-	}
-	if c.ValidID(ref, c.PrefixProject) {
-		return &ref, nil
-	}
-	p, err := o.ResolveProject(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-	return &p.ProjectID, nil
+	return refs.ProjectPtr(ctx, o.API, ref)
 }
 
 // ---- fleet ----
@@ -300,10 +286,13 @@ type SessionFilter struct {
 	Query           string   `json:"query,omitempty"`
 	States          []string `json:"states,omitempty"`
 	IncludeArchived bool     `json:"include_archived,omitempty"`
+	// IncludeMonitors also lists monitor sessions (pyre monitor add); by
+	// default they are left out and shown on the sessions they wake.
+	IncludeMonitors bool `json:"include_monitors,omitempty"`
 }
 
 func (o *Ops) ListSessions(ctx context.Context, f SessionFilter) (c.Page[c.SessionView], error) {
-	req := c.ListSessionsRequest{Harness: c.Harness(f.Harness), Query: f.Query, IncludeArchived: f.IncludeArchived}
+	req := c.ListSessionsRequest{Harness: c.Harness(f.Harness), Query: f.Query, IncludeArchived: f.IncludeArchived, IncludeMonitors: f.IncludeMonitors}
 	for _, s := range f.States {
 		req.States = append(req.States, c.RunState(s))
 	}
@@ -324,24 +313,49 @@ func (o *Ops) ListSessions(ctx context.Context, f SessionFilter) (c.Page[c.Sessi
 		}
 		req.ProjectID = p
 	}
-	return listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
+	page, err := listAll(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
 		r := req
 		r.Cursor = cur
 		return o.API.ListSessions(ctx, r)
 	})
+	if err == nil && !f.IncludeMonitors {
+		page.Items = withoutMonitors(page.Items) // a hub older than include_monitors lists them
+	}
+	return page, err
+}
+
+// withoutMonitors drops monitor sessions from a list.
+func withoutMonitors(ss []c.SessionView) []c.SessionView {
+	kept := ss[:0]
+	for _, s := range ss {
+		if !s.Session.IsMonitor() {
+			kept = append(kept, s)
+		}
+	}
+	return kept
 }
 
 // StartParams launches a session (MCP start_session input).
 type StartParams struct {
-	Node           string   `json:"node"`
-	Harness        string   `json:"harness"`
-	Cwd            string   `json:"cwd,omitempty"`
-	Project        string   `json:"project,omitempty"`
-	Worktree       string   `json:"worktree,omitempty"`    // branch for an isolated git worktree
-	Repo           string   `json:"repo,omitempty"`        // project repo id: its recorded checkout on the node (shared), or the worktree source
-	Account        string   `json:"account,omitempty"`     // explicit account: ID, unique label or rota name, or a unique prefix of either
-	Ambient        bool     `json:"ambient,omitempty"`     // node's existing login, no Pyre assignment
-	Permissions    string   `json:"permissions,omitempty"` // ask | bypass; "" = the node's --permissions
+	Node          string `json:"node"`
+	Harness       string `json:"harness"`
+	Cwd           string `json:"cwd,omitempty"`
+	Project       string `json:"project,omitempty"`
+	Worktree      string `json:"worktree,omitempty"`       // branch for an isolated git worktree
+	Repo          string `json:"repo,omitempty"`           // project repo id: its recorded checkout on the node (shared), or the worktree source
+	Account       string `json:"account,omitempty"`        // explicit account: ID, unique label or rota name, or a unique prefix of either
+	StrictAccount bool   `json:"strict_account,omitempty"` // keep --account even when it is at its limit (default: fall back)
+	Ambient       bool   `json:"ambient,omitempty"`        // node's existing login, no Pyre assignment
+	// FallbackHarness: when the harness has no free account on the node
+	// (Codex), start on this harness instead (only "claude"; for reviews and
+	// second opinions). Empty: the launch fails at once with the reason.
+	FallbackHarness string `json:"fallback_harness,omitempty"`
+	Permissions     string `json:"permissions,omitempty"` // ask | bypass; "" = the node's --permissions
+	// Model and Effort pick a non-default model and reasoning effort ("" =
+	// the harness default). The node lists choices per harness (pyre models);
+	// any name the harness accepts may be given.
+	Model          string   `json:"model,omitempty"`
+	Effort         string   `json:"effort,omitempty"`
 	Prompt         string   `json:"prompt,omitempty"`
 	Title          string   `json:"title,omitempty"`
 	IncludeContext bool     `json:"include_context,omitempty"`
@@ -355,15 +369,65 @@ type StartParams struct {
 	// ReportToParent: a session started by a session reports back to it
 	// (turn finished, needs input, exited) unless this is false.
 	ReportToParent *bool `json:"report_to_parent,omitempty"`
+	// Parent makes the new session a child of this session (ID or title).
+	// Empty: the calling session when a session credential is used, else
+	// none (see Ops.ClientCredential).
+	Parent string `json:"parent,omitempty"`
+	placed bool   // launchNode placed it after checking accounts on every candidate (placement.go)
+	// HarnessArgs are extra harness arguments from the harness's allowlist
+	// (internal/harnessargs; Claude: --append-system-prompt-file,
+	// --dangerously-load-development-channels, --plugin-dir, ...). The run
+	// records them; resumes and account switches relaunch with them.
+	HarnessArgs []string `json:"harness_args,omitempty"`
+	// NativeResume continues an existing Claude conversation started
+	// outside Pyre (its session id) as the new session's first run.
+	NativeResume string `json:"native_resume,omitempty"`
+	// EnvFile is an absolute path on the node to dotenv KEY=VALUE lines the
+	// node applies to the harness process at every launch of the session
+	// (internal/envfile). Only the path travels and is recorded.
+	EnvFile string `json:"env_file,omitempty"`
 }
 
 func validHarness(h string) bool {
 	switch c.Harness(h) {
-	case c.HarnessClaude, c.HarnessCodex, c.HarnessShell, c.HarnessMock:
+	case c.HarnessClaude, c.HarnessCodex, c.HarnessAgy, c.HarnessShell, c.HarnessMock:
 		return true
 	}
 	return false
 }
+
+// modelArgs renders a launch's model and effort as the node's start args
+// (daemon.ModelArg/EffortArg), validated here for a clear usage error.
+func modelArgs(harness, model, effort string) ([]string, error) {
+	model, effort = strings.TrimSpace(model), strings.ToLower(strings.TrimSpace(effort))
+	if model == "" && effort == "" {
+		return nil, nil
+	}
+	if c.Harness(harness) == c.HarnessShell {
+		return nil, usagef("--model/--effort apply to agent harnesses, not shell")
+	}
+	var args []string
+	if model != "" {
+		if !c.ValidModelName(model) {
+			return nil, usagef("--model %q is not a model name", model)
+		}
+		args = append(args, modelArg+"="+model)
+	}
+	if effort != "" {
+		if !c.ValidEffort(effort) {
+			return nil, usagef("--effort %q is not an effort level (low, medium, high, xhigh, max)", effort)
+		}
+		args = append(args, effortArg+"="+effort)
+	}
+	return args, nil
+}
+
+// Per-launch model and effort, removed by the node before the harness sees
+// them (daemon.ModelArg, daemon.EffortArg).
+const (
+	modelArg  = "--pyre-model"
+	effortArg = "--pyre-effort"
+)
 
 func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionResponse, error) {
 	if p.ReportToParent != nil && !*p.ReportToParent && !slices.Contains(p.Tags, c.TagReportNone) {
@@ -375,7 +439,7 @@ func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionRe
 		return o.startFromRepos(ctx, p) // W-quicklaunch
 	}
 	if !validHarness(p.Harness) {
-		return c.StartSessionResponse{}, usagef("--harness must be claude, codex or shell (got %q)", p.Harness)
+		return c.StartSessionResponse{}, usagef("--harness must be claude, codex, agy or shell (got %q)", p.Harness)
 	}
 	if p.Account != "" && p.Ambient {
 		return c.StartSessionResponse{}, usagef("--account and --ambient are mutually exclusive")
@@ -388,17 +452,57 @@ func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionRe
 	default:
 		return c.StartSessionResponse{}, usagef("--permissions must be ask or bypass (got %q)", p.Permissions)
 	}
-	nodeID, err := o.NodeID(ctx, p.Node)
+	if _, err := modelArgs(p.Harness, p.Model, p.Effort); err != nil { // syntax first, before any placement
+		return c.StartSessionResponse{}, err
+	}
+	hargs, err := startHarnessArgs(p)
 	if err != nil {
+		return c.StartSessionResponse{}, err
+	}
+	args = append(args, hargs...)
+	if p.NativeResume != "" {
+		if c.Harness(p.Harness) != c.HarnessClaude {
+			return c.StartSessionResponse{}, usagef("--native-resume continues a Claude conversation (--harness claude)")
+		}
+		if !nativeSessionRe.MatchString(strings.TrimSpace(p.NativeResume)) {
+			return c.StartSessionResponse{}, usagef("--native-resume %q is not a Claude session id (a UUID)", p.NativeResume)
+		}
+		args = append(args, nativeResumeArg+"="+strings.TrimSpace(p.NativeResume))
+	}
+	envArgs, err := envFileArgs(p)
+	if err != nil {
+		return c.StartSessionResponse{}, err
+	}
+	args = append(args, envArgs...)
+	nodeID, err := o.launchNode(ctx, &p) // placement.go
+	if err != nil {
+		return c.StartSessionResponse{}, err
+	}
+	requested := p.Harness
+	if err := o.harnessPreflight(ctx, &nodeID, &p); err != nil { // ops_harnessfallback.go
+		return c.StartSessionResponse{}, err
+	}
+	// Model and effort are built for the harness that actually starts: a
+	// Codex model never reaches the Claude fallback.
+	margs, err := o.nodeModelArgs(ctx, nodeID, requested, &p)
+	if err != nil {
+		return c.StartSessionResponse{}, err
+	}
+	args = append(args, margs...)
+	if err := o.checkNodeLaunchArgs(ctx, nodeID, requested, p); err != nil {
 		return c.StartSessionResponse{}, err
 	}
 	if p.Account, err = o.accountRef(ctx, p.Account, c.ProviderFor(c.Harness(p.Harness))); err != nil {
 		return c.StartSessionResponse{}, err
 	}
+	parent, err := o.startParent(ctx, p.Parent)
+	if err != nil {
+		return c.StartSessionResponse{}, err
+	}
 	req := c.StartSessionRequest{
 		Mutation: mut(p.OperationID), NodeID: nodeID, Harness: c.Harness(p.Harness), Title: p.Title,
 		Cwd: p.Cwd, InitialPrompt: p.Prompt, Tags: p.Tags, IncludeContext: p.IncludeContext,
-		ParentSessionID: o.Self.SessionID, AccountPolicy: accountPolicy(p.Account, p.Ambient), Args: args,
+		ParentSessionID: parent, AccountPolicy: accountPolicy(p.Account, p.Ambient, p.StrictAccount), Args: args,
 		ReportToParent: p.ReportToParent,
 	}
 	if req.ProjectID, err = o.projectPtr(ctx, p.Project); err != nil {
@@ -407,18 +511,212 @@ func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionRe
 	if req.Checkout, req.Cwd, err = o.launchCheckout(ctx, req.ProjectID, nodeID, p); err != nil {
 		return c.StartSessionResponse{}, err
 	}
-	return o.API.StartSession(ctx, req)
+	return o.startRecovering(ctx, req)
 }
+
+// startParent is the new session's parent: --parent, else the calling
+// session, which a client credential never is (an owner command run from
+// inside an agent session's shell still sees that session's PYRE_SESSION_ID).
+func (o *Ops) startParent(ctx context.Context, ref string) (string, error) {
+	if ref = strings.TrimSpace(ref); ref != "" {
+		if !o.ClientCredential && o.Self.SessionID != "" {
+			// The hub sets a session's own ID as the parent of what it starts.
+			return "", usagef("--parent applies to the owner's credential only: a session's starts are always its own children (the hub sets the parent)")
+		}
+		return o.sessionID(ctx, ref)
+	}
+	if o.ClientCredential {
+		return "", nil
+	}
+	return o.Self.SessionID, nil
+}
+
+// startRecovering sends the start and, when its answer was lost after the
+// hub may have stored it (transport failure, hub unavailable or restarting,
+// internal error), replays the identical request with the same operation
+// ID: the hub then returns the session it created, or creates it once. If
+// no answer comes back, the error is indeterminate (exit 7) and names the
+// operation ID to retry with, never a blind new start (a duplicate).
+//
+// The replays are single attempts (the client's own retries would multiply
+// the wait) and all fit in StartRecovery.Total, so a hub that hangs costs
+// at most about that much more before exit 7.
+func (o *Ops) startRecovering(ctx context.Context, req c.StartSessionRequest) (c.StartSessionResponse, error) {
+	res, err := o.API.StartSession(ctx, req)
+	if err == nil || !startMayHaveApplied(err) {
+		return res, err
+	}
+	rec := startRecoverDefault
+	if o.StartRecover != nil {
+		rec = *o.StartRecover
+	}
+	first := err
+	if o.Stderr != nil {
+		fmt.Fprintf(o.Stderr, "pyre: start: the hub's answer was lost (%s); retrying with operation %s for up to %s\n", oneLine(first), req.OperationID, rec.Total)
+	}
+	rctx, cancel := context.WithTimeout(client.WithMaxAttempts(ctx, 1), rec.Total)
+	defer cancel()
+	for _, d := range rec.Delays {
+		select {
+		case <-rctx.Done():
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			return res, startIndeterminate(req.OperationID, first)
+		case <-time.After(d):
+		}
+		res, err = o.API.StartSession(rctx, req)
+		if err == nil {
+			return res, nil
+		}
+		if !startMayHaveApplied(err) {
+			return res, err // a definite answer (e.g. the node went away before it was stored)
+		}
+	}
+	return res, startIndeterminate(req.OperationID, first)
+}
+
+// startMayHaveApplied: the request may have reached the hub and been
+// stored although no answer came back: the hub could not be reached or timed
+// out (possibly after committing), a gateway answered for it, or the outcome
+// is indeterminate (an internal error is the hub's answer: rolled back). An answer from the hub itself (node disconnected,
+// invalid, not found, ...) is definite and not replayed, and neither is a
+// failure to reach the local daemon's socket (nothing was sent).
+func startMayHaveApplied(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var ce *c.Error
+	if !errors.As(err, &ce) {
+		return true // a deadline or a malformed answer
+	}
+	switch ce.Code {
+	case c.ErrOutcomeIndeterminate:
+		return true
+	case c.ErrUnavailable:
+		switch ce.Details[client.DetailUnreachable] {
+		case "hub":
+			return true
+		case "local_daemon":
+			return false
+		}
+		return strings.HasPrefix(ce.Message, "hub returned HTTP 50") // a gateway's answer, not the hub's
+	}
+	return false
+}
+
+func startIndeterminate(opID string, cause error) error {
+	return c.Errorf(c.ErrOutcomeIndeterminate,
+		"start: no answer from the hub (%s); the session may have been created. Re-run the same command with --operation-id %s: it returns that session if it exists and never starts a second one (or look for it with `pyre sessions`)",
+		oneLine(cause), opID).WithRef(c.KindOperation, opID)
+}
+
+// checkNodeLaunchArgs refuses extra harness arguments or a native resume
+// the chosen node cannot apply: an older pyred passes start args to the
+// harness unchecked and unrecorded (resumes would drop them), and would hand
+// --pyre-native-resume to Claude as an unknown option.
+func (o *Ops) checkNodeLaunchArgs(ctx context.Context, nodeID, requested string, p StartParams) error {
+	if len(p.HarnessArgs) == 0 && p.NativeResume == "" && p.EnvFile == "" {
+		return nil
+	}
+	if p.Harness != requested && (len(p.HarnessArgs) > 0 || p.NativeResume != "") {
+		return usagef("no %s account was free and the launch fell back to %s: the extra harness arguments and --native-resume were given for %s; start again with --harness %s", requested, p.Harness, requested, p.Harness)
+	}
+	n, err := o.ResolveNode(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	h, _ := nodeHarness(n, p.Harness)
+	name := n.Name
+	if name == "" {
+		name = n.NodeID
+	}
+	if len(p.HarnessArgs) > 0 && c.Harness(p.Harness) != c.HarnessShell && !slices.Contains(h.Capabilities, c.CapLaunchHarnessArgs) {
+		return usagef("%s's pyred cannot apply extra harness arguments for %s (an older version: it would pass them unchecked and drop them on resume); upgrade it or pick another machine", name, p.Harness)
+	}
+	if p.NativeResume != "" && !slices.Contains(h.Capabilities, c.CapResumeOutside) {
+		return usagef("%s's pyred cannot continue a conversation started outside Pyre (an older version); upgrade it or pick another machine", name)
+	}
+	if p.EnvFile != "" && !slices.Contains(h.Capabilities, c.CapLaunchEnvFile) {
+		return usagef("%s's pyred cannot apply an environment file for %s (an older version: it would hand --env-file to the harness); upgrade it or pick another machine", name, p.Harness)
+	}
+	return nil
+}
+
+// envFileArgs renders --env-file as the node's start arg (daemon.EnvFileArg).
+// The file is read on the node, never here: only its path is sent.
+func envFileArgs(p StartParams) ([]string, error) {
+	path := strings.TrimSpace(p.EnvFile)
+	if path == "" {
+		return nil, nil
+	}
+	if !nodeAbsPath(path) {
+		return nil, usagef("--env-file %q must be an absolute path on the node", path)
+	}
+	return []string{envFileArg + "=" + path}, nil
+}
+
+// nodeAbsPath reports whether p is an absolute local path on a Unix or
+// Windows node (network and device paths are refused).
+func nodeAbsPath(p string) bool {
+	if strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//") {
+		return false
+	}
+	return strings.HasPrefix(p, "/") || windowsAbs(p)
+}
+
+// windowsAbs reports whether p is an absolute Windows drive path (C:\x or
+// C:/x): the node may run another OS than this CLI.
+func windowsAbs(p string) bool {
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
+		ch := p[0] | 0x20
+		return ch >= 'a' && ch <= 'z'
+	}
+	return false
+}
+
+// envFileArg is the node's env-file start arg (daemon.EnvFileArg);
+// envFileNone on a resume drops the session's file.
+const (
+	envFileArg  = c.StartArgEnvFile
+	envFileNone = "none"
+)
+
+// startHarnessArgs checks a start's extra harness arguments (the node
+// checks again) and returns them in canonical form.
+func startHarnessArgs(p StartParams) ([]string, error) {
+	if len(p.HarnessArgs) == 0 {
+		return nil, nil
+	}
+	if c.Harness(p.Harness) == c.HarnessShell {
+		// A shell's arguments are its command line (`sh -lc 'cmd'`); every
+		// node passes them unchanged, as monitors rely on.
+		return p.HarnessArgs, nil
+	}
+	if harnessargs.Passthrough(c.Harness(p.Harness)) && c.Harness(p.Harness) != c.HarnessMock {
+		return nil, usagef("--harness-arg applies to agent harnesses (claude) and shell, not %s", p.Harness)
+	}
+	args, err := harnessargs.Normalize(c.Harness(p.Harness), p.HarnessArgs)
+	if err != nil {
+		return nil, usagef("%s", c.AsError(err).Message)
+	}
+	return args, nil
+}
+
+// nativeResumeArg mirrors daemon.NativeResumeArg (pyre start --native-resume).
+const nativeResumeArg = "--pyre-native-resume"
+
+var nativeSessionRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // permissionsArg is the node's per-launch permission override, carried in
 // the start request's args and removed by the node before the harness sees
 // them (daemon.PermissionsArg).
 const permissionsArg = "--pyre-permissions"
 
-func accountPolicy(account string, ambient bool) c.AccountPolicy {
+func accountPolicy(account string, ambient, strict bool) c.AccountPolicy {
 	switch {
 	case account != "":
-		return c.AccountPolicy{Mode: c.AccountExplicit, AccountID: account}
+		return c.AccountPolicy{Mode: c.AccountExplicit, AccountID: account, Strict: strict}
 	case ambient:
 		return c.AccountPolicy{Mode: c.AccountAmbient}
 	}
@@ -471,12 +769,16 @@ func (o *Ops) Stop(ctx context.Context, p SessionCmdParams) (c.CommandReceipt, e
 
 // ResumeParams creates a new run for a session.
 type ResumeParams struct {
-	Session      string `json:"session"`
-	Node         string `json:"node,omitempty"`
-	Account      string `json:"account,omitempty"`
-	Ambient      bool   `json:"ambient,omitempty"`
-	AllowHandoff bool   `json:"allow_handoff,omitempty"`
-	OperationID  string `json:"operation_id,omitempty"`
+	Session       string `json:"session"`
+	Node          string `json:"node,omitempty"`
+	Account       string `json:"account,omitempty"`
+	StrictAccount bool   `json:"strict_account,omitempty"`
+	Ambient       bool   `json:"ambient,omitempty"`
+	AllowHandoff  bool   `json:"allow_handoff,omitempty"`
+	// EnvFile replaces the session's environment file (an absolute path on
+	// the node) or, "none", drops it; "" keeps the previous run's.
+	EnvFile     string `json:"env_file,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
 }
 
 func (o *Ops) Resume(ctx context.Context, p ResumeParams) (c.StartSessionResponse, error) {
@@ -487,7 +789,10 @@ func (o *Ops) Resume(ctx context.Context, p ResumeParams) (c.StartSessionRespons
 	if p.Account, err = o.accountRef(ctx, p.Account, ""); err != nil {
 		return c.StartSessionResponse{}, err
 	}
-	req := c.ResumeRequest{Mutation: mut(p.OperationID), SessionID: id, AllowHandoff: p.AllowHandoff, AccountPolicy: accountPolicy(p.Account, p.Ambient)}
+	req := c.ResumeRequest{Mutation: mut(p.OperationID), SessionID: id, AllowHandoff: p.AllowHandoff, AccountPolicy: accountPolicy(p.Account, p.Ambient, p.StrictAccount)}
+	if req.EnvFile = strings.TrimSpace(p.EnvFile); req.EnvFile != "" && req.EnvFile != envFileNone && !nodeAbsPath(req.EnvFile) {
+		return c.StartSessionResponse{}, usagef("--env-file %q must be an absolute path on the node, or none", req.EnvFile)
+	}
 	if p.Node != "" {
 		n, err := o.ResolveNode(ctx, p.Node)
 		if err != nil {

@@ -81,7 +81,7 @@ func (a *localAuth) Authenticate(ctx context.Context, bearer string) (contracts.
 func (d *Daemon) LocalHandler() http.Handler {
 	inner := httpapi.NewServer(d.LocalAPI(), &localAuth{d: d, cache: map[string]cachedPrincipal{}}, httpapi.Options{
 		Logger: d.cfg.Logger.With("component", "local-api"),
-		Extra:  map[string]http.Handler{"GET " + PathLocalStatus: d.localStatusHandler()},
+		Extra:  d.localExtra(),
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok := ""
@@ -103,6 +103,15 @@ func (d *Daemon) LocalHandler() http.Handler {
 		ctx := context.WithValue(WithBearer(r.Context(), fwd), freshnessNoteKey{}, note)
 		inner.ServeHTTP(&freshnessWriter{ResponseWriter: w, note: note, definitive: d.hubUnreachable}, r.WithContext(ctx))
 	})
+}
+
+// localExtra are the local-socket-only endpoints.
+func (d *Daemon) localExtra() map[string]http.Handler {
+	m := map[string]http.Handler{"GET " + PathLocalStatus: d.localStatusHandler()}
+	for k, v := range d.execHandlers() {
+		m[k] = v
+	}
+	return m
 }
 
 // ServeLocal serves the local API on the Unix socket (mode 0600) until ctx
@@ -127,7 +136,7 @@ func (d *Daemon) ServeLocal(ctx context.Context) error {
 		return err
 	}
 	_ = fileperm.Restrict(path, 0o600)
-	srv := &http.Server{Handler: d.LocalHandler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: d.LocalHandler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: withPeer}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	select {

@@ -34,7 +34,7 @@ func TestEveryActionRenders(t *testing.T) {
 		contracts.AuditAccountChosen, contracts.AuditAccountSwitched, contracts.AuditAccountWaiting, contracts.AuditAccountReauthNeeded,
 		contracts.AuditAccountReauthed, contracts.AuditAccountCooldown, contracts.AuditAccountCooldownEnded, contracts.AuditAccountTokenAdded,
 		contracts.AuditAccountTokenReplaced, contracts.AuditAccountTokenRemoved, contracts.AuditAccountTokenSynced, contracts.AuditAccountLoginAdded,
-		contracts.AuditAccountAdded, contracts.AuditAccountFolded, contracts.AuditAccountRenamed, contracts.AuditAccountDisabled, contracts.AuditAccountEnabled,
+		contracts.AuditAccountAdded, contracts.AuditAccountFolded, contracts.AuditAccountRenamed, contracts.AuditAccountDisabled, contracts.AuditAccountEnabled, contracts.AuditAccountTierChanged,
 		contracts.AuditSessionStarted, contracts.AuditSessionStopped, contracts.AuditSessionInterrupted, contracts.AuditSessionResumed,
 		contracts.AuditSessionArchived, contracts.AuditSessionUnarchived, contracts.AuditSessionArchiveScheduled, contracts.AuditSessionArchiveCanceled, contracts.AuditSessionIconSet, contracts.AuditSessionRenamed, contracts.AuditSessionAutoTitled,
 		contracts.AuditSessionLeaseTakenOver, contracts.AuditSessionReportedToParent,

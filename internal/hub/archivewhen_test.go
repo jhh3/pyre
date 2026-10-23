@@ -75,9 +75,9 @@ func TestSelfArchiveWhenDone(t *testing.T) {
 func TestParentArchivesIdleChildWhenDoneAndCancel(t *testing.T) {
 	f := newChildFixture(t, nil)
 	x, parent, sid := f.x, f.parent.Session.SessionID, f.child.Session.SessionID
-	// A peer that did not start it is refused.
+	// A peer that did not start it only files it for the owner's approval.
 	other := x.start(owner, "op_synth-other", nodeMac)
-	if _, err := archiveWhenDone(x, sesPrincipal(other.Session.SessionID), "op_synth-other-archive", sid, true); !contracts.IsCode(err, contracts.ErrForbidden) {
+	if _, err := archiveWhenDone(x, sesPrincipal(other.Session.SessionID), "op_synth-other-archive", sid, true); !contracts.IsCode(err, contracts.ErrApprovalRequested) {
 		t.Fatalf("a stranger cannot schedule: %v", err)
 	}
 	// Scheduled, then canceled before anything happens.

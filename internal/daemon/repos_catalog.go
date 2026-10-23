@@ -100,6 +100,18 @@ func (d *Daemon) actionGitHubRefresh(ctx context.Context, _ json.RawMessage) (an
 	return d.fetchGitHub(ctx, gh)
 }
 
+// ghBinary is the gh that clones and fresh-worktree fetches authenticate
+// through: the configured one, else gh on PATH, else none.
+func (d *Daemon) ghBinary() string {
+	if c := d.cfg.RepoIndex.GitHub.GH; c != "" {
+		return c
+	}
+	if found, err := exec.LookPath("gh"); err == nil {
+		return found
+	}
+	return ""
+}
+
 // actionRepoClone clones a repository into the node's repo root and adds
 // it to the index at once.
 func (d *Daemon) actionRepoClone(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -123,14 +135,7 @@ func (d *Daemon) actionRepoClone(ctx context.Context, raw json.RawMessage) (any,
 		home, _ := os.UserHomeDir()
 		roots = repoindex.DefaultRoots(home)
 	}
-	gh := ""
-	if found, err := exec.LookPath("gh"); err == nil {
-		gh = found
-	}
-	if c := d.cfg.RepoIndex.GitHub.GH; c != "" {
-		gh = c
-	}
-	res, err := repoindex.Clone(ctx, p, repoindex.CloneOptions{Index: idx, Roots: roots, GH: gh})
+	res, err := repoindex.Clone(ctx, p, repoindex.CloneOptions{Index: idx, Roots: roots, GH: d.ghBinary()})
 	if err != nil {
 		return nil, err
 	}

@@ -1,4 +1,4 @@
- Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts › Artifact                              anthropic 1 ready · 1 at limit   openai 0 ready   ○ synced
+ Pyre  S Sessions 3 · [P Projects] · M Machines · A Accounts › Artifact            claude 5h 61% · wk 41% (2/3) !1   codex wk — (0/1) ! · none ready   ○ synced
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Synthetic test report                                                    │ v1 · report.md
   VERSIONS · newest first                                                │ Type       text/markdown · 36 B

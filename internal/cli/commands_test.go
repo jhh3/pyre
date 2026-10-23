@@ -71,6 +71,7 @@ func TestExitCodeMapping(t *testing.T) {
 		c.ErrResetRequired: ExitConflict, c.ErrUnsupported: ExitUnsupported, c.ErrProtocolMismatch: ExitUnsupported,
 		c.ErrCapacityExhausted: ExitUnavailable, c.ErrUnavailable: ExitUnavailable,
 		c.ErrOutcomeIndeterminate: ExitIndeterminate, c.ErrPayloadTooLarge: ExitError, c.ErrInternal: ExitError,
+		c.ErrApprovalRequested: ExitPending,
 	}
 	for code, want := range cases {
 		if got := ExitCodeFor(c.Errorf(code, "x")); got != want {
@@ -367,5 +368,48 @@ func TestEnrollNodeBootstrapDryRunCreatesNothing(t *testing.T) {
 	expectCode(t, r, 0)
 	if pt := mustJSON[c.PairingTicket](t, r); !strings.HasPrefix(pt.URI, "pyre://pair?") {
 		t.Fatalf("pairing ticket: %+v", pt)
+	}
+}
+
+// The owner's `pyre inbox` lists mail still waiting on him; --all adds
+// updates and handled mail; `pyre msg show` reads (acknowledges) one.
+func TestOwnerInboxListsWhatWaits(t *testing.T) {
+	h := newHub(t)
+	owner := newEnv(t, h)
+	agentB := owner.with(EnvToken, "", EnvSessionToken, sessBToken, EnvSessionID, "ses_synth-b", EnvNodeID, "node_synth-linux")
+	r := run(t, agentB, nil, "--json", "send", "owner", "Synthetic digest: merged two PRs. Nothing urgent.")
+	expectCode(t, r, 0)
+	upd := mustJSON[c.MessageView](t, r)
+	if upd.Status.AckRef != c.AckRefUpdate {
+		t.Fatalf("update: %+v", upd.Status)
+	}
+	r = run(t, agentB, nil, "--json", "send", "owner", "Should I merge the synthetic PR?")
+	expectCode(t, r, 0)
+	q := mustJSON[c.MessageView](t, r)
+
+	ids := func(args ...string) map[string]bool {
+		t.Helper()
+		r := run(t, owner, nil, append([]string{"--json", "inbox"}, args...)...)
+		expectCode(t, r, 0)
+		out := map[string]bool{}
+		for _, m := range mustJSON[c.Page[c.MessageView]](t, r).Items {
+			out[m.Envelope.MessageID] = true
+		}
+		return out
+	}
+	if got := ids(); !got[q.Envelope.MessageID] || got[upd.Envelope.MessageID] {
+		t.Fatalf("owner inbox: %v", got)
+	}
+	if got := ids("--all"); !got[q.Envelope.MessageID] || !got[upd.Envelope.MessageID] {
+		t.Fatalf("owner inbox --all: %v", got)
+	}
+	r = run(t, owner, nil, "inbox", "--all")
+	expectCode(t, r, 0)
+	if !strings.Contains(r.stdout, "update") {
+		t.Fatalf("update not labelled:\n%s", r)
+	}
+	expectCode(t, run(t, owner, nil, "msg", "show", q.Envelope.MessageID), 0)
+	if got := ids(); got[q.Envelope.MessageID] {
+		t.Fatalf("a message he read still waits: %v", got)
 	}
 }

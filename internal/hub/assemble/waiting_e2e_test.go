@@ -90,11 +90,12 @@ func TestWaitingOnYouEndToEnd(t *testing.T) {
 		})
 		return it
 	}
+	// resolved: nothing active, the newest item in state.
 	resolved := func(what string, state c.AttentionState) {
 		t.Helper()
 		waitFor(t, what, func() bool {
 			got := items(sid, all...)
-			return len(got) == 1 && got[0].State == state && flag() == nil
+			return len(got) > 0 && len(items(sid)) == 0 && got[0].State == state && flag() == nil
 		})
 	}
 
@@ -123,10 +124,27 @@ func TestWaitingOnYouEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 4. The next turn asks again: the same item reopens (never a second).
+	// 4. The next turn only repeats the request (owner report 2026-10-19:
+	// idle turns re-raised one 27 times): handled stays handled.
+	n.mu.Lock()
+	n.lastText = func(string) string { return "Nothing new from me.\n\n" + question }
+	n.mu.Unlock()
 	turn(runID)
-	if again := open("reopened", 2); again.AttentionID != it.AttentionID {
-		t.Fatalf("duplicate item: %+v vs %+v", again, it)
+	resolved("a repeat leaves it handled", c.AttnHandled)
+	// A new question is a new item, its own conversation (owner report
+	// 2026-10-19: one item reopened for days showed the whole history as
+	// one thread); the handled one stays handled.
+	const newQuestion = "Should I publish the synthetic report to the staging page?"
+	n.mu.Lock()
+	n.lastText = func(string) string { return "Score built.\n\n" + newQuestion }
+	n.mu.Unlock()
+	turn(runID)
+	again := open("new question", 1)
+	if again.AttentionID == it.AttentionID || again.Title != "Waiting on you: "+newQuestion {
+		t.Fatalf("new question reused the old item: %+v vs %+v", again, it)
+	}
+	if old, err := st.Hub.GetAttention(owner, c.GetRequest{ID: it.AttentionID}); err != nil || old.State != c.AttnHandled {
+		t.Fatalf("old item: %+v %v", old, err)
 	}
 	if got := func() []c.AttentionItem {
 		page, _ := st.Hub.ListAttention(owner, c.ListAttentionRequest{SessionID: child, States: []c.AttentionState{c.AttnOpen, c.AttnRead, c.AttnHandled, c.AttnWithdrawn}})
@@ -141,9 +159,13 @@ func TestWaitingOnYouEndToEnd(t *testing.T) {
 	}
 	resolved("next turn withdraws it", c.AttnWithdrawn)
 
-	// 6. Filing an ask withdraws it (the ask is the inbox item now).
+	// 6. The turn ends on the same question: it comes back, not counted and
+	// without a push.
 	idle(runID)
-	open("reopened again", 3)
+	if back := open("same question back", 1); back.State != c.AttnOpen || back.AttentionID != again.AttentionID {
+		t.Fatalf("repeat after the next turn: %+v", back)
+	}
+	// Filing an ask withdraws it (the ask is the inbox item now).
 	sess := c.WithPrincipal(bg, c.Principal{Kind: c.PrincipalSession, ID: sid})
 	if _, err := st.Hub.CreateAsk(sess, c.CreateAskRequest{Mutation: op(), TopicKey: "synthetic-voice-match", Title: "Build the voice-match score?",
 		Context:       "Synthetic context: the report is ready; the score costs a day. " + strings.Repeat("Synthetic background a newcomer can follow: what, why now, what was tried, what each option does. ", 4),
@@ -154,6 +176,6 @@ func TestWaitingOnYouEndToEnd(t *testing.T) {
 	waitFor(t, "ask withdraws it", func() bool {
 		got := items(sid, all...)
 		f := flag()
-		return len(got) == 1 && got[0].State == c.AttnWithdrawn && f != nil && f.Reason == "ask"
+		return len(got) == 2 && got[0].AttentionID == again.AttentionID && got[0].State == c.AttnWithdrawn && f != nil && f.Reason == "ask"
 	})
 }

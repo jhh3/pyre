@@ -113,6 +113,7 @@ func (a *App) addNodeActionCommands(root *cobra.Command) {
 	accounts.Flags().BoolVar(&refresh, "refresh", false, "probe token accounts' usage now (1 output token each)")
 	a.addAccountOnboarding(accounts)
 	a.addAccountRename(accounts) // accounts_rename.go
+	a.addAccountTier(accounts)   // accounts_tier.go
 	a.addAccountLogin(accounts)  // cmd_login.go
 	a.addTokenCommands(accounts) // accounts_token.go
 	root.AddCommand(accounts)
@@ -202,10 +203,16 @@ func (a *App) addNodeActionCommands(root *cobra.Command) {
 	// ---- inventory ----
 	var invNode string
 	inventory := &cobra.Command{
-		Use:   "inventory --node N",
+		Use:   "inventory <node> | --node N",
 		Short: "Installed harnesses, tools, extensions, config roots and drift on a node",
-		Args:  cobra.NoArgs,
+		Args:  cobra.MaximumNArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				if invNode != "" && invNode != args[0] {
+					return usagef("give the node once: as an argument or with --node")
+				}
+				invNode = args[0]
+			}
 			ops, err := a.connect()
 			if err != nil {
 				return err

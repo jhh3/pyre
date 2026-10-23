@@ -1,7 +1,6 @@
 package tui_test
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,7 +29,9 @@ func startMock(t *testing.T, w, ht int, prep func(b *mock.Backend), mod func(*tu
 	}
 	h := tuitest.New(t, rec, opts, w, ht)
 	h.WaitFor("initial sessions", 5*sec, func() bool { return h.M.Loaded("sessions") && h.M.Loaded("nodes") && h.M.Loaded("attention") })
-	h.Settle()
+	// A short RefreshInterval never lets the UI idle, so cap the settle at
+	// 1 s instead of Settle's 5 s.
+	h.SettleFor(80*time.Millisecond, time.Second)
 	return h, rec, b
 }
 
@@ -62,10 +63,7 @@ func TestEndedSessionsHiddenToggleRemembered(t *testing.T) {
 	if !h.Contains("api work (limited)") || !h.Contains("ended shown — . hide") {
 		t.Fatalf(". did not show ended sessions:\n%s", h.View())
 	}
-	b, err := os.ReadFile(state)
-	if err != nil || !strings.Contains(string(b), `"show_ended": true`) {
-		t.Fatalf("toggle not remembered: %s %v", b, err)
-	}
+	stateHas(t, h, state, `"show_ended": true`)
 	// A new TUI starts with ended sessions shown.
 	h2, _, _ := startMock(t, 100, 30, nil, mod)
 	if !h2.Contains("api work (limited)") {
@@ -241,7 +239,7 @@ func TestArchiveConfirmBoundToItsSession(t *testing.T) {
 	if r := rec.Calls("StopSession")[0].Request.(contracts.SessionCommandRequest); r.SessionID != "ses_synth-b" {
 		t.Fatalf("stopped %s", r.SessionID)
 	}
-	h.Settle()
+	h.SettleFor(150*time.Millisecond, time.Second)
 	if h.M.OverlayOpen() {
 		t.Fatalf("a dialog reappeared after confirming:\n%s", h.View())
 	}

@@ -626,6 +626,61 @@ func (s *Store) SwitchConnection(ctx context.Context, name, expectedRef, mode, c
 	return true, cleanupOld, tx.Commit()
 }
 
+// RevertConnection switches connection name, currently on credential ref
+// currentRef, back to prior (its credential record, secret ref, mode,
+// method, identity and tools), cancelling the pending cleanup of prior's
+// secret. The credential it leaves is scheduled for cleanup when nothing
+// else uses it. It reports false when the connection changed concurrently.
+func (s *Store) RevertConnection(ctx context.Context, name, currentRef, cleanupID string, prior Connection, tools []Tool) (bool, error) {
+	encoded, err := json.Marshal(prior.SafeIdentity)
+	if err != nil {
+		return false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var connectionID, currentCredentialID string
+	if err := tx.QueryRowContext(ctx, `SELECT id,credential_id FROM connections WHERE name=? AND credential_ref=? AND status<>'removed'`, name, currentRef).Scan(&connectionID, &currentCredentialID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE connections SET selected_mode=?,credential_method=?,credential_id=?,credential_ref=?,status=?,safe_identity_json=?,updated_at=? WHERE id=?`,
+		prior.SelectedMode, prior.CredentialMethod, prior.CredentialID, prior.CredentialRef, prior.Status, string(encoded), now, connectionID); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE credentials SET status='active',updated_at=? WHERE id=?`, now, prior.CredentialID); err != nil {
+		return false, err
+	}
+	if prior.CredentialRef != "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM secret_cleanup WHERE credential_ref=?`, prior.CredentialRef); err != nil {
+			return false, err
+		}
+	}
+	if currentCredentialID != prior.CredentialID {
+		var remaining int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connections WHERE credential_id=? AND status<>'removed'`, currentCredentialID).Scan(&remaining); err != nil {
+			return false, err
+		}
+		if remaining == 0 && currentRef != "" && currentRef != prior.CredentialRef {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO secret_cleanup(id,credential_ref,reason,created_at) VALUES(?,?,?,?) ON CONFLICT(credential_ref) DO NOTHING`, cleanupID, currentRef, "reverted restore credential", now); err != nil {
+				return false, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE credentials SET status='cleanup-pending',updated_at=? WHERE id=?`, now, currentCredentialID); err != nil {
+				return false, err
+			}
+		}
+	}
+	if err := replaceToolsTx(ctx, tx, connectionID, tools); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
 // PurgeRemovedConnection deletes the row of a removed connection (its
 // discovered tools cascade) so its name can be used again. An active
 // connection is never touched.

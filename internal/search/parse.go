@@ -37,6 +37,7 @@ func ParseFile(path, format string) ([]Entry, error) {
 const (
 	FormatClaude = "claude" // ~/.claude/projects/<slug>/<uuid>.jsonl
 	FormatCodex  = "codex"  // $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl
+	FormatAgy    = "agy"    // ~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl
 )
 
 // maxEntryText bounds the text indexed per entry.
@@ -59,8 +60,11 @@ type parser interface {
 }
 
 func newParser(format string, seq int64) parser {
-	if format == FormatCodex {
+	switch format {
+	case FormatCodex:
 		return &codexParser{n: seq}
+	case FormatAgy:
+		return &agyParser{n: seq}
 	}
 	return &claudeParser{n: seq}
 }
@@ -162,6 +166,76 @@ func toolSummary(name string, input json.RawMessage) string {
 	var in map[string]any
 	_ = json.Unmarshal(input, &in)
 	for _, k := range []string{"command", "cmd", "file_path", "path", "pattern", "query", "description", "url"} {
+		if s, ok := in[k].(string); ok && s != "" {
+			return name + ": " + truncRunes(s, 300)
+		}
+	}
+	return name
+}
+
+// ---- agy ----
+
+// agyParser reads agy's transcript_full.jsonl (one step per line). Every
+// decodable step advances Seq, as the agy adapter's sessions.read numbers
+// them, so a hit's Seq opens the reader at it.
+type agyParser struct{ n int64 }
+
+type agyStep struct {
+	Type      string `json:"type"`
+	CreatedAt string `json:"created_at"`
+	Content   string `json:"content"`
+	ToolCalls []struct {
+		Name string          `json:"name"`
+		Args json.RawMessage `json:"args"`
+	} `json:"tool_calls"`
+}
+
+func (p *agyParser) seq() int64 { return p.n }
+func (p *agyParser) skip()      { p.n++ }
+
+func (p *agyParser) line(b []byte) (Entry, bool) {
+	var r agyStep
+	if json.Unmarshal(b, &r) != nil {
+		return Entry{}, false
+	}
+	p.n++
+	e := Entry{Seq: p.n, At: parseTime(r.CreatedAt)}
+	switch {
+	case r.Type == "USER_INPUT":
+		e.Kind, e.Text = "user", AgyUserRequest(r.Content)
+		if strings.Contains(e.Text, "[pyre-msg:") {
+			e.Kind = "message"
+		}
+	case r.Type == "PLANNER_RESPONSE" && strings.TrimSpace(r.Content) != "":
+		e.Kind, e.Text = "assistant", r.Content
+	case r.Type == "PLANNER_RESPONSE" && len(r.ToolCalls) > 0:
+		var tools []string
+		for _, tc := range r.ToolCalls {
+			tools = append(tools, agyToolSummary(tc.Name, tc.Args))
+		}
+		e.Kind, e.Text = "tool", strings.Join(tools, "; ")
+	}
+	e.Text = clipText(strings.TrimSpace(e.Text))
+	return e, e.Kind != "" && e.Text != ""
+}
+
+// AgyUserRequest is what the person entered in an agy USER_INPUT step:
+// the <USER_REQUEST> part, without agy's added metadata.
+func AgyUserRequest(content string) string {
+	s := content
+	if i := strings.Index(s, "<USER_REQUEST>"); i >= 0 {
+		s = s[i+len("<USER_REQUEST>"):]
+		if j := strings.Index(s, "</USER_REQUEST>"); j >= 0 {
+			s = s[:j]
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+func agyToolSummary(name string, args json.RawMessage) string {
+	var in map[string]any
+	_ = json.Unmarshal(args, &in)
+	for _, k := range []string{"CommandLine", "AbsolutePath", "toolSummary"} {
 		if s, ok := in[k].(string); ok && s != "" {
 			return name + ": " + truncRunes(s, 300)
 		}

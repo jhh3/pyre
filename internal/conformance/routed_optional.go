@@ -70,3 +70,82 @@ func (rt routed) GetProjectPage(ctx context.Context, req c.GetProjectPageRequest
 	}
 	return t.GetProjectPage(ctx, req)
 }
+
+// Standing grants (W-grants).
+
+var _ c.StandingGrantsAPI = routed{}
+
+func (rt routed) CreateGrant(ctx context.Context, req c.CreateGrantRequest) (c.StandingGrant, error) {
+	t, err := pickAs[c.StandingGrantsAPI](rt, ctx, c.OpGrantsCreate)
+	if err != nil {
+		return c.StandingGrant{}, err
+	}
+	return t.CreateGrant(ctx, req)
+}
+
+func (rt routed) ListGrants(ctx context.Context, req c.ListGrantsRequest) (c.ListGrantsResponse, error) {
+	t, err := pickAs[c.StandingGrantsAPI](rt, ctx, c.OpGrantsList)
+	if err != nil {
+		return c.ListGrantsResponse{}, err
+	}
+	return t.ListGrants(ctx, req)
+}
+
+func (rt routed) RevokeGrant(ctx context.Context, req c.RevokeGrantRequest) (c.StandingGrant, error) {
+	t, err := pickAs[c.StandingGrantsAPI](rt, ctx, c.OpGrantsRevoke)
+	if err != nil {
+		return c.StandingGrant{}, err
+	}
+	return t.RevokeGrant(ctx, req)
+}
+
+// Issues filed by sessions.
+var _ c.IssuesAPI = routed{}
+
+func (rt routed) FileIssue(ctx context.Context, req c.FileIssueRequest) (c.FileIssueResponse, error) {
+	t, err := pickAs[c.IssuesAPI](rt, ctx, c.OpIssuesFile)
+	if err != nil {
+		return c.FileIssueResponse{}, err
+	}
+	return t.FileIssue(ctx, req)
+}
+
+func (rt routed) ListIssues(ctx context.Context, req c.ListIssuesRequest) (c.ListIssuesResponse, error) {
+	t, err := pickAs[c.IssuesAPI](rt, ctx, c.OpIssuesList)
+	if err != nil {
+		return c.ListIssuesResponse{}, err
+	}
+	return t.ListIssues(ctx, req)
+}
+
+func (rt routed) GetIssue(ctx context.Context, req c.GetIssueRequest) (c.IssueDetail, error) {
+	t, err := pickAs[c.IssuesAPI](rt, ctx, c.OpIssuesGet)
+	if err != nil {
+		return c.IssueDetail{}, err
+	}
+	return t.GetIssue(ctx, req)
+}
+
+func (rt routed) UpdateIssue(ctx context.Context, req c.UpdateIssueRequest) (c.Issue, error) {
+	t, err := pickAs[c.IssuesAPI](rt, ctx, c.OpIssuesUpdate)
+	if err != nil {
+		return c.Issue{}, err
+	}
+	return t.UpdateIssue(ctx, req)
+}
+
+func (rt routed) GetIssueTriage(ctx context.Context, req struct{}) (c.IssueTriage, error) {
+	t, err := pickAs[c.IssuesAPI](rt, ctx, c.OpIssuesTriageGet)
+	if err != nil {
+		return c.IssueTriage{}, err
+	}
+	return t.GetIssueTriage(ctx, req)
+}
+
+func (rt routed) SetIssueTriage(ctx context.Context, req c.SetIssueTriageRequest) (c.IssueTriage, error) {
+	t, err := pickAs[c.IssuesAPI](rt, ctx, c.OpIssuesTriageSet)
+	if err != nil {
+		return c.IssueTriage{}, err
+	}
+	return t.SetIssueTriage(ctx, req)
+}

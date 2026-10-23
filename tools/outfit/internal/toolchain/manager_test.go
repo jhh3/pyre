@@ -228,3 +228,26 @@ func TestCatalogEstablishesTwentyFiveToolRegistry(t *testing.T) {
 		t.Fatal("reference tools are not pinned")
 	}
 }
+
+// Manifests declare "stripe"/"gws"; their Windows zips carry stripe.exe and
+// gws.exe (win-home: "archive does not contain declared binary stripe").
+func TestWindowsExtractionFindsTheExeOfADeclaredBinary(t *testing.T) {
+	root := t.TempDir()
+	for _, declared := range []string{"stripe", "gws"} {
+		archivePath := filepath.Join(root, declared+".zip")
+		if err := os.WriteFile(archivePath, testZip(t, declared+".exe", "windows-"+declared), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(root, "out", declared+".exe")
+		if err := extractBinary(archivePath, declared+"_windows_x86_64.zip", declared, declared, destination); err != nil {
+			t.Fatalf("%s: %v", declared, err)
+		}
+		if body, err := os.ReadFile(destination); err != nil || string(body) != "windows-"+declared {
+			t.Fatalf("%s output = %q, %v", declared, body, err)
+		}
+		// A non-Windows destination still requires the exact declared name.
+		if err := extractBinary(archivePath, declared+".zip", declared, declared, filepath.Join(root, "unix", declared)); err == nil {
+			t.Fatalf("%s: unix extraction accepted %s.exe", declared, declared)
+		}
+	}
+}

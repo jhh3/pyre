@@ -2,12 +2,14 @@ package attention
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jhh3/pyre/internal/attention/sessionflag"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/runfail"
 )
 
 // Stale launch failures (owner report 2026-10-12): 84 open "Session run
@@ -34,6 +36,10 @@ func newLineageEnv(t *testing.T, lk lineageLookup) *env {
 	e.der = NewDeriver(e.store, e.log, DeriverOptions{Lookup: lk})
 	return e
 }
+
+// checkoutMissing is the group of owner-started sessions outside projects
+// whose launch failed with "launch failed: checkout missing".
+var checkoutMissing = failedGroup(nil, runfail.CauseOf("launch failed: checkout missing", nil).Key)
 
 const capacityReason = "launch failed: no eligible openai subscription on this node: acct_synth-1: cooldown until 2026-10-12T20:00:00Z (usage limit)"
 
@@ -73,7 +79,7 @@ func TestChildFailureIsNotOwnerAttention(t *testing.T) {
 	}
 	e.runFailed("ses_synth-own", "run_synth-o1", contracts.HarnessCodex, "launch failed: checkout missing")
 	e.drain()
-	if got := e.byGroup("failure:ses_synth-own"); len(got) != 1 || got[0].State != contracts.AttnOpen {
+	if got := e.byGroup(checkoutMissing); len(got) != 1 || got[0].State != contracts.AttnOpen {
 		t.Fatalf("owner-started failure: %+v", got)
 	}
 }
@@ -152,16 +158,18 @@ func TestFailureResolvesOnArchiveAndLiveRun(t *testing.T) {
 	e.drain()
 	e.runState("ses_synth-a", "run_synth-a2", contracts.RunStarting)
 	e.drain()
-	if it := e.byGroup("failure:ses_synth-a"); it[0].State != contracts.AttnOpen {
+	if it := e.byGroup(checkoutMissing); len(it) != 1 || it[0].State != contracts.AttnOpen || it[0].Count != 2 {
 		t.Fatalf("starting run resolved: %+v", it)
 	}
 	e.runState("ses_synth-a", "run_synth-a2", contracts.RunWaitingInput)
+	e.drain()
+	if it := e.byGroup(checkoutMissing); it[0].State != contracts.AttnOpen || it[0].Count != 1 {
+		t.Fatalf("after a live run: %+v", it)
+	}
 	e.archived("ses_synth-b")
 	e.drain()
-	for _, sid := range []string{"ses_synth-a", "ses_synth-b"} {
-		if it := e.byGroup("failure:" + sid); len(it) != 1 || it[0].State != contracts.AttnWithdrawn {
-			t.Fatalf("%s: %+v", sid, it)
-		}
+	if it := e.byGroup(checkoutMissing); len(it) != 1 || it[0].State != contracts.AttnWithdrawn {
+		t.Fatalf("after the last left: %+v", it)
 	}
 }
 
@@ -197,7 +205,7 @@ func TestResolveSessionIdempotent(t *testing.T) {
 	e.drain()
 	ctx := context.Background()
 	refs, err := e.store.ResolvableSessions(ctx, "", 100)
-	if err != nil || len(refs) != 3 || !refs[0].Member || refs[0].Failure || !refs[2].Failure {
+	if err != nil || len(refs) != 3 || !refs[0].Member || refs[0].Failure || !refs[2].Member {
 		t.Fatalf("resolvable: %+v %v", refs, err)
 	}
 	if page, _ := e.store.ResolvableSessions(ctx, refs[0].SessionID, 1); len(page) != 1 || page[0].SessionID != refs[1].SessionID {
@@ -298,5 +306,40 @@ func TestMessageItemSummary(t *testing.T) {
 	}
 	if todo, _ := e.store.MessageItemsWithoutSummary(ctx, "", 10); len(todo) != 0 {
 		t.Fatalf("still todo: %+v", todo)
+	}
+}
+
+type taggedLookup struct {
+	lineageLookup
+	tags map[string][]string
+}
+
+func (l taggedLookup) SessionTags(_ context.Context, id string) ([]string, error) {
+	return l.tags[id], nil
+}
+
+// A failed headless pyre run (its launch fell through to the caller's own
+// login, or the command failed) never raises owner attention.
+func TestPyreRunFailureIsNotOwnerAttention(t *testing.T) {
+	e := newEnv(t)
+	e.der = NewDeriver(e.store, e.log, DeriverOptions{Lookup: taggedLookup{tags: map[string][]string{"ses_synth-run": {contracts.TagPyreRun, contracts.TagReportNone}}}})
+	e.runFailed("ses_synth-run", "run_synth-r1", contracts.HarnessClaude, "launch failed: checkout missing")
+	e.drain()
+	if got := e.active(); len(got) != 0 {
+		t.Fatalf("pyre run failure raised owner items: %+v", got)
+	}
+	e.runFailed("ses_synth-other", "run_synth-o1", contracts.HarnessClaude, "launch failed: checkout missing")
+	e.drain()
+	if got := e.byGroup(checkoutMissing); len(got) != 1 {
+		t.Fatalf("ordinary failure: %+v", got)
+	}
+	// A later interactive resume of the pyre run session is an ordinary
+	// session run: its failure is the owner's.
+	r := contracts.Run{RunID: "run_synth-r2", SessionID: "ses_synth-run", Harness: contracts.HarnessClaude, Adapter: "claude-tmux",
+		State: contracts.RunFailed, StateReason: "launch failed: checkout missing"}
+	e.log.AppendPayload(contracts.EvRunEnded, contracts.ObjectRef{Kind: contracts.KindRun, ID: r.RunID}, r.SessionID, nil, r)
+	e.drain()
+	if got := e.byGroup(checkoutMissing); len(got) != 1 || !strings.Contains(fmt.Sprint(got), "ses_synth-run") {
+		t.Fatalf("interactive resume failure not raised: %+v", got)
 	}
 }

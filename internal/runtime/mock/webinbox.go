@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -195,8 +196,12 @@ func (b *Backend) FlushHeldAnswers(ctx context.Context, req c.FlushHeldAnswersRe
 // ---- project pages ----
 
 func (b *Backend) pageDocLocked(projectID string) *c.Document {
+	return b.slugDocLocked(projectID, c.ProjectPageSlug)
+}
+
+func (b *Backend) slugDocLocked(projectID, slug string) *c.Document {
 	for _, d := range b.documents {
-		if d.ProjectID != nil && *d.ProjectID == projectID && d.Slug == c.ProjectPageSlug {
+		if d.ProjectID != nil && *d.ProjectID == projectID && d.Slug == slug {
 			return d
 		}
 	}
@@ -230,16 +235,49 @@ func (b *Backend) pageLocked(projectID string) c.ProjectPage {
 		dc, rc := *d, *b.revisions[d.HeadRevisionID]
 		pg.Document, pg.Revision, pg.Content = &dc, &rc, rc.Content
 	}
+	if d := b.slugDocLocked(projectID, c.ProjectStatusSlug); d != nil {
+		r := b.revisions[d.HeadRevisionID]
+		var st c.ProjectStatus
+		if json.Unmarshal([]byte(r.Content), &st) == nil {
+			at := r.CreatedAt
+			pg.Status, pg.StatusUpdatedAt = &st, &at
+		}
+	}
 	return pg
+}
+
+// writeDocLocked creates the project's document with slug, or adds a head
+// revision to it.
+func (b *Backend) writeDocLocked(p c.Principal, projectID, slug, title, mediaType, content, summary string) {
+	d := b.slugDocLocked(projectID, slug)
+	if d == nil {
+		pid := projectID
+		b.createDocLocked(p, &pid, title, slug, mediaType, content, summary)
+		return
+	}
+	now := b.now()
+	r := &c.DocumentRevision{RevisionID: c.NewID(c.PrefixRevision), DocumentID: d.DocumentID, Seq: d.HeadSeq + 1, ParentRevisionID: d.HeadRevisionID,
+		Digest: sha256Digest([]byte(content)), Size: int64(len(content)), Author: p, CreatedAt: now, Summary: summary, Content: content}
+	b.revisions[r.RevisionID] = r
+	d.HeadRevisionID, d.HeadSeq, d.UpdatedAt = r.RevisionID, r.Seq, now
+	b.emit(c.EvDocumentRevised, ref(c.KindDocumentRevision, r.RevisionID), "", d.ProjectID, withoutContent(*r))
 }
 
 func (b *Backend) SetProjectPage(ctx context.Context, req c.SetProjectPageRequest) (c.ProjectPage, error) {
 	return mutate(b, ctx, c.OpProjectsSetPage, req.Mutation, req, func(p c.Principal) (c.ProjectPage, error) {
-		if strings.TrimSpace(req.Content) == "" {
-			return c.ProjectPage{}, c.Errorf(c.ErrInvalid, "content is required")
+		hasContent := strings.TrimSpace(req.Content) != ""
+		if !hasContent && req.Status == nil {
+			return c.ProjectPage{}, c.Errorf(c.ErrInvalid, "content or status is required")
 		}
 		if len(req.Content) > c.ProjectPageMaxSize {
 			return c.ProjectPage{}, c.Errorf(c.ErrPayloadTooLarge, "the page is %d bytes; limit %d", len(req.Content), c.ProjectPageMaxSize)
+		}
+		var statusJSON []byte
+		if req.Status != nil {
+			var err error
+			if statusJSON, err = c.ValidateProjectStatus(req.Status); err != nil {
+				return c.ProjectPage{}, err
+			}
 		}
 		projectID, s, err := b.pageProjectLocked(p, strings.TrimSpace(req.ProjectID))
 		if err != nil {
@@ -251,25 +289,21 @@ func (b *Backend) SetProjectPage(ctx context.Context, req c.SetProjectPageReques
 		default:
 			return c.ProjectPage{}, c.Errorf(c.ErrForbidden, "only the owner or a top-level session in project %s writes its page", projectID)
 		}
-		d := b.pageDocLocked(projectID)
-		if req.BaseRevisionID != "" && (d == nil || d.HeadRevisionID != req.BaseRevisionID) {
-			head := ""
-			if d != nil {
-				head = d.HeadRevisionID
+		summary := strings.TrimSpace(req.Summary)
+		if hasContent {
+			d := b.pageDocLocked(projectID)
+			if req.BaseRevisionID != "" && (d == nil || d.HeadRevisionID != req.BaseRevisionID) {
+				head := ""
+				if d != nil {
+					head = d.HeadRevisionID
+				}
+				return c.ProjectPage{}, c.Errorf(c.ErrConflict, "the page head moved").WithDetail("current_head", head)
 			}
-			return c.ProjectPage{}, c.Errorf(c.ErrConflict, "the page head moved").WithDetail("current_head", head)
+			b.writeDocLocked(p, projectID, c.ProjectPageSlug, "Project page", "text/markdown", req.Content, summary)
 		}
-		if d == nil {
-			pid := projectID
-			b.createDocLocked(p, &pid, "Project page", c.ProjectPageSlug, "text/markdown", req.Content, strings.TrimSpace(req.Summary))
-			return b.pageLocked(projectID), nil
+		if statusJSON != nil {
+			b.writeDocLocked(p, projectID, c.ProjectStatusSlug, "Project status", "application/json", string(statusJSON), summary)
 		}
-		now := b.now()
-		r := &c.DocumentRevision{RevisionID: c.NewID(c.PrefixRevision), DocumentID: d.DocumentID, Seq: d.HeadSeq + 1, ParentRevisionID: d.HeadRevisionID,
-			Digest: sha256Digest([]byte(req.Content)), Size: int64(len(req.Content)), Author: p, CreatedAt: now, Summary: strings.TrimSpace(req.Summary), Content: req.Content}
-		b.revisions[r.RevisionID] = r
-		d.HeadRevisionID, d.HeadSeq, d.UpdatedAt = r.RevisionID, r.Seq, now
-		b.emit(c.EvDocumentRevised, ref(c.KindDocumentRevision, r.RevisionID), "", d.ProjectID, withoutContent(*r))
 		return b.pageLocked(projectID), nil
 	})
 }

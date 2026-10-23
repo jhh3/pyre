@@ -1,0 +1,34 @@
+ Pyre  [S Sessions 3] v sidenav · P Projects · M Machines · A Accounts                     cl 41%~!1   cx —!   ○ synced
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    ╭─ New session ────────────────────────────────────────────────────────────────────────────────────────────────╮
+    │                                                                                                              │
+    │   Machine    ● synth-linux  1/16 runs · cpu 7% · mem 40%    claude shell  auto                               │
+    │              ○ synth-mac    2/8 runs · cpu 18% · mem 63%    claude codex shell                               │
+    │ › Where      📁 ~/src/ap▏  on synth-linux                                                                    │
+    │              in ~/src on synth-linux  (~ is /home/demo)                                                      │
+    │                ✓ Use ~/src/ap  new folder, created first                                                     │
+    │              › api/                                                                                          │
+    │                apps/                                                                                         │
+    │                2 folders: api  apps                                                                          │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │                                                                                                              │
+    │   Agent      ○ Claude   ● Shell                                                                              │
+    │   Model      — a shell has no model                                                                          │
+    │   Effort     — a shell has no model                                                                          │
+    │   Workspace  ● main checkout   ○ fresh worktree   ○ new branch   auto                                        │
+    │   Account    — a shell needs no account                                                                      │
+    │   Prompt     optional first prompt (shift+enter: new line)                                                   │
+    │   Title      auto (named from the prompt)                                                                    │
+    │ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+    │ Shell on synth-linux · ~/src/ap (browsing) · folder                                                          │
+    │ enter on ✓ Use chooses the folder · ^s: use it and start · esc: back to the list    [ Start ^s ]  [ Cancel ] │
+    │                                                                                                              │
+    ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+ tab complete   ↑↓ move   → in   ← up   enter in / use   ^s use + start   esc back

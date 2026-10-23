@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/runfail"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
 
@@ -17,8 +18,18 @@ import (
 // count, title and summary are its member sessions. A session leaves every
 // group when it is archived or a later run of it goes live; the item is
 // withdrawn when its last member leaves.
+//
+// Every other owner-started run failure joins the item of its cause
+// (owner report 2026-10-17: 332 "Session run failed" items in two weeks,
+// 179 on one day): "failed:<project>:<cause>" (project "-" for a session
+// outside projects; runfail.CauseOf), so "12 sessions failed to start:
+// working folder missing" is one item. A session is in at most one failure
+// group: failing again for another cause moves it.
 
-const capacityPrefix = "capacity:"
+const (
+	capacityPrefix = "capacity:"
+	failedPrefix   = "failed:"
+)
 
 // capacityGroup is the group of owner-started launches that failed only for
 // lack of a provider account with capacity.
@@ -29,6 +40,26 @@ func capacityGroup(p contracts.Provider) string {
 	return capacityPrefix + string(p)
 }
 
+// failedGroup is the group of owner-started runs in a project (nil:
+// outside projects) that failed for one cause (a runfail.Cause key).
+func failedGroup(project *string, cause string) string {
+	p := "-"
+	if project != nil && *project != "" {
+		p = *project
+	}
+	return failedPrefix + p + ":" + cause
+}
+
+// groupCause is a failed group's cause key ("" for other groups).
+func groupCause(group string) string {
+	rest, ok := strings.CutPrefix(group, failedPrefix)
+	if !ok {
+		return ""
+	}
+	_, cause, _ := strings.Cut(rest, ":")
+	return cause
+}
+
 // maxGroupSummary bounds the session list of a grouped item (runes).
 const maxGroupSummary = 240
 
@@ -36,7 +67,9 @@ const maxGroupSummary = 240
 // labels (newest first).
 func renderGroup(group string, labels []string) (title, summary string) {
 	n := len(labels)
-	if strings.HasPrefix(group, capacityPrefix) {
+	lead, hint := "Waiting: ", ". Resume or retry after the reset; archive the ones you no longer need."
+	switch cause := groupCause(group); {
+	case strings.HasPrefix(group, capacityPrefix):
 		prov := providerLabel(contracts.Provider(strings.TrimPrefix(group, capacityPrefix)))
 		if prov == "Unknown-provider" {
 			prov = "Provider"
@@ -46,11 +79,14 @@ func renderGroup(group string, labels []string) (title, summary string) {
 			noun = "launch"
 		}
 		title = fmt.Sprintf("%s out of capacity: %d %s waiting for the reset", prov, n, noun)
-	} else {
+	case cause != "":
+		title = failedTitle(cause, labels)
+		lead, hint = "Sessions: ", ". "+runfail.CauseHint(cause)
+	default:
 		title = fmt.Sprintf("%d sessions", n)
 	}
 	var b strings.Builder
-	b.WriteString("Waiting: ")
+	b.WriteString(lead)
 	for i, l := range labels {
 		part := quoteTitle(l)
 		if i > 0 {
@@ -63,8 +99,30 @@ func renderGroup(group string, labels []string) (title, summary string) {
 		}
 		b.WriteString(part)
 	}
-	b.WriteString(". Resume or retry after the reset; archive the ones you no longer need.")
+	b.WriteString(hint)
 	return title, short(b.String(), maxGroupSummary+80)
+}
+
+// failedTitle is a failure group's title: "'<title>' failed to start:
+// working folder missing" for one session, "12 sessions failed to start:
+// working folder missing" / "5 sessions crashed: exit code 1" for more.
+func failedTitle(cause string, labels []string) string {
+	label := runfail.CauseLabel(cause)
+	verb := "failed"
+	switch {
+	case runfail.CauseLaunch(cause):
+		verb = "failed to start"
+	case strings.HasPrefix(label, "exit code "):
+		verb = "crashed"
+	}
+	who := fmt.Sprintf("%d sessions", len(labels))
+	if len(labels) == 1 {
+		who = quoteTitle(labels[0])
+	}
+	if label == "" {
+		return short(who+" "+verb, maxTitle)
+	}
+	return short(who+" "+verb+": "+label, maxTitle)
 }
 
 func memberLabelsTx(ctx context.Context, tx *sql.Tx, attentionID string) ([]string, error) {
@@ -85,12 +143,21 @@ func memberLabelsTx(ctx context.Context, tx *sql.Tx, attentionID string) ([]stri
 }
 
 // raiseMemberTx applies a raise with a member: the session joins the active
-// item of the group (created when there is none). A new member is new
-// activity (a read item reopens); a session already in the group only
-// refreshes its label.
+// item of the group (created when there is none) and leaves the other
+// groups it was in (it failed again, for another cause). A new member is
+// new activity (a read item reopens, without another push: the owner is
+// notified once per item); a session already in the group only refreshes
+// its label.
 func (s *Store) raiseMemberTx(ctx context.Context, tx *sql.Tx, ch change, cursor int64, now time.Time) (bool, error) {
 	active, err := activeByGroupTx(ctx, tx, ch.groupKey)
 	if err != nil {
+		return false, err
+	}
+	keep := ""
+	if len(active) > 0 {
+		keep = active[0].item.AttentionID
+	}
+	if _, err := s.leaveItemsTx(ctx, tx, ch.member, keep, time.Time{}, cursor, now); err != nil {
 		return false, err
 	}
 	var r itemRow
@@ -124,6 +191,10 @@ func (s *Store) raiseMemberTx(ctx context.Context, tx *sql.Tx, ch change, cursor
 		return false, err
 	}
 	r.item.Title, r.item.Summary = renderGroup(ch.groupKey, labels)
+	if len(labels) == 1 && ch.summary != "" {
+		// One session: its own reason in full (node, account, fix).
+		r.item.Summary = ch.summary
+	}
 	r.item.Count = len(labels)
 	r.cursor = cursor
 	if isNew {
@@ -139,7 +210,7 @@ func (s *Store) raiseMemberTx(ctx context.Context, tx *sql.Tx, ch change, cursor
 			r.item.DeepLink = contracts.DeepLink(ch.object)
 		}
 		if r.item.State == contracts.AttnRead {
-			if err := s.setStateTx(ctx, tx, &r, contracts.AttnOpen, nil, now, true); err != nil {
+			if err := s.setStateTx(ctx, tx, &r, contracts.AttnOpen, nil, now, false); err != nil {
 				return false, err
 			}
 		}
@@ -150,24 +221,33 @@ func (s *Store) raiseMemberTx(ctx context.Context, tx *sql.Tx, ch change, cursor
 	return true, s.emitTx(ctx, tx, r.item, now)
 }
 
-// leaveTx removes a session from every active grouped item. An item whose
-// last member left is withdrawn; the others shrink without moving in the
-// inbox (it is not new activity).
+// leaveTx removes a session from every active grouped item.
 func (s *Store) leaveTx(ctx context.Context, tx *sql.Tx, ch change, cursor int64, now time.Time) (bool, error) {
 	if ch.sessionID == "" {
 		return false, nil
 	}
-	ids, err := memberItemsTx(ctx, tx, ch.sessionID)
+	return s.leaveItemsTx(ctx, tx, ch.sessionID, "", ch.before, cursor, now)
+}
+
+// leaveItemsTx removes a session from its active grouped items except keep
+// (before: only memberships added at or before it). An item whose last
+// member left is withdrawn; the others shrink without moving in the inbox
+// (it is not new activity).
+func (s *Store) leaveItemsTx(ctx context.Context, tx *sql.Tx, sessionID, keep string, before time.Time, cursor int64, now time.Time) (bool, error) {
+	ids, err := memberItemsTx(ctx, tx, sessionID)
 	if err != nil || len(ids) == 0 {
 		return false, err
 	}
 	changed := false
 	for _, id := range ids {
-		q, args := `DELETE FROM attention_members WHERE attention_id=? AND session_id=?`, []any{id, ch.sessionID}
-		if !ch.before.IsZero() {
+		if id == keep {
+			continue
+		}
+		q, args := `DELETE FROM attention_members WHERE attention_id=? AND session_id=?`, []any{id, sessionID}
+		if !before.IsZero() {
 			// A sweep decided on older state: a session that joined again
 			// since stays.
-			q, args = q+` AND added_at<=?`, append(args, sqlitex.FormatTime(ch.before))
+			q, args = q+` AND added_at<=?`, append(args, sqlitex.FormatTime(before))
 		}
 		res, err := tx.ExecContext(ctx, q, args...)
 		if err != nil {
@@ -193,6 +273,9 @@ func (s *Store) leaveTx(ctx context.Context, tx *sql.Tx, ch change, cursor int64
 			r.item.UpdatedAt = now
 			r.item.Count = 0
 			r.item.Summary = "No launches are waiting any more."
+			if groupCause(r.item.GroupKey) != "" {
+				r.item.Summary = "None of these sessions needs you any more."
+			}
 		} else {
 			r.item.Title, r.item.Summary = renderGroup(r.item.GroupKey, labels)
 			r.item.Count = len(labels)

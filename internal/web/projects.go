@@ -15,6 +15,74 @@ import (
 	c "github.com/jhh3/pyre/internal/contracts"
 )
 
+// StatusStaleAfter: a project with working sessions whose lead has not
+// updated the page or status card for this long shows as stale.
+const StatusStaleAfter = 30 * time.Minute
+
+// StuckAfter: a working session with no activity for this long shows as
+// stuck.
+const StuckAfter = 20 * time.Minute
+
+// leadUpdatedAt is the latest of the page's and the status card's writes.
+func leadUpdatedAt(p c.ProjectPage) *time.Time {
+	t := pageTime(p)
+	if u := p.StatusUpdatedAt; u != nil && (t == nil || u.After(*t)) {
+		t = u
+	}
+	return t
+}
+
+// isStale: work is running (sessions starting or working, including
+// working ones with no recent activity) and the lead's last update of the
+// page or card is older than StatusStaleAfter. A project whose lead never
+// wrote either is not stale (the page says it is unwritten).
+func isStale(p c.ProjectPage, working int, now time.Time) bool {
+	t := leadUpdatedAt(p)
+	return working > 0 && t != nil && now.Sub(*t) > StatusStaleAfter
+}
+
+// statusCard builds the project view's status card from the page and the
+// project's sessions.
+func statusCard(pg c.ProjectPage, views []c.SessionView, now time.Time) StatusCard {
+	sc := StatusCard{Lead: pg.Status, UpdatedAt: leadUpdatedAt(pg), StaleAfterMinutes: int(StatusStaleAfter / time.Minute),
+		Working: []SessionCard{}, NeedsYou: []SessionCard{}, Idle: []SessionCard{}, Stuck: []SessionCard{}}
+	at := map[string]time.Time{}
+	for _, v := range views {
+		card := sessionCard(v)
+		a := activeAt(v)
+		at[card.ID] = a
+		switch card.State {
+		case StateWorking:
+			if now.Sub(a) > StuckAfter {
+				sc.Stuck = append(sc.Stuck, card)
+			} else {
+				sc.Working = append(sc.Working, card)
+			}
+		case StateStarting:
+			sc.Working = append(sc.Working, card)
+		case StateNeedsYou:
+			sc.NeedsYou = append(sc.NeedsYou, card)
+		case StateIdle:
+			if !card.IsLead {
+				sc.Idle = append(sc.Idle, card)
+			}
+		case StateFailed:
+			sc.Stuck = append(sc.Stuck, card)
+		}
+	}
+	for _, l := range [][]SessionCard{sc.Working, sc.NeedsYou, sc.Idle, sc.Stuck} {
+		sortCards(l, at)
+	}
+	running := len(sc.Working)
+	for _, s := range sc.Stuck {
+		if s.State == StateWorking {
+			running++
+		}
+	}
+	sc.Stale = isStale(pg, running, now)
+	return sc
+}
+
 // pageTime is when a project page was last written (nil: no page).
 func pageTime(p c.ProjectPage) *time.Time {
 	if p.Revision != nil && !p.Revision.CreatedAt.IsZero() {
@@ -90,6 +158,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		waiting  bool
 		openAsks int
 		live     int
+		working  int
 		last     time.Time
 	}
 	by := map[string]*agg{}
@@ -115,7 +184,10 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		case StateNeedsYou:
 			g.waiting = true
 			g.live++
-		case StateWorking, StateIdle, StateStarting:
+		case StateWorking, StateStarting:
+			g.live++
+			g.working++
+		case StateIdle:
 			g.live++
 		}
 		if isLead(v) {
@@ -149,6 +221,13 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 			if card.PageUpdatedAt != nil {
 				later(g, *card.PageUpdatedAt)
 			}
+			if st := pg.Status; st != nil {
+				card.Progress, card.Phase = st.Progress, st.Phase
+			}
+			if u := pg.StatusUpdatedAt; u != nil {
+				later(g, *u)
+			}
+			card.Stale = isStale(pg, g.working, sn.now)
 		}
 		card.LastActivityAt = g.last
 		card.LiveSessions = g.live
@@ -180,11 +259,13 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		page             c.ProjectPage
 		asks             []c.Ask
 		arts             []c.Artifact
+		grants           []c.StandingGrant
 		sn               *snap
 		pErr, sErr, aErr error
 		artErr, pageErr  error
+		grantErr         error
 	)
-	wg.Add(5)
+	wg.Add(6)
 	go func() { defer wg.Done(); proj, pErr = s.api.GetProject(ctx, c.GetRequest{ID: id}) }()
 	go func() { defer wg.Done(); page, pageErr = s.getPage(ctx, id) }()
 	go func() { defer wg.Done(); sn, sErr = s.loadSnap(ctx, need{projects: true}) }()
@@ -204,13 +285,27 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() {
 		defer wg.Done()
+		api, ok := s.grantsAPI()
+		if !ok {
+			return
+		}
+		pid := id
+		var resp c.ListGrantsResponse
+		resp, grantErr = api.ListGrants(ctx, c.ListGrantsRequest{ProjectID: &pid})
+		grants = resp.Grants
+		if c.IsCode(grantErr, c.ErrUnsupported) {
+			grants, grantErr = nil, nil
+		}
+	}()
+	go func() {
+		defer wg.Done()
 		pid := id
 		arts, artErr = all(ctx, func(ctx context.Context, cur string) (c.Page[c.Artifact], error) {
 			return s.api.ListArtifacts(ctx, c.ListArtifactsRequest{PageRequest: c.PageRequest{Cursor: cur, Limit: pageLimit}, ProjectID: &pid})
 		})
 	}()
 	wg.Wait()
-	for _, err := range []error{pErr, sErr, aErr, artErr, pageErr} {
+	for _, err := range []error{pErr, sErr, aErr, artErr, pageErr, grantErr} {
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -222,14 +317,17 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 
 	at := map[string]time.Time{}
 	sessions := []SessionCard{}
+	var views []c.SessionView
 	for _, v := range sn.active {
 		if v.Session.ProjectID != nil && *v.Session.ProjectID == id {
 			card := sessionCard(v)
 			at[card.ID] = activeAt(v)
 			sessions = append(sessions, card)
+			views = append(views, v)
 		}
 	}
 	sortCards(sessions, at)
+	status := statusCard(page, views, sn.now)
 
 	var open, decided []c.Ask
 	for _, a := range asks {
@@ -254,7 +352,10 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	for _, a := range arts {
 		artifacts = append(artifacts, ArtifactRef{ID: a.ArtifactID, Title: a.Title, URL: "/api/artifacts/" + url.PathEscape(a.ArtifactID) + "/content", UpdatedAt: a.UpdatedAt})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"project": proj, "page": page, "sessions": sessions, "asks": outAsks, "artifacts": artifacts})
+	if grants == nil {
+		grants = []c.StandingGrant{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": proj, "page": page, "sessions": sessions, "asks": outAsks, "artifacts": artifacts, "grants": grants, "status": status})
 }
 
 // artifactCSP: published files are served inert (no scripts, no
@@ -293,4 +394,30 @@ func (s *Server) handleArtifactContent(w http.ResponseWriter, r *http.Request) {
 		h.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": name}))
 	}
 	_, _ = io.Copy(w, rc)
+}
+
+// handleRevokeGrant revokes a standing grant (the project page's Revoke).
+func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason      string `json:"reason,omitempty"`
+		OperationID string `json:"operation_id,omitempty"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	api, ok := s.grantsAPI()
+	if !ok {
+		writeErr(w, c.Errorf(c.ErrUnsupported, "This hub has no standing grants."))
+		return
+	}
+	ctx, cancel := hubCtx(r)
+	defer cancel()
+	g, err := api.RevokeGrant(ctx, c.RevokeGrantRequest{Mutation: c.Mutation{OperationID: opID(body.OperationID)}, GrantID: r.PathValue("grant_id"),
+		Reason: strings.TrimSpace(body.Reason)})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"grant": g})
 }

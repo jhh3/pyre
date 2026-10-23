@@ -33,7 +33,7 @@ type runOpts struct {
 	maxRuns                                                     int
 	devMock, noIntegrations, noDoorbell                         bool
 	trustDirs                                                   []string
-	worktreeRoot                                                string
+	worktreeRoot, runTmpRoot                                    string
 	rotaCheckout                                                bool
 	rotaIndependent                                             string
 	rotaHome                                                    string
@@ -86,7 +86,8 @@ func runFlags(o *runOpts) *flag.FlagSet {
 		o.trustDirs = append(o.trustDirs, v)
 		return nil
 	})
-	fs.StringVar(&o.worktreeRoot, "worktree-root", "", "directory for new Pyre worktrees (<dir>/<repo>/<branch>); default next to the repo as <repo>-worktrees")
+	fs.StringVar(&o.worktreeRoot, "worktree-root", "~/worktrees", "directory for new Pyre worktrees (<dir>/<repo>/<branch>), exported to runs as PYRE_WORKTREE_ROOT; \"\" puts them next to the repo as <repo>-worktrees")
+	fs.StringVar(&o.runTmpRoot, "run-tmp-root", "", "directory for each run's TMPDIR (<dir>/<run_id>, removed after the run is done); default <state>/tmp/runs; \"none\" keeps the inherited TMPDIR")
 	fs.Func("tool-path", "extra directory to search for tmux/claude/codex/node (repeatable; also PYRE_TOOL_PATH)", func(v string) error {
 		o.toolPaths = append(o.toolPaths, v)
 		return nil
@@ -110,6 +111,13 @@ func runFlags(o *runOpts) *flag.FlagSet {
 }
 
 func runDaemon(o runOpts) error {
+	// A pyred started from inside a session (an agent restarting it) must
+	// not carry that session's identity into everything it spawns: tmux
+	// servers and helpers would look like the session's leftovers to its
+	// cleanup, and its token would outlive the session (W-lifecycle).
+	for _, k := range []string{"PYRE_SESSION_ID", "PYRE_RUN_ID", "PYRE_SESSION_TOKEN", "PYRE_PARENT_SESSION_ID", "PYRE_HARNESS"} {
+		_ = os.Unsetenv(k)
+	}
 	if !daemon.ValidPermissions(o.permissions) {
 		return fmt.Errorf("--permissions %q: want ask or bypass", o.permissions)
 	}
@@ -173,8 +181,8 @@ func runDaemon(o runOpts) error {
 	}
 
 	cfg := daemon.Config{StateDir: o.state, DB: db, NodeID: nodeID, NodeName: o.name, SSHAlias: o.sshAlias,
-		MaxRuns: o.maxRuns, OwnerToken: ownerToken, Logger: logger, ReadCacheQueue: o.readCacheQueue, Permissions: o.permissions,
-		WorktreeRoot: o.worktreeRoot}
+		MaxRuns: o.maxRuns, OwnerToken: ownerToken, NodeToken: nodeToken, Logger: logger, ReadCacheQueue: o.readCacheQueue, Permissions: o.permissions,
+		WorktreeRoot: o.worktreeRoot, RunTmpRoot: o.runTmpRoot}
 	cfg.RepoIndex = repoIndexConfig() // W-quicklaunch
 	if o.permissions == daemon.PermissionsBypass {
 		logger.Warn("permissions bypass: Pyre-launched runs on this node execute without approval prompts or sandbox (--permissions bypass)")
@@ -206,6 +214,7 @@ func runDaemon(o runOpts) error {
 		return err
 	}
 	cfg.Adapters = built.list
+	cfg.ExecAdapters = built.exec
 	// Agent tools are core, independent of integrations: the absolute CLI
 	// path goes into the guide and PYRE_CLI, and Claude and Codex get `pyre mcp`.
 	cli := findPyreCLI()
@@ -214,8 +223,9 @@ func runDaemon(o runOpts) error {
 		cfg.AgentMCP = []string{cli, "mcp"}
 	}
 	cfg.AgentGuide = func(h contracts.Harness, _ contracts.Session) string {
-		// Claude gets `pyre mcp` via --mcp-config; Codex via per-thread config.
-		return agentguide.Text(agentguide.Options{CLI: cli, MCP: cli != "" && h != contracts.HarnessShell})
+		// Claude gets `pyre mcp` via --mcp-config, Codex via per-thread
+		// config, agy via its workspace mcp_config.json.
+		return agentguide.Text(agentguide.Options{CLI: cli, MCP: cli != "" && h != contracts.HarnessShell, Harness: string(h)})
 	}
 	var integ *integrations
 	if !o.noIntegrations {
@@ -249,6 +259,7 @@ func runDaemon(o runOpts) error {
 		}
 		link, err = transport.NewNodeLink(transport.NodeLinkConfig{HubURL: hubURL, NodeID: cred.NodeID, Token: nodeToken, TLS: tlsCfg, DB: db,
 			Clock: clock, Logger: logger.With("component", "nodelink"), Hello: d.Hello, Handler: transport.CommandHandlerFunc(d.HandleCommand),
+			RecoverCommand:   d.RecoverCommand,
 			CommandRetention: o.devCommandRetention,
 			OnStateChange: func(s transport.LinkStatus) {
 				d.SetHubLink(s.State == transport.LinkConnected)

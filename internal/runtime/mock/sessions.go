@@ -41,8 +41,41 @@ func (b *Backend) viewLocked(s *c.Session) c.SessionView {
 		}
 		mine = append(mine, *a)
 	}
+	// The hub's order (attention.SessionAttentionRun: updated_at DESC,
+	// attention_id DESC): ComputeRun keeps the first of equally ranked,
+	// equally recent items, and map order would pick one at random.
+	sort.Slice(mine, func(i, j int) bool {
+		if !mine[i].UpdatedAt.Equal(mine[j].UpdatedAt) {
+			return mine[i].UpdatedAt.After(mine[j].UpdatedAt)
+		}
+		return mine[i].AttentionID > mine[j].AttentionID
+	})
 	v.Flag = sessionflag.WithRun(sessionflag.ComputeRun(mine, v.Run), v.Run)
+	v.Monitor = s.IsMonitor()
+	v.Monitors = b.liveMonitorsLocked(s.SessionID)
 	return v
+}
+
+// liveMonitorsLocked mirrors the hub: the unarchived monitors with a live
+// run that wake id, oldest first.
+func (b *Backend) liveMonitorsLocked(id string) []c.MonitorRef {
+	var ms []*c.Session
+	for _, m := range b.sessions {
+		if r, ok := b.runs[m.CurrentRunID]; ok && !m.Archived && c.MonitorLive(r.State) && m.MonitorTarget() == id {
+			ms = append(ms, m)
+		}
+	}
+	sort.Slice(ms, func(i, j int) bool {
+		if !ms[i].CreatedAt.Equal(ms[j].CreatedAt) {
+			return ms[i].CreatedAt.Before(ms[j].CreatedAt)
+		}
+		return ms[i].SessionID < ms[j].SessionID
+	})
+	var out []c.MonitorRef
+	for _, m := range ms {
+		out = append(out, c.MonitorRef{SessionID: m.SessionID, Title: m.Title, State: b.runs[m.CurrentRunID].State})
+	}
+	return out
 }
 
 func (b *Backend) currentRun(sessionID string) *c.Run {
@@ -59,6 +92,9 @@ func (b *Backend) ListSessions(ctx context.Context, req c.ListSessionsRequest) (
 		q := strings.ToLower(req.Query)
 		for _, s := range b.sessions {
 			if s.Archived && !req.IncludeArchived {
+				continue
+			}
+			if !req.IncludeMonitors && req.Harness != c.HarnessShell && s.IsMonitor() {
 				continue
 			}
 			if req.Harness != "" && s.Harness != req.Harness {
@@ -184,7 +220,7 @@ func harnessAvailable(n *c.Node, h c.Harness) bool {
 
 func validHarness(h c.Harness) bool {
 	switch h {
-	case c.HarnessClaude, c.HarnessCodex, c.HarnessShell, c.HarnessMock:
+	case c.HarnessClaude, c.HarnessCodex, c.HarnessAgy, c.HarnessShell, c.HarnessMock:
 		return true
 	}
 	return false
@@ -296,7 +332,13 @@ func (b *Backend) chooseAccount(h c.Harness, pol c.AccountPolicy) (string, strin
 
 func (b *Backend) StartSession(ctx context.Context, req c.StartSessionRequest) (c.StartSessionResponse, error) {
 	return mutate(b, ctx, c.OpStartSession, req.Mutation, req, func(p c.Principal) (c.StartSessionResponse, error) {
-		if err := requireNotNode(p); err != nil {
+		byNode := c.NodeStarter(p)
+		if byNode {
+			// A node starts only a headless pyre run on itself (tags forced).
+			if err := c.CheckNodeStart(p, &req); err != nil {
+				return c.StartSessionResponse{}, err
+			}
+		} else if err := requireNotNode(p); err != nil {
 			return c.StartSessionResponse{}, err
 		}
 		if !validHarness(req.Harness) {
@@ -360,6 +402,13 @@ func (b *Backend) StartSession(ctx context.Context, req c.StartSessionRequest) (
 		s := &c.Session{
 			SessionID: c.NewID(c.PrefixSession), Harness: req.Harness, Title: title, ProjectID: cloneStrPtr(req.ProjectID),
 			CreatedBy: p, CreatedAt: now, Tags: autotitle.LaunchTags(p, req.Title, req.Harness, append([]string(nil), req.Tags...)),
+		}
+		if byNode {
+			auto := slices.Contains(s.Tags, autotitle.TagAuto)
+			s.Tags = append([]string(nil), c.NodeStartTags...)
+			if auto {
+				s.Tags = append(s.Tags, autotitle.TagAuto)
+			}
 		}
 		s.Lineage.ParentSessionID = req.ParentSessionID
 		if p.Kind == c.PrincipalSession && s.Lineage.ParentSessionID == "" {
@@ -680,7 +729,13 @@ func (b *Backend) UpdateSession(ctx context.Context, req c.UpdateSessionRequest)
 			}
 		}
 		if req.Archived != nil && p.Kind == c.PrincipalSession && p.ID != s.SessionID && !s.StartedBy(p.ID) { // W-childnotify
-			return c.SessionView{}, c.Errorf(c.ErrForbidden, "an agent may archive only its own session and the sessions it started")
+			if !*req.Archived {
+				return c.SessionView{}, c.Errorf(c.ErrForbidden, "an agent may unarchive only its own session and the sessions it started")
+			}
+			// The hub files this for the owner's approval (owner actions);
+			// the mock files nothing.
+			return c.SessionView{}, c.Errorf(c.ErrApprovalRequested, "needs the owner's approval (the mock backend files no approvals)").
+				WithDetail("status", "filed")
 		}
 		var icon *string
 		if req.Icon != nil { // W-archive2

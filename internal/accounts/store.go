@@ -25,7 +25,88 @@ func Migrations() []sqlitex.Migration {
 		Version:   3,
 		Name:      "token_fallback_and_aliases",
 		SQL:       tokenMergeMigration(), // tokenmerge.go
+	}, {
+		Namespace: "accounts",
+		Version:   4,
+		Name:      "assignment_pinned",
+		// pinned: the starter named this account strictly (AccountPolicy.Strict);
+		// the rebalancer never moves such a run (rebalance.go).
+		// Runs from before the upgrade may have been strict pins: never move
+		// any of them.
+		SQL: `ALTER TABLE accounts_assignment ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+UPDATE accounts_assignment SET pinned=1 WHERE released_at='';`,
+	}, {
+		Namespace: "accounts",
+		Version:   5,
+		Name:      "assignment_named",
+		// named: the starter chose this account (an explicit account, strict
+		// or not, or the policy's Prefer list); the rebalancer never moves
+		// such a run off a reserve account (reserve.go). Runs from before
+		// the upgrade are backfilled from what their row says: a strict pin,
+		// or a reason the selector words for an explicit or preferred
+		// account (successors bound by a fallback read "explicit account"
+		// too, which errs on the side of staying). Every other active run,
+		// e.g. one the selector put on an account the owner now reserves,
+		// may drain.
+		SQL: `ALTER TABLE accounts_assignment ADD COLUMN named INTEGER NOT NULL DEFAULT 0;
+UPDATE accounts_assignment SET named=1 WHERE released_at='' AND
+	(pinned=1 OR reason LIKE 'explicit account%' OR reason LIKE 'preferred account (%');`,
 	}}
+}
+
+// markNamed records that the starter chose a run's account.
+func markNamed(ctx context.Context, q querier, assignmentID string) error {
+	_, err := q.ExecContext(ctx, `UPDATE accounts_assignment SET named=1 WHERE assignment_id=?`, assignmentID)
+	return err
+}
+
+// markPinned records a strict explicit pin on a run's assignment.
+func markPinned(ctx context.Context, q querier, assignmentID string) error {
+	_, err := q.ExecContext(ctx, `UPDATE accounts_assignment SET pinned=1 WHERE assignment_id=?`, assignmentID)
+	return err
+}
+
+// carryPinned gives a successor run the pinned flag of the run it replaced
+// (successors bind strictly to the planner's choice; that is not a pin),
+// and its named flag when the successor stayed on the same account (the
+// starter named that account, not the one a fallback moved it to).
+func carryPinned(ctx context.Context, q querier, fromRunID, toRunID string) error {
+	if toRunID == "" {
+		return nil
+	}
+	_, err := q.ExecContext(ctx, `UPDATE accounts_assignment SET
+		pinned=COALESCE((SELECT p.pinned FROM accounts_assignment p WHERE p.run_id=?),0),
+		named=COALESCE((SELECT p.named FROM accounts_assignment p WHERE p.run_id=? AND p.account_id=accounts_assignment.account_id),0)
+		WHERE run_id=?`, fromRunID, fromRunID, toRunID)
+	return err
+}
+
+// staleClaims lists proactive-move claims planned before cutoff.
+func staleClaims(ctx context.Context, q querier, cutoff time.Time) ([]contracts.FallbackPlan, error) {
+	rows, err := q.QueryContext(ctx, `SELECT body FROM accounts_fallback WHERE planned_at < ? AND json_extract(body,'$.outcome')=?`, ft(cutoff), string(outcomePending))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []contracts.FallbackPlan
+	for rows.Next() {
+		var body string
+		var p contracts.FallbackPlan
+		if rows.Scan(&body) == nil && json.Unmarshal([]byte(body), &p) == nil {
+			out = append(out, p)
+		}
+	}
+	return out, rows.Err()
+}
+
+// failedMoveSince: the session's latest recorded failed proactive move at
+// or after since (so the suppression survives a restart).
+func failedMoveSince(ctx context.Context, q querier, sessionID string, since time.Time) bool {
+	var n int
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts_fallback WHERE session_id=? AND planned_at >= ?
+		AND COALESCE(json_extract(body,'$.reason'),'') LIKE ? AND COALESCE(json_extract(body,'$.reason'),'') LIKE '%failed%'`,
+		sessionID, ft(since), ProactivePrefix+"%").Scan(&n)
+	return err == nil && n > 0
 }
 
 func v1Migration() sqlitex.Migration {
@@ -527,8 +608,8 @@ func getFallback(ctx context.Context, q querier, fromRunID string) (*contracts.F
 // sessionID) the whole node, and returns the latest one's time.
 func countSwitches(ctx context.Context, q querier, sessionID string, since time.Time) (int, time.Time, error) {
 	query := `SELECT COUNT(*), COALESCE(MAX(planned_at),'') FROM accounts_fallback
-		WHERE planned_at >= ? AND json_extract(body,'$.outcome') IN (?,?)`
-	args := []any{ft(since), string(contracts.FallbackNativeResume), string(contracts.FallbackHandoff)}
+		WHERE planned_at >= ? AND json_extract(body,'$.outcome') IN (?,?) AND COALESCE(json_extract(body,'$.reason'),'') NOT LIKE ?`
+	args := []any{ft(since), string(contracts.FallbackNativeResume), string(contracts.FallbackHandoff), ProactivePrefix + "%"}
 	if sessionID != "" {
 		query += ` AND session_id=?`
 		args = append(args, sessionID)
@@ -545,8 +626,8 @@ func countSwitches(ctx context.Context, q querier, sessionID string, since time.
 // sessions away from since the given time.
 func switchedFromAccounts(ctx context.Context, q querier, since time.Time) (map[string]bool, error) {
 	rows, err := q.QueryContext(ctx, `SELECT DISTINCT COALESCE(json_extract(body,'$.from_account_id'),'') FROM accounts_fallback
-		WHERE planned_at >= ? AND json_extract(body,'$.outcome') IN (?,?)`,
-		ft(since), string(contracts.FallbackNativeResume), string(contracts.FallbackHandoff))
+		WHERE planned_at >= ? AND json_extract(body,'$.outcome') IN (?,?) AND COALESCE(json_extract(body,'$.reason'),'') NOT LIKE ?`,
+		ft(since), string(contracts.FallbackNativeResume), string(contracts.FallbackHandoff), ProactivePrefix+"%")
 	if err != nil {
 		return nil, err
 	}
@@ -560,6 +641,31 @@ func switchedFromAccounts(ctx context.Context, q querier, since time.Time) (map[
 		out[id] = true
 	}
 	return out, rows.Err()
+}
+
+// setFallback writes a run's fallback plan, replacing a proactive claim.
+func setFallback(ctx context.Context, q querier, p contracts.FallbackPlan) error {
+	b, _ := json.Marshal(p)
+	_, err := q.ExecContext(ctx, `INSERT INTO accounts_fallback(from_run_id,session_id,planned_at,body) VALUES(?,?,?,?)
+		ON CONFLICT(from_run_id) DO UPDATE SET planned_at=excluded.planned_at, body=excluded.body`, p.FromRunID, p.SessionID, ft(p.PlannedAt), string(b))
+	return err
+}
+
+func deleteFallback(ctx context.Context, q querier, fromRunID string) error {
+	_, err := q.ExecContext(ctx, `DELETE FROM accounts_fallback WHERE from_run_id=?`, fromRunID)
+	return err
+}
+
+// lastProactive is the time of the session's latest proactive move (zero
+// when none since).
+func lastProactive(ctx context.Context, q querier, sessionID string, since time.Time) (time.Time, error) {
+	var last string
+	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(planned_at),'') FROM accounts_fallback
+		WHERE session_id=? AND planned_at >= ? AND COALESCE(json_extract(body,'$.reason'),'') LIKE ?`, sessionID, ft(since), ProactivePrefix+"%").Scan(&last)
+	if err != nil || last == "" {
+		return time.Time{}, err
+	}
+	return pt(last), nil
 }
 
 func putFallback(ctx context.Context, q querier, p contracts.FallbackPlan) error {

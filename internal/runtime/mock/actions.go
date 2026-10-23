@@ -387,6 +387,9 @@ func (b *Backend) runAction(p c.Principal, n *c.Node, action string, params c.Ra
 		if err := decodeParams(params, &dp); err != nil {
 			return nil, err
 		}
+		if t := b.dirTree(n.NodeID); t != nil {
+			return t.list(n.NodeID, b.mockMadeDirs, dp)
+		}
 		base := dp.Path
 		if base == "" {
 			base = "/home/synth"

@@ -22,7 +22,7 @@ const (
 var knownKinds = []contracts.AttentionKind{
 	contracts.AttnApproval, contracts.AttnQuestion, contracts.AttnFailure, contracts.AttnAccountPool,
 	contracts.AttnReviewReady, contracts.AttnMessage, contracts.AttnIndeterminate, contracts.AttnConflict,
-	contracts.AttnComment, contracts.AttnUpdate, contracts.AttnNode, contracts.AttnAsk, contracts.AttnWaiting,
+	contracts.AttnComment, contracts.AttnUpdate, contracts.AttnNode, contracts.AttnAsk, contracts.AttnWaiting, contracts.AttnGrantFYI,
 }
 
 // ValidatePrefs checks preferences, returning an ErrInvalid *contracts.Error.
@@ -115,6 +115,9 @@ func Evaluate(p contracts.NotificationPrefs, it contracts.AttentionItem, now tim
 	if enabled, ok := p.Kinds[it.Kind]; ok && !enabled {
 		return StateDisabled, "push disabled for " + string(it.Kind)
 	}
+	if enabled := p.Kinds[it.Kind]; it.Kind == contracts.AttnGrantFYI && !enabled {
+		return StateDisabled, "informational (no push unless enabled for " + string(it.Kind) + ")"
+	}
 	if it.ProjectID != nil && slices.Contains(p.MutedProjects, *it.ProjectID) {
 		return StateDisabled, "project muted"
 	}
@@ -158,14 +161,16 @@ func GenericTitle(k contracts.AttentionKind) string {
 		return "Pyre: a decision is waiting"
 	case contracts.AttnWaiting:
 		return "Pyre: a lead is waiting on you"
+	case contracts.AttnGrantFYI:
+		return "Pyre: a standing go-ahead was used"
 	}
 	return "Pyre: needs attention"
 }
 
 // RepeatWindow is the minimum time between pushes for one group of kind k
-// (0: no limit). A "waiting" item is one per session and reopens at each
-// turn that ends with a question, so it pushes at most once per session
-// per hour; the item itself always updates.
+// (0: no limit). A session raises a "waiting" item (group per session)
+// at each turn that ends with a new question, so it pushes at most once
+// per session per hour; the item itself is always raised.
 func RepeatWindow(k contracts.AttentionKind) time.Duration {
 	if k == contracts.AttnWaiting {
 		return time.Hour

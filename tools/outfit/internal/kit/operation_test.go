@@ -1,6 +1,10 @@
 package kit
 
-import "testing"
+import (
+	"encoding/json"
+	"math"
+	"testing"
+)
 
 func TestEffectiveInputCompilesTemplatesAndPreservesExplicitTypes(t *testing.T) {
 	operation := Operation{
@@ -90,5 +94,21 @@ func TestAuditOperationSchemaRejectsInvalidEnums(t *testing.T) {
 	issues := AuditOperationSchema(operation)
 	if len(issues) != 3 {
 		t.Fatalf("schema issues = %v", issues)
+	}
+}
+
+func TestSchemaIntegerAcceptsWholeJSONNumbers(t *testing.T) {
+	for _, value := range []any{10, int64(10), uint8(3), 10.0, float32(2), json.Number("25"), json.Number("1e2")} {
+		if !schemaValueMatches("integer", value) {
+			t.Errorf("integer rejected %#v (%T)", value, value)
+		}
+	}
+	for _, value := range []any{1.5, json.Number("2.5"), math.NaN(), math.Inf(1), "10", true} {
+		if schemaValueMatches("integer", value) {
+			t.Errorf("integer accepted %#v (%T)", value, value)
+		}
+	}
+	if !schemaValueMatches("number", json.Number("1.5")) || schemaValueMatches("number", json.Number("x")) {
+		t.Error("number check mishandles json.Number")
 	}
 }

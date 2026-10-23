@@ -43,6 +43,7 @@ func (h *Hub) RunMaintenance(ctx context.Context) error {
 	if err := h.notifyStuckMail(ctx); err != nil { // stuckmail.go (W-stuckmail)
 		errs = append(errs, err)
 	}
+	h.deliverIssueNotices(ctx)                 // issues.go: triage notices not sent yet
 	if err := h.resolveAsks(ctx); err != nil { // asks.go: deadlines, unsent ask mail (W-asks)
 		errs = append(errs, err)
 	}
@@ -51,6 +52,13 @@ func (h *Hub) RunMaintenance(ctx context.Context) error {
 	}
 	if err := h.backfillMessageSummaries(ctx); err != nil { // attention_sweep.go: once per process
 		errs = append(errs, err)
+	}
+	if !h.askMailAcked.Load() { // asks.go: mail of asks closed before close acknowledged it; once per process
+		if done, err := h.ackClosedAskMail(ctx); err != nil {
+			errs = append(errs, err)
+		} else if done {
+			h.askMailAcked.Store(true)
+		}
 	}
 	rows, err := h.db.QueryContext(ctx, `SELECT DISTINCT node_id FROM commands WHERE state=?`, cmdQueued)
 	if err != nil {

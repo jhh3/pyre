@@ -10,7 +10,8 @@ package accounts
 //
 //  1. Policy preference (Prefer list).
 //  2. Affinity tier, only for accounts below the near-limit threshold
-//     (usage.NearPercent, 80 %, on the 5-hour and the weekly window):
+//     (usage.NearPercent, 80 %, on the 5-hour window; HomeWeeklyPercent,
+//     70 %, on the weekly window):
 //     tierHome   this machine's home account (the one it is using now, else
 //     the one it used last), unless another machine was on it first;
 //     tierFree   not in use by runs on any other machine;
@@ -72,6 +73,8 @@ type fleetUse struct {
 	// since: account -> other node -> its earliest active assignment.
 	since map[string]map[string]time.Time
 	names map[string]string // node id -> name
+	// tiers: every listed account's tier (reserve.go); "" is normal.
+	tiers map[string]contracts.AccountTier
 }
 
 type fleetCache struct {
@@ -109,7 +112,7 @@ func (s *Service) fleetView(ctx context.Context) *fleetUse {
 }
 
 func (s *Service) fetchFleet(ctx context.Context) *fleetUse {
-	u := &fleetUse{since: map[string]map[string]time.Time{}, names: map[string]string{}}
+	u := &fleetUse{since: map[string]map[string]time.Time{}, names: map[string]string{}, tiers: map[string]contracts.AccountTier{}}
 	cur := ""
 	for i := 0; i < 20; i++ {
 		page, err := s.cfg.Fleet.ListAccounts(ctx, contracts.ListAccountsRequest{PageRequest: contracts.PageRequest{Cursor: cur, Limit: 200}})
@@ -117,6 +120,7 @@ func (s *Service) fetchFleet(ctx context.Context) *fleetUse {
 			return &fleetUse{why: "fleet view unavailable: " + redact(contracts.AsError(err).Message)}
 		}
 		for _, v := range page.Items {
+			u.tiers[v.Account.AccountID] = v.Account.Tier
 			for _, a := range v.Assignments {
 				if a.ReleasedAt != nil || a.AccountID == "" || a.NodeID == "" || a.NodeID == s.cfg.NodeID {
 					continue
@@ -180,13 +184,22 @@ func (c *candidate) tier() int {
 	return tierShared
 }
 
-// nearLimit: a reported 5-hour or weekly window at or above
-// usage.NearPercent, or no window reported at all.
+// nearNote says no account is below the near-limit thresholds.
+var nearNote = fmt.Sprintf("every eligible account is near a limit (5h from %.0f%%, weekly from %.0f%%)", usage.NearPercent, HomeWeeklyPercent)
+
+// HomeWeeklyPercent is the weekly used-percent from which a machine stops
+// preferring its home account: past it, new runs go to the account with the
+// most headroom (a home at 97 % weekly next to accounts at 4-36 % starved
+// them while its own week ran out and cut sessions off mid-step).
+const HomeWeeklyPercent = 70.0
+
+// nearLimit: a reported 5-hour window at or above usage.NearPercent, a
+// weekly window at or above HomeWeeklyPercent, or no window reported at all.
 func nearLimit(h usage.Headroom) bool {
 	if !h.FiveOK && !h.WeekOK {
 		return true
 	}
-	return h.FiveOK && h.FiveHour >= usage.NearPercent || h.WeekOK && h.Weekly >= usage.NearPercent
+	return h.FiveOK && h.FiveHour >= usage.NearPercent || h.WeekOK && h.Weekly >= HomeWeeklyPercent
 }
 
 // markAffinity sets home/others/senior/near/tie on candidates (inside the
@@ -247,6 +260,10 @@ func acctName(a contracts.Account) string {
 	return a.AccountID
 }
 
+// acctRef names an account unambiguously in agent-facing text:
+// `account "opus"` (a bare label such as "opus" reads as a model name).
+func acctRef(label string) string { return fmt.Sprintf("account %q", label) }
+
 func (s *Service) nodeName() string {
 	if s.cfg.NodeName != "" {
 		return s.cfg.NodeName
@@ -287,11 +304,11 @@ func (s *Service) explainAuto(c *candidate, list, all []*candidate) string {
 		if n := s.homeNote(c, list, all); n != "" {
 			parts = append(parts, n)
 		}
-		parts = append(parts, fmt.Sprintf("every eligible account below %.0f%% is in use on another machine; shared with %s (fewest other machines, %s)",
-			usage.NearPercent, c.otherNames(), nums))
+		parts = append(parts, fmt.Sprintf("every eligible account with room is in use on another machine; shared with %s (fewest other machines, %s)",
+			c.otherNames(), nums))
 	default:
 		if c.fleetOK() && c.near {
-			parts = append(parts, fmt.Sprintf("no eligible account below %.0f%%", usage.NearPercent))
+			parts = append(parts, nearNote)
 		}
 		parts = append(parts, usage.Explain(c.room, len(list)))
 		if c.fleetOK() && len(c.others) > 0 {
@@ -321,6 +338,8 @@ func (s *Service) homeNote(c *candidate, list, all []*candidate) string {
 	}
 	name := acctName(h.acct)
 	switch {
+	case !inList && reserveHomeNote(c, list, all) != "":
+		return reserveHomeNote(c, list, all)
 	case !inList:
 		return "home account " + name + " is not available now"
 	case h.near:

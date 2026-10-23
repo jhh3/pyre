@@ -1,13 +1,15 @@
-import { ArrowUpRight, ChevronLeft, ChevronRight, FileText, FolderOpen, Inbox, NotebookPen } from 'lucide-react';
+import { ArrowUpRight, ChevronLeft, FileText, FolderOpen, Inbox, NotebookPen } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { Avatar, Chip, DeadlineChip, Dot, EmptyState, ErrorState, Markdown, Time } from '@/components/bits';
+import { Avatar, Chip, Dot, EmptyState, ErrorState, Markdown, Time, Watching } from '@/components/bits';
 import { MenuButton } from '@/components/InboxList';
+import { ProjectStatusCard } from '@/components/ProjectStatus';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useProject, useProjects } from '@/hooks/data';
+import { revokeGrant, useProject, useProjects } from '@/hooks/data';
+import { Button } from '@/components/ui/button';
 import { listHref } from '@/hooks/route';
 import { askThreadId, outcome, projectHref, projectTone, sessionState, threadHref } from '@/lib/model';
 import * as T from '@/lib/time';
-import type { Ask, ProjectCard, SessionCard } from '@/lib/types';
+import type { ProjectCard, SessionCard, StandingGrant } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { InactiveToggle } from '@/components/Rail';
 import { useUI, visibleProjects } from '@/lib/ui-store';
@@ -25,8 +27,22 @@ function Card({ p }: { p: ProjectCard }) {
         {(p.waiting || p.open_asks > 0) && (
           <Chip tone="warn">{p.open_asks > 0 ? `${p.open_asks} waiting on you` : 'Needs you'}</Chip>
         )}
+        {p.stale && (
+          <Chip tone="neutral" title="Work is running but the lead hasn't updated the page lately">
+            Stale
+          </Chip>
+        )}
       </div>
       {p.description && <p className="mt-1 truncate pl-[18px] text-[13px] text-muted-foreground">{p.description}</p>}
+      {p.progress != null && (
+        <div className="mt-3 flex items-center gap-2 pl-[18px]">
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+            <div className="h-full rounded-full bg-primary" style={{ width: `${p.progress}%` }} />
+          </div>
+          <span className="text-[12px] font-semibold text-muted-foreground tabular-nums">{p.progress}%</span>
+        </div>
+      )}
+      {p.phase && <p className="mt-2 truncate pl-[18px] text-[13px] font-medium text-foreground/85">{p.phase}</p>}
       <p className={cn('mt-3.5 line-clamp-3 flex-1 text-[13.5px] leading-relaxed', p.page_summary ? 'text-foreground/80' : 'text-faint italic')}>
         {p.page_summary || "The lead hasn't written this page yet."}
       </p>
@@ -110,6 +126,7 @@ function SessionRow({ s }: { s: SessionCard }) {
         <Dot tone={st.tone} pulse />
         <span className="min-w-0 truncate text-[13.5px] font-medium">{s.title}</span>
         {s.is_lead && <span className="rounded bg-brand-soft px-1.5 text-[10.5px] leading-4 font-semibold text-brand-text">Lead</span>}
+        <Watching titles={s.watching} />
         <span className="ml-auto shrink-0 text-[12px] text-faint">{st.label}</span>
       </div>
       {s.last_activity && (
@@ -121,17 +138,40 @@ function SessionRow({ s }: { s: SessionCard }) {
   );
 }
 
-function OpenAsk({ a }: { a: Ask }) {
+/** Where a grant came from: the owner's own words only, else "approved". */
+function grantSource(g: StandingGrant) {
+  if (g.ask_id && g.quote) return <>You: “{g.quote}”</>;
+  if (g.ask_id) return <>You approved a proposal (no words)</>;
+  if (g.quote) return <>Set by you: “{g.quote}”</>;
+  return <>Set by you</>;
+}
+
+function GrantRow({ g, projectId }: { g: StandingGrant; projectId: string }) {
   return (
-    <a href={threadHref(askThreadId(a))} className="group block rounded-xl border bg-card px-3.5 py-3 transition-colors hover:border-primary/40 hover:bg-brand-soft/40">
+    <li className="rounded-xl px-1 py-2">
       <div className="flex items-start gap-2">
-        <span className="min-w-0 flex-1 text-[13.5px] leading-snug font-medium">{a.title}</span>
-        <ChevronRight className="mt-0.5 size-4 shrink-0 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-brand-text" />
+        <span className="min-w-0 flex-1 text-[13.5px] leading-snug">
+          <span className="font-medium">{g.action}</span>
+          <span className="text-muted-foreground"> → “{g.option}”</span>
+        </span>
+        <Button
+          variant="outline"
+          size="xs"
+          aria-label={`Revoke the ${g.action} go-ahead`}
+          onClick={() => {
+            if (confirm(`Revoke the standing go-ahead "${g.action} → ${g.option}"? Asks for it will reach you again.`)) revokeGrant(g.grant_id, projectId);
+          }}
+        >
+          Revoke
+        </Button>
       </div>
-      <div className="mt-2">
-        <DeadlineChip ask={a} />
-      </div>
-    </a>
+      <p className="mt-0.5 line-clamp-2 text-[12.5px] leading-snug text-muted-foreground">{grantSource(g)}</p>
+      {g.condition && <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-faint">Note (not checked): {g.condition}</p>}
+      <p className="mt-0.5 text-[12px] text-faint">
+        {g.scope === 'session' ? 'A session tree' : 'Whole project'} · expires {T.short(g.expires_at)}
+        {g.used_count > 0 && <> · used {g.used_count}×</>}
+      </p>
+    </li>
   );
 }
 
@@ -145,6 +185,7 @@ export function ProjectPage({ id }: { id: string }) {
   const decided = asks.filter((a) => a.state !== 'open');
   const sessions = d?.sessions ?? [];
   const artifacts = d?.artifacts ?? [];
+  const grants = d?.grants ?? [];
   const page = d?.page;
   const author = page?.revision?.author;
   const updated = page?.revision?.created_at ?? page?.document?.updated_at;
@@ -184,16 +225,9 @@ export function ProjectPage({ id }: { id: string }) {
               </div>
             </header>
 
+            {d.status && <ProjectStatusCard status={d.status} openAsks={open} />}
+
             <div className="grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,1fr)_330px] lg:grid-rows-[auto_1fr] lg:gap-7">
-              {open.length > 0 && (
-                <Side title="Waiting on you" count={open.length} className="border-warning/30 lg:col-start-2 lg:row-start-1">
-                  <div className="flex flex-col gap-2">
-                    {open.map((a) => (
-                      <OpenAsk key={a.ask_id} a={a} />
-                    ))}
-                  </div>
-                </Side>
-              )}
 
               <article className="min-w-0 rounded-2xl border bg-card shadow-card lg:col-start-1 lg:row-span-2 lg:row-start-1">
                 {page?.content ? (
@@ -218,7 +252,7 @@ export function ProjectPage({ id }: { id: string }) {
                 )}
               </article>
 
-              <div className={cn('flex min-w-0 flex-col gap-5 lg:col-start-2', open.length ? 'lg:row-start-2' : 'lg:row-span-2 lg:row-start-1')}>
+              <div className="flex min-w-0 flex-col gap-5 lg:col-start-2 lg:row-span-2 lg:row-start-1">
                 <Side title="Sessions" count={sessions.length}>
                   {sessions.length ? (
                     <ul className="divide-y divide-border">
@@ -230,6 +264,15 @@ export function ProjectPage({ id }: { id: string }) {
                     <p className="px-1 text-[13px] text-faint">No live sessions.</p>
                   )}
                 </Side>
+                {grants.length > 0 && (
+                  <Side title="Standing go-aheads" count={grants.length}>
+                    <ul className="divide-y divide-border">
+                      {grants.map((g) => (
+                        <GrantRow key={g.grant_id} g={g} projectId={id} />
+                      ))}
+                    </ul>
+                  </Side>
+                )}
                 {decided.length > 0 && (
                   <Side title="Recent decisions">
                     <ul className="flex flex-col">

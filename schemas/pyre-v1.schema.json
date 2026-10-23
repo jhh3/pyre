@@ -35,6 +35,9 @@
         },
         "per_machine_independent": {
           "type": "boolean"
+        },
+        "tier": {
+          "type": "string"
         }
       },
       "type": "object",
@@ -207,6 +210,9 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "strict": {
+          "type": "boolean"
         }
       },
       "type": "object",
@@ -636,6 +642,23 @@
         "source"
       ]
     },
+    "ArchiveCascade": {
+      "properties": {
+        "archived": {
+          "items": {
+            "$ref": "#/$defs/CascadeSession"
+          },
+          "type": "array"
+        },
+        "left": {
+          "items": {
+            "$ref": "#/$defs/CascadeSession"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "Artifact": {
       "properties": {
         "artifact_id": {
@@ -1020,6 +1043,20 @@
         "size",
         "digest",
         "provenance"
+      ]
+    },
+    "CascadeSession": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "session_id"
       ]
     },
     "ChangePlan": {
@@ -2232,6 +2269,21 @@
         },
         "login": {
           "$ref": "#/$defs/HarnessLogin"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ModelChoice"
+          },
+          "type": "array"
+        },
+        "efforts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "usage": {
+          "$ref": "#/$defs/HarnessUsage"
         }
       },
       "type": "object",
@@ -2256,6 +2308,28 @@
         }
       },
       "type": "object"
+    },
+    "HarnessUsage": {
+      "properties": {
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/UsageWindow"
+          },
+          "type": "array"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "windows",
+        "observed_at"
+      ]
     },
     "HelloResponse": {
       "properties": {
@@ -2542,6 +2616,47 @@
       "type": "object",
       "required": [
         "version_id"
+      ]
+    },
+    "ModelChoice": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "efforts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "id"
+      ]
+    },
+    "MonitorRef": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "session_id",
+        "title"
       ]
     },
     "NativeRef": {
@@ -3689,6 +3804,10 @@
         },
         "icon": {
           "type": "string"
+        },
+        "owner_active_at": {
+          "type": "string",
+          "format": "date-time"
         }
       },
       "type": "object",
@@ -3759,6 +3878,18 @@
         },
         "freshness": {
           "$ref": "#/$defs/Freshness"
+        },
+        "monitor": {
+          "type": "boolean"
+        },
+        "monitors": {
+          "items": {
+            "$ref": "#/$defs/MonitorRef"
+          },
+          "type": "array"
+        },
+        "archive_cascade": {
+          "$ref": "#/$defs/ArchiveCascade"
         }
       },
       "type": "object",

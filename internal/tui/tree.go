@@ -332,7 +332,7 @@ func (m *Model) treeTitleCell(sel, quiet bool, s contracts.SessionView, w int) s
 	}
 	// The title fits with its decoration: the doing suffix takes the rest.
 	rest := w - tw - postW
-	phrase, _, ok := sessionDoing(s, m.nodeOf(s))
+	phrase, ok := m.rowPhrase(s) // monitors.go
 	tail := pad("", rest)
 	if ok && rest >= 8 {
 		tail = m.th.faint.Render(pad(" · "+phrase, rest))

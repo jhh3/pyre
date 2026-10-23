@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -63,7 +64,7 @@ SKILL.md the agent follows).`,
 		Args:  cobra.NoArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			opts := agentguide.Options{MCP: gMCP, ParentSessionID: a.Getenv(agentguide.EnvParentSessionID),
-				ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT")}
+				ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT"), RunTmpDir: a.runTmpDir(), Harness: a.guideHarness()}
 			if gProject != "" {
 				ops, err := a.connect()
 				if err != nil {
@@ -106,10 +107,37 @@ Codex:        codex -c 'mcp_servers.pyre.command="pyre"' -c 'mcp_servers.pyre.ar
 				return enc.Encode(tools)
 			}
 			srv := &MCPServer{Connect: a.connect, Tools: tools, Log: a.Stderr, Instructions: agentguide.Text(agentguide.Options{MCP: true,
-				ParentSessionID: a.Getenv(agentguide.EnvParentSessionID), ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT")})}
+				ParentSessionID: a.Getenv(agentguide.EnvParentSessionID), ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT"), RunTmpDir: a.runTmpDir(),
+				Harness: a.guideHarness()})}
 			return srv.Serve(cmd.Context(), a.Stdin, a.Stdout)
 		}),
 	}
 	mcp.Flags().BoolVar(&listTools, "list-tools", false, "print the tool manifest as JSON and exit")
 	root.AddCommand(mcp)
+}
+
+// guideHarness is the harness the guide is for (callerHarness; "" =
+// unknown, the guide then covers both ways to wait).
+func (a *App) guideHarness() string { return a.callerHarness() }
+
+// runTmpDir reports whether pyred gave the calling run its own TMPDIR
+// (<state>/tmp/runs/<run_id>).
+func (a *App) runTmpDir() bool {
+	run := a.Getenv("PYRE_RUN_ID")
+	return run != "" && filepath.Base(a.Getenv("TMPDIR")) == run
+}
+
+// callerHarness is the calling session's harness: $PYRE_HARNESS, which
+// pyred sets in every run. Outside a Pyre session ($PYRE_SESSION_ID unset)
+// CLAUDECODE=1 means Claude Code; inside one without $PYRE_HARNESS (an
+// older pyred) it is unknown, since CLAUDECODE may leak from whatever
+// started pyred.
+func (a *App) callerHarness() string {
+	if h := a.Getenv(EnvHarness); h != "" {
+		return h
+	}
+	if a.Getenv(EnvSessionID) == "" && a.Getenv("CLAUDECODE") == "1" {
+		return "claude"
+	}
+	return ""
 }

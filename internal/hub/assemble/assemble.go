@@ -79,6 +79,10 @@ type Config struct {
 	// Hub tunes the hub core.
 	Hub    hub.Options
 	Logger *slog.Logger
+	// RequireConnectionGrants turns off the owner default for connections
+	// (sessions use verified connections without a grant): every use then
+	// needs a matching grant (connections.Options.RequireGrants).
+	RequireConnectionGrants bool
 }
 
 // Stack is the composed hub.
@@ -170,7 +174,7 @@ func Open(ctx context.Context, cfg Config) (*Stack, error) {
 	if s.Review, err = review.New(ctx, s.DB, s.Events, s.Projects, s.Artifacts, review.Options{Clock: cfg.Clock}); err != nil {
 		return fail(err)
 	}
-	if s.Connections, err = connections.Open(ctx, s.DB, connections.Options{Events: s.Events, Clock: cfg.Clock}); err != nil {
+	if s.Connections, err = connections.Open(ctx, s.DB, connections.Options{Events: s.Events, Clock: cfg.Clock, RequireGrants: cfg.RequireConnectionGrants}); err != nil {
 		return fail(err)
 	}
 	if s.Attention, err = attention.NewStore(ctx, s.DB, attention.Options{Sink: s.Events, Clock: cfg.Clock, FCMConfigured: cfg.FCM != nil, Logger: log}); err != nil {
@@ -193,12 +197,12 @@ func Open(ctx context.Context, cfg Config) (*Stack, error) {
 		Attention: s.attn, Connections: s.Connections, Tokens: s.Auth, Nodes: nodes, Terminal: s.Terminal, Options: cfg.Hub,
 		ConnectionGrants: func(ctx context.Context, connectionID string, gs hub.GrantSession) (contracts.GrantDecision, error) {
 			d, err := s.Connections.CheckGrant(ctx, connectionID, connections.SessionContext{
-				SessionID: gs.SessionID, NodeID: gs.NodeID, ProjectID: gs.ProjectID, Archived: gs.Archived})
+				SessionID: gs.SessionID, NodeID: gs.NodeID, ProjectID: gs.ProjectID, Archived: gs.Archived, RunActive: gs.RunActive})
 			return contracts.GrantDecision{Allowed: d.Allowed, Generation: d.Generation, Reason: d.Reason}, err
 		},
 		RouteConnectionInvoke: func(ctx context.Context, connectionID string, gs hub.GrantSession) (string, error) {
 			r, err := s.Connections.RouteInvoke(ctx, connectionID, connections.SessionContext{
-				SessionID: gs.SessionID, NodeID: gs.NodeID, ProjectID: gs.ProjectID, Archived: gs.Archived})
+				SessionID: gs.SessionID, NodeID: gs.NodeID, ProjectID: gs.ProjectID, Archived: gs.Archived, RunActive: gs.RunActive})
 			return r.NodeID, err
 		},
 		RecordConnectionGrant: func(ctx context.Context, p contracts.Principal, opID string, g contracts.ConnectionGrantParams, active bool) error {

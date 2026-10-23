@@ -152,20 +152,28 @@ type turnsListResponse struct {
 
 // item is the subset of ThreadItem fields Pyre reads.
 type item struct {
-	Type          string            `json:"type"`
-	ID            string            `json:"id"`
-	ClientID      string            `json:"clientId,omitempty"`
-	Content       []json.RawMessage `json:"content,omitempty"`
-	Text          string            `json:"text,omitempty"`
-	Command       string            `json:"command,omitempty"`
-	ExitCode      *int              `json:"exitCode,omitempty"`
-	Status        string            `json:"status,omitempty"`
-	Kind          string            `json:"kind,omitempty"`
-	AgentThreadID string            `json:"agentThreadId,omitempty"`
-	AgentPath     string            `json:"agentPath,omitempty"`
-	Server        string            `json:"server,omitempty"` // mcpToolCall
-	Tool          string            `json:"tool,omitempty"`   // mcpToolCall
-	Changes       []struct {
+	Type     string            `json:"type"`
+	ID       string            `json:"id"`
+	ClientID string            `json:"clientId,omitempty"`
+	Content  []json.RawMessage `json:"content,omitempty"`
+	Text     string            `json:"text,omitempty"`
+	Command  string            `json:"command,omitempty"`
+	ExitCode *int              `json:"exitCode,omitempty"`
+	// commandExecution: the shell-free commands it ran, its cwd, its
+	// output (set on item/completed) and how long it ran.
+	CommandActions []struct {
+		Command string `json:"command"`
+	} `json:"commandActions,omitempty"`
+	Cwd              string `json:"cwd,omitempty"`
+	AggregatedOutput string `json:"aggregatedOutput,omitempty"`
+	DurationMs       *int64 `json:"durationMs,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	AgentThreadID    string `json:"agentThreadId,omitempty"`
+	AgentPath        string `json:"agentPath,omitempty"`
+	Server           string `json:"server,omitempty"` // mcpToolCall
+	Tool             string `json:"tool,omitempty"`   // mcpToolCall
+	Changes          []struct {
 		Path string `json:"path"`
 	} `json:"changes,omitempty"`
 }

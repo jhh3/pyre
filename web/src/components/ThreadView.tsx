@@ -3,20 +3,21 @@
 // conversation with a reply composer.
 import {
   AlertCircle, Archive, ArrowDown, ArrowRight, ArrowUp, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronUp, Clock, CornerDownLeft,
-  FolderClosed, Loader2, MessageSquareText, Pause, Undo2, X, Zap,
+  ExternalLink, FolderClosed, Loader2, MessageSquareText, Pause, ShieldCheck, Undo2, X, Zap,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Avatar, Chip, DeadlineChip, Dot, EmptyState, ErrorState, Markdown, Time } from '@/components/bits';
 import { Button } from '@/components/ui/button';
 import { Kbd } from '@/components/ui/kbd';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
-  archiveThread, choose, currentList, discardReply, dismissAnswerError, markRead, sendHeldNow, sendReply, undoHeld, useHeld, useInbox, useMe, useThread,
+  answerWithText, archiveThread, choose, currentList, discardReply, dismissAnswerError, markRead, sendHeldNow, sendReply, undoHeld, useHeld, useInbox, useMe,
+  useThread,
 } from '@/hooks/data';
 import { useNow } from '@/hooks/now';
 import { listHref, navigate } from '@/hooks/route';
-import { canArchive, heldItems, isOpenAsk, OPEN_ASK_ARCHIVE, optionLabel, projectHref, sessionState, threadHref } from '@/lib/model';
+import { answeredPerItem, archiveDismisses, canArchive, heldItems, isOpenAsk, itemOption, optionLabel, projectHref, sessionState, threadHref } from '@/lib/model';
 import * as T from '@/lib/time';
 import type { Ask, AskOption, HeldAnswers, Msg, Thread } from '@/lib/types';
 import { getUI, setUI, useUI, withKey, type PendingReply } from '@/lib/ui-store';
@@ -44,7 +45,7 @@ function Toolbar({ thread }: { thread?: Thread }) {
         <ChevronLeft className="size-5" />
         {box === 'open' ? 'Inbox' : 'Done'}
       </a>
-      {thread && (canArchive(thread) || isOpenAsk(thread)) && <ArchiveButton thread={thread} />}
+      {thread && canArchive(thread) && <ArchiveButton thread={thread} />}
       <div className="flex-1" />
       {idx >= 0 && <span className="mr-1 text-[12.5px] text-faint tabular-nums">{idx + 1} of {list.length}</span>}
       <NavButton label="Previous" keys="K" disabled={idx <= 0} onClick={() => go(-1)}>
@@ -57,32 +58,27 @@ function Toolbar({ thread }: { thread?: Thread }) {
   );
 }
 
-// Archive: an open ask cannot be archived, so its button explains why
-// instead of acting (a disabled button would hide the tooltip).
+// Archive: an open ask and a session item are dismissed rather than filed
+// (an open ask asks to confirm first: DismissDialog).
 function ArchiveButton({ thread }: { thread: Thread }) {
-  const blocked = isOpenAsk(thread);
+  const dismiss = archiveDismisses(thread);
+  const label = dismiss ? 'Dismiss' : 'Archive';
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
           variant="ghost"
-          aria-label="Archive"
-          aria-disabled={blocked || undefined}
+          aria-label={label}
           onClick={() => archiveThread(thread)}
-          className={cn('size-10 gap-1.5 px-0 text-muted-foreground md:-ml-1 md:h-8 md:w-auto md:px-2.5 md:text-[13px]', blocked && 'opacity-50')}
+          className="size-10 gap-1.5 px-0 text-muted-foreground md:-ml-1 md:h-8 md:w-auto md:px-2.5 md:text-[13px]"
         >
-          <Archive className="size-[18px] md:size-4" />
-          <span className="hidden md:inline">Archive</span>
+          {dismiss ? <X className="size-[18px] md:size-4" /> : <Archive className="size-[18px] md:size-4" />}
+          <span className="hidden md:inline">{label}</span>
         </Button>
       </TooltipTrigger>
-      <TooltipContent className={blocked ? 'max-w-60' : undefined}>
-        {blocked ? (
-          OPEN_ASK_ARCHIVE
-        ) : (
-          <>
-            Archive: move to Done <Kbd>E</Kbd>
-          </>
-        )}
+      <TooltipContent className={dismiss ? 'max-w-64' : undefined}>
+        {isOpenAsk(thread) ? 'Dismiss: no option, no default; the session is told' : dismiss ? 'Dismiss: it needs nothing from you' : 'Archive: move to Done'}{' '}
+        <Kbd>E</Kbd>
       </TooltipContent>
     </Tooltip>
   );
@@ -135,6 +131,10 @@ function Header({ thread }: { thread: Thread }) {
             Asked <Time at={ask.created_at} mode="long" />
             {ask.count > 1 && <span className="text-faint"> · asked {ask.count} times</span>}
           </span>
+        ) : thread.attention ? (
+          <span>
+            {thread.attention.kind === 'waiting' ? 'Waiting on you since' : 'Flagged'} <Time at={thread.attention.updated_at} mode="long" />
+          </span>
         ) : (
           <span>
             {thread.message_count} message{thread.message_count === 1 ? '' : 's'} · last <Time at={thread.last_at} mode="long" />
@@ -156,6 +156,33 @@ function Header({ thread }: { thread: Thread }) {
         )}
       </div>
     </header>
+  );
+}
+
+// ---------- a session item ----------
+
+// What the session said when it ended its turn waiting on the owner (or
+// flagged itself), and what replying or dismissing does.
+function AttentionBody({ thread }: { thread: Thread }) {
+  const it = thread.attention!;
+  const session = thread.session?.title ?? 'the session';
+  const active = it.state === 'open' || it.state === 'read';
+  return (
+    <div className="mt-7">
+      {it.summary && <Markdown text={it.summary} className="text-[15px] md:text-[14.5px]" />}
+      <p className="mt-5 rounded-xl bg-muted/60 px-4 py-3 text-[13.5px] text-muted-foreground">
+        {active ? (
+          <>
+            {it.kind === 'waiting' ? `${session} ended its turn with this question in its own chat.` : `${session} flagged that it needs you.`} A reply below goes
+            to it as chat (and answers any open question it filed before). If it needs nothing from you, dismiss it.
+          </>
+        ) : it.state === 'handled' ? (
+          'Handled: you replied, typed into the session or dismissed this.'
+        ) : (
+          'Resolved: the session moved on (its next turn, an ask, or it ended).'
+        )}
+      </p>
+    </div>
   );
 }
 
@@ -274,7 +301,9 @@ function HeldBanner({ ask, held }: { ask: Ask; held: HeldAnswers }) {
           <Pause className="size-3.5" strokeWidth={2.5} />
         </span>
         <div className="min-w-0">
-          <p className="text-[14px] font-semibold text-foreground">Held: {optionLabel(ask, mine.option_id) || mine.text}</p>
+          <p className="text-[14px] font-semibold text-foreground">
+            Held: {Object.keys(mine.items ?? {}).length ? 'an answer per item' : optionLabel(ask, mine.option_id) || mine.text}
+          </p>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
             {held.sends_at ? (
               <>
@@ -347,17 +376,44 @@ function Outcome({ thread, messages }: { thread: Thread; messages: Msg[] }) {
   const fresh = useUI((s) => s.fresh[ask.ask_id]);
   const decision = messages.find((m) => m.message_id === ask.decision_message_id);
   const failed = decision?.delivery.state === 'failed';
-  const label = optionLabel(ask, ask.answer?.option_id) || ask.answer?.text || '';
+  const perItem = answeredPerItem(ask);
+  const label = perItem ? 'a choice per item (below)' : optionLabel(ask, ask.answer?.option_id) || ask.answer?.text || '';
   const session = thread.session?.title ?? 'the session';
   let icon: ReactNode, title: ReactNode, body: ReactNode, tone: 'ok' | 'bad' | 'neutral';
   switch (ask.state) {
     case 'answered':
+      if (ask.grant_id) {
+        // A standing grant answered it when it was asked; the owner was not asked.
+        tone = failed ? 'bad' : 'ok';
+        icon = <ShieldCheck className="size-4" strokeWidth={2.5} />;
+        title = <>Answered by a standing grant {T.clock(ask.answer?.at)}</>;
+        body = (
+          <>
+            Go ahead with <b className="font-semibold text-foreground">{optionLabel(ask, ask.answer?.option_id)}</b>
+            {ask.answer?.text ? <> · {ask.answer.text}</> : <span className="text-faint"> ({ask.grant_id})</span>}
+          </>
+        );
+        break;
+      }
+      if (ask.answer?.source === 'chat') {
+        // The owner wrote to the session itself; it has his words already.
+        tone = 'ok';
+        icon = <MessageSquareText className="size-4" strokeWidth={2.5} />;
+        title = <>Answered in chat {T.clock(ask.answer.at)}</>;
+        body = (
+          <>
+            You wrote to {session}: <b className="font-semibold text-foreground">{ask.answer.text}</b>
+            {!!ask.answer.with?.length && <span className="text-faint"> · the same words answered {ask.answer.with.length} more</span>}
+          </>
+        );
+        break;
+      }
       tone = failed ? 'bad' : 'ok';
       icon = failed ? <AlertCircle className="size-4" strokeWidth={2.5} /> : <Check className="size-4" strokeWidth={3} />;
       title = failed ? 'Recorded, but not delivered' : <>Sent {T.clock(ask.answer?.at)}</>;
       body = (
         <>
-          {ask.answer?.by?.kind === 'owner' || !ask.answer?.by?.kind ? 'You chose ' : 'Answered: '}
+          {ask.answer?.by?.kind === 'owner' || !ask.answer?.by?.kind ? (ask.answer?.option_id || answeredPerItem(ask) ? 'You chose ' : 'You answered: ') : 'Answered: '}
           <b className="font-semibold text-foreground">{label}</b>
         </>
       );
@@ -381,6 +437,11 @@ function Outcome({ thread, messages }: { thread: Thread; messages: Msg[] }) {
     case 'withdrawn':
       tone = 'neutral';
       icon = <Undo2 className="size-4" strokeWidth={2.5} />;
+      if (ask.answer?.by?.kind === 'owner') {
+        title = <>Dismissed {T.clock(ask.answer.at)}</>;
+        body = `No option was chosen and the default was not applied. ${session} was told.`;
+        break;
+      }
       title = 'Withdrawn';
       body = ask.updates?.length ? ask.updates[ask.updates.length - 1].text : `${session} took this question back.`;
       break;
@@ -471,7 +532,7 @@ function AnswerPanel({ thread, messages }: { thread: Thread; messages: Msg[] }) 
                   <AlertCircle className="size-4" strokeWidth={2.5} />
                 </span>
                 <div className="min-w-0">
-                  <p className="text-[14px] font-semibold text-destructive">Not sent: {optionLabel(ask, answering.option_id)}</p>
+                  <p className="text-[14px] font-semibold text-destructive">Not sent: {answering.items ? 'your answers per item' : optionLabel(ask, answering.option_id)}</p>
                   <p className="mt-0.5 text-[13px] text-muted-foreground">{answering.message}</p>
                 </div>
               </div>
@@ -479,7 +540,7 @@ function AnswerPanel({ thread, messages }: { thread: Thread; messages: Msg[] }) 
                 <Button variant="ghost" size="sm" className="h-9 sm:h-8" onClick={() => dismissAnswerError(ask.ask_id)}>
                   Dismiss
                 </Button>
-                <Button variant="destructive" size="sm" className="h-9 sm:h-8" onClick={() => choose(thread, answering.option_id, answering.mode)}>
+                <Button variant="destructive" size="sm" className="h-9 sm:h-8" onClick={() => choose(thread, answering.option_id, answering.mode, answering.items)}>
                   Retry
                 </Button>
               </div>
@@ -491,6 +552,9 @@ function AnswerPanel({ thread, messages }: { thread: Thread; messages: Msg[] }) 
           <Outcome thread={thread} messages={messages} />
         </div>
       )}
+      {ask.items?.length ? (
+        <BatchAnswer thread={thread} />
+      ) : (
       <div className="flex flex-col gap-2">
         {ask.options.map((o, i) => {
           const st = stateFor(o);
@@ -508,6 +572,7 @@ function AnswerPanel({ thread, messages }: { thread: Thread; messages: Msg[] }) 
           );
         })}
       </div>
+      )}
       {open && (
         <p className="mt-3.5 flex items-start gap-2 text-[12.5px] leading-snug text-muted-foreground">
           <Clock className="mt-px size-3.5 shrink-0 text-faint" />
@@ -533,6 +598,118 @@ function AnswerPanel({ thread, messages }: { thread: Thread; messages: Msg[] }) 
       )}
       {!open && ask.state === 'answered' && <NextQuestion thread={thread} />}
     </section>
+  );
+}
+
+// A batched ask: the options apply to each item. The owner picks per item
+// (or applies one option to all) and sends them together; once decided,
+// each item shows its outcome.
+function BatchAnswer({ thread }: { thread: Thread }) {
+  const ask = thread.ask!;
+  const items = ask.items ?? [];
+  const mode = useUI((s) => s.mode);
+  const answering = useUI((s) => s.answering[ask.ask_id]);
+  const held = useHeld();
+  const heldItem = heldItems(held).find((i) => i.ask_id === ask.ask_id);
+  const open = ask.state === 'open';
+  const sending = answering?.phase === 'sending';
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const chosen = (id: string) => (open ? picks[id] || itemOption(ask, id, heldItem) : itemOption(ask, id));
+  const done = items.filter((it) => chosen(it.id)).length;
+  const submit = () => {
+    const map = Object.fromEntries(items.map((it) => [it.id, chosen(it.id)]));
+    const one = new Set(Object.values(map));
+    if (one.size === 1) choose(thread, [...one][0], mode);
+    else choose(thread, '', mode, map);
+  };
+  return (
+    <div className="flex flex-col gap-3">
+      <ul className="flex flex-col gap-1.5 text-[13px] text-muted-foreground">
+        {ask.options.map((o, i) => (
+          <li key={o.id}>
+            <span className="font-semibold text-foreground">
+              {i + 1}. {o.label}
+            </span>
+            {o.id === ask.default_option && <span className="ml-1.5 rounded border px-1.5 text-[11px] font-medium">Default</span>}
+            {o.detail && <> · {o.detail}</>}
+          </li>
+        ))}
+      </ul>
+      {open && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[13px] font-medium text-muted-foreground">Apply to all:</span>
+          {ask.options.map((o) => (
+            <Button
+              key={o.id}
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={sending}
+              onClick={() => setPicks(Object.fromEntries(items.map((it) => [it.id, o.id])))}
+            >
+              {o.label}
+            </Button>
+          ))}
+        </div>
+      )}
+      <ul className="divide-y rounded-xl border bg-card">
+        {items.map((it) => {
+          const pick = chosen(it.id);
+          return (
+            <li key={it.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-[14px] font-semibold">
+                  <span className="rounded bg-muted px-1.5 text-[11.5px] font-medium text-muted-foreground tabular-nums">{it.id}</span>
+                  {it.url ? (
+                    <a href={it.url} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-1 truncate hover:underline">
+                      {it.label} <ExternalLink className="size-3 shrink-0 text-faint" />
+                    </a>
+                  ) : (
+                    <span className="truncate">{it.label}</span>
+                  )}
+                </div>
+                {it.detail && <p className="mt-0.5 text-[13px] text-muted-foreground">{it.detail}</p>}
+              </div>
+              <div role="radiogroup" aria-label={`Answer for ${it.label}`} className="flex shrink-0 flex-wrap gap-1">
+                {ask.options.map((o) => (
+                  <button
+                    key={o.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={pick === o.id}
+                    disabled={!open || sending}
+                    onClick={() => setPicks((p) => ({ ...p, [it.id]: o.id }))}
+                    className={cn(
+                      'h-8 rounded-md border px-2.5 text-[12.5px] font-medium transition-colors disabled:cursor-default',
+                      pick === o.id
+                        ? open
+                          ? 'border-primary/50 bg-brand-soft text-brand-text'
+                          : 'border-success/45 bg-success-soft text-success'
+                        : open
+                          ? 'bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground'
+                          : 'bg-card text-faint opacity-60',
+                    )}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {open && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[13px] text-muted-foreground tabular-nums">
+            {done} of {items.length} chosen
+          </span>
+          <Button size="sm" className="h-9 sm:h-8" disabled={done < items.length || sending} onClick={submit}>
+            {sending ? <Loader2 className="animate-spin" /> : mode === 'now' ? <ArrowRight /> : <Pause />}
+            {mode === 'now' ? `Send ${items.length} answers` : `Hold ${items.length} answers`}
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -620,7 +797,9 @@ function Conversation({ thread, messages }: { thread: Thread; messages: Msg[] })
       </h2>
       {shown.length + pending.length === 0 ? (
         <p className="rounded-xl border border-dashed px-4 py-4 text-[13.5px] text-muted-foreground">
-          No messages yet. Ask {thread.session?.title ?? 'the session'} for more context below; the reply lands here.
+          {thread.attention
+            ? `Nothing sent yet. Your reply goes to ${thread.session?.title ?? 'the session'} as chat.`
+            : `No messages yet. Ask ${thread.session?.title ?? 'the session'} for more context below; the reply lands here.`}
         </p>
       ) : (
         <ol className="flex flex-col gap-3">
@@ -658,6 +837,14 @@ function Composer({ thread }: { thread: Thread }) {
     setDraft('');
     sendReply(id, text);
   };
+  // An open ask: the text can be the answer itself (a reply only asks).
+  const openAsk = isOpenAsk(thread);
+  const answering = useUI((s) => (thread.ask ? s.answering[thread.ask.ask_id]?.phase === 'sending' : false));
+  const answer = async () => {
+    const text = (getUI().drafts[id] ?? '').trim();
+    if (!text || !openAsk) return;
+    if (await answerWithText(thread, text)) setDraft('');
+  };
 
   if (!session) return null;
   return (
@@ -686,13 +873,31 @@ function Composer({ thread }: { thread: Thread }) {
               (e.target as HTMLTextAreaElement).blur();
             }
           }}
-          placeholder={thread.kind === 'ask' ? 'Ask for more context…' : `Reply to ${session}…`}
+          placeholder={openAsk ? 'Ask for context, or answer in your words…' : thread.kind === 'ask' ? 'Ask for more context…' : `Reply to ${session}…`}
           className="block max-h-[40vh] min-h-10 w-full min-w-0 flex-1 resize-none bg-transparent px-3.5 py-2 text-[16px] leading-6 outline-none placeholder:text-faint md:min-h-11 md:px-4 md:pt-3 md:pb-1 md:text-[14.5px]"
         />
         <div className="flex shrink-0 items-center gap-2 md:pr-2 md:pb-2 md:pl-4">
           <span className="hidden min-w-0 flex-1 truncate text-[12px] text-faint md:block">
             To {session} · <Kbd className="h-[18px] text-[11px]">{isMac ? '⌘' : 'Ctrl'}</Kbd> <Kbd className="h-[18px] text-[11px]">↵</Kbd> to send
           </span>
+          {openAsk && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!draft.trim() || answering}
+                  onClick={answer}
+                  className="h-10 gap-1 rounded-full px-2.5 text-[13px] md:h-8 md:rounded-lg md:px-3"
+                >
+                  {answering ? <Loader2 className="animate-spin" /> : <Check />}
+                  <span className="md:hidden">Answer</span>
+                  <span className="hidden md:inline">Answer with this</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-64">Your text is the answer: the question closes and {session} gets it as the decision. Send only asks.</TooltipContent>
+            </Tooltip>
+          )}
           <Button type="submit" disabled={!draft.trim()} aria-label="Send" className="size-10 rounded-full p-0 md:h-8 md:w-auto md:rounded-lg md:px-3.5">
             <span className="hidden md:inline">Send</span> <ArrowUp className="size-[18px] md:size-4" />
           </Button>
@@ -748,6 +953,7 @@ export function ThreadPane({ id, className }: { id: string; className?: string }
               <Header thread={thread} />
               {thread.ask && <Context ask={thread.ask} />}
               {thread.ask && <AnswerPanel thread={thread} messages={messages} />}
+              {thread.attention && <AttentionBody thread={thread} />}
               <Conversation thread={thread} messages={messages} />
             </article>
           ) : null}

@@ -30,7 +30,7 @@ func sessionDoing(s contracts.SessionView, node *contracts.Node) (string, time.T
 // suffix is dropped when too little room is left for it to read.
 func (m *Model) titleDoingCell(sel bool, s contracts.SessionView, w int) string {
 	title := iconTitle(s)
-	phrase, _, ok := sessionDoing(s, m.nodeOf(s))
+	phrase, ok := m.rowPhrase(s) // doing, then "watching N" (monitors.go)
 	if !ok {
 		return m.titleCell(sel, title, w)
 	}

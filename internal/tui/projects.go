@@ -19,10 +19,11 @@ const (
 	tabArtifacts
 	tabDiscussion
 	tabSessions
+	tabGrants // grants.go
 	numTabs
 )
 
-var tabNames = [numTabs]string{"Overview", "Docs", "Artifacts", "Discussion", "Sessions"}
+var tabNames = [numTabs]string{"Overview", "Docs", "Artifacts", "Discussion", "Sessions", "Grants"}
 
 // ---- projects list ----
 
@@ -167,6 +168,8 @@ func (m *Model) projectHints() []hint {
 		h = append(h, hint{"c", "post to project thread"})
 	case tabSessions:
 		h = append(h, hint{"enter", "go to session"})
+	case tabGrants:
+		h = append(h, hint{"x", "revoke"})
 	}
 	return h
 }
@@ -216,6 +219,8 @@ func (m *Model) loadProjectView(force bool) []tea.Cmd {
 				p, err := api.ListMessages(ctx, contracts.ListMessagesRequest{Box: "inbox", Address: &contracts.Address{Kind: contracts.AddrProject, ID: pid}, PageRequest: contracts.PageRequest{Limit: 100}})
 				return p.Items, err
 			}))
+		case tabGrants:
+			cmds = append(cmds, m.loadProjectGrants(force))
 		}
 	case viewArtifact:
 		aid := m.curArtifact
@@ -380,6 +385,8 @@ func (m *Model) keyProject(k tea.KeyPressMsg) tea.Cmd {
 		if key == "enter" && l.sel != "" {
 			return m.focusSession(l.sel)
 		}
+	case tabGrants:
+		return m.keyProjectGrants(key)
 	}
 	return nil
 }
