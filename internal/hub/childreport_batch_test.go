@@ -466,7 +466,7 @@ func TestChildReportStuckClaimBacksOff(t *testing.T) {
 }
 
 // A child whose launch failed (tmux refused the command line: issue
-// iss_01M5KW3QAPJSDZZ4TAMKETXBF7, reported 17 minutes late) reaches its
+// iss_…, reported 17 minutes late) reaches its
 // busy parent at once, on its own, like needs_input: never batched until
 // the parent's turn ends (up to childBatchMax). The start command's failed
 // result and the node's "launch failed" run report both take that path; an

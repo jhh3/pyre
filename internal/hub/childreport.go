@@ -47,7 +47,7 @@ import (
 //     within childRecentMessage before the turn ended (it sent its result
 //     and then went idle). An earlier message, even one in the same turn,
 //     does not count: a long turn's mid-turn question or coordination ask
-//     is not its result (issue iss_01M5J3XGZGGWF1APPPE7PZ0B25: a worker
+//     is not its result (issue iss_…: a worker
 //     asked at 07:57, 08:09 and 08:25 and ended at 08:37 with its result;
 //     its idle report was skipped and its ended report folded, so the lead
 //     never heard). The window is used rather than the transcript's last
@@ -1549,7 +1549,7 @@ func isLaunchFailure(reason string) bool {
 // launch, go out at once on their own, never batched for a busy parent: the
 // parent is waiting on work that will not happen (a launch that tmux
 // refused reached its parent 17 minutes later, issue
-// iss_01M5KW3QAPJSDZZ4TAMKETXBF7).
+// iss_…).
 func urgentReport(cr childReport) bool {
 	return cr.Kind == reportNeeds || (cr.Kind == reportEnded && cr.RunState == contracts.RunFailed && isLaunchFailure(cr.Reason))
 }

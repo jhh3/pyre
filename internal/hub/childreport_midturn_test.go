@@ -8,7 +8,7 @@ import (
 	"github.com/jhh3/pyre/internal/contracts"
 )
 
-// ---- a mid-turn message is not the turn's result (iss_01M5J3XGZGGWF1APPPE7PZ0B25) ----
+// ---- a mid-turn message is not the turn's result (iss_…) ----
 
 // childSays sends the parent a message from child (the child's own
 // send_message, not an automatic report).

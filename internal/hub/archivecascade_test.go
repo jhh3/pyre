@@ -10,7 +10,7 @@ import (
 	"github.com/jhh3/pyre/internal/contracts"
 )
 
-// ---- archive cascade (iss_01M5J9271SRZQ4WDX4AKNWBWFM) ----
+// ---- archive cascade (iss_…) ----
 
 // connectWide connects nodeMac with room for a session tree.
 func (x *harness) connectWide() {

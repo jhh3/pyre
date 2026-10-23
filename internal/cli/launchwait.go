@@ -11,7 +11,7 @@ import (
 // DefaultLaunchWait bounds how long `pyre start` and start_session wait for
 // the node to launch the run: the hub answers once the launch is queued,
 // and a launch that failed (tmux refused the command line, issue
-// iss_01M5KW3QAPJSDZZ4TAMKETXBF7) was otherwise only visible later, in the
+// iss_…) was otherwise only visible later, in the
 // run state or the parent's report.
 const DefaultLaunchWait = 20 * time.Second
 

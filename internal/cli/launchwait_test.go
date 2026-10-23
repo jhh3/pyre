@@ -38,7 +38,7 @@ func observeLaunch(t *testing.T, h *hub, state c.RunState, reason string) {
 }
 
 // pyre start waits (bounded) for the launch outcome: a launch that failed
-// (issue iss_01M5KW3QAPJSDZZ4TAMKETXBF7: tmux refused the command line and
+// (issue iss_…: tmux refused the command line and
 // start had said "started") exits 1 with the reason; a launch still
 // starting at the deadline, or one that succeeded, exits 0.
 func TestStartWaitsForLaunchOutcome(t *testing.T) {

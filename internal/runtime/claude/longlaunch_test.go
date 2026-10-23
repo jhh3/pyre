@@ -12,7 +12,7 @@ import (
 )
 
 // A Claude launch whose guide and initial prompt are far over tmux's 16 KiB
-// client command limit starts (issue iss_01M5KW3QAPJSDZZ4TAMKETXBF7: "tmux
+// client command limit starts (issue iss_…: "tmux
 // new-session: command too long" with a 5 KB brief on laptop), on the real
 // tmux of an isolated socket, and Claude gets both byte for byte, special
 // characters included.

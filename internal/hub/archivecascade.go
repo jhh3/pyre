@@ -9,7 +9,7 @@ import (
 	"github.com/jhh3/pyre/internal/contracts"
 )
 
-// Archive cascade (issue iss_01M5J9271SRZQ4WDX4AKNWBWFM: a lead archived
+// Archive cascade (issue iss_…: a lead archived
 // itself and three sessions in its tree, one child and two grandchildren
 // started by its archived reviewers, stayed live and idle for up to 37
 // hours; the coordinator above them could archive them only through owner
