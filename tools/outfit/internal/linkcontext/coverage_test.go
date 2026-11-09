@@ -268,6 +268,7 @@ func representativeSegment(rule kit.SegmentRule) string {
 		"linear-identifier":   "ENG-123",
 		"slack-channel":       "C012ABC",
 		"slack-ts":            "p1712345678123456",
+		"slack-file":          "T012ABC-F012ABCDEF",
 		"opaque-token":        "token_123",
 		"notion-page":         "a1b2c3d4e5f67890a1b2c3d4e5f67890",
 		"google-calendar-eid": "ZXZlbnRfMTIzIGpvaG5AZXhhbXBsZS5jb20",

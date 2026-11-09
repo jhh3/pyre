@@ -2,7 +2,12 @@ package accounts
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/usage"
@@ -16,12 +21,52 @@ import (
 // and the audit log attribute it correctly. A node whose own login is a
 // different identity refuses; it never runs one account's work on another.
 
+// fleetAcctTTL is how long a node reuses the hub's account list for
+// own-login matching. Every own-login usage update (one a minute per
+// harness while runs take turns) and launch looked the account up with a
+// fresh ~150 KB accounts.list; the identities it matches on (rota_ref,
+// provider_ref, disabled) change rarely.
+const fleetAcctTTL = 30 * time.Second
+
+type fleetAcctCache struct {
+	mu sync.Mutex
+	by map[contracts.Provider]fleetAcctEntry
+}
+
+type fleetAcctEntry struct {
+	views []contracts.AccountView
+	at    time.Time
+}
+
 // fleetAccounts lists the hub's accounts of provider (bounded by
-// FleetTimeout; nil without a directory).
+// FleetTimeout; nil without a directory), reusing a list up to
+// fleetAcctTTL old (a negative FleetCache always reads). Callers treat the
+// views as read-only.
 func (s *Service) fleetAccounts(ctx context.Context, provider contracts.Provider) ([]contracts.AccountView, error) {
 	if s.cfg.Fleet == nil {
 		return nil, nil
 	}
+	if s.cfg.FleetCache >= 0 {
+		s.fleetAccts.mu.Lock()
+		e, ok := s.fleetAccts.by[provider]
+		s.fleetAccts.mu.Unlock()
+		if ok && time.Since(e.at) < fleetAcctTTL {
+			return e.views, nil
+		}
+	}
+	out, err := s.listFleetAccounts(ctx, provider)
+	if err == nil && s.cfg.FleetCache >= 0 {
+		s.fleetAccts.mu.Lock()
+		if s.fleetAccts.by == nil {
+			s.fleetAccts.by = map[contracts.Provider]fleetAcctEntry{}
+		}
+		s.fleetAccts.by[provider] = fleetAcctEntry{views: out, at: time.Now()}
+		s.fleetAccts.mu.Unlock()
+	}
+	return out, err
+}
+
+func (s *Service) listFleetAccounts(ctx context.Context, provider contracts.Provider) ([]contracts.AccountView, error) {
 	tctx, cancel := context.WithTimeout(ctx, s.cfg.FleetTimeout)
 	defer cancel()
 	var out []contracts.AccountView
@@ -163,24 +208,150 @@ func (s *Service) ownLoginCandidate(ctx context.Context, h contracts.Harness, ex
 	}
 	provider := contracts.ProviderFor(h)
 	views, _ := s.fleetAccounts(ctx, provider)
-	now := s.now()
 	for _, v := range views {
 		a := v.Account
 		if a.Disabled || a.Provider != provider || slices.Contains(exclude, a.AccountID) || !MatchesOwnLogin(a, login) || s.hasGrant(ctx, a.AccountID, h) {
 			continue
 		}
-		if o := v.Latest; o != nil {
-			if o.Eligibility == contracts.EligibleUnusable {
-				continue
-			}
-			if (o.Eligibility == contracts.EligibleExhausted || o.Eligibility == contracts.EligibleCooldown) && o.ResetAt != nil && o.ResetAt.After(now) {
-				continue
-			}
-			if usage.Judge(o.Windows, now).Limited {
-				continue
-			}
+		if _, _, blocked := s.ownLoginBlocked(ctx, h, a.AccountID, v.Latest); blocked {
+			continue
 		}
 		return a, true
 	}
 	return contracts.Account{}, false
+}
+
+// ownLoginBlockedErr is the selection error for an explicit account that
+// is this node's own login for h when that login cannot take a run now
+// (ownLoginBlocked), nil when it can. It reads like noneEligible's, so a
+// non-strict pin falls back with the reason (pinFallbackNote): waiting
+// when the limit has a reset, else intervention. Only for harnesses whose
+// logins Pyre manages.
+func (s *Service) ownLoginBlockedErr(ctx context.Context, h contracts.Harness, a contracts.Account) error {
+	if !contracts.ManagedLogins(h) {
+		return nil // agy: its own login is all there is (OwnLimit holds placement)
+	}
+	why, reset, blocked := s.ownLoginBlocked(ctx, h, a.AccountID, s.fleetLatest(ctx, a.Provider, a.AccountID))
+	if !blocked {
+		return nil
+	}
+	r := acctRef(accountName(a)) + " (" + a.AccountID + "): own " + string(h) + " login " + why
+	outcome, code := contracts.FallbackIntervention, contracts.ErrUnavailable
+	if reset != nil {
+		outcome, code = contracts.FallbackWaiting, contracts.ErrCapacityExhausted
+	}
+	e := contracts.Errorf(code, "no eligible %s subscription on this node: %s", a.Provider, r)
+	e.Retryable = reset != nil
+	e = e.WithDetail("outcome", string(outcome)).WithDetail("reasons", []string{r}).WithRef(contracts.KindAccount, a.AccountID)
+	if reset != nil {
+		e = e.WithDetail("earliest_reset", reset.UTC().Format(time.RFC3339))
+	}
+	return e
+}
+
+// fleetLatest is the hub's latest usage observation of account id (nil
+// when the hub has none or cannot be read).
+func (s *Service) fleetLatest(ctx context.Context, provider contracts.Provider, id string) *contracts.AccountObservation {
+	views, _ := s.fleetAccounts(ctx, provider)
+	for _, v := range views {
+		if v.Account.AccountID == id {
+			return v.Latest
+		}
+	}
+	return nil
+}
+
+// ownLoginRejectWindow bounds how far back a refused login on the node's
+// own login counts when the login file's age cannot be read (a keychain).
+const ownLoginRejectWindow = time.Hour
+
+// ownLoginBlocked reports why this node's own login for h, which is account
+// id, cannot take a run now: by latest (the hub's last-known usage, as
+// `pyre accounts` shows it) or this node's own record of it, it is at a
+// 5-hour or weekly limit or unusable; it is in a cooldown here; or a run
+// on it here was refused authentication since the login was last written
+// (ownLoginRejected). reset is when a limit ends (nil: unknown, or a login
+// that needs a re-login). Every check reads stored state only.
+func (s *Service) ownLoginBlocked(ctx context.Context, h contracts.Harness, id string, latest *contracts.AccountObservation) (why string, reset *time.Time, blocked bool) {
+	now := s.now()
+	obs := []*contracts.AccountObservation{latest}
+	if o, err := getObservation(ctx, s.db, id); err == nil && o != nil {
+		obs = append(obs, o)
+	}
+	for _, o := range obs {
+		if o == nil {
+			continue
+		}
+		if o.Eligibility == contracts.EligibleUnusable {
+			return "login unusable: " + o.Detail, nil, true
+		}
+		if (o.Eligibility == contracts.EligibleExhausted || o.Eligibility == contracts.EligibleCooldown) && o.ResetAt != nil && o.ResetAt.After(now) {
+			u := *o.ResetAt
+			return fmt.Sprintf("%s until %s", o.Eligibility, u.Format(time.RFC3339)), &u, true
+		}
+		if lk := usage.Judge(o.Windows, now); lk.Limited {
+			if lk.Until != nil {
+				return "at its limit until " + lk.Until.Format(time.RFC3339), lk.Until, true
+			}
+			return "at its limit", nil, true
+		}
+	}
+	if cd, err := getCooldown(ctx, s.db, id); err == nil && cd != nil && cd.Until.After(now) {
+		u := cd.Until
+		return "cooldown until " + u.Format(time.RFC3339) + " (" + cd.Reason + ")", &u, true
+	}
+	if why, ok := s.ownLoginRejected(ctx, h, id); ok {
+		return why, nil, true
+	}
+	return "", nil, false
+}
+
+// ownLoginRejected reports a run on this node's own login for h (account
+// id) that ended on a refused login (a limit event of kind auth_invalid)
+// after the login file was last written: every turn there fails the same
+// way until someone signs in again, which rewrites the file and clears it
+// (server's own Codex login answered "workspace routing discovery
+// unauthorized (401)" to every turn for nine days).
+func (s *Service) ownLoginRejected(ctx context.Context, h contracts.Harness, id string) (string, bool) {
+	since := s.now().Add(-ownLoginRejectWindow)
+	if mt, ok := ownLoginWritten(s.cfg, h); ok {
+		since = mt
+	}
+	var planned, detail string
+	err := s.db.QueryRowContext(ctx, `SELECT f.planned_at, COALESCE(json_extract(f.body,'$.limit.detail'),'') FROM accounts_fallback f
+		JOIN accounts_assignment a ON a.run_id=f.from_run_id
+		WHERE a.credential_kind=? AND a.account_id=? AND json_extract(f.body,'$.limit.kind')=? AND f.planned_at>=?
+		ORDER BY f.planned_at DESC LIMIT 1`, string(contracts.CredAmbient), id, LimitAuthInvalid, ft(since)).Scan(&planned, &detail)
+	if err != nil {
+		return "", false
+	}
+	why := "this node's own " + string(h) + " login was refused"
+	if detail != "" {
+		why += " (" + truncate(detail, 120) + ")"
+	}
+	return why + " at " + planned + "; sign in again on this machine to use it", true
+}
+
+// ownLoginWritten is when the node's own login file for h was last
+// written (ok=false when it cannot be read, e.g. a macOS keychain).
+func ownLoginWritten(cfg Config, h contracts.Harness) (time.Time, bool) {
+	var p string
+	switch h {
+	case contracts.HarnessCodex:
+		if cfg.UserCodexDir != "" {
+			p = filepath.Join(cfg.UserCodexDir, "auth.json")
+		}
+	case contracts.HarnessClaude:
+		if cfg.UserClaudeDir != "" {
+			p = filepath.Join(cfg.UserClaudeDir, ".credentials.json")
+		}
+	}
+	if p == "" {
+		return time.Time{}, false
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return fi.ModTime().UTC(), true
 }

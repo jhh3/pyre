@@ -98,16 +98,16 @@ const (
 // askSystem answers asks at their deadline and withdraws them on archive.
 var askSystem = contracts.Principal{Kind: contracts.PrincipalSystem, ID: "asks"}
 
-const askCols = `ask_id,topic_key,project_id,session_id,title,context,options,default_option,urgent,deadline_at,deadline_rule,state,answer,count,superseded_by,message_id,thread_id,attention_id,decision_message_id,created_at,updated_at,action,items,grant_id,irreversible`
+const askCols = `ask_id,topic_key,project_id,session_id,title,context,options,default_option,urgent,deadline_at,deadline_rule,state,answer,count,superseded_by,message_id,thread_id,attention_id,decision_message_id,created_at,updated_at,action,items,grant_id,irreversible,owner_chat`
 
 func scanAsk(sc interface{ Scan(...any) error }) (contracts.Ask, error) {
 	var a contracts.Ask
 	var project, deadline, answer sql.NullString
-	var options, state, created, updated, items string
+	var options, state, created, updated, items, ownerChat string
 	var urgent, irreversible int
 	if err := sc.Scan(&a.AskID, &a.TopicKey, &project, &a.SessionID, &a.Title, &a.Context, &options, &a.DefaultOption, &urgent, &deadline,
 		&a.DeadlineRule, &state, &answer, &a.Count, &a.SupersededBy, &a.MessageID, &a.ThreadID, &a.AttentionID, &a.DecisionMessageID, &created, &updated,
-		&a.Action, &items, &a.GrantID, &irreversible); err != nil {
+		&a.Action, &items, &a.GrantID, &irreversible, &ownerChat); err != nil {
 		return a, err
 	}
 	a.ProjectID = persistence.ProjectPtr(project)
@@ -123,6 +123,12 @@ func scanAsk(sc interface{ Scan(...any) error }) (contracts.Ask, error) {
 		var ans contracts.AskAnswer
 		if persistence.FromJSON(answer.String, &ans) == nil {
 			a.Answer = &ans
+		}
+	}
+	if ownerChat != "" {
+		var oc contracts.AskOwnerChat
+		if persistence.FromJSON(ownerChat, &oc) == nil {
+			a.OwnerChat = &oc
 		}
 	}
 	a.CreatedAt = persistence.ParseTime(created)
@@ -353,8 +359,8 @@ func (h *Hub) createAskTx(ctx context.Context, tx *sql.Tx, sessionID string, in 
 			open.AskID, seq, sessionID, in.Context, persistence.Time(now)); err != nil {
 			return contracts.CreateAskResponse{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE asks SET count=count+1, updated_at=?, filed_turn=? WHERE ask_id=?`,
-			persistence.Time(now), h.filedTurnTx(ctx, tx, sessionID), open.AskID); err != nil { // asks_chat.go: asked again this turn
+		if _, err := tx.ExecContext(ctx, `UPDATE asks SET count=count+1, updated_at=?, filed_turn=?, owner_chat='' WHERE ask_id=?`,
+			persistence.Time(now), h.filedTurnTx(ctx, tx, sessionID), open.AskID); err != nil { // asks_chat.go: asked again this turn (earlier chat predates the new question)
 			return contracts.CreateAskResponse{}, err
 		}
 		a, err := h.getAskFull(ctx, tx, open.AskID)
@@ -713,17 +719,18 @@ func askAttentionGroup(askID string) string { return "ask:" + askID }
 
 // ---- asks.answer ----
 
-// AnswerAsks implements asks.answer (owner only). Each item commits on its
-// own (operation ID <op>:<index>); the decisions then go to each asking
-// session as one combined message.
+// AnswerAsks implements asks.answer: the owner, or the asking session
+// recording the answer he gave in its chat (answerAskTx). Each item
+// commits on its own (operation ID <op>:<index>); the decisions then go to
+// each asking session as one combined message.
 func (h *Hub) AnswerAsks(ctx context.Context, req contracts.AnswerAsksRequest) (contracts.AnswerAsksResponse, error) {
 	out := contracts.AnswerAsksResponse{Results: []contracts.AnswerAskResult{}}
 	p, err := principal(ctx)
 	if err != nil {
 		return out, err
 	}
-	if !isOwner(p) {
-		return out, contracts.Errorf(contracts.ErrForbidden, "only the owner answers asks")
+	if !isOwner(p) && p.Kind != contracts.PrincipalSession {
+		return out, contracts.Errorf(contracts.ErrForbidden, "only the owner, or the asking session recording his chat answer, answers asks")
 	}
 	if err := requireOp(req.Mutation); err != nil {
 		return out, err
@@ -799,18 +806,50 @@ func (h *Hub) answerAskTx(ctx context.Context, tx *sql.Tx, p contracts.Principal
 	if item, err = checkAnswer(a, item); err != nil {
 		return a, err
 	}
-	a, err = h.decideAskTx(ctx, tx, a, contracts.AskAnswered, contracts.AskAnswer{OptionID: item.OptionID, Items: item.Items, Text: item.Text, By: p, At: h.now()}, "")
+	ans := contracts.AskAnswer{OptionID: item.OptionID, Items: item.Items, Text: item.Text, By: p, At: h.now()}
+	if !isOwner(p) {
+		if err := h.checkSessionAnswerTx(ctx, tx, p, a, item); err != nil {
+			return a, err
+		}
+		ans.Source = contracts.AskSourceChat
+	}
+	a, err = h.decideAskTx(ctx, tx, a, contracts.AskAnswered, ans, "")
 	if err != nil {
 		return a, err
 	}
 	return h.settleProposalTx(ctx, tx, a, p) // proposals.go: approve writes the grant (or queues the fact)
 }
 
+// checkSessionAnswerTx: a session answers only its own ask, with the option
+// the owner chose in its chat and his words quoted, and never a proposal,
+// an owner-action request or an ask he already queued an answer for (those
+// stay his to answer).
+func (h *Hub) checkSessionAnswerTx(ctx context.Context, tx *sql.Tx, p contracts.Principal, a contracts.Ask, item contracts.AnswerAskItem) error {
+	if p.Kind != contracts.PrincipalSession || p.ID != a.SessionID {
+		return contracts.Errorf(contracts.ErrForbidden, "only the owner or the session that asked answers %s", a.AskID).WithRef(contracts.KindAsk, a.AskID)
+	}
+	if item.OptionID == "" && len(item.Items) == 0 {
+		return contracts.Errorf(contracts.ErrInvalid, "name the option the owner chose; if his words fit no option, withdraw the ask or ask again").WithRef(contracts.KindAsk, a.AskID)
+	}
+	if item.Text == "" {
+		return contracts.Errorf(contracts.ErrInvalid, "quote the owner's words that answer the ask").WithRef(contracts.KindAsk, a.AskID)
+	}
+	var owners int
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ask_held WHERE ask_id=?)+(SELECT COUNT(*) FROM owner_actions WHERE ask_id=?)+(SELECT COUNT(*) FROM ask_proposals WHERE ask_id=?)`,
+		a.AskID, a.AskID, a.AskID).Scan(&owners); err != nil {
+		return err
+	}
+	if owners > 0 {
+		return contracts.Errorf(contracts.ErrForbidden, "%s is a proposal, an approval request or has an answer the owner queued: only he answers it", a.AskID).WithRef(contracts.KindAsk, a.AskID)
+	}
+	return nil
+}
+
 // decideAskTx moves an open ask to a final state (first commit wins: an ask
 // already decided is a conflict).
 func (h *Hub) decideAskTx(ctx context.Context, tx *sql.Tx, a contracts.Ask, state contracts.AskState, ans contracts.AskAnswer, supersededBy string) (contracts.Ask, error) {
 	now := h.now()
-	notify := a.SessionID != "" && (state == contracts.AskAnswered || state == contracts.AskDefaulted || state == contracts.AskExpired ||
+	notify := a.SessionID != "" && !answeredBySelf(contracts.Ask{SessionID: a.SessionID, Answer: &ans}) && (state == contracts.AskAnswered || state == contracts.AskDefaulted || state == contracts.AskExpired ||
 		(state == contracts.AskWithdrawn || state == contracts.AskSuperseded) && ans.By.Kind == contracts.PrincipalOwner)
 	res, err := tx.ExecContext(ctx, `UPDATE asks SET state=?, answer=?, superseded_by=?, decided_at=?, updated_at=?, decision_pending=? WHERE ask_id=? AND state=?`,
 		string(state), persistence.JSON(ans), supersededBy, persistence.Time(now), persistence.Time(now), boolInt(notify), a.AskID, string(contracts.AskOpen))
@@ -1081,6 +1120,12 @@ func (h *Hub) repairAskMessages(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// answeredBySelf: the asking session recorded the owner's chat answer
+// itself (it needs no decision message).
+func answeredBySelf(a contracts.Ask) bool {
+	return a.Answer != nil && a.Answer.By.Kind == contracts.PrincipalSession && a.Answer.By.ID == a.SessionID
+}
+
 // sendDecisions tells each asking session the outcome of its decided asks
 // in one combined queue message per session, replying to the (first) ask's
 // owner message. It returns the decision message ID per ask.
@@ -1090,7 +1135,7 @@ func (h *Hub) sendDecisions(ctx context.Context, asks []contracts.Ask, sender co
 	var order []string
 	groups := map[string][]contracts.Ask{}
 	for _, a := range asks {
-		if a.SessionID == "" || !a.State.Decided() {
+		if a.SessionID == "" || !a.State.Decided() || answeredBySelf(a) {
 			continue
 		}
 		if _, ok := groups[a.SessionID]; !ok {

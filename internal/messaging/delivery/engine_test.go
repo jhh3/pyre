@@ -23,6 +23,7 @@ type fakeRuns struct {
 	runs     map[string]*contracts.Run // run ID -> run
 	current  map[string]string         // session -> run ID
 	attached map[string]bool
+	limited  map[string]time.Time // run ID -> Target.LimitedUntil
 }
 
 func (f *fakeRuns) target(r *contracts.Run) Target {
@@ -34,7 +35,7 @@ func (f *fakeRuns) target(r *contracts.Run) Target {
 	if f.wrap != nil {
 		ad = f.wrap(ad)
 	}
-	return Target{Run: *r, Handle: h, Adapter: ad, Attached: f.attached[r.RunID]}
+	return Target{Run: *r, Handle: h, Adapter: ad, Attached: f.attached[r.RunID], LimitedUntil: f.limited[r.RunID]}
 }
 
 func (f *fakeRuns) Current(ctx context.Context, sessionID string) (Target, bool) {
@@ -223,6 +224,32 @@ func TestHumanLeaseBlocksPasteAndStructuredPathContinues(t *testing.T) {
 	}
 }
 
+// TestLimitedRunHoldsDelivery: a run whose account is at its limit until a
+// reset gets no paste (each would be another failed turn and another report
+// to the parent, iss_…); the mail stays queued and
+// goes out once the hold is lifted.
+func TestLimitedRunHoldsDelivery(t *testing.T) {
+	e := newEnv(t)
+	e.launch("ses_a", "run_1", nil)
+	e.runs.set(func() { e.runs.limited = map[string]time.Time{"run_1": time.Now().Add(time.Hour)} })
+	e.put("msg_1", "ses_a", nil)
+	for i := 0; i < 3; i++ {
+		e.engine.ProcessSession(context.Background(), "ses_a", true)
+	}
+	if e.ad.Hits() != 0 {
+		t.Fatalf("adapter called %d times while the account is at its limit", e.ad.Hits())
+	}
+	if m := e.state("msg_1"); m.State != contracts.DeliveryQueued || !strings.Contains(m.Reason, "at its limit until") {
+		t.Fatalf("held message = %+v", m)
+	}
+	// A hold in the past does not hold.
+	e.runs.set(func() { e.runs.limited["run_1"] = time.Now().Add(-time.Second) })
+	e.engine.ProcessSession(context.Background(), "ses_a", true)
+	if got := e.state("msg_1").State; got != contracts.DeliveryAccepted {
+		t.Fatalf("after the reset = %s", got)
+	}
+}
+
 func TestLeaseReleaseThenDeliver(t *testing.T) {
 	e := newEnv(t)
 	e.launch("ses_a", "run_1", nil)
@@ -266,6 +293,47 @@ func TestBusyKeepsOrderAndBacksOff(t *testing.T) {
 	p, _ := e.world.Proc("run_1")
 	if len(p.Delivered) != 2 || p.Delivered[0].MessageID != "msg_1" || p.Delivered[1].MessageID != "msg_2" {
 		t.Fatalf("delivery order = %+v", p.Delivered)
+	}
+}
+
+// Incident 2026-10-23 (iss_…): an attempt the
+// runtime withdraws unsent (the Claude plugin did not take it) returns the
+// message to the queue unbound and unattempted; newer mail waits behind it,
+// and at the next idle the older message goes first.
+func TestWithdrawnUnsentAttemptRequeuedAndDeliveredBeforeNewer(t *testing.T) {
+	e := newEnv(t)
+	e.launch("ses_a", "run_1", nil)
+	withdraw := true
+	e.ad.DeliverFunc = func(p *daemontest.Proc, in contracts.DeliveryInput) (contracts.DeliveryResult, error, bool) {
+		if withdraw {
+			return contracts.DeliveryResult{State: contracts.DeliveryQueued, Evidence: contracts.EvidenceNone,
+				Detail: "the session's plugin did not take the message; withdrawn unsent"}, nil, true
+		}
+		return contracts.DeliveryResult{}, nil, false
+	}
+	e.put("msg_old", "ses_a", nil)
+	e.engine.ProcessSession(context.Background(), "ses_a", true)
+	e.put("msg_new", "ses_a", nil)
+	e.engine.ProcessSession(context.Background(), "ses_a", true)
+	old, nw := e.state("msg_old"), e.state("msg_new")
+	if old.State != contracts.DeliveryQueued || old.Attempted || old.BoundRunID != "" || !strings.Contains(old.Reason, "withdrawn unsent") {
+		t.Fatalf("withdrawn msg_old = %+v", old)
+	}
+	if nw.State != contracts.DeliveryQueued || len(e.rep.Receipts("msg_new")) != 0 {
+		t.Fatalf("msg_new must wait behind the withdrawn head: %+v receipts=%v", nw, states(e.rep.Receipts("msg_new")))
+	}
+	if got := strings.Join(states(e.rep.Receipts("msg_old")), ","); got != "attempting,queued,attempting,queued" {
+		t.Fatalf("msg_old receipts = %s", got)
+	}
+	// The recipient takes input again: the older message first.
+	withdraw = false
+	e.engine.ProcessSession(context.Background(), "ses_a", true)
+	p, _ := e.world.Proc("run_1")
+	if len(p.Delivered) != 2 || p.Delivered[0].MessageID != "msg_old" || p.Delivered[1].MessageID != "msg_new" {
+		t.Fatalf("delivery order = %+v", p.Delivered)
+	}
+	if e.state("msg_old").State != contracts.DeliveryAccepted || e.state("msg_new").State != contracts.DeliveryAccepted {
+		t.Fatalf("not accepted: %+v %+v", e.state("msg_old"), e.state("msg_new"))
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jhh3/pyre/internal/apikeylogin"
 	"github.com/jhh3/pyre/internal/contracts"
 )
 
@@ -35,6 +36,26 @@ func (s *Service) OwnLogin(h contracts.Harness) *contracts.HarnessLogin {
 		return agyOwnLogin(s.cfg.UserAgyDir)
 	}
 	return nil
+}
+
+// ownLoginAPIKey reports why this machine's own login for h bills an API
+// key ("" when it does not, or for a harness Pyre does not manage logins
+// of). Read-only, local files only; nothing secret is returned.
+func (s *Service) ownLoginAPIKey(h contracts.Harness) string {
+	switch h {
+	case contracts.HarnessCodex:
+		if s.cfg.UserCodexDir == "" {
+			return ""
+		}
+		return apikeylogin.Codex(s.cfg.UserCodexDir)
+	case contracts.HarnessClaude:
+		p := s.cfg.Rota.LiveClaudeJSON
+		if p == "" {
+			p = s.cfg.UserClaudeJSON
+		}
+		return apikeylogin.ClaudeFiles(s.cfg.UserClaudeDir, p)
+	}
+	return ""
 }
 
 // agyOwnLogin reads the identity of agy's sign-in: the email claim of the
@@ -169,11 +190,11 @@ func (s *Service) ObserveOwnRateLimits(ctx context.Context, h contracts.Harness,
 	}
 	cctx, cancel := context.WithTimeout(ctx, defaultFleetTimeout)
 	defer cancel()
-	page, err := s.cfg.Fleet.ListAccounts(cctx, contracts.ListAccountsRequest{Provider: contracts.ProviderFor(h)})
+	views, err := s.fleetAccounts(cctx, contracts.ProviderFor(h)) // cached (ownaccount.go)
 	if err != nil {
 		return
 	}
-	for _, v := range page.Items {
+	for _, v := range views {
 		if v.Account.Disabled || !MatchesOwnLogin(v.Account, login) {
 			continue
 		}

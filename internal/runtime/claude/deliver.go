@@ -238,7 +238,11 @@ func (a *Adapter) Deliver(ctx context.Context, h contracts.RunHandle, in contrac
 	if a.pluginLive(h) {
 		return a.deliverPlugin(ctx, h, in)
 	}
-	return a.deliverPaste(ctx, h, in)
+	r, err := a.deliverPaste(ctx, h, in)
+	if err == nil && !a.o.DisablePluginDelivery && PluginAlive(h.StateDir, a.o.Now()) {
+		r.Detail = "pyre-session plugin stalled (it left mail unclaimed while the session sat idle for " + a.o.PluginStallAfter.String() + "); paste fallback: " + r.Detail
+	}
+	return r, err
 }
 
 // InputReady implements delivery.InputReadiness: the paste gate without
@@ -253,9 +257,12 @@ func (a *Adapter) InputReady(ctx context.Context, h contracts.RunHandle, mode co
 	if a.pluginLive(h) {
 		return a.pluginReady(h)
 	}
-	_, refusal, err := a.gate(ctx, h)
+	si, refusal, err := a.gate(ctx, h)
 	if err != nil || refusal == nil || refusal.State != contracts.DeliveryQueued {
 		return true, ""
+	}
+	if si.DialogKind == "limit" && !si.LimitAutoResume {
+		return true, "" // Deliver closes the usage-limit menu first
 	}
 	return false, refusal.Detail
 }
@@ -404,9 +411,16 @@ func (a *Adapter) leftoverDraft(h contracts.RunHandle, si screenInfo) (string, j
 }
 
 func (a *Adapter) deliverPaste(ctx context.Context, h contracts.RunHandle, in contracts.DeliveryInput) (contracts.DeliveryResult, error) {
-	_, refusal, err := a.gate(ctx, h)
+	gs, refusal, err := a.gate(ctx, h)
 	if err != nil {
 		return contracts.DeliveryResult{}, err
+	}
+	if refusal != nil && gs.DialogKind == "limit" && a.closeLimitMenu(ctx, h, gs) {
+		// Claude's usage-limit menu after a failed turn: closed with its
+		// "Stop" so the message reaches the input box.
+		if _, refusal, err = a.gate(ctx, h); err != nil {
+			return contracts.DeliveryResult{}, err
+		}
 	}
 	if refusal != nil {
 		return *refusal, nil

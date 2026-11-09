@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"sync"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 // its runs' native transcripts in its own database. It is brought up to
 // date by one background goroutine: shortly after start (backfill), after a
 // turn ends (a run settles into waiting_input or ends; debounced), and every
-// few minutes. Hooks never index. A query first catches up on changed files
+// few minutes, paced and at low priority (searchpace.go). Hooks never index. A query first catches up on changed files
 // within part of its time budget (skipped while a background pass runs),
 // then searches.
 
@@ -30,6 +31,10 @@ const (
 	searchBackfillWait = 15 * time.Second
 	searchRetryEmpty   = 30 * time.Minute // re-resolve an ended run without files
 	searchKickDebounce = 2 * time.Second
+	// searchAliasBudget bounds one alias cleanup pass (the first on a node
+	// that indexed shared transcripts once per path deletes about a million
+	// entries; what is left continues on the next pass).
+	searchAliasBudget = 2 * time.Minute
 )
 
 type searchState struct {
@@ -72,6 +77,12 @@ func (d *Daemon) searchLoop(ctx context.Context) {
 	if d.search == nil {
 		return
 	}
+	// Never unlocked: the thread keeps its lowered priority and exits with
+	// this goroutine.
+	runtime.LockOSThread()
+	if err := lowerThreadPriority(); err != nil {
+		d.noteErr("transcript index: lower thread priority: %v", err)
+	}
 	tick := time.NewTicker(searchPassInterval)
 	defer tick.Stop()
 	next := time.NewTimer(searchBackfillWait)
@@ -89,12 +100,23 @@ func (d *Daemon) searchLoop(ctx context.Context) {
 			case <-time.After(searchKickDebounce):
 			}
 		}
+		if nodeBusy() {
+			next.Reset(searchBusyDelay)
+			continue
+		}
 		pctx, cancel := context.WithTimeout(ctx, searchPassBudget)
-		st, err := d.search.ix.Update(pctx, d.searchSources(pctx))
+		st, err := d.search.ix.UpdatePaced(pctx, d.searchSources(pctx), newSearchPacer())
 		cancel()
 		if err != nil && ctx.Err() == nil {
 			d.noteErr("transcript index: %v", err)
 		}
+		// Entries indexed under paths now known to be aliases of another
+		// (W-dbspace, search/alias.go); nothing to do on most passes.
+		actx, cancel := context.WithTimeout(ctx, searchAliasBudget)
+		if _, err := d.search.ix.PruneAliases(actx); err != nil && actx.Err() == nil {
+			d.noteErr("transcript index alias cleanup: %v", err)
+		}
+		cancel()
 		d.search.mu.Lock()
 		d.search.last = st
 		d.search.mu.Unlock()

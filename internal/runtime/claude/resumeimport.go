@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -265,4 +266,62 @@ func copyTree(src, dst string) error {
 		}
 		return nil
 	})
+}
+
+// recentCwdTail bounds how much of a transcript RecentCwds reads.
+const recentCwdTail = 1 << 20
+
+// RecentCwds returns the distinct working directories prev's conversation
+// recorded (each transcript line carries the session's cwd), most recent
+// first, from the transcript's last MiB. A resume whose launch directory
+// was removed starts in the newest one that still exists.
+func (a *Adapter) RecentCwds(prev contracts.Run) []string {
+	if prev.NativeRef == nil || prev.NativeRef.Kind != "claude_session" || !uuidRe.MatchString(prev.NativeRef.ID) {
+		return nil
+	}
+	p := findTranscript(a.transcriptHomes(), prev.Cwd, prev.NativeRef.ID)
+	if p == "" {
+		return nil
+	}
+	return recentCwdsIn(p)
+}
+
+func recentCwdsIn(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	start := fi.Size() - recentCwdTail
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, fi.Size()-start)
+	if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
+		return nil
+	}
+	lines := bytes.Split(buf, []byte{'\n'})
+	if start > 0 && len(lines) > 0 {
+		lines = lines[1:] // a partial first line
+	}
+	var out []string
+	seen := map[string]bool{}
+	for i := len(lines) - 1; i >= 0 && len(out) < 10; i-- {
+		if !bytes.Contains(lines[i], []byte(`"cwd"`)) {
+			continue
+		}
+		var r struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(lines[i], &r) != nil || r.Cwd == "" || seen[r.Cwd] {
+			continue
+		}
+		seen[r.Cwd] = true
+		out = append(out, r.Cwd)
+	}
+	return out
 }

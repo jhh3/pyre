@@ -267,4 +267,15 @@ type FallbackPlan struct {
 	UncertainWork bool      `json:"uncertain_work"`
 	Provider      Provider  `json:"provider,omitempty"`
 	PlannedAt     time.Time `json:"planned_at"`
+	// StoppedTasks (additive) are the harness background tasks (shells,
+	// monitors, background subagents, Codex exec groups) that the switch's
+	// stop ended; the successor was told to re-check its jobs (decision
+	// I67). Pyre's own message monitor is not listed.
+	StoppedTasks []string `json:"stopped_tasks,omitempty"`
+	// Limit (additive) is the limit event the plan answers: its kind, a
+	// short credential-free excerpt of the harness's message ("You've hit
+	// your individual spend limit · … resets 1am (UTC)") and the reset it
+	// named. The hub words its child report from it ("stopped on X's spend
+	// limit"). Absent on proactive moves and older nodes.
+	Limit *LimitEvent `json:"limit,omitempty"`
 }

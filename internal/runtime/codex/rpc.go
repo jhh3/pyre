@@ -50,6 +50,7 @@ type rpcClient struct {
 	pending map[string]chan rpcMessage
 	closed  bool
 	err     error
+	diedAt  time.Time // when the connection failed or was closed
 	done    chan struct{}
 
 	onNotify  func(method string, params json.RawMessage)
@@ -117,11 +118,18 @@ func (c *rpcClient) fail(err error) {
 	if c.closed {
 		return
 	}
-	c.closed, c.err = true, err
+	c.closed, c.err, c.diedAt = true, err, time.Now()
 	for id, ch := range c.pending {
 		close(ch)
 		delete(c.pending, id)
 	}
+}
+
+// died is when the connection failed (zero while it is alive).
+func (c *rpcClient) died() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.diedAt
 }
 
 // alive reports whether the connection is usable.

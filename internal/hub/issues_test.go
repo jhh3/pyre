@@ -454,3 +454,28 @@ func TestIssueNoticeOutbox(t *testing.T) {
 		t.Fatalf("mail: %+v", mail)
 	}
 }
+
+// A node daemon (its automatic updater) files machine issues about itself
+// only; repeats dedupe like any other machine issue.
+func TestIssueFiledByNode(t *testing.T) {
+	f := newChildFixture(t, nil)
+	x := f.x
+	node := contracts.Principal{Kind: contracts.PrincipalNode, ID: nodeMac}
+	file := func(op string, kind contracts.IssueKind, nodeID string) (contracts.FileIssueResponse, error) {
+		return x.h.FileIssue(as(node), contracts.FileIssueRequest{Mutation: contracts.Mutation{OperationID: op}, Kind: kind,
+			Title: "codex auto-update: codex 0.999.0 could not be staged", Body: "synthetic", NodeID: nodeID})
+	}
+	r, err := file("op_synth-node1", contracts.IssueMachine, "")
+	if err != nil || r.Outcome != contracts.IssueCreated || r.Issue.NodeID != nodeMac || r.Issue.ReporterSessionID != "" {
+		t.Fatalf("node files a machine issue: %+v %v", r.Issue, err)
+	}
+	if r2, err := file("op_synth-node2", contracts.IssueMachine, nodeMac); err != nil || r2.Issue.IssueID != r.Issue.IssueID || r2.Issue.Occurrences != 2 {
+		t.Fatalf("repeat is an occurrence: %+v %v", r2.Issue, err)
+	}
+	if _, err := file("op_synth-node3", contracts.IssuePyreBug, ""); !contracts.IsCode(err, contracts.ErrForbidden) {
+		t.Fatalf("a node filed a pyre_bug issue: %v", err)
+	}
+	if _, err := file("op_synth-node4", contracts.IssueMachine, nodeLin); !contracts.IsCode(err, contracts.ErrForbidden) {
+		t.Fatalf("a node filed about another node: %v", err)
+	}
+}

@@ -77,7 +77,7 @@ func Write(dir string, s Spec) (string, error) {
 	}
 	manifest := map[string]any{
 		"name":        Name,
-		"version":     "1.3.0",
+		"version":     "1.3.1",
 		"description": "Pyre session plugin: delivers Pyre messages between turns and rings the inbox doorbell (generated per run; do not edit)",
 		"author":      map[string]string{"name": "Pyre"},
 	}
@@ -238,8 +238,12 @@ export const register: Register = on => {
     }
     return started
   })
+  // Only the main agent's turns make the session busy: subagent turns
+  // (agentId set) also fire turn.start, including side agents Claude starts
+  // right after the main turn ends, and their turn.complete never clears
+  // the flag (incident 2026-10-23: an idle session never took its mail).
   on('turn.start', ($, e, next) => {
-    S.busy = true
+    if (e.agentId === undefined) S.busy = true
     return next(e)
   })
   on('turn.complete', ($, e, next) => {

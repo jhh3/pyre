@@ -69,7 +69,7 @@ func TestCreateFetchFailureFailsLoudly(t *testing.T) {
 	if branchExists(context.Background(), clone, "pyre/x") {
 		t.Fatal("a branch was created despite the failed fetch")
 	}
-	if _, err := os.Stat(filepath.Join(clone, ".worktrees", "x")); err == nil {
+	if _, err := os.Stat(filepath.Join(root, "worktrees", "app", "x")); err == nil {
 		t.Fatal("a worktree was created despite the failed fetch")
 	}
 }

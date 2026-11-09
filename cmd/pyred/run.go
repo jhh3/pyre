@@ -46,6 +46,7 @@ type runOpts struct {
 	devCommandRetention                                         time.Duration
 	// Background work limits (A20): see docs/operations.md.
 	hiveCaptureQueue, hiveBackgroundSlots, readCacheQueue int
+	mem                                                   memOpts // decision I66
 }
 
 // noIntegrationsReason explains the node actions that pyred run
@@ -81,13 +82,13 @@ func runFlags(o *runOpts) *flag.FlagSet {
 	fs.StringVar(&o.logLevel, "log-level", "info", "debug|info|warn|error")
 	fs.BoolVar(&o.devMock, "dev-mock", false, "register the deterministic mock runtime adapter (development only)")
 	fs.DurationVar(&o.devClockOffset, "dev-clock-offset", 0, "TESTING ONLY: shift the daemon and hub-link clock by this much (simulates node clock skew)")
-	fs.DurationVar(&o.devCommandRetention, "dev-command-retention", 0, "TESTING ONLY: keep finished hub-link command records this long instead of 30 days (soak checks of the hourly prune)")
+	fs.DurationVar(&o.devCommandRetention, "dev-command-retention", 0, "TESTING ONLY: keep finished hub-link command records this long instead of 7 days (soak checks of the hourly prune)")
 	fs.Func("trust-dir", "directory whose workspaces Claude runs may trust automatically (repeatable; default none)", func(v string) error {
 		o.trustDirs = append(o.trustDirs, v)
 		return nil
 	})
-	fs.StringVar(&o.worktreeRoot, "worktree-root", "~/worktrees", "directory for new Pyre worktrees (<dir>/<repo>/<branch>), exported to runs as PYRE_WORKTREE_ROOT; \"\" puts them next to the repo as <repo>-worktrees")
-	fs.StringVar(&o.runTmpRoot, "run-tmp-root", "", "directory for each run's TMPDIR (<dir>/<run_id>, removed after the run is done); default <state>/tmp/runs; \"none\" keeps the inherited TMPDIR")
+	fs.StringVar(&o.worktreeRoot, "worktree-root", "~/worktrees", "directory for new Pyre worktrees (<dir>/<repo>/<branch>), exported to runs as PYRE_WORKTREE_ROOT; \"\" puts run checkouts next to the repo as <repo>-worktrees (fresh repo launches still use ~/worktrees)")
+	fs.StringVar(&o.runTmpRoot, "run-tmp-root", "", "directory for each run's TMPDIR (<dir>/<10-char id>, kept short for Unix sockets; removed once the run ended and nothing uses it); default ~/.ptmp; \"none\" keeps the inherited TMPDIR")
 	fs.Func("tool-path", "extra directory to search for tmux/claude/codex/node (repeatable; also PYRE_TOOL_PATH)", func(v string) error {
 		o.toolPaths = append(o.toolPaths, v)
 		return nil
@@ -105,7 +106,8 @@ func runFlags(o *runOpts) *flag.FlagSet {
 	fs.StringVar(&o.rotaIndependent, "rota-independent", "", "comma-separated account IDs whose rota login on this machine is independent (checked out without a hub lease)")
 	fs.StringVar(&o.credBackend, "credential-backend", "", "store for Pyre-provisioned connection credentials: auto (default; macOS Keychain, Linux Secret Service), keychain or secret-service (also "+EnvCredentialBackend+"); never a plaintext fallback")
 	fs.StringVar(&o.credKeychain, "credential-keychain", "", "macOS: keep Pyre-provisioned credentials in this keychain file instead of the default search list (also "+EnvCredentialKeychain+"; e.g. a throwaway test keychain)")
-	addRepoFlags(fs) // W-quicklaunch
+	addRepoFlags(fs)        // W-quicklaunch
+	addMemFlags(fs, &o.mem) // I66 memory protection
 	fs.BoolVar(&o.accountsTestMode, "accounts-test-mode", false, "TESTING ONLY: enable account.inject_limit and sub-5-minute usage polls (same as PYRE_ACCOUNTS_TEST_MODE=1); never on a production node")
 	return fs
 }
@@ -179,11 +181,13 @@ func runDaemon(o runOpts) error {
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
 		_ = fileperm.Restrict(p, 0o600)
 	}
+	prepareReclaim(context.Background(), db, dbPath, logger)
 
 	cfg := daemon.Config{StateDir: o.state, DB: db, NodeID: nodeID, NodeName: o.name, SSHAlias: o.sshAlias,
 		MaxRuns: o.maxRuns, OwnerToken: ownerToken, NodeToken: nodeToken, Logger: logger, ReadCacheQueue: o.readCacheQueue, Permissions: o.permissions,
 		WorktreeRoot: o.worktreeRoot, RunTmpRoot: o.runTmpRoot}
-	cfg.RepoIndex = repoIndexConfig() // W-quicklaunch
+	cfg.UserHome, _ = os.UserHomeDir() // default RunTmpRoot ~/.ptmp (W-runtmp)
+	cfg.RepoIndex = repoIndexConfig()  // W-quicklaunch
 	if o.permissions == daemon.PermissionsBypass {
 		logger.Warn("permissions bypass: Pyre-launched runs on this node execute without approval prompts or sandbox (--permissions bypass)")
 	}
@@ -245,6 +249,9 @@ func runDaemon(o runOpts) error {
 		}
 		defer bridge.Close()
 		cfg.Terminal = bridge
+	}
+	if err := applyMemProtection(ctx, o.mem, o.state, &cfg, logger); err != nil {
+		return err
 	}
 	d, err := daemon.New(cfg)
 	if err != nil {

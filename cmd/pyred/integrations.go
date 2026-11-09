@@ -82,6 +82,7 @@ func wireIntegrations(ctx context.Context, cfg *daemon.Config, o runOpts, built 
 		// agy's quota is read by the observer, at most every 5 minutes).
 		cfg.OwnLogin = svc.OwnLogin
 		cfg.OwnUsage = svc.OwnUsage // agy reports its own quota (agyusage.go)
+		cfg.OwnLimit = svc.OwnLimit // agy's own login at its quota (ownlimit.go)
 		if built.rates != nil {
 			built.rates.set(func(home string, raw json.RawMessage) {
 				if home == "" {
@@ -178,6 +179,7 @@ func wireIntegrations(ctx context.Context, cfg *daemon.Config, o runOpts, built 
 		}
 		return out
 	}
+	cfg.MemoryAvailable = func(ctx context.Context) bool { return in.hive.Status(ctx).Mode != hive.ModeUnavailable }
 	return in
 }
 
@@ -190,6 +192,9 @@ func (in *integrations) attach(ctx context.Context, d *daemon.Daemon, link *tran
 	}
 	if link != nil {
 		in.rep.set(link)
+	}
+	if in.env != nil && in.env.auto != nil {
+		go in.env.auto.Run(ctx)
 	}
 	if in.env != nil && link != nil {
 		// Results recorded at boot (an automatic pyred rollback by the
@@ -332,6 +337,16 @@ func (a accountsResolver) OnLimit(ctx context.Context, run contracts.Run, ev con
 	return nil, err
 }
 
+// ResumeAfterLimit and LimitRoom serve session.limit_resume (decision I70).
+func (a accountsResolver) ResumeAfterLimit(ctx context.Context, sessionID, runID string) (contracts.LimitResumeResult, error) {
+	return a.s.ResumeAfterLimit(ctx, sessionID, runID)
+}
+
+func (a accountsResolver) LimitRoom(ctx context.Context, runID string) (daemon.LimitRoom, error) {
+	r, err := a.s.LimitRoomFor(ctx, runID)
+	return daemon.LimitRoom{OK: r.OK, Refused: r.Refused, AccountID: r.AccountID, ResetAt: r.ResetAt, Why: r.Why, Prompt: r.Prompt}, err
+}
+
 // reportBridge implements accounts.Reporter over the hub link (dropped in
 // standalone mode).
 type reportBridge struct {
@@ -375,16 +390,28 @@ func (c *runController) CurrentRun(ctx context.Context, sessionID string) (accou
 		return accounts.RunInfo{}, err
 	}
 	r, err := d.CurrentRun(ctx, sessionID)
-	return accounts.RunInfo{SessionID: r.SessionID, RunID: r.RunID, Harness: r.Harness, Capabilities: r.Capabilities, NativeRef: r.NativeRef, TurnInFlight: r.TurnInFlight, State: r.State, RecentInput: r.RecentInput, Live: r.Live}, err
+	return accounts.RunInfo{SessionID: r.SessionID, RunID: r.RunID, Harness: r.Harness, Capabilities: r.Capabilities, NativeRef: r.NativeRef, TurnInFlight: r.TurnInFlight, State: r.State, RecentInput: r.RecentInput, Live: r.Live, Cwd: r.Cwd}, err
 }
 
-func (c *runController) Quiesce(ctx context.Context, sessionID, runID string) (accounts.QuiesceResult, error) {
+func (c *runController) BackgroundWork(ctx context.Context, sessionID, runID string) []string {
+	d, err := c.get()
+	if err != nil {
+		return nil
+	}
+	return d.RunBackgroundWork(ctx, runID)
+}
+
+func (c *runController) Quiesce(ctx context.Context, sessionID, runID string, opt accounts.QuiesceOptions) (accounts.QuiesceResult, error) {
 	d, err := c.get()
 	if err != nil {
 		return accounts.QuiesceResult{}, err
 	}
-	exited, inFlight, detail, err := d.QuiesceRun(ctx, sessionID, runID)
-	return accounts.QuiesceResult{Exited: exited, TurnInFlight: inFlight, Detail: detail}, err
+	kind := contracts.AccountSwitchLimit
+	if opt.Proactive {
+		kind = contracts.AccountSwitchProactive
+	}
+	q, err := d.QuiesceRun(ctx, sessionID, runID, kind, opt.Proactive)
+	return accounts.QuiesceResult{Exited: q.Exited, TurnInFlight: q.TurnInFlight, Detail: q.Detail, Refused: q.Refused, Stopped: q.Stopped}, err
 }
 
 func (c *runController) StartContinuation(ctx context.Context, k accounts.Continuation) (accounts.ContinuationResult, error) {

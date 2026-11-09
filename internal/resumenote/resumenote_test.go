@@ -34,6 +34,17 @@ func TestAfterCrashText(t *testing.T) {
 	if s := AfterCrash(time.Time{}, up); strings.Contains(s, "died at") || !strings.Contains(s, "your previous process died and Pyre resumed you") {
 		t.Errorf("unknown death time: %s", s)
 	}
+	boot := died.Add(time.Minute)
+	got = AfterInterrupt(Interrupt{Machine: "synth-box", MachineRestarted: true, BootAt: boot, DiedAt: died, ResumedAt: up})
+	for _, want := range []string{"[from Pyre] synth-box restarted (it booted at Oct 20, 12:35 AM P", "your previous process died at about Oct 20, 12:34 AM P",
+		"with it and Pyre resumed you at Oct 20, 12:43 AM P", "Tool calls that were in flight did not finish and nothing was replayed", lostBackground} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reboot interrupt note lacks %q:\n%s", want, got)
+		}
+	}
+	if got := AfterInterrupt(Interrupt{MachineRestarted: true, InPlace: true, ResumedAt: up}); !strings.Contains(got, "This machine restarted: your previous process died with it and Pyre restarted you in the same conversation") {
+		t.Errorf("in-place note: %s", got)
+	}
 	if s := AfterReboot("server"); !strings.HasPrefix(s, "[from the owner] server has restarted") || !strings.Contains(s, lostBackground) {
 		t.Errorf("reboot note: %s", s)
 	}

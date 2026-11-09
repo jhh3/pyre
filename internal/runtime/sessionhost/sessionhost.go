@@ -65,6 +65,21 @@ type Host interface {
 	AttachDescriptor(cfg AttachConfig, runID, name string, req contracts.AttachCommand, now time.Time) (contracts.AttachDescriptor, error)
 }
 
+// TreeMarker is implemented by hosts that can record a session's process
+// tree before a stop asks the harness to exit, so TerminateSession also
+// ends the children the exit orphans (plugin and MCP servers). MarkTree
+// calls it when the host has it.
+type TreeMarker interface {
+	MarkTree(ctx context.Context, name string)
+}
+
+// MarkTree records the session's process tree on hosts that support it.
+func MarkTree(ctx context.Context, h Host, name string) {
+	if m, ok := h.(TreeMarker); ok {
+		m.MarkTree(ctx, name)
+	}
+}
+
 // AttachConfig is the node-level part of attach descriptors.
 type AttachConfig struct {
 	NodeID   string
@@ -203,6 +218,9 @@ type PaneInfo struct {
 	CurrentCommand string
 	// Width and Height are the pane size in cells (0 if unknown).
 	Width, Height int
+	// TTY is the terminal device the program runs on (tmux: /dev/pts/N;
+	// "" when the host does not say).
+	TTY string
 }
 
 // PrepareDir creates dir with mode 0700 (and tightens an existing dir).

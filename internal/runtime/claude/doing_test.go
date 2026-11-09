@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -77,5 +78,43 @@ func TestHiddenAgentToolAfterStopKeepsIdle(t *testing.T) {
 	hook("PreToolUse", "Read", "t2", "synthetic-sub")
 	if rs.state != contracts.RunRunning || rs.inflight.Len() != 1 {
 		t.Fatalf("announced subagent tool: state=%s inflight=%d", rs.state, rs.inflight.Len())
+	}
+}
+
+// iss_…: a background subagent the turn started
+// (announced by SubagentStart) keeps running tools after Stop. Its tool
+// events must not reopen the turn, or the hub sees the parent "mid-turn"
+// and holds its children's reports.
+func TestBackgroundSubagentToolAfterStopKeepsTurnEnded(t *testing.T) {
+	at := time.Date(2026, 11, 3, 20, 11, 0, 0, time.UTC)
+	rs := newRunState()
+	apply := func(ev, tool, id string, m map[string]any) {
+		at = at.Add(time.Second)
+		p, _ := json.Marshal(m)
+		rs.applyHook(hookRecord{ID: "h" + id + ev, At: at, Event: ev, ToolName: tool, ToolUseID: id, Payload: p})
+	}
+	sub := map[string]any{"agent_id": "synthetic-bg", "agent_type": "implementer"}
+	apply("SessionStart", "", "", nil)
+	apply("UserPromptSubmit", "", "", nil)
+	apply("SubagentStart", "", "", sub)
+	apply("PreToolUse", "Bash", "t1", sub)
+	if rs.state != contracts.RunRunning {
+		t.Fatalf("subagent tool inside the turn: state=%s", rs.state)
+	}
+	apply("PostToolUse", "Bash", "t1", sub)
+	apply("Stop", "", "", map[string]any{"background_tasks": []any{map[string]any{"type": "agent", "status": "running", "description": "live check"}}})
+	if rs.state != contracts.RunWaitingBackground {
+		t.Fatalf("after Stop: state=%s %q", rs.state, rs.reason)
+	}
+	for i, ev := range []string{"PreToolUse", "PostToolUse", "PreToolUse", "PostToolUseFailure", "PermissionDenied"} {
+		apply(ev, "Bash", fmt.Sprintf("t%d", 2+i/2), sub)
+		if rs.state != contracts.RunWaitingBackground {
+			t.Fatalf("background subagent %s reopened the turn: state=%s %q", ev, rs.state, rs.reason)
+		}
+	}
+	// The main thread's own tool call (no agent_id) is a new turn.
+	apply("PreToolUse", "Bash", "t9", nil)
+	if rs.state != contracts.RunRunning {
+		t.Fatalf("main-thread tool after Stop: state=%s", rs.state)
 	}
 }

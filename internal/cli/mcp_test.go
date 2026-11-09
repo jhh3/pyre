@@ -150,6 +150,12 @@ func TestMCPServerToolsAndCalls(t *testing.T) {
 	if !isErr || !strings.Contains(string(out), "invalid arguments") {
 		t.Fatalf("unknown argument must be rejected: %s", out)
 	}
+	// The rejection names the fields the tool takes, so a guessed name
+	// (details for report_issue's body) is corrected in one step.
+	out, isErr = cl.tool("report_issue", map[string]any{"kind": "pyre_bug", "title": "t", "details": "x"})
+	if !isErr || !strings.Contains(string(out), `unknown field \"details\"`) || !strings.Contains(string(out), "it takes body, ") || !strings.Contains(string(out), "title (required)") {
+		t.Fatalf("unknown argument must name the accepted ones: %s", out)
+	}
 	out, isErr = cl.tool("wait_reply", map[string]any{"message_id": "msg_synth-indeterminate", "timeout_seconds": 1})
 	if !isErr || json.Unmarshal(out, &te) != nil || te.ExitCode != ExitUnavailable || te.Result == nil {
 		t.Fatalf("wait_reply timeout should carry the latest state: %s", out)

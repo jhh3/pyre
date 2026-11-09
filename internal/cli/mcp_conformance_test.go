@@ -189,6 +189,7 @@ func TestMCPConformanceWithOfficialSDK(t *testing.T) {
 			call("list_sessions", map[string]any{})
 			call("get_session", map[string]any{"session": "ses_synth-offline"}) // stale run, nullable fields
 			call("read_session", map[string]any{"session": "ses_synth-b", "tail": 5})
+			call("read_session", map[string]any{"session": "ses_synth-b", "tail": 2, "full": true})
 			call("list_approvals", map[string]any{"all": true})
 			call("list_projects", map[string]any{"include_archived": true})
 			call("list_documents", map[string]any{})
@@ -198,6 +199,7 @@ func TestMCPConformanceWithOfficialSDK(t *testing.T) {
 			call("get_context", map[string]any{"project": "prj_synth-outfit"})
 			call("memory_search", map[string]any{"query": "brief", "node": "synth-mac"})
 			call("get_message", map[string]any{"message_id": "msg_synth-indeterminate"})
+			call("get_note", map[string]any{"note_id": "note_synth-handoff-1"})
 			call("inbox", map[string]any{"session": "ses_synth-b"})
 			started := call("start_session", map[string]any{"node": "synth-mac", "harness": "claude", "cwd": "/home/synth/conf", "title": "conformance"})
 			sid := started["session"].(map[string]any)["session"].(map[string]any)["session_id"].(string)
@@ -288,7 +290,7 @@ func TestOutputSchemaRejectsWrongShapes(t *testing.T) {
 	good := map[string]any{
 		"session": map[string]any{"session_id": "ses_x", "harness": "claude", "title": "t", "project_id": nil,
 			"created_by": map[string]any{"kind": "owner", "id": "cli_x"}, "created_at": "2026-10-04T12:00:00Z",
-			"lineage": map[string]any{}, "archived": false},
+			"lineage": map[string]any{}, "archived": false, "archived_at": nil},
 		"attention": 0, "freshness": map[string]any{"observed_at": "2026-10-04T12:00:00Z", "source": "x", "stale": false},
 	}
 	if err := rs.Validate(good); err != nil {

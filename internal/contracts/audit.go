@@ -68,6 +68,10 @@ const (
 	AuditSessionReportedToParent = "session.reported_to_parent"
 	AuditSessionReparented       = "session.reparented" // From -> To parent session ("" = top level) (W-reparent)
 	AuditSessionCleanedUp        = "session.cleaned_up" // its node stopped leftover processes / removed its worktrees (W-lifecycle)
+
+	// AuditSessionLimitResumed: Pyre continued a session once an account
+	// had room after a limit (decision I70). To: the account and how.
+	AuditSessionLimitResumed = "session.limit_resumed"
 )
 
 // Audit actions. Fleet:
@@ -94,6 +98,31 @@ const (
 	// screen (theme picker, security notes) answered with Enter for a run
 	// that had not started.
 	AuditNodeOnboardingAnswered = "node.onboarding_answered"
+	// AuditNodeAvoided (additive): new placements avoid the machine until
+	// ToNote (To: "soft" | "hard"; FromNote: the project of a project
+	// flag; Reason: the flag's reason). AuditNodeAvoidCleared: a flag was
+	// removed before it expired.
+	AuditNodeAvoided      = "node.avoided"
+	AuditNodeAvoidCleared = "node.avoid_cleared"
+	// AuditNodeStopDeferred (additive): an automatic stop of a Codex run
+	// (archive when done, archive cascade, the idle-thread sweep) left the
+	// thread loaded because process groups of its exec sessions still had
+	// live processes (Reason: the pgids and commands). AuditNodeStopResumed:
+	// Pyre unloaded that thread later (the groups emptied, or the cap was
+	// reached and they were killed). Decision I62.
+	AuditNodeStopDeferred = "node.stop_deferred"
+	AuditNodeStopResumed  = "node.stop_resumed"
+	// AuditNodeMemoryGuardKill (additive): the node's memory guard stopped
+	// a run's process (SIGTERM, then SIGKILL if needed) because the machine
+	// was nearly out of memory and swap (Reason: pid, command, RSS, swap,
+	// the node's memory and the outcome). Decision I66.
+	AuditNodeMemoryGuardKill = "node.memory_guard_kill"
+	// AuditNodeMoveHeld (additive): a proactive account move between turns
+	// left a session on its account because it has live harness background
+	// tasks that stopping it would end (Reason: the tasks, and how Pyre
+	// found them: the harness's own list or its exit dialog). Retried once
+	// they are gone. Decision I67.
+	AuditNodeMoveHeld = "node.move_held"
 )
 
 // AuditActor is who did it. Kind: "owner" | "session" | "node" | "pyre"
@@ -180,6 +209,20 @@ const (
 	// AutomationOnboardingAnswered (additive): Claude's first-run
 	// onboarding screen answered (Detail: which screen).
 	AutomationOnboardingAnswered = "onboarding_answered"
+	// AutomationStopDeferred (additive): an automatic stop spared live
+	// process groups and kept the Codex thread loaded (Detail: pgids and
+	// commands); AutomationStopResumed: the deferred unload ran (Detail:
+	// why). Decision I62.
+	AutomationStopDeferred = "stop_deferred"
+	AutomationStopResumed  = "stop_resumed"
+	// AutomationMemoryGuardKill (additive): the memory guard stopped a
+	// run's process on a node nearly out of memory (Detail: pid, command,
+	// RSS, outcome). Decision I66.
+	AutomationMemoryGuardKill = "memory_guard_kill"
+	// AutomationMoveHeld (additive): a proactive account move was held
+	// back because the run has live background tasks (Detail: the tasks).
+	// Decision I67.
+	AutomationMoveHeld = "move_held"
 )
 
 // NodeAutomation is the payload of node.automation. Detail is a short

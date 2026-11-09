@@ -618,10 +618,11 @@ func rawCLIConditionArguments(bindings []kit.CredentialBinding, argv []string) m
 }
 
 func cliReadOnly(binary string, argv []string) bool {
-	// gh api takes an endpoint, not a verb, so the generic verb check below
-	// can neither prove it safe nor rule it out; it gets its own rules.
-	if isGHBinary(binary) && argv[0] == "api" {
-		return ghAPIReadOnly(argv)
+	// The GitHub CLI's reads are a known set of commands and flags (gh api
+	// is judged by its request); the verb check below would pass a write
+	// whose last word is a read verb (`issue comment 1 --body list`).
+	if isGHBinary(binary) {
+		return ghReadOnly(argv)
 	}
 	// The Stripe CLI's reads are a known set of request shapes; everything
 	// else, including subcommands the verb check would pass, needs --write.
@@ -1014,6 +1015,17 @@ func (service Service) credentialContext(pkg kit.Package, mode kit.Mode, method 
 	}
 	result.Binary = path
 	return result, nil
+}
+
+// CredentialFields returns the named connection's stored (and, for OAuth,
+// refreshed) credential fields for built-in in-process fetchers such as link
+// file downloads. Callers must never render or log the values.
+func (service Service) CredentialFields(ctx context.Context, connectionName string) (map[string]string, error) {
+	connection, err := service.State.Connection(ctx, connectionName)
+	if err != nil {
+		return nil, err
+	}
+	return service.secret(ctx, connection)
 }
 
 func (service Service) secret(ctx context.Context, connection state.Connection) (map[string]string, error) {

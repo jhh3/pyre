@@ -67,7 +67,7 @@ func (f *fakeClaude) pluginHost(dir string) {
 			last = time.Now()
 		}
 		f.mu.Lock()
-		busy := f.busy || f.dialog != ""
+		busy := f.busy || f.dialog != "" || os.Getenv("FAKE_PLUGIN_WEDGED") == "1" // wedged: heartbeats, never claims
 		f.mu.Unlock()
 		if busy {
 			continue
@@ -91,6 +91,14 @@ func (f *fakeClaude) pluginHost(dir string) {
 				continue
 			}
 			ids := map[string]string{"name": n, "message_id": m.MessageID, "attempt_id": m.AttemptID}
+			f.mu.Lock()
+			stopped := f.stopped
+			f.mu.Unlock()
+			if stopped {
+				ids["reason"] = "the session was stopped and nobody has sent input since"
+				emit(claudeplugin.EvPluginDropped, ids)
+				continue
+			}
 			if strings.Contains(m.Text, "FAKE_PLUGIN_DROP") {
 				ids["reason"] = "synthetic prompt hook refusal"
 				emit(claudeplugin.EvPluginDropped, ids)
@@ -161,7 +169,7 @@ func TestFakePluginDeliveryOrderedAndIdempotent(t *testing.T) {
 	if r.State != contracts.DeliveryAccepted || !strings.Contains(r.Detail, "already accepted") {
 		t.Fatalf("redeliver %+v", r)
 	}
-	if n := countUserRecords(t, f.a, h, "msg_p1"); n != 1 {
+	if n := waitUserRecord(t, f.a, h, "msg_p1"); n != 1 {
 		t.Fatalf("user records for msg_p1: %d", n)
 	}
 }
@@ -238,7 +246,7 @@ func TestFakePluginBusyWithdrawsAndDrop(t *testing.T) {
 	if r := deliver(t, f.a, h, "msg_wait", "after the turn", contracts.ModeQueue); r.State != contracts.DeliveryAccepted {
 		t.Fatalf("after turn: %+v", r)
 	}
-	if n := countUserRecords(t, f.a, h, "msg_wait"); n != 1 {
+	if n := waitUserRecord(t, f.a, h, "msg_wait"); n != 1 {
 		t.Fatalf("user records %d", n)
 	}
 	f.waitState(f.a, h, contracts.RunWaitingInput, 10*time.Second)
@@ -249,6 +257,99 @@ func TestFakePluginBusyWithdrawsAndDrop(t *testing.T) {
 	}
 	if rr, _ := f.a.Reconcile(ctx, h, "msg_drop"); rr.State != contracts.DeliveryRejected {
 		t.Fatalf("reconcile drop: %+v", rr)
+	}
+}
+
+// iss_…: after a Stop (an interrupt's Esc)
+// Claude Code refuses every plugin prompt until someone types, so every
+// message to an interrupted worker was dropped for hours. The drop now
+// pastes the message at once (typed input lifts Claude's refusal), and
+// later mail goes by plugin again once a prompt has entered.
+func TestFakePluginStopRefusalPastesAndRecovers(t *testing.T) {
+	t.Parallel()
+	f := newFakeEnv(t, nil)
+	env := pluginEnv()
+	env["FAKE_PLUGIN_STOPPED"] = "1"
+	h := f.launch("run_plugstop", env, nil)
+	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
+	waitPluginAlive(t, f, h)
+	r := deliver(t, f.a, h, "msg_stop1", "[pyre-msg:msg_stop1] from session:synthetic:\nafter the stop", contracts.ModeQueue)
+	if r.State != contracts.DeliveryAccepted || r.Evidence != contracts.EvidenceClaudePromptHook || !strings.Contains(r.Detail, "paste fallback") {
+		t.Fatalf("refused plugin prompt not pasted: %+v", r)
+	}
+	if last := lastAttempts(h.StateDir)["msg_stop1"]; last.Mode != "paste" || last.State != jAccepted {
+		t.Fatalf("journal %+v", last)
+	}
+	if n := waitUserRecord(t, f.a, h, "msg_stop1"); n != 1 {
+		t.Fatalf("user records for msg_stop1: %d", n)
+	}
+	// The pasted prompt entered: the plugin path is preferred again and works.
+	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
+	if !f.a.pluginLive(h) {
+		t.Fatal("plugin path not restored after a prompt entered")
+	}
+	r = deliver(t, f.a, h, "msg_stop2", "[pyre-msg:msg_stop2] from session:synthetic:\nnext", contracts.ModeQueue)
+	if r.State != contracts.DeliveryAccepted || r.Evidence != contracts.EvidenceClaudePluginPrompt {
+		t.Fatalf("second message: %+v", r)
+	}
+}
+
+// Incident 2026-10-23 (iss_…): the module kept
+// heartbeating but never claimed while the session sat idle, so every
+// attempt was withdrawn unsent. After PluginStallAfter of that the run
+// pastes instead; a main turn ending gives the module another chance.
+func TestFakePluginStalledWhileIdleFallsBackToPaste(t *testing.T) {
+	t.Parallel()
+	f := newFakeEnv(t, func(o *Options) {
+		o.DeliverTimeout = 600 * time.Millisecond
+		o.PluginStallAfter = 1500 * time.Millisecond
+	})
+	env := pluginEnv()
+	env["FAKE_PLUGIN_WEDGED"] = "1"
+	h := f.launch("run_plugwedge", env, nil)
+	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
+	waitPluginAlive(t, f, h)
+	ctx := context.Background()
+	in := contracts.DeliveryInput{MessageID: "msg_old", AttemptID: "dlv_old_1", Mode: contracts.ModeQueue, Text: "[pyre-msg:msg_old] from session:synthetic:\nolder"}
+	r, err := f.a.Deliver(ctx, h, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != contracts.DeliveryQueued || !strings.Contains(r.Detail, "although the session was idle") {
+		t.Fatalf("idle withdrawal: %+v", r)
+	}
+	if !f.a.pluginLive(h) {
+		t.Fatal("stalled after a single idle miss")
+	}
+	time.Sleep(1600 * time.Millisecond)
+	if f.a.pluginLive(h) {
+		t.Fatal("module still preferred after the stall window")
+	}
+	if ok, why := f.a.InputReady(ctx, h, contracts.ModeQueue); !ok {
+		t.Fatalf("not ready for the paste fallback: %s", why)
+	}
+	in.AttemptID = "dlv_old_2"
+	r, err = f.a.Deliver(ctx, h, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != contracts.DeliveryAccepted || r.Evidence != contracts.EvidenceClaudePromptHook || !strings.Contains(r.Detail, "plugin stalled") {
+		t.Fatalf("fallback: %+v", r)
+	}
+	if last := lastAttempts(h.StateDir)["msg_old"]; last.Mode != "paste" || last.State != jAccepted {
+		t.Fatalf("journal %+v", last)
+	}
+	if n := waitUserRecord(t, f.a, h, "msg_old"); n != 1 {
+		t.Fatalf("user records for msg_old: %d", n)
+	}
+	// Its turn ends: the module is tried again.
+	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
+	end := time.Now().Add(5 * time.Second)
+	for !f.a.pluginLive(h) && time.Now().Before(end) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !f.a.pluginLive(h) {
+		t.Fatal("module not retried after a main turn ended")
 	}
 }
 

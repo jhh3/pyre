@@ -18,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import config, db, util
+from . import config, db, raw_push, util
 
 SEGMENT_MIN_NEW_BYTES = 4096
 LOCAL_MTIME_DAYS = 90
@@ -41,27 +41,6 @@ def _git(vault: Path, *args: str, timeout: int = 30) -> subprocess.CompletedProc
 def _has_remote(vault: Path) -> bool:
     r = _git(vault, "remote")
     return r.returncode == 0 and bool(r.stdout.strip())
-
-
-def _current_branch(vault: Path) -> str:
-    r = _git(vault, "rev-parse", "--abbrev-ref", "HEAD")
-    b = r.stdout.strip()
-    return b if r.returncode == 0 and b and b != "HEAD" else "main"
-
-
-def _git_push(vault: Path) -> bool:
-    """push with rebase-retry (2 attempts)."""
-    branch = _current_branch(vault)
-    p = None
-    for _ in range(2):
-        p = _git(vault, "push", "origin", branch, timeout=60)
-        if p.returncode == 0:
-            return True
-        _git(vault, "pull", "--rebase", "--autostash", "origin", branch, timeout=60)
-    util.log(config.TICK_LOG,
-             f"raw push failed after retry: "
-             f"{(p.stderr if p else '').strip()[:200]}")
-    return False
 
 
 def _ensure_vault() -> Path:
@@ -109,13 +88,25 @@ def _sync_session(conn, vault: Path, machine: str, s) -> int:
     start = int(s["raw_synced_through"] or 0)
     if size <= start + SEGMENT_MIN_NEW_BYTES:
         return 0
-    with open(tp, "rb") as f:
-        f.seek(start)
-        data = f.read(size - start)
-    if not data:
-        return 0
-    end = start + len(data)
+    # Each segment holds at most SEGMENT_MAX_BYTES raw bytes, so no file
+    # comes near GitHub's 100 MiB limit; a big backlog becomes several.
+    chunk = raw_push.SEGMENT_MAX_BYTES
+    wrote = 0
+    while size > start + (SEGMENT_MIN_NEW_BYTES if not wrote else 0):
+        with open(tp, "rb") as f:
+            f.seek(start)
+            data = f.read(min(size - start, chunk))
+        if not data:
+            break
+        _write_segment(conn, vault, machine, s, start, data)
+        start += len(data)
+        wrote += 1
+    return wrote
 
+
+def _write_segment(conn, vault: Path, machine: str, s, start: int,
+                   data: bytes) -> None:
+    end = start + len(data)
     d = vault / "raw" / machine / s["harness"] / s["session_id"]
     d.mkdir(parents=True, exist_ok=True)
     seq = len(list(d.glob("*.jsonl.zst")))
@@ -140,39 +131,23 @@ def _sync_session(conn, vault: Path, machine: str, s) -> int:
         "WHERE harness=? AND session_id=? AND machine=?",
         (end, s["harness"], s["session_id"], machine))
     conn.commit()
-    return 1
 
 
-def _push_debounced(vault: Path) -> None:
-    interval = int(config.load()["sync"]["live_debounce_s"])
-    with util.flocked(config.STATE_DIR / "raw.lock") as got:
-        if not got:
-            return
-        if not _has_remote(vault):
-            flag = config.STATE_DIR / "raw.no-remote"
-            if not flag.exists():
-                util.log(config.TICK_LOG,
-                         f"raw: {vault} has no git remote — segments stay "
-                         f"local until one is configured (logged once)")
-                try:
-                    flag.parent.mkdir(parents=True, exist_ok=True)
-                    flag.touch()
-                except OSError:
-                    pass
-            return
-        stamp = config.STATE_DIR / "raw.push.stamp"
-        now = time.time()
-        try:
-            last = float(stamp.read_text().strip())
-        except (OSError, ValueError):
-            last = 0.0
-        if now - last < interval:
-            return
-        if _git_push(vault):
+def _request_push(vault: Path) -> None:
+    """Mark a push wanted; raw_push owns the single background pusher."""
+    if not _has_remote(vault):
+        flag = config.STATE_DIR / "raw.no-remote"
+        if not flag.exists():
+            util.log(config.TICK_LOG,
+                     f"raw: {vault} has no git remote — segments stay "
+                     f"local until one is configured (logged once)")
             try:
-                stamp.write_text(str(now))
+                flag.parent.mkdir(parents=True, exist_ok=True)
+                flag.touch()
             except OSError:
                 pass
+        return
+    raw_push.request(vault)
 
 
 def tick_phase() -> None:
@@ -202,6 +177,12 @@ def tick_phase() -> None:
     finally:
         conn.close()
     if not wrote:
+        # A backlog left by a failed push is retried once its backoff ends.
+        if raw_push.wanted_path().exists():
+            try:
+                _request_push(vault)
+            except Exception as e:
+                util.log(config.TICK_LOG, f"raw: push request failed: {e!r}")
         return
     try:
         _git(vault, "add", "-A", "--", "raw")
@@ -211,7 +192,7 @@ def tick_phase() -> None:
                 util.log(config.TICK_LOG,
                          f"raw commit failed: {c.stderr.strip()[:200]}")
                 return
-        _push_debounced(vault)
+        _request_push(vault)
     except Exception as e:
         util.log(config.TICK_LOG, f"raw: git phase failed: {e!r}")
 
@@ -357,6 +338,18 @@ def _status() -> int:
     finally:
         conn.close()
     print(f"unsynced local transcript bytes: {pending}")
+    st = raw_push.load_state()
+    if raw_push.lock_held():
+        print("push: a background pusher is running")
+    if st.get("failures"):
+        nxt = time.strftime("%Y-%m-%d %H:%M:%S",
+                            time.localtime(st.get("next_attempt_at", 0)))
+        print(f"push: {st['failures']} failure(s) in a row, next attempt "
+              f"{nxt}: {st.get('last_error', '')}")
+    elif st.get("last_ok_at"):
+        ok = time.strftime("%Y-%m-%d %H:%M:%S",
+                           time.localtime(st["last_ok_at"]))
+        print(f"push: last success {ok}")
     return 0
 
 
@@ -390,7 +383,9 @@ hive raw — raw transcript segments (vault-raw)
 
   hive raw import <session-id> [--harness claude-code|codex]
                           reassemble a synced transcript for --resume here
-  hive raw status         per-machine segment inventory + local sync lag
+  hive raw status         per-machine segment inventory, sync lag, push state
+  hive raw push [--force] push the backlog now in bounded batches (one
+                          pusher at a time; --force skips the failure backoff)
   hive raw prune [--dry-run]
                           list scratch-class prune candidates (v1: list only)
 """
@@ -421,6 +416,12 @@ def run(argv: list[str]) -> int:
         return 0
     if verb == "status":
         return _status()
+    if verb == "push":
+        rc = raw_push.run_pusher(config.RAW_VAULT, force="--force" in rest)
+        st = raw_push.load_state()
+        if rc:
+            util.eprint(f"hive raw push failed: {st.get('last_error', '')}")
+        return rc
     if verb == "prune":
         return _prune()
     util.eprint(f"hive raw: unknown subcommand '{verb}' (try `hive raw help`)")

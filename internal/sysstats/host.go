@@ -59,6 +59,13 @@ type FSInfo struct {
 	Dev          uint64 // device id of the path (dedupes filesystems)
 }
 
+// DiskAvail returns the bytes available to this process on the filesystem
+// holding path (sqlitex.ReclaimPolicy checks it before a VACUUM).
+func DiskAvail(path string) (uint64, error) {
+	fi, err := statfs(path)
+	return fi.Avail, err
+}
+
 // Sampler takes machine samples. The zero value is not usable; use
 // NewSampler. Function fields are injectable for tests.
 type Sampler struct {
@@ -148,6 +155,52 @@ func (s *Sampler) Sample(ctx context.Context) Host {
 	}
 	h.Disks = s.disks()
 	s.last, s.haveLast = h, true
+	return h
+}
+
+// Memory takes a fresh memory-only sample (RAM, swap, pressure; no CPU,
+// load or disks, not cached): the memory guard polls it every few
+// seconds. Linux reads /proc/meminfo and /proc/pressure/memory; macOS uses
+// sysctls and runs vm_stat only when the kernel reports warn or critical
+// pressure (otherwise MemAvailMB stays 0, "not sampled").
+func (s *Sampler) Memory(ctx context.Context) Host {
+	h := Host{At: s.Now()}
+	switch s.GOOS {
+	case "linux":
+		if b, err := s.read("meminfo"); err == nil {
+			m := parseMeminfo(b)
+			h.MemTotalMB = m["MemTotal"] / 1024
+			h.MemAvailMB = m["MemAvailable"] / 1024
+			h.SwapTotalMB = m["SwapTotal"] / 1024
+			if st, ok := m["SwapTotal"]; ok {
+				h.SwapUsedMB = (st - m["SwapFree"]) / 1024
+			}
+		}
+		if b, err := s.read("pressure/memory"); err == nil {
+			if some, ok := parsePSISome10(b); ok {
+				h.PSISome10 = some
+				h.Pressure = PSILevel(some)
+			}
+		}
+	case "darwin":
+		if b, err := s.Sysctl("hw.memsize"); err == nil {
+			h.MemTotalMB = int64(le64(b, 0) >> 20)
+		}
+		if b, err := s.Sysctl("vm.swapusage"); err == nil {
+			total, _, used := parseSwapUsage(b)
+			h.SwapTotalMB, h.SwapUsedMB = int64(total>>20), int64(used>>20)
+		}
+		if b, err := s.Sysctl("kern.memorystatus_vm_pressure_level"); err == nil {
+			h.Pressure = DarwinPressure(int(le32(b, 0)))
+		}
+		if h.Pressure != "" && h.Pressure != "normal" && h.MemTotalMB > 0 {
+			if out, err := s.Exec(ctx, "vm_stat"); err == nil {
+				if used, ok := parseVMStatUsed(out); ok {
+					h.MemAvailMB = max(h.MemTotalMB-used>>20, 0)
+				}
+			}
+		}
+	}
 	return h
 }
 

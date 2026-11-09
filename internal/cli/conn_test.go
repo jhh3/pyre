@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,6 +236,107 @@ func TestPairRejectsBadLinks(t *testing.T) {
 
 // TestSocketConnection serves the API on a unix socket (as the node daemon
 // does) and checks PYRE_SOCKET + PYRE_SESSION_TOKEN are used.
+// A plain ssh shell on a node (no PYRE_HUB, PYRE_SOCKET or client config)
+// reaches this machine's pyred at its default socket, as a session there
+// does, and says so on stderr; a socket open to others is refused
+// (iss_…).
+func TestLocalPyredFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket modes")
+	}
+	h := newHub(t)
+	state, err := os.MkdirTemp("", "pyre-lp") // short path: sun_path is ~104 bytes on macOS
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(state) })
+	e := newEnv(t, nil).with(EnvStateDir, state)
+
+	// No socket yet: today's error.
+	r := run(t, e, nil, "--json", "whoami")
+	if r.code == 0 || !strings.Contains(r.stderr, "no hub configured") || strings.Contains(r.stderr, "was not used") || strings.Contains(r.stderr, "using this machine's pyred") {
+		t.Fatalf("no socket: %s", r)
+	}
+
+	// A fake pyred started with --owner-credential: like the real one, a
+	// bearer-less local call acts as the owner.
+	sock := filepath.Join(state, "pyred.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var ownerCred atomic.Bool
+	auth := httpapi.NewStaticTokens(map[string]c.Principal{ownerToken: testOwner})
+	inner := httpapi.NewServer(h.b, auth, httpapi.Options{StreamWait: time.Second})
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == localStatusPath {
+			json.NewEncoder(w).Encode(map[string]any{"node_id": "node_synth-local", "owner_credential": ownerCred.Load()})
+			return
+		}
+		if r.Header.Get("Authorization") == "" && ownerCred.Load() {
+			r.Header.Set("Authorization", "Bearer "+ownerToken)
+		}
+		inner.ServeHTTP(w, r)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	// Without an owner credential pyred cannot act for the owner on the
+	// hub: today's error, saying why the socket was not used.
+	r = run(t, e, nil, "--json", "whoami")
+	if r.code == 0 || !strings.Contains(r.stderr, "no hub configured") || !strings.Contains(r.stderr, sock+" was not used: it holds no owner credential") {
+		t.Fatalf("pyred without an owner credential: %s", r)
+	}
+
+	ownerCred.Store(true)
+	r = run(t, e, nil, "--json", "whoami")
+	expectCode(t, r, 0)
+	who := mustJSON[WhoAmIResult](t, r)
+	if who.Mode != "socket" || who.Endpoint != sock || who.Source != SourceLocalPyred || who.TokenSource != "none" || who.Principal.ID != testOwner.ID {
+		t.Fatalf("fallback whoami: %+v", who)
+	}
+	if want := "pyre: using this machine's pyred (" + sock + ")\n"; r.stderr != want {
+		t.Fatalf("stderr %q, want %q", r.stderr, want)
+	}
+	// The reported call: publish.
+	f := filepath.Join(t.TempDir(), "report.txt")
+	os.WriteFile(f, []byte("synthetic report\n"), 0o600)
+	r = run(t, e, nil, "--json", "publish", f, "--title", "Synthetic Local Report")
+	expectCode(t, r, 0)
+	mustJSON[c.PublishReceipt](t, r)
+
+	// Precedence: a client config wins over the local socket.
+	other := newHub(t)
+	cfg := e[EnvConfig]
+	if err := SaveConfig(cfg, ClientConfig{HubURL: other.srv.URL, Token: ownerToken}); err != nil {
+		t.Fatal(err)
+	}
+	r = run(t, e, nil, "--json", "whoami")
+	expectCode(t, r, 0)
+	if who := mustJSON[WhoAmIResult](t, r); who.Mode != "hub" || who.Endpoint != other.srv.URL || strings.Contains(r.stderr, "using this machine's pyred") {
+		t.Fatalf("config must beat the local socket: %+v\n%s", who, r)
+	}
+	os.Remove(cfg)
+	// ...and so does PYRE_HUB.
+	r = run(t, e.with(EnvHub, other.srv.URL, EnvToken, ownerToken), nil, "--json", "whoami")
+	expectCode(t, r, 0)
+	if who := mustJSON[WhoAmIResult](t, r); who.Mode != "hub" || who.Source != EnvHub {
+		t.Fatalf("PYRE_HUB must beat the local socket: %+v", who)
+	}
+
+	// World-writable: refused, and the error says why.
+	if err := os.Chmod(sock, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	r = run(t, e, nil, "--json", "whoami")
+	if r.code == 0 || !strings.Contains(r.stderr, "no hub configured") || !strings.Contains(r.stderr, sock+" was not used") || !strings.Contains(r.stderr, "mode 0666") {
+		t.Fatalf("world-writable socket must be refused: %s", r)
+	}
+}
+
 func TestSocketConnection(t *testing.T) {
 	h := newHub(t)
 	dir, err := os.MkdirTemp("", "pyre-sock") // short path: sun_path is ~104 bytes on macOS

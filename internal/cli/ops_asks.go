@@ -4,8 +4,9 @@ package cli
 // owner — topic key, context, 2–4 options, a default and a deadline. The
 // hub keeps one open ask per topic (a repeat merges), answers a decided
 // topic with its decision, and redirects a child session's ask to its
-// parent. Agents call find_asks before asking; ask_owner/find_asks/
-// withdraw_ask are pre-approved. The owner lists and answers asks with
+// parent. Agents call find_asks before asking, and record the owner's
+// chat answer with answer_ask; ask_owner/find_asks/answer_ask/withdraw_ask
+// are pre-approved. The owner lists and answers asks with
 // `pyre ask`. The ops are optional (contracts.AsksAPI): a connection
 // without them answers ErrUnsupported.
 
@@ -13,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -200,6 +202,55 @@ func (o *Ops) WithdrawAsk(ctx context.Context, p WithdrawAskParams) (c.Ask, erro
 		Reason: strings.TrimSpace(p.Reason), SupersededBy: strings.TrimSpace(p.SupersededBy)})
 }
 
+// AnswerOwnAskParams are answer_ask's arguments: the asking session
+// recording the answer the owner gave in its chat.
+type AnswerOwnAskParams struct {
+	AskID       string `json:"ask_id"`
+	Option      string `json:"option"`
+	Quote       string `json:"quote"`
+	OperationID string `json:"operation_id,omitempty"`
+}
+
+// AnswerOwnAsk records the owner's chat answer on the session's own ask
+// (option ID or label; his words quoted).
+func (o *Ops) AnswerOwnAsk(ctx context.Context, p AnswerOwnAskParams) (c.Ask, error) {
+	api, err := o.asks()
+	if err != nil {
+		return c.Ask{}, err
+	}
+	id := strings.TrimSpace(p.AskID)
+	if !c.ValidID(id, c.PrefixAsk) {
+		return c.Ask{}, usagef("ask_id must be an ask ID (ask_...); find_asks lists them")
+	}
+	if strings.TrimSpace(p.Quote) == "" {
+		return c.Ask{}, usagef("quote the owner's words that answer the ask")
+	}
+	a, err := api.GetAsk(ctx, c.GetRequest{ID: id})
+	if err != nil {
+		return c.Ask{}, err
+	}
+	opt := strings.TrimSpace(p.Option)
+	for _, x := range a.Options {
+		if strings.EqualFold(opt, x.ID) || strings.EqualFold(opt, strings.TrimSpace(x.Label)) {
+			opt = x.ID
+			break
+		}
+	}
+	resp, err := api.AnswerAsks(ctx, c.AnswerAsksRequest{Mutation: mut(p.OperationID), Answers: []c.AnswerAskItem{{AskID: id, OptionID: opt, Text: strings.TrimSpace(p.Quote)}}})
+	if err != nil {
+		return c.Ask{}, err
+	}
+	for _, r := range resp.Results {
+		if r.Error != nil {
+			return c.Ask{}, r.Error
+		}
+		if r.Ask != nil {
+			return *r.Ask, nil
+		}
+	}
+	return c.Ask{}, c.Errorf(c.ErrInternal, "no result for %s", id)
+}
+
 // DismissAsk is the owner archiving an open ask: withdrawn with
 // contracts.AskDismissReason (no option, the default never applies), and
 // the asking session is told.
@@ -267,6 +318,15 @@ func askMCPTools() []MCPTool {
 				return o.FindAsks(ctx, p, time.Now())
 			}),
 			func(rc *renderCtx, pg c.Page[c.Ask]) string { return asksText(pg.Items, rc.at(pg.SnapshotAt).now) }),
+		compactly(tool("answer_ask", "Record the owner's answer",
+			"The owner answered your open ask in chat (chat alone never decides it): record the option his words clearly pick, quoting them. If they pick none, leave it open, withdraw_ask, or ask_owner again.",
+			obj(props{"ask_id": str("your open ask (ask_...)"), "option": str("the option he chose: its id or label"),
+				"quote": str("the owner's words that answer it, verbatim"), "operation_id": opIDProp}, "ask_id", "option", "quote"),
+			hints("Record the owner's answer", idempotent, true),
+			func(ctx context.Context, o *Ops, p AnswerOwnAskParams) (c.Ask, error) { return o.AnswerOwnAsk(ctx, p) }),
+			func(rc *renderCtx, a c.Ask) string {
+				return fmt.Sprintf("%s (topic %s) is %s.\n", a.AskID, a.TopicKey, askOutcome(a))
+			}),
 		compactly(tool("withdraw_ask", "Withdraw ask",
 			"Take back your open ask (no longer needed), or mark it superseded by another ask. To correct or add to an ask, call ask_owner again with the same topic_key instead.",
 			obj(props{"ask_id": str("ask ID (ask_...)"), "reason": str("one line the owner sees"),
@@ -318,10 +378,15 @@ func askOptionText(a c.Ask, id string) string {
 func askOutcome(a c.Ask) string {
 	switch a.State {
 	case c.AskOpen:
+		s := "open; no default (expires unanswered)"
 		if a.DefaultOption != "" {
-			return "open; defaults to " + askOptionText(a, a.DefaultOption)
+			s = "open; defaults to " + askOptionText(a, a.DefaultOption)
 		}
-		return "open; no default (expires unanswered)"
+		if oc := a.OwnerChat; oc != nil {
+			s += "; the owner wrote to the session since (not an answer by itself): " + strconv.Quote(clip(oc.Text, 200)) +
+				"; if those words pick an option, the session records it with answer_ask"
+		}
+		return s
 	case c.AskSuperseded:
 		return "superseded by " + orDash(a.SupersededBy)
 	case c.AskWithdrawn:
@@ -338,6 +403,13 @@ func askOutcome(a c.Ask) string {
 	s := string(a.State)
 	if a.GrantID != "" {
 		s += " by standing grant " + a.GrantID
+	}
+	if an := a.Answer; an != nil && an.Source == c.AskSourceChat && an.OptionID != "" {
+		s += " " + askOptionText(a, an.OptionID) + " in chat: " + clip(an.Text, 200)
+		if an.By.Kind == c.PrincipalSession {
+			s += " (recorded by " + an.By.ID + ")"
+		}
+		return s
 	}
 	if an := a.Answer; an != nil && an.Source == c.AskSourceChat {
 		s += " in chat: " + clip(an.Text, 200)

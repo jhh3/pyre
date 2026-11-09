@@ -162,3 +162,38 @@ func TestStartDryRunEnvFileOtherOSAndWarnings(t *testing.T) {
 		t.Fatalf("0644: %v", err)
 	}
 }
+
+// A shell session's prompt is refused before anything reaches the hub on a
+// node whose pyred would drop it (no launch.shell_prompt), and together
+// with shell arguments (the command goes in one or the other).
+func TestStartShellPrompt(t *testing.T) {
+	node := c.Node{NodeID: "node_synth-nuc", Name: "synth-nuc", Connection: c.NodeConnection{State: c.ConnConnected},
+		Harnesses: []c.HarnessInfo{{Harness: c.HarnessShell, Available: true, Capabilities: []string{c.CapShellInitialPrompt}}}}
+	api := &startCapture{nodes: []c.Node{node}}
+	o := &Ops{API: api, Self: Identity{NodeID: "node_synth-nuc"}}
+	ctx := context.Background()
+	if _, err := o.StartSession(ctx, StartParams{Harness: "shell", Cwd: "/synthetic", Prompt: "cd ~/.cache && ls > log"}); err != nil {
+		t.Fatal(err)
+	}
+	if api.req.InitialPrompt != "cd ~/.cache && ls > log" || len(api.req.Args) != 0 {
+		t.Fatalf("request %+v", api.req)
+	}
+	api.req = c.StartSessionRequest{}
+	if _, err := o.StartSession(ctx, StartParams{Harness: "shell", Cwd: "/synthetic", Prompt: "ls", HarnessArgs: []string{"-lc", "ls"}}); err == nil || ExitCodeFor(err) != 2 {
+		t.Fatalf("prompt with shell args: %v", err)
+	}
+	if _, err := o.StartSession(ctx, StartParams{Harness: "shell", Cwd: "/synthetic", HarnessArgs: []string{"-lc", "ls"}}); err != nil {
+		t.Fatalf("shell args alone: %v", err)
+	}
+	api.req = c.StartSessionRequest{}
+	api.nodes[0].Harnesses[0].Capabilities = nil
+	if _, err := o.StartSession(ctx, StartParams{Harness: "shell", Cwd: "/synthetic", Prompt: "ls"}); err == nil || !strings.Contains(err.Error(), "older version") {
+		t.Fatalf("old node: %v", err)
+	}
+	if api.req.Harness != "" {
+		t.Fatal("a refused start reached the hub")
+	}
+	if _, err := o.StartSession(ctx, StartParams{Harness: "shell", Cwd: "/synthetic"}); err != nil {
+		t.Fatalf("old node, no prompt: %v", err)
+	}
+}

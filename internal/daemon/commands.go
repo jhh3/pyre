@@ -245,6 +245,18 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	if resume && recreateTempDir(sc.Cwd) {
 		d.cfg.Logger.Info("resume: recreated a temporary working directory a reboot removed", "session", sc.Session.SessionID, "cwd", sc.Cwd)
 	}
+	if resume {
+		if err := d.restoreRemovedWorktrees(ctx, sc.Session.SessionID, sc.Cwd); err != nil {
+			return contracts.CommandResult{}, err
+		}
+		if note := d.resumeCwdFallback(ctx, adapter, &sc); note != "" && harness != contracts.HarnessShell {
+			// Tell the session where it runs now (a shell would type it).
+			if p := strings.TrimSpace(sc.InitialPrompt); p != "" {
+				note += "\n\n" + p
+			}
+			sc.InitialPrompt = note
+		}
+	}
 	if sc.Checkout == nil || sc.Checkout.Mode == contracts.CheckoutWorktree {
 		if _, err := validateDir(sc.Cwd); err != nil {
 			return contracts.CommandResult{}, err
@@ -306,6 +318,12 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 	}
 	if sc.Args, err = runHarnessArgs(harness, sc.Args, argsPrev); err != nil {
 		return contracts.CommandResult{}, err
+	}
+	// A monitor resumed without arguments relaunches its recorded command
+	// (monitorrelaunch.go); a shell resume has nothing else to continue.
+	monitorRelaunch := resume && relaunchOf == "" && monitorRelaunchable(sc.Session, sc.PreviousRun)
+	if monitorRelaunch && len(sc.Args) == 0 {
+		sc.Args = contracts.MonitorRelaunchArgs(*sc.PreviousRun)
 	}
 	envFile, sessEnv, err := d.runEnvFile(ctx, envFileReq, argsPrev)
 	if err != nil {
@@ -394,12 +412,15 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 				same = true
 			}
 		}
-		kind, ref, rerr := adapter.ResumeSpec(ctx, basis, same)
-		if rerr == nil && kind != contracts.ContinuationNativeResume {
-			// An adapter that can only hand off is a native-resume refusal:
-			// the caller's AllowHandoff decides, and the handoff carries the
-			// lineage prompt, exactly like ErrUnsupported.
-			rerr = contracts.Errorf(contracts.ErrUnsupported, "no native thread to resume on this account")
+		kind, ref, rerr := contracts.ContinuationFresh, (*contracts.NativeRef)(nil), error(nil)
+		if !monitorRelaunch { // a monitor's loop restores its own state (deadline, last output)
+			kind, ref, rerr = adapter.ResumeSpec(ctx, basis, same)
+			if rerr == nil && kind != contracts.ContinuationNativeResume {
+				// An adapter that can only hand off is a native-resume refusal:
+				// the caller's AllowHandoff decides, and the handoff carries the
+				// lineage prompt, exactly like ErrUnsupported.
+				rerr = contracts.Errorf(contracts.ErrUnsupported, "no native thread to resume on this account")
+			}
 		}
 		switch {
 		case rerr == nil && kind == contracts.ContinuationNativeResume:
@@ -408,6 +429,11 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 			cont = kind
 		case contracts.IsCode(rerr, contracts.ErrUnsupported) && sc.AllowHandoff:
 			cont = contracts.ContinuationHandoff
+			if harness == contracts.HarnessShell {
+				// A shell types its initial prompt as a command: only an
+				// explicit one, never the agent handoff text.
+				break
+			}
 			hp := handoffPrompt(sc, basis)
 			if p := strings.TrimSpace(sc.InitialPrompt); p != "" {
 				hp += "\n\n" + p
@@ -457,6 +483,10 @@ func (d *Daemon) startRun(ctx context.Context, cmd contracts.NodeCommand, sc con
 		}
 	}
 	recordHarnessArgs(&run, sc.Args)
+	recordMonitorArgs(&run, sc.Session, sc.Args)
+	if sc.ProjectLead {
+		run.AdapterData[adapterDataProjectLead] = "1" // local continuations inherit it (StartContinuation)
+	}
 	if cmd.Actor.Kind == contracts.PrincipalSystem && cmd.Actor.ID == crashResumeActor {
 		run.AdapterData[adapterDataCrashResumed] = ftime(now) // crashresume.go: at most once
 	}
@@ -589,11 +619,11 @@ func handoffPrompt(sc contracts.StartRunCommand, prev contracts.Run) string {
 	}
 	b.WriteString(". Native resume is unavailable, so this is a reconstructed continuation, not the same conversation thread.\n")
 	if sc.Session.Lineage.HandoffNoteID != "" {
-		b.WriteString("Read the handoff note first: pyre note get " + sc.Session.Lineage.HandoffNoteID + "\n")
+		b.WriteString("Read the handoff note first: pyre note show " + sc.Session.Lineage.HandoffNoteID + "\n")
 	}
-	b.WriteString("Review the previous run: pyre session read " + sc.Session.SessionID + " --run " + prev.RunID + " --tail\n")
+	b.WriteString("Review the previous run: pyre read " + sc.Session.SessionID + " --run " + prev.RunID + " --tail 80 (MCP read_session)\n")
 	b.WriteString("Do not repeat actions whose outcome is unclear without checking their effects first. ")
-	b.WriteString("Then publish a short handoff note of what you reconstructed: pyre note create --kind handoff --session " + sc.Session.SessionID)
+	b.WriteString("Then publish a short handoff note of what you reconstructed: pyre note \"Handoff: <summary>\" --handoff --body \"...\" (MCP create_note)")
 	return b.String()
 }
 
@@ -734,7 +764,7 @@ func (d *Daemon) launch(ctx context.Context, cmd contracts.NodeCommand, sc contr
 	if d.cfg.AgentGuide != nil && rec.Run.Harness != contracts.HarnessShell && !execRun {
 		guide = d.cfg.AgentGuide(rec.Run.Harness, rec.Session)
 		if parent := rec.Session.Lineage.ParentSessionID; parent != "" && !strings.Contains(guide, "## Started by another session") { // W-childnotify
-			guide = strings.TrimRight(guide, "\n") + "\n" + agentguide.ParentNote(parent, slices.Contains(rec.Session.Tags, contracts.TagReportParent))
+			guide = strings.TrimRight(guide, "\n") + "\n" + agentguide.ParentNote(parent, slices.Contains(rec.Session.Tags, contracts.TagReportParent), sc.ProjectLead)
 		}
 		if sc.LaunchContext != nil && sc.LaunchContext.Text != "" {
 			guide = strings.TrimSpace(guide + "\n\n" + sc.LaunchContext.Text)
@@ -902,6 +932,13 @@ func requireCap(rec runRecord, adapter contracts.RuntimeAdapter, caps ...string)
 	return contracts.Errorf(contracts.ErrUnsupported, "adapter %s does not support %s", adapter.Name(), strings.Join(caps, "/")).WithRef(contracts.KindRun, rec.Run.RunID)
 }
 
+// sparingStop: a stop Pyre issued by itself (the hub's archive when done,
+// marked RunCommand.Automatic). A stop the owner or an agent asked for is
+// never one, whatever the command says.
+func sparingStop(cmd contracts.NodeCommand, rc contracts.RunCommand) bool {
+	return rc.Automatic && cmd.Actor.Kind == contracts.PrincipalSystem
+}
+
 func (d *Daemon) runControl(ctx context.Context, cmd contracts.NodeCommand, rc contracts.RunCommand) (contracts.CommandResult, error) {
 	lr, err := d.liveTarget(ctx, rc.SessionID, rc.RunID)
 	if err != nil {
@@ -925,7 +962,13 @@ func (d *Daemon) runControl(ctx context.Context, cmd contracts.NodeCommand, rc c
 	var rcpt contracts.CommandReceipt
 	if cmd.Kind == contracts.CmdStop {
 		marked := d.markStopRequested(ctx, lr, string(cmd.Actor.Kind)+":"+cmd.Actor.ID)
-		rcpt, err = lr.adapter.Stop(cctx, *rec.Handle)
+		if sp, ok := lr.adapter.(contracts.StopSparer); ok && sparingStop(cmd, rc) {
+			// Pyre's own stop (archive when done): live work the agent
+			// preserved keeps running (decision I62).
+			rcpt, err = sp.StopSparing(cctx, *rec.Handle)
+		} else {
+			rcpt, err = lr.adapter.Stop(cctx, *rec.Handle)
+		}
 		if marked && (err != nil || rcpt.Outcome == contracts.OutcomeFailed) {
 			d.clearStopRequested(ctx, lr)
 		}
@@ -1134,13 +1177,25 @@ func (d *Daemon) readTranscript(ctx context.Context, rr contracts.ReadSessionReq
 	if !contracts.HasCap(rec.Run.Capabilities, contracts.CapTranscript) && !contracts.HasCap(rec.Run.Capabilities, contracts.CapScreen) {
 		return contracts.ReadSessionResponse{}, contracts.Errorf(contracts.ErrUnsupported, "adapter %s cannot read transcripts", adapter.Name())
 	}
+	rr = rr.SeqWindow()
 	if rr.Limit <= 0 || rr.Limit > 500 {
 		rr.Limit = 200
 	}
 	rr.RunID = rec.Run.RunID
 	cctx, cancel := context.WithTimeout(ctx, d.cfg.CommandTimeout)
 	defer cancel()
-	return adapter.ReadTranscript(cctx, *rec.Handle, rr)
+	resp, err := adapter.ReadTranscript(cctx, *rec.Handle, rr)
+	if err != nil {
+		return resp, err
+	}
+	if resp, err = rr.PickSeq(resp); err != nil {
+		return resp, err
+	}
+	if rr.Full {
+		expandFull(cctx, adapter, *rec.Handle, &resp) // redacts every entry
+	}
+	redactRead(&resp, !rr.Full)
+	return resp, nil
 }
 
 // ---- lease ----

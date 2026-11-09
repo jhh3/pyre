@@ -16,6 +16,8 @@ func TestRepoFromPath(t *testing.T) {
 		"/home/synth/src/outfit/.claude/worktrees/fix-login":  "outfit",
 		"/home/synth/src/outfit/.claude/worktrees/x/sub/dir":  "outfit",
 		"/Users/synth/code/pyre/.worktrees/w-grid":            "pyre",
+		"/Users/synth/worktrees/pyre/w-grid":                  "pyre",
+		"/Users/synth/worktrees/pyre":                         "pyre",
 		"/Users/synth/code/pyre/.git/worktrees/w-grid":        "pyre",
 		"/Users/synth/code/pyre-worktrees/W-tuigroup":         "pyre",
 		"/Users/synth/code/pyre-worktrees/W-tuigroup/android": "pyre",

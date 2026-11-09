@@ -30,6 +30,12 @@ func (m *Model) sessionsSafetyNet() time.Duration {
 	return max(5*time.Minute, m.opts.RefreshInterval*6)
 }
 
+// listSafetyNet is how old the accounts and nodes lists may get while the
+// event stream is connected before the periodic tick re-lists them anyway.
+func (m *Model) listSafetyNet() time.Duration {
+	return max(2*time.Minute, m.opts.RefreshInterval*6)
+}
+
 // sessPatchState tracks the per-session refresh path.
 type sessPatchState struct {
 	unsupported bool // the hub lacks sessions.get_many: full reloads only

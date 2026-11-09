@@ -69,7 +69,7 @@ var (
 	}
 	claudeCaps = []string{c.CapAttachNative, c.CapAttachReadOnly, c.CapInputQueue, c.CapInputReconcile, c.CapApprovals, c.CapInterrupt, c.CapStop, c.CapResumeNative, c.CapResumeHandoff, c.CapSubagentsObserve, c.CapTranscript, c.CapScreen, c.CapAccountProfile, c.CapHooks, c.CapAgentTools}
 	codexCaps  = []string{c.CapAttachNative, c.CapAttachReadOnly, c.CapInputQueue, c.CapInputSteer, c.CapApprovals, c.CapInterrupt, c.CapStop, c.CapResumeNative, c.CapResumeHandoff, c.CapTranscript, c.CapScreen, c.CapAccountProfile, c.CapAgentTools}
-	shellCaps  = []string{c.CapAttachNative, c.CapAttachReadOnly, c.CapStop, c.CapScreen}
+	shellCaps  = []string{c.CapAttachNative, c.CapAttachReadOnly, c.CapStop, c.CapScreen, c.CapShellInitialPrompt}
 )
 
 func fresh(src string, min int) c.Freshness {

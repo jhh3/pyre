@@ -68,6 +68,12 @@ type runState struct {
 	humanTool     string               // tool_use_id of a pending human-only dialog tool
 	permPrompt    bool                 // waiting_approval came from a permission request/prompt
 
+	// Permission prompts read from the screen (tuiprompt.go); tuiOpen is
+	// the one shown now.
+	tuiPrompts map[string]*tuiTrack
+	tuiOrder   []string
+	tuiOpen    string
+
 	subagents map[string]*subagent
 	subOrder  []string
 
@@ -83,15 +89,36 @@ type runState struct {
 
 	lastTurnDurationAt time.Time
 
+	// stopMsg is the last_assistant_message of the latest Stop until the
+	// transcript shows it: Claude Code buffers transcript writes, so a read
+	// right after Stop can miss the turn's final message (ReadTranscript
+	// waits for it; iss_…). lastAssistant is the
+	// newest main-thread assistant text the transcript showed.
+	stopMsg       string
+	lastAssistant string
+
 	pluginVersion string                   // Claude version the delivery module reported at load
 	pluginClaimed map[string]time.Time     // msg id -> the module claimed it from the spool
 	pluginFailed  map[string]pluginFailure // msg id -> dropped / submit failed
+	// pluginRefusedAt: Claude Code refused a plugin prompt because the
+	// session was stopped (an Esc / interrupt) and nobody has typed since.
+	// Claude keeps refusing every plugin prompt until typed input arrives,
+	// so delivery pastes until a prompt enters again (stopRefusal).
+	pluginRefusedAt time.Time
+
+	// bgTasks are the live background tasks the latest main-turn Stop
+	// listed (background_tasks), Pyre's monitor left out (decision I67). An idle_prompt notification later turns
+	// waiting_on_background into waiting_input, so the state alone does
+	// not say whether a stop would end any.
+	bgTasks []string
+
+	security []contracts.SecurityAlert // flagged tool calls (secretcheck.go), newest last
 }
 
 func newRunState() *runState {
 	return &runState{
 		state: contracts.RunStarting, reason: "launching; no SessionStart hook yet",
-		approvals: map[string]*approvalTrack{}, toolPostAt: map[string]time.Time{}, toolDeniedAt: map[string]time.Time{},
+		approvals: map[string]*approvalTrack{}, tuiPrompts: map[string]*tuiTrack{}, toolPostAt: map[string]time.Time{}, toolDeniedAt: map[string]time.Time{},
 		subagents: map[string]*subagent{}, accepted: map[string][]evidence{}, consumed: map[string]evidence{}, acked: map[string]time.Time{},
 		pluginClaimed: map[string]time.Time{}, pluginFailed: map[string]pluginFailure{},
 	}
@@ -117,6 +144,9 @@ var humanOnlyTools = map[string]bool{"AskUserQuestion": true, "ExitPlanMode": tr
 func (rs *runState) applyHook(r hookRecord) {
 	p := r.payload()
 	rs.lastEventAt = r.At
+	if r.Security != nil {
+		rs.addSecurity(*r.Security)
+	}
 	switch r.Event {
 	case "SessionStart":
 		rs.hasStart, rs.ended = true, false
@@ -131,7 +161,10 @@ func (rs *runState) applyHook(r hookRecord) {
 		rs.inflight.Clear()
 		rs.doingHint = ""
 	case "UserPromptSubmit":
-		rs.set(contracts.RunRunning, "prompt submitted", r.At)
+		rs.set(contracts.RunRunning, contracts.RunReasonPromptSubmitted, r.At)
+		if !rs.pluginRefusedAt.IsZero() && !r.At.Before(rs.pluginRefusedAt) {
+			rs.pluginRefusedAt = time.Time{} // a prompt entered: Claude lifted its refusal
+		}
 		for _, m := range r.Markers {
 			rs.addEvidence(evidence{MessageID: m, Kind: contracts.EvidenceClaudePromptHook, Ref: r.ID, At: r.At, Source: 'e', Offset: r.offset})
 		}
@@ -142,10 +175,16 @@ func (rs *runState) applyHook(r hookRecord) {
 		if rs.hiddenAgentEvent(p) {
 			break
 		}
+		if r.Blocked != "" {
+			// Refused by the hook (killguard.go): the tool never ran, so
+			// no PostToolUse closes it.
+			rs.activity = r.ToolName + ": refused by Pyre"
+			break
+		}
 		if humanOnlyTools[r.ToolName] {
 			rs.humanTool = r.ToolUseID
 			rs.set(contracts.RunWaitingApproval, "needs human: "+r.ToolName+" dialog", r.At)
-		} else if rs.state != contracts.RunExiting {
+		} else if rs.state != contracts.RunExiting && !rs.agentAfterTurn(p) {
 			rs.set(contracts.RunRunning, "tool: "+r.ToolName, r.At)
 		}
 		rs.activity = r.ToolName + ": " + oneLine(toolSummary(p), 120)
@@ -178,7 +217,7 @@ func (rs *runState) applyHook(r hookRecord) {
 				}
 			}
 		}
-		if rs.state != contracts.RunExiting {
+		if rs.state != contracts.RunExiting && !rs.agentAfterTurn(p) {
 			verb := "tool finished: "
 			if r.Event == "PostToolUseFailure" {
 				verb = "tool failed: "
@@ -191,7 +230,7 @@ func (rs *runState) applyHook(r hookRecord) {
 			rs.toolDeniedAt[r.ToolUseID] = r.At
 			rs.inflight.Done(r.ToolUseID)
 		}
-		if rs.state != contracts.RunExiting {
+		if rs.state != contracts.RunExiting && !rs.agentAfterTurn(p) {
 			rs.set(contracts.RunRunning, "permission denied (auto mode): "+r.ToolName, r.At)
 		}
 		rs.activity = "denied: " + r.ToolName + ": " + oneLine(str(p, "reason"), 120)
@@ -227,6 +266,7 @@ func (rs *runState) applyHook(r hookRecord) {
 			rs.activity = oneLine(m, 160)
 		}
 	case "Stop":
+		rs.noteBackground(p)
 		if bg := backgroundTasks(p); bg > 0 {
 			rs.set(contracts.RunWaitingBackground, fmt.Sprintf("turn ended; %d background task(s) may start a new turn", bg), r.At)
 		} else {
@@ -238,6 +278,10 @@ func (rs *runState) applyHook(r hookRecord) {
 		rs.doingHint = ""
 		if m := str(p, "last_assistant_message"); m != "" {
 			rs.activity = oneLine(m, 160)
+			rs.stopMsg = m
+			if sameMessage(rs.lastAssistant, m) {
+				rs.stopMsg = ""
+			}
 		}
 	case "StopFailure":
 		rs.set(contracts.RunWaitingInput, "turn failed (StopFailure)", r.At)
@@ -311,8 +355,19 @@ func (rs *runState) applyHook(r hookRecord) {
 				why = str(p, "error")
 			}
 			rs.pluginFailed[r.MessageID] = pluginFailure{Event: r.Event, Reason: oneLine(why, 300), At: r.At}
+			if r.Event == claudeplugin.EvPluginDropped && stopRefusal(why) {
+				rs.pluginRefusedAt = r.At
+			}
 		}
 	}
+}
+
+// stopRefusal reports whether a plugin drop reason is Claude Code's own
+// plugin-input refusal after a Stop ("the session was stopped and nobody
+// has sent input since", Claude 2.1.318). It lasts until typed input
+// enters, so a pasted prompt lifts it; a plugin retry never does.
+func stopRefusal(reason string) bool {
+	return strings.Contains(reason, "session was stopped")
 }
 
 // pluginFailure is the plugin module's report that a claimed message did
@@ -333,14 +388,21 @@ type pluginFailure struct {
 // waiting_input -> running -> waiting_input cycle opens a new child turn,
 // so the parent got a second automatic report.
 func (rs *runState) hiddenAgentEvent(p map[string]any) bool {
-	id := str(p, "agent_id")
-	if id == "" {
+	if !rs.agentAfterTurn(p) {
 		return false
 	}
-	if _, ok := rs.subagents[id]; ok {
-		return false
-	}
-	return rs.state != contracts.RunRunning && rs.state != contracts.RunWaitingApproval
+	_, ok := rs.subagents[str(p, "agent_id")]
+	return !ok
+}
+
+// agentAfterTurn reports whether a tool hook event comes from an agent
+// (it carries an agent_id) while the main turn is not open. Such an event
+// never reopens the turn: a background subagent the turn started (Agent
+// with run_in_background) keeps running tools after Stop, and folding them
+// in showed the parent running for as long as it worked, so the hub held
+// its children's reports as "mid-turn" (iss_…).
+func (rs *runState) agentAfterTurn(p map[string]any) bool {
+	return str(p, "agent_id") != "" && rs.state != contracts.RunRunning && rs.state != contracts.RunWaitingApproval
 }
 
 // doingNow is the "doing now" phrase while the run works: the in-flight
@@ -386,6 +448,49 @@ func backgroundTasks(p map[string]any) int {
 		return int(v)
 	}
 	return 0
+}
+
+// noteBackground keeps a hook's background_tasks list (when it has one).
+func (rs *runState) noteBackground(p map[string]any) {
+	if _, ok := p["background_tasks"]; ok {
+		rs.bgTasks = backgroundTaskList(p)
+	}
+}
+
+// backgroundTaskList describes a hook's live background tasks, Pyre's own
+// monitor left out: "shell: <description>", "subagent: <description>".
+// Shapes seen on Claude Code 2.1.3xx Stop hooks: {type:
+// shell | subagent | "MCP task", id, status: running, description, ...}.
+func backgroundTaskList(p map[string]any) []string {
+	var items []any
+	switch v := p["background_tasks"].(type) {
+	case []any:
+		items = v
+	case map[string]any:
+		for _, t := range v {
+			items = append(items, t)
+		}
+	}
+	var out []string
+	for _, t := range items {
+		m, ok := t.(map[string]any)
+		if !ok || pyreMonitorTask(t) {
+			continue
+		}
+		switch str(m, "status") {
+		case "completed", "failed", "killed", "stopped":
+			continue
+		}
+		kind, what := str(m, "type"), str(m, "description")
+		if what == "" {
+			what = str(m, "command")
+		}
+		if kind == "" {
+			kind = "task"
+		}
+		out = append(out, kind+": "+oneLine(what, 80))
+	}
+	return out
 }
 
 // pyreMonitorTask reports whether a Stop background_tasks entry is the
@@ -435,7 +540,27 @@ func (rs *runState) applyTranscript(t transcriptRecord, off int64) {
 		if le := detectLimit(t.text(), at); le != nil {
 			rs.limit = le
 		}
+	case t.Type == "assistant" && !t.IsSidechain:
+		if x := t.text(); strings.TrimSpace(x) != "" {
+			rs.lastAssistant = x
+			if sameMessage(x, rs.stopMsg) {
+				rs.stopMsg = ""
+			}
+		}
 	}
+}
+
+// sameMessage compares two assistant texts by their first 200 bytes (a
+// hook payload or a transcript entry may be cut).
+func sameMessage(a, b string) bool {
+	head := func(s string) string {
+		s = strings.TrimSpace(s)
+		if len(s) > 200 {
+			s = s[:200]
+		}
+		return s
+	}
+	return head(a) != "" && head(a) == head(b)
 }
 
 // derive returns the observed state, reconciling hook state with the
@@ -485,8 +610,18 @@ func oneLine(s string, n int) string {
 // the same text is the transcript's API-error record and the screen line.
 // "session"/"weekly"/"Opus" limits, curly apostrophes and the StopFailure
 // error codes are all recognised.
+//
+// Spend limits (Team/Enterprise seats, 2.1.304): StopFailure carries
+// {"error":"rate_limit","last_assistant_message":"You've hit your
+// individual spend limit · ask your admin to raise it at … · your session
+// limit resets 1am (UTC)"}; also "org's monthly spend limit", "channel's
+// monthly spend limit", "individual usage limit", "team's shared budget",
+// "You're out of usage credits", "Your org is out of usage" (Claude's own
+// limit-message prefixes, sWr/Ze/Kt/Qt/qt in the 2.1.304 bundle). They are
+// usage limits of that account until the named reset, not rate limits
+// (iss_…).
 var (
-	limitUsageRe = regexp.MustCompile(`(?i)(usage limit reached|you(?:'|’)?ve hit your (?:[\w-]+ )?limit|out of extra usage|limit will reset|5-hour limit reached|weekly limit reached|session limit reached|"error"\s*:\s*"billing_error")`)
+	limitUsageRe = regexp.MustCompile(`(?i)(usage limit reached|you(?:'|’)?ve hit your (?:[\w-]+ )?limit|you(?:'|’)?ve hit your [^·\n"]{0,60}?(?:spend|usage) limit|you(?:'|’)?ve hit your team(?:'|’)?s shared budget|you(?:'|’)?ve reached your [\w-]+ limit|you(?:'|’)?re out of (?:usage credits|extra usage)|your org is out of usage|your group(?:'|’)?s usage limit is set to \$0|your usage allocation has been disabled|credit balance is too low|out of extra usage|limit will reset|5-hour limit reached|weekly limit reached|session limit reached|"error"\s*:\s*"billing_error")`)
 	limitRateRe  = regexp.MustCompile(`(?i)(rate_limit_error|rate limit exceeded|too many requests|"error"\s*:\s*"rate_limit")`)
 	limitAuthRe  = regexp.MustCompile(`(?i)(invalid api key|oauth token (has )?expired|please run /login|authentication_error|not logged in|invalid authentication credentials|token has been revoked|"error"\s*:\s*"authentication_failed")`)
 	limitEpochRe = regexp.MustCompile(`limit reached\|(\d{9,11})`)

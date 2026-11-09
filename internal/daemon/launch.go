@@ -17,6 +17,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/agentguide"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/ghguard"
 	"github.com/jhh3/pyre/internal/repoindex"
 )
 
@@ -246,6 +247,30 @@ func (d *Daemon) pyreBinDir() string {
 	return ""
 }
 
+// nodeName is this node's Pyre name (pyred --name), else its OS hostname,
+// the name the hub lists for a node that reported none.
+func (d *Daemon) nodeName() string {
+	if d.cfg.NodeName != "" {
+		return d.cfg.NodeName
+	}
+	host, _ := os.Hostname()
+	return host
+}
+
+// setNodeEnv sets this machine's identity in a run's environment: its node
+// ID and its Pyre name, which can differ from the OS hostname and the
+// Tailscale name an agent sees.
+func (d *Daemon) setNodeEnv(env map[string]string) {
+	env["PYRE_NODE_ID"] = d.nodeID
+	if name := d.nodeName(); name != "" {
+		env["PYRE_NODE_NAME"] = name
+	}
+}
+
+// adapterDataProjectLead records StartRunCommand.ProjectLead on the run
+// (nonsecret), so a continuation the node starts on its own keeps it.
+const adapterDataProjectLead = "pyre.project_lead"
+
 // runEnv builds the Pyre additions to a run's environment. The session
 // token travels only in this map (never logged or reported). The tmux
 // adapters hand the whole map to the pane process through a private 0600
@@ -260,7 +285,7 @@ func (d *Daemon) runEnv(base map[string]string, cmd contracts.StartRunCommand, r
 	env["PYRE_SESSION_ID"] = cmd.Session.SessionID
 	env["PYRE_HARNESS"] = string(cmd.Session.Harness)
 	env["PYRE_RUN_ID"] = cmd.RunID
-	env["PYRE_NODE_ID"] = d.nodeID
+	d.setNodeEnv(env)
 	env["PYRE_SOCKET"] = d.SocketPath()
 	env["PYRE_RUN_DIR"] = runDir
 	if d.cfg.WorktreeRoot != "" {
@@ -275,16 +300,24 @@ func (d *Daemon) runEnv(base map[string]string, cmd contracts.StartRunCommand, r
 			env[agentguide.EnvReportToParent] = "1"
 		}
 	}
+	if cmd.ProjectLead && env["PYRE_PROJECT_ID"] != "" {
+		env[agentguide.EnvProjectLead] = "1"
+	}
 	if cmd.SessionToken != "" {
 		env["PYRE_SESSION_TOKEN"] = cmd.SessionToken
 	}
 	d.setRunTmp(env, cmd.RunID) // TMPDIR on the data disk (runtmp.go)
+	d.plantDecoys(env, runDir)  // decoy credentials (secretegress.go)
 	path := env["PATH"]
 	if path == "" {
 		path = os.Getenv("PATH")
 	}
 	if bin := d.pyreBinDir(); bin != "" && !strings.HasPrefix(path, bin+string(os.PathListSeparator)) {
 		path = bin + string(os.PathListSeparator) + path
+	}
+	if dir := d.ghShimDir(); dir != "" && env[ghguard.EnvGuard] != "off" { // ghguard.go
+		path = dir + string(os.PathListSeparator) + path
+		env[ghguard.EnvShimDir] = dir
 	}
 	env["PATH"] = path
 	if d.cfg.PyreCLI != "" {

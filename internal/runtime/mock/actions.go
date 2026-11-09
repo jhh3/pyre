@@ -24,6 +24,13 @@ func (b *Backend) InvokeNodeAction(ctx context.Context, req c.NodeActionRequest)
 		if req.NodeID == "" && req.Action == c.ActionConnInvoke {
 			req.NodeID = b.routeInvoke(req.Params) // like the hub: route to the verified holder
 		}
+		if req.NodeID == "" && req.Action == c.ActionMemorySearch {
+			// Like the hub: a connected node advertising Hive memory.
+			if req.NodeID = b.routeMemory(); req.NodeID == "" {
+				return c.NodeActionResult{}, c.Errorf(c.ErrUnavailable, "no connected node serves Hive memory (none advertises %s)", c.NodeCapMemoryHive).
+					WithDetail("reason", c.MemoryNoNodeReason)
+			}
+		}
 		n, ok := b.nodes[req.NodeID]
 		if !ok {
 			return c.NodeActionResult{}, notFound(c.KindNode, req.NodeID)
@@ -32,7 +39,7 @@ func (b *Backend) InvokeNodeAction(ctx context.Context, req c.NodeActionRequest)
 			return c.NodeActionResult{}, c.Errorf(c.ErrUnavailable, "node %s is not connected; action not sent", n.Name).WithRef(c.KindNode, n.NodeID)
 		}
 		result, err := b.runAction(p, n, req.Action, req.Params)
-		res := c.NodeActionResult{CommandID: c.NewID(c.PrefixCommand)}
+		res := c.NodeActionResult{CommandID: c.NewID(c.PrefixCommand), NodeID: n.NodeID}
 		if err != nil {
 			ce, ok := err.(*c.Error)
 			if !ok {
@@ -56,6 +63,18 @@ func (b *Backend) InvokeNodeAction(ctx context.Context, req c.NodeActionRequest)
 		b.cmdResults[res.CommandID] = cmdResult{res: res, actor: p, nodeID: n.NodeID}
 		return res, nil
 	})
+}
+
+// routeMemory picks the connected node advertising c.NodeCapMemoryHive
+// with the lowest ID ("" when none).
+func (b *Backend) routeMemory() string {
+	best := ""
+	for id, n := range b.nodes {
+		if n.Connection.State == c.ConnConnected && c.HasCap(n.Capabilities, c.NodeCapMemoryHive) && (best == "" || id < best) {
+			best = id
+		}
+	}
+	return best
 }
 
 // routeInvoke picks the first node with verified remote_invoke availability

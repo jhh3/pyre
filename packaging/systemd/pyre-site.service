@@ -1,0 +1,37 @@
+# systemd user unit for the Pyre review site (pyre site serve), docs/site.md.
+# Install (on the machine that holds the pages):
+#   install -m 0644 packaging/systemd/pyre-site.service ~/.config/systemd/user/
+#   (edit --allow-domain / --origin below for your domains and public URL)
+#   systemctl --user daemon-reload && systemctl --user enable --now pyre-site
+# It listens on 127.0.0.1:7393 only; pyre-site-tunnel.service puts it online.
+# Pages: ~/.local/share/pyre/site/pages. Notes: ~/.local/state/pyre/site.
+# New notes are sent to the page's session with the owner's client config
+# (~/.config/pyre/client.json, written by `pyre login`); no secret appears here.
+#
+# Keep it running across logout: loginctl enable-linger <user>
+
+[Unit]
+Description=Pyre review site (pyre site serve)
+Documentation=https://github.com/jhh3/pyre/blob/main/docs/site.md
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pyre site serve --listen 127.0.0.1:7393 --allow-domain example.org --allow-domain example.net --origin https://pyre-example-review.ngrok.app
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Never run as an agent session or through a node's local proxy.
+UnsetEnvironment=PYRE_SESSION_TOKEN PYRE_TOKEN PYRE_SOCKET PYRE_HUB
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+MemoryMax=256M
+CPUQuota=100%
+TasksMax=64
+NoNewPrivileges=yes
+UMask=0077
+SyslogIdentifier=pyre-site
+
+[Install]
+WantedBy=default.target

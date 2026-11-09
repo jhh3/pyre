@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -80,7 +81,11 @@ type App struct {
 	conn       *Connection
 	ops        *Ops
 	ran        bool
+	// quietLocal drops the "using this machine's pyred" note (pyre run,
+	// whose stderr is the wrapped command's).
+	quietLocal bool
 	cached     *contracts.Freshness
+	noticeMu   sync.Mutex
 }
 
 // NewApp returns an App wired to the real process environment.
@@ -139,7 +144,7 @@ func (a *App) Main(ctx context.Context, args []string) int {
 	root.SetIn(a.Stdin)
 	root.SetOut(a.Stdout)
 	root.SetErr(a.Stderr)
-	err := root.ExecuteContext(client.WithFreshnessSink(ctx, a.noteCached))
+	err := root.ExecuteContext(client.WithNotices(client.WithFreshnessSink(ctx, a.noteCached), a.notice))
 	if err == nil {
 		a.printCached()
 		return ExitOK
@@ -274,6 +279,9 @@ func (a *App) connect() (*Ops, error) {
 		}
 		a.conn = conn
 		api = conn.Client
+		if conn.Source == SourceLocalPyred && !a.quietLocal {
+			fmt.Fprintf(a.Stderr, "pyre: using this machine's pyred (%s)\n", conn.Socket)
+		}
 	}
 	self := IdentityFromEnv(a.Getenv)
 	if self.NodeID == "" {
@@ -298,8 +306,11 @@ diagnostics go to stderr. IDs are discoverable (pyre nodes, pyre sessions,
 pyre project ls); names are accepted where unambiguous.
 
 Connection: --hub/PYRE_HUB, else PYRE_SOCKET (local daemon), else
-~/.config/pyre/client.json. Credential: PYRE_SESSION_TOKEN, else PYRE_TOKEN,
-else the client config.
+~/.config/pyre/client.json, else this machine's pyred socket
+(<state dir>/pyred.sock; used only if it is yours, mode 0600, and pyred holds
+an owner credential, so it gives no access your processes on this machine do
+not already have). Credential: PYRE_SESSION_TOKEN, else PYRE_TOKEN, else the
+client config.
 
 ` + exitCodesHelp,
 		Version:       buildinfo.Version,
@@ -315,7 +326,8 @@ else the client config.
 				return err
 			}
 			viaHub := a.conn != nil && a.conn.Mode == "hub" // the local daemon socket has no terminal relay
-			return a.RunTUI(cmd.Context(), ops.API, TUIOptions{Stdin: a.Stdin, Stdout: a.Stdout, Stderr: a.Stderr, Self: ops.Self, Relay: viaHub})
+			// The TUI owns the terminal: stderr notices would tear its frame.
+			return a.RunTUI(client.WithNotices(cmd.Context(), nil), ops.API, TUIOptions{Stdin: a.Stdin, Stdout: a.Stdout, Stderr: a.Stderr, Self: ops.Self, Relay: viaHub})
 		}),
 	}
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return &usageError{msg: err.Error()} })
@@ -338,7 +350,9 @@ else the client config.
 		a.addGrantCommands,       // W-grants
 		a.addIssueCommands,       // issues filed by sessions
 		a.addWebCommands,         // W-web-inbox
+		a.addSiteCommands,        // review site (docs/site.md)
 		a.addMonitorCommands,     // W6 monitors
+		a.addWaitCommands,        // GitHub waits (pyre wait gh-pr / gh-run)
 		a.addModelCommands,       // pyre models (start --model/--effort choices)
 	} {
 		add(root)
@@ -389,6 +403,14 @@ func (a *App) emitLine(v any, human func(w io.Writer)) error {
 }
 
 // warnf writes a diagnostic to stderr (never stdout).
+// notice prints a client notice (a retry through a restarting hub or
+// pyred, upload progress) on stderr, so --json output stays parseable.
+func (a *App) notice(msg string) {
+	a.noticeMu.Lock()
+	defer a.noticeMu.Unlock()
+	fmt.Fprintf(a.Stderr, "pyre: %s\n", msg)
+}
+
 func (a *App) warnf(format string, args ...any) {
 	fmt.Fprintf(a.Stderr, format+"\n", args...)
 }

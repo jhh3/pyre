@@ -312,6 +312,12 @@ func TestEveryBlessedConnectorHasHeavyLinkEvidence(t *testing.T) {
 		for _, resolver := range pkg.Links {
 			for _, lookup := range resolver.LookupOptions() {
 				mode := mustMode(t, pkg, lookup.Mode)
+				if lookup.Download != "" {
+					if !kit.DownloadKinds[lookup.Download] {
+						t.Errorf("%s/%s cites unknown download kind %s", pkg.Key, resolver.ID, lookup.Download)
+					}
+					continue
+				}
 				if mode.Executor.Kind != "mcp" {
 					operation, ok := findOperation(mode, lookup.Operation)
 					if !ok || operation.Class != "read" {

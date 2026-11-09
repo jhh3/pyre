@@ -20,6 +20,7 @@ var (
 	procGlobalMemoryStatusEx    = modkernel32.NewProc("GlobalMemoryStatusEx")
 	procGetSystemTimes          = modkernel32.NewProc("GetSystemTimes")
 	procK32GetProcessMemoryInfo = modkernel32.NewProc("K32GetProcessMemoryInfo")
+	procGetTickCount64          = modkernel32.NewProc("GetTickCount64")
 )
 
 // memoryStatusEx is MEMORYSTATUSEX.
@@ -208,4 +209,14 @@ func NativeSelf() (time.Duration, int64, error) {
 		rss = int64(mc.WorkingSetSize)
 	}
 	return cpu, rss, nil
+}
+
+// winUptime is the time since boot (GetTickCount64, milliseconds; it
+// counts sleep and hibernation, as a boot time should).
+func winUptime() (time.Duration, error) {
+	if err := procGetTickCount64.Find(); err != nil {
+		return 0, err
+	}
+	ms, _, _ := procGetTickCount64.Call()
+	return time.Duration(ms) * time.Millisecond, nil
 }

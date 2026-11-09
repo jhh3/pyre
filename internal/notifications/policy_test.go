@@ -100,3 +100,22 @@ func TestGenericTitlesAreGeneric(t *testing.T) {
 		}
 	}
 }
+
+// Decision I79: a possible credential leak pushes through quiet hours and
+// project mutes; only disabling the kind stops it.
+func TestEvaluateSecurityAlwaysPushes(t *testing.T) {
+	now := time.Date(2026, 11, 1, 9, 19, 0, 0, time.UTC) // 01:19 PT
+	prj := "prj_synth-muted"
+	it := contracts.AttentionItem{Kind: contracts.AttnSecurity, Severity: "urgent", ProjectID: &prj}
+	p := contracts.NotificationPrefs{QuietHoursStart: "22:00", QuietHoursEnd: "07:00", TZ: "America/Los_Angeles", MutedProjects: []string{prj}}
+	if got, why := Evaluate(p, it, now); got != "" {
+		t.Fatalf("security suppressed: %s %s", got, why)
+	}
+	p.Kinds = map[contracts.AttentionKind]bool{contracts.AttnSecurity: false}
+	if got, _ := Evaluate(p, it, now); got != StateDisabled {
+		t.Fatalf("kind disabled: %q", got)
+	}
+	if err := ValidatePrefs(contracts.NotificationPrefs{Kinds: map[contracts.AttentionKind]bool{contracts.AttnSecurity: true}}); err != nil {
+		t.Fatal(err)
+	}
+}

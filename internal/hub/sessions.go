@@ -143,8 +143,10 @@ func nodeLabel(ni nodeInfo) string {
 	return ni.ID
 }
 
-// selectNode applies a caller-supplied selector over known nodes.
-func (h *Hub) selectNode(ctx context.Context, sel *contracts.NodeSelector, hn contracts.Harness) (nodeInfo, contracts.HarnessInfo, error) {
+// selectNode applies a caller-supplied selector over known nodes. A node
+// with a soft avoid flag for the launch's project goes last; a hard one is
+// skipped unless overridden (node_avoid.go).
+func (h *Hub) selectNode(ctx context.Context, p contracts.Principal, sel *contracts.NodeSelector, hn contracts.Harness, projectID *string, override bool) (nodeInfo, contracts.HarnessInfo, error) {
 	ids := map[string]bool{}
 	if h.cfg.Fleet != nil {
 		page, err := h.cfg.Fleet.ListNodes(h.systemCtx(ctx), contracts.ListNodesRequest{PageRequest: contracts.PageRequest{Limit: persistence.MaxLimit}})
@@ -167,12 +169,22 @@ func (h *Hub) selectNode(ctx context.Context, sel *contracts.NodeSelector, hn co
 	}
 	rows.Close()
 	type cand struct {
-		ni   nodeInfo
-		hi   contracts.HarnessInfo
-		load int
+		ni      nodeInfo
+		hi      contracts.HarnessInfo
+		load    int
+		avoided bool // a soft avoid flag: only when nothing else matches
 	}
 	var cands []cand
 	var lastErr error
+	now := h.now()
+	avoids, err := h.activeAvoids(ctx, h.db, "", now)
+	if err != nil {
+		return nodeInfo{}, contracts.HarnessInfo{}, err
+	}
+	pid := ""
+	if projectID != nil {
+		pid = *projectID
+	}
 	sorted := make([]string, 0, len(ids))
 	for id := range ids {
 		sorted = append(sorted, id)
@@ -200,8 +212,16 @@ func (h *Hub) selectNode(ctx context.Context, sel *contracts.NodeSelector, hn co
 			lastErr = err
 			continue
 		}
+		avoided := false
+		if a, ok := contracts.EffectiveAvoid(avoids[id], pid, now); ok {
+			if a.Hard && !(override && a.Overridable(isOwner(p))) {
+				lastErr = contracts.Errorf(contracts.ErrForbidden, "node %s is avoided (hard) until %s", nodeLabel(ni), askClock(a.ExpiresAt))
+				continue
+			}
+			avoided = true
+		}
 		load := h.activeRunsOn(ctx, h.db, id)
-		cands = append(cands, cand{ni, hi, load})
+		cands = append(cands, cand{ni, hi, load, avoided})
 	}
 	if len(cands) == 0 {
 		if lastErr != nil {
@@ -209,9 +229,12 @@ func (h *Hub) selectNode(ctx context.Context, sel *contracts.NodeSelector, hn co
 		}
 		return nodeInfo{}, contracts.HarnessInfo{}, contracts.Errorf(contracts.ErrNotFound, "no node matches the selector")
 	}
-	if sel.LeastLoaded {
-		sort.SliceStable(cands, func(i, j int) bool { return cands[i].load < cands[j].load })
-	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].avoided != cands[j].avoided {
+			return !cands[i].avoided
+		}
+		return sel.LeastLoaded && cands[i].load < cands[j].load
+	})
 	return cands[0].ni, cands[0].hi, nil
 }
 
@@ -298,7 +321,7 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 			hi, err = h.checkLaunchTarget(ctx, ni, req.Harness)
 		}
 	case req.NodeSelector != nil:
-		ni, hi, err = h.selectNode(ctx, req.NodeSelector, req.Harness)
+		ni, hi, err = h.selectNode(ctx, p, req.NodeSelector, req.Harness, req.ProjectID, req.IgnoreAvoid)
 	default:
 		err = contracts.Errorf(contracts.ErrInvalid, "node_id or node_selector is required")
 	}
@@ -328,6 +351,14 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 		}
 		if req.ProjectID != nil && *req.ProjectID != "" && h.cfg.Projects != nil {
 			if _, err := h.cfg.Projects.GetProject(ctx, contracts.GetRequest{ID: *req.ProjectID}); err != nil {
+				return contracts.StartSessionResponse{}, err
+			}
+		}
+		// A hard avoid flag on the node refuses new work there unless
+		// overridden (node_avoid.go); a node's own headless records and
+		// monitors are exempt.
+		if !byNode && !avoidExempt(req) {
+			if err := h.checkAvoid(ctx, p, ni, req.ProjectID, req.IgnoreAvoid); err != nil {
 				return contracts.StartSessionResponse{}, err
 			}
 		}
@@ -386,6 +417,7 @@ func (h *Hub) StartSession(ctx context.Context, req contracts.StartSessionReques
 		cmd, err := h.enqueueTx(ctx, tx, ni.ID, contracts.CmdStartRun, p, contracts.StartRunCommand{
 			Session: sess, RunID: run.RunID, Cwd: req.Cwd, Checkout: req.Checkout, EnvProfile: req.EnvProfile,
 			AccountPolicy: req.AccountPolicy, InitialPrompt: req.InitialPrompt, Args: req.Args, LaunchContext: launchCtx,
+			ProjectLead: h.leadsOwnProject(ctx, tx, sess),
 		}, h.opt.StartCommandTTL, contracts.ObjectRef{Kind: contracts.KindRun, ID: run.RunID})
 		if err != nil {
 			return nil, err
@@ -445,6 +477,7 @@ func (h *Hub) GetSession(ctx context.Context, req contracts.GetRequest) (contrac
 	if err == nil {
 		views := []contracts.SessionView{v}
 		h.attachMonitors(ctx, h.db, views)
+		h.attachArchivePending(ctx, views)
 		v = views[0]
 	}
 	return v, err
@@ -461,6 +494,7 @@ func (h *Hub) ListSessions(ctx context.Context, req contracts.ListSessionsReques
 	page, err := h.listSessions(ctx, req)
 	if err == nil {
 		h.attachMonitors(ctx, h.db, page.Items)
+		h.attachArchivePending(ctx, page.Items)
 	}
 	return page, err
 }
@@ -515,7 +549,7 @@ func (h *Hub) listSessions(ctx context.Context, req contracts.ListSessionsReques
 		}
 		const batch = 100
 		a = append(a, batch)
-		rows, err := h.db.QueryContext(ctx, `SELECT s.session_id,s.harness,s.title,s.project_id,s.created_by,s.created_at,s.current_run_id,s.lineage,s.tags,s.archived,s.icon,s.owner_active_at,r.run
+		rows, err := h.db.QueryContext(ctx, `SELECT s.session_id,s.harness,s.title,s.project_id,s.created_by,s.created_at,s.current_run_id,s.lineage,s.tags,s.archived,s.icon,s.owner_active_at,s.archived_at,s.unarchived_at,r.run
 			FROM sessions s LEFT JOIN runs r ON r.run_id = s.current_run_id WHERE `+strings.Join(w, " AND ")+` ORDER BY s.created_at DESC, s.session_id DESC LIMIT ?`, a...)
 		if err != nil {
 			return page, err
@@ -719,6 +753,9 @@ func (h *Hub) ResumeSession(ctx context.Context, req contracts.ResumeRequest) (c
 		req.AccountPolicy.Mode = contracts.AccountEligible
 	}
 	if !h.opExists(ctx, req.OperationID) {
+		if err := h.checkResumeArchived(ctx, p, req.SessionID); err != nil {
+			return contracts.StartSessionResponse{}, err
+		}
 		if prev, ni, hi, kind, err = h.planResume(ctx, &req); err != nil {
 			return contracts.StartSessionResponse{}, err
 		}
@@ -759,7 +796,7 @@ func (h *Hub) ResumeSession(ctx context.Context, req contracts.ResumeRequest) (c
 		}
 		cmd, err := h.enqueueTx(ctx, tx, ni.ID, contracts.CmdResume, p, contracts.ResumeCommand{StartRunCommand: contracts.StartRunCommand{
 			Session: sess, RunID: run.RunID, Cwd: cur.Cwd, Checkout: nil, AccountPolicy: req.AccountPolicy, PreviousRun: &cur, AllowHandoff: req.AllowHandoff,
-			Args: resumeArgs,
+			Args: resumeArgs, ProjectLead: h.leadsOwnProject(ctx, tx, sess),
 		}}, h.opt.StartCommandTTL, contracts.ObjectRef{Kind: contracts.KindRun, ID: run.RunID})
 		if err != nil {
 			return nil, err
@@ -768,6 +805,13 @@ func (h *Hub) ResumeSession(ctx context.Context, req contracts.ResumeRequest) (c
 			return nil, err
 		}
 		sess.CurrentRunID = run.RunID
+		if sess.Archived {
+			// A resumed session is live again: listings, project grouping
+			// and mail treat it as active (checkResumeArchived allowed it).
+			sess.Archived = false
+			sess.Tags = withoutTag(sess.Tags, contracts.TagArchiveWhenDone)
+			h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionUnarchived, Actor: actorOf(p), NodeID: ni.ID, SessionID: sess.SessionID, Reason: "resumed"})
+		}
 		if err := h.updateSessionTx(ctx, tx, sess); err != nil {
 			return nil, err
 		}
@@ -784,8 +828,11 @@ func (h *Hub) ResumeSession(ctx context.Context, req contracts.ResumeRequest) (c
 			return nil, err
 		}
 		how := "native resume"
-		if kind == contracts.ContinuationHandoff {
+		switch kind {
+		case contracts.ContinuationHandoff:
 			how = "handoff"
+		case contracts.ContinuationFresh:
+			how = "monitor relaunch"
 		}
 		if ni.ID != cur.NodeID {
 			how += " from another machine"
@@ -843,8 +890,14 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 	if err := requireOp(req.Mutation); err != nil {
 		return contracts.SessionView{}, err
 	}
+	if req.CancelArchive && req.Archived != nil {
+		return contracts.SessionView{}, contracts.Errorf(contracts.ErrInvalid, "cancel_archive cannot be combined with archived")
+	}
 	if !h.opExists(ctx, req.OperationID) {
 		if err := h.checkRename(ctx, p, req); err != nil { // W-names
+			return contracts.SessionView{}, err
+		}
+		if err := h.checkSelfArchiveChildren(ctx, p, req); err != nil { // archivepending.go
 			return contracts.SessionView{}, err
 		}
 		if err := h.checkArchive(ctx, p, req); err != nil { // W-childnotify
@@ -869,6 +922,15 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 	// the archive-when-done worker stops the run after its turn and then
 	// archives it (archivewhen.go).
 	schedule := req.Archived != nil && *req.Archived && req.WhenDone && h.runLive(ctx, req.SessionID)
+	// archivepending.go: a cancel (or unarchive) also cancels what the
+	// session's archive cascaded to; the answer lists both.
+	canceling := req.CancelArchive || req.Archived != nil && !*req.Archived
+	hadPending := false
+	if canceling {
+		if cur, err := h.getSession(ctx, h.db, req.SessionID); err == nil {
+			hadPending = !cur.Archived && hasArchiveWhenDone(cur)
+		}
+	}
 	auditEdit := func(ctx context.Context, tx *sql.Tx, before, after contracts.Session) {
 		act := actorOf(p)
 		node := ""
@@ -927,6 +989,11 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 			ch["tags"] = s.Tags
 		}
 		switch {
+		case req.CancelArchive:
+			if hasArchiveWhenDone(*s) {
+				s.Tags = withoutTag(s.Tags, contracts.TagArchiveWhenDone)
+				ch["tags"] = s.Tags
+			}
 		case schedule:
 			if !hasArchiveWhenDone(*s) {
 				s.Tags = append(slices.Clone(s.Tags), contracts.TagArchiveWhenDone)
@@ -953,6 +1020,15 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 		}
 		v.ArchiveCascade = h.archiveCascadeSummary(ctx, req.SessionID)
 	}
+	if err == nil && canceling {
+		if hadPending {
+			v.ArchiveCanceled = append(v.ArchiveCanceled, contracts.CascadeSession{SessionID: v.Session.SessionID, Title: v.Session.Title})
+			h.awd.mu.Lock()
+			delete(h.awd.scheduled, req.SessionID)
+			h.awd.mu.Unlock()
+		}
+		v.ArchiveCanceled = append(v.ArchiveCanceled, h.cancelCascaded(ctx, p, req.SessionID)...)
+	}
 	if err == nil && schedule {
 		h.noteArchiveScheduled(req.SessionID)
 		return v, nil // its run keeps its tokens until the turn ends
@@ -971,6 +1047,10 @@ func (h *Hub) UpdateSession(ctx context.Context, req contracts.UpdateSessionRequ
 // started it; other principals are unaffected. An archive it may not do is
 // filed for the owner's approval (approval_requested, owneractions.go).
 func (h *Hub) checkArchive(ctx context.Context, p contracts.Principal, req contracts.UpdateSessionRequest) error {
+	if req.CancelArchive && req.Archived == nil {
+		no := false // a cancel is allowed where an unarchive is
+		req.Archived = &no
+	}
 	if req.Archived == nil || p.Kind != contracts.PrincipalSession {
 		return nil
 	}
@@ -1003,6 +1083,23 @@ func (h *Hub) checkArchive(ctx context.Context, p contracts.Principal, req contr
 	}
 	return contracts.Errorf(contracts.ErrForbidden, "an agent may unarchive only its own session and the sessions under it; the owner can restore %s", req.SessionID).
 		WithRef(contracts.KindSession, req.SessionID)
+}
+
+// checkResumeArchived applies the unarchive rule (checkArchive) to resuming
+// an archived session, since the resume unarchives it: a session principal
+// may resume an archived session only when it is that session or the
+// session sits under it. Unarchived sessions and other principals are
+// unaffected.
+func (h *Hub) checkResumeArchived(ctx context.Context, p contracts.Principal, sessionID string) error {
+	if p.Kind != contracts.PrincipalSession {
+		return nil
+	}
+	s, err := h.getSession(ctx, h.db, sessionID)
+	if err != nil || !s.Archived || p.ID == s.SessionID || s.StartedBy(p.ID) || h.isAncestor(ctx, p.ID, s) {
+		return err
+	}
+	return contracts.Errorf(contracts.ErrForbidden, "%s is archived and resuming unarchives it; an agent may unarchive only its own session and the sessions under it, the owner can resume it", sessionID).
+		WithRef(contracts.KindSession, sessionID)
 }
 
 // editSession applies edit in a mutation; auditEdit (optional) records the
@@ -1059,7 +1156,16 @@ func (h *Hub) planResume(ctx context.Context, req *contracts.ResumeRequest) (pre
 	if err != nil {
 		return prev, ni, hi, kind, err
 	}
+	monitorArgs := sess.IsMonitor() && prev.Harness == contracts.HarnessShell && len(contracts.MonitorRelaunchArgs(prev)) > 0
 	switch {
+	case monitorArgs && nodeID == prev.NodeID:
+		// A monitor relaunches its recorded command on its own node; its
+		// loop keeps its deadline and last output (daemon/monitorrelaunch.go).
+		kind = contracts.ContinuationFresh
+	case monitorArgs:
+		return prev, ni, hi, kind, contracts.Errorf(contracts.ErrUnsupported, "a monitor relaunches only on its own node (%s); start a new one there with pyre monitor add --node", prev.NodeID).WithRef(contracts.KindRun, prev.RunID)
+	case sess.IsMonitor() && prev.Harness == contracts.HarnessShell:
+		return prev, ni, hi, kind, contracts.Errorf(contracts.ErrUnsupported, "monitor %s was started before Pyre recorded monitor commands, so it cannot be relaunched; re-create it with pyre monitor add", sess.SessionID).WithRef(contracts.KindRun, prev.RunID)
 	case contracts.HasCap(prev.Capabilities, contracts.CapResumeNative) && nodeID == prev.NodeID:
 		kind = contracts.ContinuationNativeResume
 	case contracts.HasCap(prev.Capabilities, contracts.CapResumeHandoff) && req.AllowHandoff:

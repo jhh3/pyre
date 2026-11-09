@@ -1,0 +1,30 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.7
+     ▀▀▀▀▀▀       synthetic@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Argon (Medium)
+   ▄▀▀    ▀▀▄     ~
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Synthetic task: review a synthetic design doc and report back to the parent session.
+
+○ Thought for 3m 31s (Synthetic thinking summary...)
+● Ran 3 commands (synthetic.txt)
+● Explored 1 file (synthetic.txt)
+… 22 more actions (19 reads, 1 command, 2 subagents) …
+● Explored 1 file (synthetic.txt)
+● Ran 2 commands (synthetic.txt)
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 13h20m52s.
+Error ID: 00000000-0000-4000-8000-000000000000-1
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 13h19m45s.
+Error ID: 00000000-0000-4000-8000-000000000000-1
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 13h19m24s.
+Error ID: 00000000-0000-4000-8000-000000000000-1
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                                                                                                  Gemini 4 Argon · medium

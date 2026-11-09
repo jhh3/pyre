@@ -905,6 +905,96 @@ func (b *Backend) GetLaunchContext(ctx context.Context, req c.ContextRequest) (c
 		}
 		lc.Text = text
 		lc.Bytes = len(text)
+		if p.Kind == c.PrincipalSession {
+			if s, ok := b.sessions[p.ID]; ok {
+				lc.Role = b.roleLocked(*s, req.ProjectID)
+			}
+		}
 		return lc, nil
 	})
+}
+
+// roleLocked is s's role in projectID (nil: its own project), by the hub's
+// rule (hub/projectpage.go projectLeadOf): walking up while the parent is
+// in the project, the first session whose parent is outside it leads.
+func (b *Backend) roleLocked(s c.Session, projectID *string) *c.ProjectRole {
+	role := &c.ProjectRole{}
+	switch {
+	case projectID != nil && *projectID != "":
+		role.ProjectID = *projectID
+	case s.ProjectID != nil:
+		role.ProjectID = *s.ProjectID
+	}
+	if role.ProjectID == "" || s.ProjectID == nil || *s.ProjectID != role.ProjectID {
+		return role
+	}
+	cur := s
+	for range 32 {
+		if b.parentOutsideLocked(cur, role.ProjectID) {
+			if !cur.NoLead() { // a bounded worker (TagRoleWorker) leads nothing
+				role.LeadSessionID, role.Lead = cur.SessionID, cur.SessionID == s.SessionID
+			}
+			b.pageOwnershipLocked(s, role)
+			return role
+		}
+		cur = *b.sessions[cur.Parent()]
+	}
+	return role // a loop or too deep: no lead
+}
+
+// pageOwnershipLocked fills role's page fields like the hub
+// (hub/projectpage.go pageOwnership, I63): of the live leads, the one that
+// wrote the page or its status card last, else the longest-running; the
+// page's last write by anyone.
+func (b *Backend) pageOwnershipLocked(s c.Session, role *c.ProjectRole) {
+	var leads []c.Session
+	for _, x := range b.sessions {
+		r := b.runs[x.CurrentRunID]
+		live := x.SessionID == s.SessionID || (!x.Archived && r != nil && !r.State.Terminal())
+		if live && b.leadsLocked(*x, role.ProjectID) {
+			leads = append(leads, *x)
+		}
+	}
+	isLead := map[string]bool{}
+	for _, l := range leads {
+		isLead[l.SessionID] = true
+	}
+	var owner string
+	var ownerAt time.Time
+	for _, slug := range []string{c.ProjectPageSlug, c.ProjectStatusSlug} {
+		d := b.slugDocLocked(role.ProjectID, slug)
+		if d == nil {
+			continue
+		}
+		if head := b.revisions[d.HeadRevisionID]; head != nil && (role.PageUpdatedAt == nil || head.CreatedAt.After(*role.PageUpdatedAt)) {
+			at := head.CreatedAt
+			role.PageUpdatedAt = &at
+		}
+		for _, r := range b.revisions {
+			if r.DocumentID == d.DocumentID && r.Author.Kind == c.PrincipalSession && isLead[r.Author.ID] && (owner == "" || r.CreatedAt.After(ownerAt)) {
+				owner, ownerAt = r.Author.ID, r.CreatedAt
+			}
+		}
+	}
+	if len(leads) == 0 {
+		return
+	}
+	if owner == "" {
+		sort.Slice(leads, func(i, j int) bool {
+			if !leads[i].CreatedAt.Equal(leads[j].CreatedAt) {
+				return leads[i].CreatedAt.Before(leads[j].CreatedAt)
+			}
+			return leads[i].SessionID < leads[j].SessionID
+		})
+		owner = leads[0].SessionID
+	}
+	role.PageOwnerSessionID, role.PageOwner = owner, owner == s.SessionID
+	if role.Lead {
+		for _, l := range leads {
+			if l.SessionID != s.SessionID {
+				role.CoLeads = append(role.CoLeads, l.SessionID)
+			}
+		}
+		sort.Strings(role.CoLeads)
+	}
 }

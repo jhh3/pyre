@@ -37,6 +37,13 @@ func TestMain(m *testing.M) {
 	case "inboxwatch":
 		os.Exit(inboxWatchMain(os.Args[1:]))
 	}
+	// Never reach the developer's own Pyre (a test run inside a Pyre
+	// session inherits its socket, token and project): the Stop hook's
+	// page nudge asks the hub through them (pagenudge.go).
+	for _, k := range []string{"PYRE_SOCKET", "PYRE_SESSION_TOKEN", "PYRE_TOKEN", "PYRE_HUB", "PYRE_PROJECT_ID",
+		"PYRE_PROJECT_LEAD", "PYRE_PARENT_SESSION_ID", StateDirEnv} {
+		_ = os.Unsetenv(k)
+	}
 	os.Exit(m.Run())
 }
 
@@ -50,17 +57,22 @@ type fakeClaude struct {
 	output     []string
 	busy       bool
 	queue      []string
-	dialog     string // "", "trust", "perm", "ask", "theme", "security", "firstrun", "login", "loginpicked"
+	dialog     string // "", "trust", "perm", "dangerrm", "ask", "theme", "security", "firstrun", "login", "loginpicked"
+	dangerSel  int    // dangerrm: the selected option (1 Yes, 2 No)
 	prompt     string // initial prompt, submitted once the startup screens are answered
 	trustYes   bool
 	dialogCh   chan bool
 	interrupt  chan struct{}
 	toolSeq    int
 	pasting    bool
+	// stopped: like Claude Code after a Stop, the plugin host refuses
+	// plugin prompts until typed input is submitted (FAKE_PLUGIN_STOPPED=1
+	// starts the run that way).
+	stopped bool
 }
 
 func fakeClaudeMain(args []string) int {
-	f := &fakeClaude{hooks: map[string]string{}}
+	f := &fakeClaude{hooks: map[string]string{}, stopped: os.Getenv("FAKE_PLUGIN_STOPPED") == "1"}
 	if p := os.Getenv("FAKE_ARGV_FILE"); p != "" {
 		_ = os.WriteFile(p, []byte(strings.Join(args, "\n")), 0o600)
 	}
@@ -96,7 +108,7 @@ func fakeClaudeMain(args []string) int {
 			i++
 			resume = args[i]
 			f.sid = resume
-		case "--permission-mode", "--append-system-prompt", "--model":
+		case "--permission-mode", "--append-system-prompt", "--append-system-prompt-file", "--model":
 			i++
 		default:
 			if !strings.HasPrefix(args[i], "-") {
@@ -277,11 +289,30 @@ func (f *fakeClaude) render() {
 		b.WriteString(" Enter to confirm · Esc to cancel\r\n")
 	case "perm":
 		b.WriteString(rule + "\r\n Bash command\r\n   ls\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No\r\n Esc to cancel\r\n")
+	case "dangerrm":
+		b.WriteString(fakeDangerRmHead(rule))
+		for i, o := range []string{"Yes", "No"} {
+			mark := "  "
+			if f.dangerSel == i+1 {
+				mark = "❯ "
+			}
+			fmt.Fprintf(&b, " %s%d. %s\r\n", mark, i+1, o)
+		}
+		b.WriteString("\r\n Esc to cancel · Tab to amend\r\n")
 	case "exitbg":
-		b.WriteString(rule + "\r\n Background work is running\r\n The following will stop when you exit:\r\n\r\n monitor · New Pyre messages for this session\r\n\r\n")
+		b.WriteString(rule + "\r\n Background work is running\r\n The following will stop when you exit:\r\n\r\n monitor · New Pyre messages for this session\r\n")
+		// FAKE_BG_ON_EXIT_TASK: one more task the dialog lists (a shell
+		// the agent started).
+		if t := os.Getenv("FAKE_BG_ON_EXIT_TASK"); t != "" {
+			b.WriteString(" " + t + "\r\n")
+		}
+		b.WriteString("\r\n")
 		b.WriteString(" ❯ 1. Exit and stop tasks\r\n   2. Move to background and exit\r\n   3. Stay\r\n\r\n Enter to confirm · Esc to cancel\r\n")
 	case "ask":
 		b.WriteString(rule + "\r\n Which option?\r\n ❯ 1. Red\r\n   2. Blue\r\n Enter to select · Esc to cancel\r\n")
+	case "limitmenu":
+		b.WriteString(strings.Repeat("▔", 60) + "\r\n   What do you want to do?\r\n\r\n   ❯ 1. Stop and wait for limit to reset\r\n")
+		b.WriteString("     2. Wait here, then continue automatically at 6pm\r\n\r\n   Enter to confirm · Esc to cancel\r\n")
 	case "theme": // Claude Code 2.1.304's onboarding theme picker
 		b.WriteString(" Let's get started.\r\n\r\n Choose the text style that looks best with your terminal\r\n To change this later, run /theme\r\n\r\n")
 		b.WriteString("     Auto (match terminal)\r\n ❯ ✔ Dark mode\r\n     Light mode\r\n\r\n")
@@ -530,6 +561,14 @@ func (f *fakeClaude) key(k string) {
 			f.submit(prompt)
 		}
 		return
+	case "limitmenu": // option 1 is selected: Enter and Esc both close it
+		if k == "enter" || k == "esc" {
+			f.mu.Lock()
+			f.dialog = ""
+			f.mu.Unlock()
+			f.render()
+		}
+		return
 	case "exitbg":
 		switch k {
 		case "enter":
@@ -540,6 +579,22 @@ func (f *fakeClaude) key(k string) {
 			f.dialog = ""
 			f.mu.Unlock()
 			f.render()
+		}
+		return
+	case "dangerrm":
+		switch k {
+		case "down", "up":
+			f.mu.Lock()
+			f.dangerSel = 3 - f.dangerSel
+			f.mu.Unlock()
+			f.render()
+		case "enter":
+			f.mu.Lock()
+			yes := f.dangerSel == 1
+			f.mu.Unlock()
+			f.dialogCh <- yes
+		case "esc":
+			f.dialogCh <- false
 		}
 		return
 	case "perm", "ask":
@@ -556,6 +611,9 @@ func (f *fakeClaude) key(k string) {
 		f.mu.Lock()
 		text := string(f.input)
 		f.input = nil
+		if strings.TrimSpace(text) != "" {
+			f.stopped = false // typed input lifts the plugin-input refusal
+		}
 		f.mu.Unlock()
 		f.render()
 		if strings.TrimSpace(text) != "" {
@@ -687,6 +745,25 @@ func (f *fakeClaude) turn(text string) {
 			return
 		}
 	}
+	if strings.Contains(text, "FAKE_DANGER_RM") {
+		// Claude's hard-coded dangerous-rm check, raised by a subagent in
+		// bypass mode: a dialog and a permission_prompt notification, but
+		// no PreToolUse or PermissionRequest hook in the main session.
+		f.hook("Notification", map[string]any{"notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})
+		f.mu.Lock()
+		f.dialog, f.dialogCh, f.dangerSel = "dangerrm", make(chan bool), 1
+		f.mu.Unlock()
+		f.render()
+		yes := <-f.dialogCh
+		f.mu.Lock()
+		f.dialog = ""
+		f.mu.Unlock()
+		if yes {
+			f.reply("rm-allowed")
+		} else {
+			f.reply("rm-denied")
+		}
+	}
 	if strings.Contains(text, "FAKE_ASK") {
 		id := f.toolID()
 		f.hook("PreToolUse", map[string]any{"tool_name": "AskUserQuestion", "tool_use_id": id, "tool_input": map[string]any{"question": "Which option?"}})
@@ -717,12 +794,29 @@ func (f *fakeClaude) turn(text string) {
 			"content": []any{map[string]any{"type": "text", "text": "Claude AI usage limit reached|1791200000"}}}})
 		f.say("⎿ Claude AI usage limit reached|1791200000")
 		f.hook("StopFailure", map[string]any{"error": "Claude AI usage limit reached|1791200000"})
+		if os.Getenv("FAKE_LIMIT_MENU") == "1" {
+			// Claude Code 2.1.304: the usage-limit menu replaces the input
+			// box after the failed turn, under the session's agent rows.
+			f.say("● implementer(Synthetic task)")
+			f.say("✻ Waiting for 1 background agent to finish")
+			f.mu.Lock()
+			f.dialog = "limitmenu"
+			f.mu.Unlock()
+		}
 		f.endTurn(false)
 		return
 	}
 	f.reply("ok")
 	bg := []any{}
-	if strings.Contains(text, "FAKE_BG") {
+	if strings.Contains(text, "FAKE_BG_SHELL") {
+		// Claude Code 2.1.3xx's shape: Pyre's monitor and the agent's shell.
+		bg = []any{
+			map[string]any{"type": "shell", "id": "bmon", "status": "running", "description": "New Pyre messages for this session", "command": "/synthetic/pyred inbox-watch --run-dir /tmp/x"},
+			map[string]any{"type": "shell", "id": "bsh1", "status": "running", "description": "until grep -q synced /tmp/synthetic.log; do sleep 30; done", "command": "until grep -q synced /tmp/synthetic.log; do sleep 30; done"},
+		}
+	} else if strings.Contains(text, "FAKE_BG_MONITOR_ONLY") {
+		bg = []any{map[string]any{"type": "shell", "id": "bmon", "status": "running", "description": "New Pyre messages for this session", "command": "/synthetic/pyred inbox-watch --run-dir /tmp/x"}}
+	} else if strings.Contains(text, "FAKE_BG") {
 		bg = []any{map[string]any{"id": "bg1"}}
 	}
 	out := f.hook("Stop", map[string]any{"last_assistant_message": "ok", "background_tasks": bg, "stop_hook_active": false})
@@ -795,4 +889,14 @@ func (f *fakeClaude) permission(toolTime time.Duration) bool {
 		f.hook("PostToolUse", map[string]any{"tool_name": "Bash", "tool_use_id": id, "tool_input": ti, "tool_response": map[string]any{"stdout": "file"}})
 	}
 	return proceed
+}
+
+// fakeDangerRmHead draws the top of Claude Code 2.1.304's dangerous-rm
+// prompt raised by a subagent (iss_…), down to
+// the question; the options follow.
+func fakeDangerRmHead(rule string) string {
+	return rule + "\r\n Bash command · from the implementer agent\r\n\r\n" +
+		"   rm -rf \"$(readlink runs/v1-synthetic/tmp)\" runs/v1-synthetic\r\n   Remove the synthetic run directory\r\n\r\n" +
+		" Dangerous rm operation on statically-unresolvable target: command substitution output\r\n\r\n" +
+		" Do you want to proceed?\r\n"
 }

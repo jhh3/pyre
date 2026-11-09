@@ -273,6 +273,29 @@ func TestAmbientRunNoAutomaticFallback(t *testing.T) {
 	}
 }
 
+// agy runs on the machine's own login: a limit is planned without
+// stopping the run (it has subagents and background work, and there is no
+// other login to move it to), iss_….
+func TestOwnLoginLimitKeepsRunUp(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.startRun("ses_agy", "run_agy", contracts.HarnessAgy, contracts.AccountPolicy{}, nil)
+	reset := e.clock.Now().Add(13 * time.Hour)
+	plan, err := e.svc.HandleLimitEvent(ctx, "ses_agy", "run_agy", contracts.LimitEvent{Kind: LimitUsage, ResetAt: &reset, Detail: "Individual quota reached."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Outcome != contracts.FallbackIntervention || !strings.HasPrefix(plan.Reason, OwnLoginLimitPrefix) || plan.Limit == nil || plan.Limit.ResetAt == nil {
+		t.Fatalf("plan %+v", plan)
+	}
+	if len(e.ctrl.order) != 0 || len(e.ctrl.continuations) != 0 {
+		t.Fatalf("the run was touched: %v", e.ctrl.order)
+	}
+	if _, ok := resumablePlan(&plan); ok {
+		t.Fatal("an own-login plan must not arm an automatic resume")
+	}
+}
+
 func TestActionsAndInjectLimit(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()

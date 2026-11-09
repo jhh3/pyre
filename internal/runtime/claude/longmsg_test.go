@@ -174,7 +174,7 @@ func TestFakeLongMessageNarrowPaneRestored(t *testing.T) {
 		t.Fatalf("pane %dx%d, want the launch size back", w, hh)
 	}
 	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
-	if n := countUserRecords(t, f.a, h, "msg_long1"); n != 1 {
+	if n := waitUserRecord(t, f.a, h, "msg_long1"); n != 1 {
 		t.Fatalf("transcript records %d, want 1", n)
 	}
 	si, _ := f.a.screen(context.Background(), h.TmuxTarget)
@@ -228,7 +228,7 @@ func TestFakeLongMessageNarrowViewerTailMatch(t *testing.T) {
 		t.Fatalf("submitted record %q, want recognition by tail", how)
 	}
 	f.waitState(f.a, h, contracts.RunWaitingInput, 15*time.Second)
-	if n := countUserRecords(t, f.a, h, "msg_long2"); n != 1 {
+	if n := waitUserRecord(t, f.a, h, "msg_long2"); n != 1 {
 		t.Fatalf("transcript records %d, want 1", n)
 	}
 }

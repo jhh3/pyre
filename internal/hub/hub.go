@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,9 +111,11 @@ type Options struct {
 
 	// CommandRetention keeps finished node commands (done, expired,
 	// cancelled) this long after completion (7 days); OperationRetention
-	// keeps operation-idempotency records (30 days): a retry of a mutation
+	// keeps operation-idempotency records (7 days; clients retry within
+	// minutes, a resumable publish within hours): a retry of a mutation
 	// older than that executes again. Both are pruned at most every
-	// PruneInterval (1h).
+	// PruneInterval (1h). Before W-dbspace operation records were kept 30
+	// days: about 750 MB on server, mostly stored message send/ack responses.
 	CommandRetention time.Duration
 	// CommandCompactAfter drops the large payload and result of a finished
 	// command this long after completion (1 day); the record itself is kept
@@ -123,6 +126,17 @@ type Options struct {
 	PollInterval        time.Duration // long-poll safety net for a commit that missed its Notify (5s); waiters wake on Notify
 
 	HubVersion string // default buildinfo.Version
+	// Hostname is this hub's machine, matched against nodes' reported
+	// hostnames to prefer the hub's own node (memory routing,
+	// memoryroute.go). Default os.Hostname().
+	Hostname string
+
+	// LimitAutoResumeOff turns off the automatic resume of sessions that
+	// stopped on an account limit (limitresume.go, decision I70; pyre-hub
+	// serve --limit-auto-resume=false). LimitResumeGap spaces those
+	// resumes across the hub (10s).
+	LimitAutoResumeOff bool
+	LimitResumeGap     time.Duration
 }
 
 func (o *Options) defaults() {
@@ -143,9 +157,10 @@ func (o *Options) defaults() {
 	def(&o.MaintenanceInterval, 10*time.Second)
 	def(&o.CommandRetention, 7*24*time.Hour)
 	def(&o.CommandCompactAfter, 24*time.Hour)
-	def(&o.OperationRetention, 30*24*time.Hour)
+	def(&o.OperationRetention, 7*24*time.Hour)
 	def(&o.PruneInterval, time.Hour)
 	def(&o.PollInterval, 5*time.Second)
+	def(&o.LimitResumeGap, defaultLimitResumeGap)
 	if o.MaxPendingCommandsPerNode <= 0 {
 		o.MaxPendingCommandsPerNode = 10_000
 	}
@@ -154,6 +169,9 @@ func (o *Options) defaults() {
 	}
 	if o.HubVersion == "" {
 		o.HubVersion = buildinfo.Version
+	}
+	if o.Hostname == "" {
+		o.Hostname, _ = os.Hostname()
 	}
 }
 
@@ -190,15 +208,19 @@ type Hub struct {
 	askMailAcked atomic.Bool   // closed asks' leftover owner mail was acknowledged (asks.go)
 	reportWake   chan struct{} // wakes the report worker
 	reportMu     sync.Mutex    // one report pass at a time
+	reportPull   string        // parent reading its inbox: its batched reports go now (under reportMu; childreport_release.go)
 	childSummary func(ctx context.Context, sessionID, runID string) (string, error)
-	waiting      waitingRaiser    // "waiting on you" items (waiting.go; nil: cfg.Attention)
-	engage       engageState      // owner engagement updates (attention_flags.go)
-	ownerAct     ownerActiveState // owner activity marks (owner_activity.go)
-	awd          archiveWhenState // archive when done (archivewhen.go)
-	stuck        stuckMailState   // stuck-mail notices to senders (stuckmail.go)
-	life         lifecycleState   // automatic archive and nightly sweep (lifecycle.go)
-	inv          inventoryState   // nodes' latest run inventories (unknownruns.go)
-	heldMu       sync.Mutex       // one held-answer flush at a time (asks_hold.go)
+	childActive  func(ctx context.Context, sessionID, runID string) (time.Time, error)                   // overdueStill (nil: lastTurnActivity)
+	childTail    func(ctx context.Context, sessionID, runID string) ([]contracts.TranscriptEntry, error) // childMessagedTurn (nil: childTranscriptTail)
+	waiting      waitingRaiser                                                                           // "waiting on you" items (waiting.go; nil: cfg.Attention)
+	engage       engageState                                                                             // owner engagement updates (attention_flags.go)
+	ownerAct     ownerActiveState                                                                        // owner activity marks (owner_activity.go)
+	awd          archiveWhenState                                                                        // archive when done (archivewhen.go)
+	lres         limitResumeState                                                                        // automatic resume after a limit (limitresume.go)
+	stuck        stuckMailState                                                                          // stuck-mail notices to senders (stuckmail.go)
+	life         lifecycleState                                                                          // automatic archive and nightly sweep (lifecycle.go)
+	inv          inventoryState                                                                          // nodes' latest run inventories (unknownruns.go)
+	heldMu       sync.Mutex                                                                              // one held-answer flush at a time (asks_hold.go)
 
 	// Answer in chat (asks_chat.go): its own worker; chatTranscript
 	// replaces transcriptTail in tests.
@@ -245,6 +267,12 @@ func New(cfg Config) (*Hub, error) {
 	if err := sqlitex.Migrate(ctx, cfg.DB, sessionOwnerActiveMigrations...); err != nil { // owner activity
 		return nil, err
 	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, sessionArchivedAtMigrations...); err != nil {
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, sessionUnarchivedAtMigrations...); err != nil {
+		return nil, err
+	}
 	if err := sqlitex.Migrate(ctx, cfg.DB, retentionMigrations...); err != nil { // W-dbhygiene
 		return nil, err
 	}
@@ -278,10 +306,17 @@ func New(cfg Config) (*Hub, error) {
 	if err := sqlitex.Migrate(ctx, cfg.DB, issueMigrations...); err != nil { // issues filed by sessions
 		return nil, err
 	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, nodeAvoidMigrations...); err != nil { // node avoid flags
+		return nil, err
+	}
+	if err := sqlitex.Migrate(ctx, cfg.DB, limitResumeMigrations...); err != nil { // automatic resume after a limit (I70)
+		return nil, err
+	}
 	h := &Hub{
 		cfg: cfg, db: cfg.DB, clock: cfg.Clock, opt: cfg.Options,
 		dirty: map[string]bool{}, nodeLocks: map[string]*sync.Mutex{}, stop: make(chan struct{}), reportWake: make(chan struct{}, 1), askChatWake: make(chan struct{}, 1),
 		awd:    archiveWhenState{wake: make(chan struct{}, 1), stops: map[string]time.Time{}, scheduled: map[string]time.Time{}},
+		lres:   limitResumeState{wake: make(chan struct{}, 1)},
 		tokens: tokenVault{dir: cfg.DataDir},
 	}
 	if cfg.Events != nil {
@@ -351,6 +386,8 @@ func (h *Hub) Start() {
 	h.wg.Add(1)
 	go h.archiveWhenDoneLoop() // W-archive2
 	h.wg.Add(1)
+	go h.limitResumeLoop() // decision I70
+	h.wg.Add(1)
 	go h.lifecycleLoop() // W-lifecycle
 	h.wg.Add(1)
 	go func() {
@@ -398,6 +435,7 @@ func (h *Hub) afterCommit() {
 	h.kickChildReports()
 	h.kickAskChats()        // asks_chat.go
 	h.kickArchiveWhenDone() // W-archive2
+	h.kickLimitResumes()    // decision I70
 }
 
 func (h *Hub) markDirty(nodeID string) {

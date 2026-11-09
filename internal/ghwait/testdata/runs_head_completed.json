@@ -1,0 +1,2 @@
+{"total_count":1,"workflow_runs":[
+{"id":900,"name":"CI","display_title":"synth change","status":"completed","conclusion":"failure","html_url":"https://github.com/synth-org/synth-repo/actions/runs/900","head_sha":"c208475aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"synth-branch","event":"pull_request","run_attempt":1,"run_started_at":"2026-11-06T20:30:00Z","updated_at":"2026-11-06T20:55:00Z"}]}

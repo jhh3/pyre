@@ -22,7 +22,7 @@
       "tcp": ["127.0.0.1:5431"],
       "public": [
         {"url": "https://pyre-example.ngrok.app", "label": "pyre-web"},
-        {"url": "https://backrooms-jhh3.ngrok.app", "label": "backrooms"},
+        {"url": "https://notes-example.ngrok.app", "label": "notes"},
         {"url": "https://vortex-launch.ngrok.app", "label": "vortex-dash"},
         {"url": "https://support-vortex.ngrok.app", "label": "support-intake"},
         {"url": "https://vortex-ui-ux-iss.ngrok.app", "label": "vortex-uiux"}

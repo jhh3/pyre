@@ -63,38 +63,28 @@ func Slug(text string) string {
 	return s
 }
 
-// WorktreeDir is where a repository's linked worktrees go: an existing
-// <repo>/.worktrees, else an existing <repo>-worktrees sibling, else
-// <repo>/.worktrees (the convention on the owner's machines).
-func WorktreeDir(repo string) string {
-	in := filepath.Join(repo, ".worktrees")
-	if st, err := os.Stat(in); err == nil && st.IsDir() {
-		return in
-	}
-	sib := filepath.Join(filepath.Dir(repo), filepath.Base(repo)+"-worktrees")
-	if st, err := os.Stat(sib); err == nil && st.IsDir() {
-		return sib
-	}
-	return in
+// DefaultWorktreeRoot is where fresh worktrees go on a node without a
+// configured root (pyred --worktree-root): ~/worktrees.
+func DefaultWorktreeRoot() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "worktrees")
 }
 
-// ensureIgnored keeps a new in-repo .worktrees folder out of `git status`
-// through the repository's local exclude file (never a committed file).
-func ensureIgnored(ctx context.Context, repo, dir string) {
-	if filepath.Dir(dir) != filepath.Clean(repo) {
-		return
-	}
-	if _, err := Git(ctx, repo, "check-ignore", "-q", filepath.Base(dir)+"/"); err == nil {
-		return
-	}
-	p := filepath.Join(repo, ".git", "info", "exclude")
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+// worktreeOnBranch is the worktree of repo that has branch checked out, or "".
+func worktreeOnBranch(ctx context.Context, repo, branch string) string {
+	out, err := Git(ctx, repo, "worktree", "list", "--porcelain")
 	if err != nil {
-		return
+		return ""
 	}
-	defer f.Close()
-	_, _ = f.WriteString("\n# pyre: linked worktrees\n/" + filepath.Base(dir) + "/\n")
+	path := ""
+	for _, l := range strings.Split(out, "\n") {
+		if p, ok := strings.CutPrefix(l, "worktree "); ok {
+			path = p
+		} else if l == "branch refs/heads/"+branch {
+			return path
+		}
+	}
+	return ""
 }
 
 func branchExists(ctx context.Context, repo, branch string) bool {
@@ -121,6 +111,10 @@ func validBranch(b string) bool {
 // CreateOptions are the node's settings for Create.
 type CreateOptions struct {
 	GH string // gh binary for the fetch's credential fallback (FreshBase); empty: found on PATH
+	// Root is the node's worktree root (pyred --worktree-root): a single
+	// repository's fresh worktree goes to <Root>/<repo>/<branch or slug>.
+	// Empty: DefaultWorktreeRoot.
+	Root string
 }
 
 // Create makes fresh worktrees for a launch with default options.
@@ -128,7 +122,12 @@ func Create(ctx context.Context, p contracts.WorktreeCreateParams, now time.Time
 	return CreateWith(ctx, p, now, CreateOptions{})
 }
 
-// CreateWith makes fresh worktrees for a launch. Each new branch starts at
+// CreateWith makes fresh worktrees for a launch. A single repository's
+// worktree goes to <root>/<repo>/<name>: name is the requested branch
+// ("/" read as "-"), which is created with exactly that name or the launch
+// fails (ErrConflict) when it already exists locally, on origin or as the
+// folder; without a branch, name is the slug of the title or prompt and the
+// branch pyre/<slug>, deduplicated with -2, -3…. Each new branch starts at
 // origin's default branch, fetched first (FreshBase; HEAD, with a warning,
 // only without an origin remote), and tracks nothing, so a plain `git
 // push` never targets main (`git push -u origin <branch>` sets the
@@ -154,9 +153,10 @@ func CreateWith(ctx context.Context, p contracts.WorktreeCreateParams, now time.
 		}
 		repos[i] = main
 	}
+	exact := p.Branch != "" // the caller named the branch: that name or nothing
 	slug := Slug(p.Slug)
-	if slug == "" {
-		slug = Slug(strings.TrimPrefix(p.Branch, "pyre/"))
+	if exact {
+		slug = strings.ReplaceAll(strings.TrimPrefix(p.Branch, "pyre/"), "/", "-")
 	}
 	if slug == "" && len(repos) > 1 {
 		var names []string
@@ -176,6 +176,11 @@ func CreateWith(ctx context.Context, p contracts.WorktreeCreateParams, now time.
 		return res, contracts.Errorf(contracts.ErrInvalid, "invalid branch name %q", base)
 	}
 	multi := len(repos) > 1
+	root := opts.Root
+	if root == "" {
+		root = DefaultWorktreeRoot()
+	}
+	root = filepath.Clean(ExpandHome(root))
 	var folder string
 	if multi {
 		folder = p.Dir
@@ -197,9 +202,24 @@ func CreateWith(ctx context.Context, p contracts.WorktreeCreateParams, now time.
 			}
 			return filepath.Join(folder+sfx, name)
 		}
-		return filepath.Join(WorktreeDir(repos[i]), strings.ReplaceAll(slug, "/", "-")+sfx)
+		return filepath.Join(root, filepath.Base(repos[i]), strings.ReplaceAll(slug, "/", "-")+sfx)
 	}
 	branch, sfx := "", ""
+	if exact {
+		for i, r := range repos {
+			if branchExists(ctx, r, base) {
+				where := ""
+				if wt := worktreeOnBranch(ctx, r, base); wt != "" {
+					where = " (checked out in " + wt + ")"
+				}
+				return res, contracts.Errorf(contracts.ErrConflict, "branch %s already exists in %s%s; name a new branch, or start in the existing worktree with cwd", base, r, where)
+			}
+			if _, err := os.Lstat(pathFor(i, "")); err == nil {
+				return res, contracts.Errorf(contracts.ErrConflict, "%s already exists; name another branch, or start there with cwd", pathFor(i, ""))
+			}
+		}
+		branch = base
+	}
 	for n := 1; n <= 50 && branch == ""; n++ {
 		s := ""
 		if n > 1 {
@@ -241,6 +261,15 @@ func CreateWith(ctx context.Context, p contracts.WorktreeCreateParams, now time.
 			return res, err
 		}
 	}
+	if exact {
+		// After the fetch: a branch of that name on origin would make this
+		// one diverge from it (a push is then refused or clobbers it).
+		for _, r := range repos {
+			if OriginHasBranch(ctx, r, opts.GH, branch) {
+				return res, contracts.Errorf(contracts.ErrConflict, "branch %s already exists on origin of %s; name a new branch (a fresh worktree never starts from an existing branch)", branch, r)
+			}
+		}
+	}
 	for i, st := range starts {
 		if st.Warning != "" {
 			w := st.Warning
@@ -268,9 +297,6 @@ func CreateWith(ctx context.Context, p contracts.WorktreeCreateParams, now time.
 	}
 	for i, r := range repos {
 		path := pathFor(i, sfx)
-		if !multi {
-			ensureIgnored(ctx, r, filepath.Dir(path))
-		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			rollback()
 			return contracts.WorktreeCreateResult{}, err
@@ -282,7 +308,8 @@ func CreateWith(ctx context.Context, p contracts.WorktreeCreateParams, now time.
 		if adm, ok := adminDir(path); ok {
 			_ = os.WriteFile(filepath.Join(adm, MarkerFile), []byte(now.UTC().Format(time.RFC3339)+"\n"+markerClaimPrefix+token+"\n"), 0o644)
 		}
-		res.Worktrees = append(res.Worktrees, contracts.CreatedWorktree{Repo: r, Path: path, Branch: branch})
+		head, _ := Git(ctx, path, "rev-parse", "HEAD")
+		res.Worktrees = append(res.Worktrees, contracts.CreatedWorktree{Repo: r, Path: path, Branch: branch, Head: strings.TrimSpace(head)})
 	}
 	res.Cwd = res.Worktrees[0].Path
 	if multi {

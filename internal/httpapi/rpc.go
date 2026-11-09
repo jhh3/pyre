@@ -185,11 +185,10 @@ func (s *server) serveRPC(w http.ResponseWriter, r *http.Request, op string) {
 	}
 	resp, err := fn(r.Context(), body)
 	if err != nil {
-		noteInternal(r, err)
-		WriteError(w, err)
+		writeOpError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	s.writeRPC(w, r, op, resp)
 }
 
 func readLimited(r *http.Request, limit int64) ([]byte, error) {

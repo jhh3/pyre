@@ -10,6 +10,7 @@ const (
 	EnvHub          = cc.EnvHub
 	EnvHubPin       = cc.EnvHubPin
 	EnvSocket       = cc.EnvSocket
+	EnvSocketWait   = cc.EnvSocketWait
 	EnvSessionToken = cc.EnvSessionToken
 	EnvToken        = cc.EnvToken
 	EnvConfig       = cc.EnvConfig
@@ -19,6 +20,8 @@ const (
 	EnvRunID        = cc.EnvRunID
 	EnvNodeID       = cc.EnvNodeID
 	ConfigVersion   = cc.ConfigVersion
+
+	SourceLocalPyred = cc.SourceLocalPyred
 )
 
 type (

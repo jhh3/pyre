@@ -243,12 +243,15 @@ type drainResult struct {
 }
 
 type resumeResult struct {
-	NodeID   string         `json:"node_id"`
-	NodeName string         `json:"node_name"`
-	Tag      string         `json:"tag"`
-	DryRun   bool           `json:"dry_run,omitempty"`
-	All      bool           `json:"all,omitempty"`
-	Sessions []nodeOpItem   `json:"sessions"`
+	NodeID   string       `json:"node_id"`
+	NodeName string       `json:"node_name"`
+	Tag      string       `json:"tag"`
+	DryRun   bool         `json:"dry_run,omitempty"`
+	All      bool         `json:"all,omitempty"`
+	Sessions []nodeOpItem `json:"sessions"`
+	// Monitors (additive) are the node's monitors the reboot killed and
+	// pyred did not relaunch itself (resumeMonitors).
+	Monitors []nodeOpItem   `json:"monitors,omitempty"`
 	Counts   map[string]int `json:"counts"`
 	Failures int            `json:"failures"`
 }
@@ -323,7 +326,10 @@ the reboot ended (state reason "exit not observed") or whose resume launch
 failed, sends sessions that are still live a restart note, and leaves
 deliberately ended sessions alone (--all resumes every ended one). The tag
 is removed once a session is handled and kept when a resume fails, so a
-rerun retries.`,
+rerun retries. Monitors (pyre monitor add) on the node whose run the restart
+ended are relaunched with the same command, interval, flags, target and
+remaining --for (pyred normally relaunches them itself at start-up; this
+catches any it could not).`,
 		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
@@ -620,7 +626,49 @@ func (a *App) nodeResume(ctx context.Context, ops *Ops, ref string, all, dry boo
 		res.Counts[it.Action]++
 	}
 	res.Sessions = items
-	return res, nil
+	return res, a.resumeMonitors(ctx, ops, node, dry, &res)
+}
+
+// resumeMonitors relaunches the node's monitors whose run the reboot ended
+// ("exit not observed") and that pyred did not already relaunch itself
+// (daemon/monitorrelaunch.go): same command, interval, flags and target;
+// the loop keeps its deadline and last output. Monitors are never drained
+// (a message would run as a shell command), so no tag selects them. A
+// monitor that ended deliberately (its exit was observed) is left alone.
+func (a *App) resumeMonitors(ctx context.Context, ops *Ops, node c.Node, dry bool, res *resumeResult) error {
+	mons, err := ops.MonitorList(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sv := range mons {
+		r := sv.Run
+		if r == nil || r.NodeID != node.NodeID || !r.State.Terminal() || !strings.Contains(strings.ToLower(r.StateReason), exitNotObserved) {
+			continue
+		}
+		it := newItem(sv)
+		switch {
+		case len(c.MonitorRelaunchArgs(*r)) == 0:
+			it.Action, it.Reason = "skipped", "started before Pyre recorded monitor commands; re-create it with pyre monitor add"
+		case dry:
+			it.Action = "would relaunch"
+		case node.Connection.State != c.ConnConnected:
+			it.Action, it.Error = "failed", "node is "+string(node.Connection.State)+"; rerun once it reconnects"
+			res.Failures++
+		default:
+			nr, err := ops.Resume(ctx, ResumeParams{Session: sv.Session.SessionID})
+			if err != nil {
+				it.Action, it.Error = "failed", "relaunch: "+err.Error()
+				res.Failures++
+				break
+			}
+			it.Action = "relaunched"
+			if nr.Session.Run != nil {
+				it.NewRunID, it.NewState = nr.Session.Run.RunID, string(nr.Session.Run.State)
+			}
+		}
+		res.Monitors = append(res.Monitors, it)
+	}
+	return nil
 }
 
 // ---- printing ----
@@ -679,17 +727,23 @@ func printDrain(w io.Writer, r drainResult) {
 }
 
 func printNodeResume(w io.Writer, r resumeResult) {
-	if len(r.Sessions) == 0 {
-		fmt.Fprintf(w, "no session on %s is tagged %s\n", r.NodeName, r.Tag)
-		return
-	}
 	prefix := ""
 	if r.DryRun {
 		prefix = "(dry run) "
 	}
-	fmt.Fprintf(w, "%s%d drained session(s) on %s: %s\n", prefix, len(r.Sessions), r.NodeName, countsText(r.Counts))
-	for _, it := range r.Sessions {
-		printOpItem(w, it)
+	if len(r.Sessions) == 0 {
+		fmt.Fprintf(w, "no session on %s is tagged %s\n", r.NodeName, r.Tag)
+	} else {
+		fmt.Fprintf(w, "%s%d drained session(s) on %s: %s\n", prefix, len(r.Sessions), r.NodeName, countsText(r.Counts))
+		for _, it := range r.Sessions {
+			printOpItem(w, it)
+		}
+	}
+	if len(r.Monitors) > 0 {
+		fmt.Fprintf(w, "%s%d monitor(s) the restart ended:\n", prefix, len(r.Monitors))
+		for _, it := range r.Monitors {
+			printOpItem(w, it)
+		}
 	}
 	if r.Failures > 0 {
 		fmt.Fprintf(w, "%d failure(s); tags kept where a resume failed, rerun to retry\n", r.Failures)

@@ -42,6 +42,7 @@ const (
 	PathLocalExecClaim   = "/v1/local/exec/claim"   // POST ExecClaimRequest -> ExecBinding
 	PathLocalExecStarted = "/v1/local/exec/started" // POST ExecProgress
 	PathLocalExecExited  = "/v1/local/exec/exited"  // POST ExecProgress
+	PathLocalExecNative  = "/v1/local/exec/native"  // POST ExecProgress (NativeID seen while the child runs)
 )
 
 // handleDataExecClaim keeps the claim hash on the run's node-local handle
@@ -58,17 +59,28 @@ type ExecInfo struct {
 	Start bool `json:"start,omitempty"`
 }
 
-// ExecClaimRequest takes a headless run's binding.
+// ExecClaimRequest takes a headless run's binding. WaitMS is how long the
+// caller waits for the answer: the node answers within it (503, "still on
+// its way" or "still launching", when the binding is not ready), so the
+// caller gets a real answer before its own deadline and can claim again.
+// Zero: execClaimWait.
 type ExecClaimRequest struct {
 	RunID     string `json:"run_id"`
 	Secret    string `json:"secret"`
 	ClientPID int    `json:"client_pid"`
+	WaitMS    int64  `json:"wait_ms,omitempty"`
 }
+
+// ExecClaimAgain is the error detail (true) of a claim answer that is not
+// final: the run has not reached the node or is still launching, and the
+// same claim may succeed when sent again.
+const ExecClaimAgain = "claim_again"
 
 // ExecBinding is what the CLI runs the command with. Env holds the
 // account's environment (the profile's CLAUDE_CONFIG_DIR, a token
-// account's token variable): secret, returned once over the 0600 local
-// socket and never logged or stored.
+// account's token variable): secret, returned over the 0600 local socket
+// only to the process holding the claim secret (again only to the same
+// process, until it reports the child started) and never logged or stored.
 type ExecBinding struct {
 	RunID      string            `json:"run_id"`
 	SessionID  string            `json:"session_id"`
@@ -78,8 +90,9 @@ type ExecBinding struct {
 	Unset      []string          `json:"unset,omitempty"`
 }
 
-// ExecProgress reports the child's start (PID) or end (ExitCode/Signal,
-// NativeID: the Claude session id when the CLI saw it in the output).
+// ExecProgress reports the child's start (PID), the conversation id seen in
+// its output while it runs (NativeID, PathLocalExecNative), or its end
+// (ExitCode/Signal, NativeID: the conversation id the CLI saw).
 type ExecProgress struct {
 	RunID    string `json:"run_id"`
 	Secret   string `json:"secret"`
@@ -96,6 +109,7 @@ type execRunAdapter interface {
 	Claimed(h contracts.RunHandle, clientPID int) error
 	Started(h contracts.RunHandle, childPID int, group bool) error
 	Exited(h contracts.RunHandle, code *int, signal, nativeID string) error
+	Native(h contracts.RunHandle, nativeID string) error
 }
 
 // conversationLocator tells which account reaches a native conversation
@@ -111,7 +125,11 @@ type execClaim struct {
 	once  sync.Once
 	b     ExecBinding
 	err   error
-	taken bool // claimed: the environment was handed out and cleared
+	// taken: claimed by the CLI process pid. The same process may claim
+	// again (its answer was lost) until it reports the child started; the
+	// environment is cleared then.
+	taken bool
+	pid   int
 }
 
 func (c *execClaim) finish(b ExecBinding, err error) {
@@ -143,19 +161,45 @@ func (d *Daemon) putExecClaim(runID, hash string) *execClaim {
 	return c
 }
 
-// takeExecClaim reports whether c is still unclaimed; with take it marks
-// it claimed and clears the environment it holds.
-func (d *Daemon) takeExecClaim(c *execClaim, take bool) bool {
+// claimable reports whether process pid may claim c: unclaimed, or
+// claimed by pid before it started the child.
+func (d *Daemon) claimable(c *execClaim, pid int) bool {
 	d.execs.mu.Lock()
 	defer d.execs.mu.Unlock()
-	if c.taken {
-		return false
+	return !c.taken || pid != 0 && c.pid == pid && c.b.RunID != ""
+}
+
+// takeExecClaim marks c claimed by pid and returns its binding; again is
+// true when pid had claimed it already. ok is false when another process
+// claimed it, or its environment was cleared.
+func (d *Daemon) takeExecClaim(c *execClaim, pid int) (b ExecBinding, again, ok bool) {
+	d.execs.mu.Lock()
+	defer d.execs.mu.Unlock()
+	switch {
+	case !c.taken:
+		c.taken, c.pid = true, pid
+		return c.b, false, true
+	case pid != 0 && c.pid == pid && c.b.RunID != "":
+		return c.b, true, true
 	}
-	if take {
-		c.taken = true
+	return ExecBinding{}, false, false
+}
+
+// untakeExecClaim reverts a claim the adapter refused.
+func (d *Daemon) untakeExecClaim(c *execClaim) {
+	d.execs.mu.Lock()
+	defer d.execs.mu.Unlock()
+	c.taken, c.pid = false, 0
+}
+
+// clearExecBinding forgets the environment of a claimed run once its child
+// started (it is handed out to the claiming process only until then).
+func (d *Daemon) clearExecBinding(runID string) {
+	d.execs.mu.Lock()
+	defer d.execs.mu.Unlock()
+	if c := d.execs.m[runID]; c != nil && c.taken {
 		c.b = ExecBinding{}
 	}
-	return true
 }
 
 func (d *Daemon) dropExecClaim(runID string) {
@@ -283,6 +327,7 @@ func (d *Daemon) execHandlers() map[string]http.Handler {
 		"POST " + PathLocalExecClaim:   http.HandlerFunc(d.serveExecClaim),
 		"POST " + PathLocalExecStarted: http.HandlerFunc(d.serveExecProgress),
 		"POST " + PathLocalExecExited:  http.HandlerFunc(d.serveExecProgress),
+		"POST " + PathLocalExecNative:  http.HandlerFunc(d.serveExecProgress),
 	}
 }
 
@@ -317,10 +362,14 @@ func (d *Daemon) serveExecClaim(w http.ResponseWriter, r *http.Request) {
 		writeLocalErr(w, contracts.Errorf(contracts.ErrInvalid, "claim: %v", err))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), execClaimWait)
+	wait := execClaimWait
+	if ms := time.Duration(req.WaitMS) * time.Millisecond; ms > 0 && ms < wait {
+		wait = ms
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), wait)
 	defer cancel()
 	// The CLI claims as soon as the hub recorded the start; the start
-	// command may still be on its way to this node.
+	// command may still be on its way to this node, or binding its account.
 	c := d.execClaim(req.RunID)
 	for c == nil && ctx.Err() == nil {
 		select {
@@ -329,18 +378,26 @@ func (d *Daemon) serveExecClaim(w http.ResponseWriter, r *http.Request) {
 		}
 		c = d.execClaim(req.RunID)
 	}
-	if c == nil || !sameHash(c.hash, claimHash(req.Secret)) {
+	if c == nil {
+		// Not "no such run": the hub recorded it, and the start (sent over
+		// the hub link, then account binding) can take longer than the wait.
+		writeLocalErr(w, contracts.Errorf(contracts.ErrUnavailable, "headless run %s has not reached this node yet (waited %s); claim again", req.RunID, wait.Round(time.Millisecond)).
+			WithDetail(ExecClaimAgain, true))
+		return
+	}
+	if !sameHash(c.hash, claimHash(req.Secret)) {
 		writeLocalErr(w, contracts.Errorf(contracts.ErrNotFound, "no headless run %s waiting for this claim", req.RunID))
 		return
 	}
-	if !d.takeExecClaim(c, false) {
+	if !d.claimable(c, req.ClientPID) {
 		writeLocalErr(w, contracts.Errorf(contracts.ErrConflict, "headless run %s was already claimed", req.RunID))
 		return
 	}
 	select {
 	case <-c.ready:
 	case <-ctx.Done():
-		writeLocalErr(w, contracts.Errorf(contracts.ErrUnavailable, "headless run %s is still launching", req.RunID))
+		writeLocalErr(w, contracts.Errorf(contracts.ErrUnavailable, "headless run %s is still launching (waited %s); claim again", req.RunID, wait.Round(time.Millisecond)).
+			WithDetail(ExecClaimAgain, true))
 		return
 	}
 	if c.err != nil {
@@ -359,12 +416,18 @@ func (d *Daemon) serveExecClaim(w http.ResponseWriter, r *http.Request) {
 		writeLocalErr(w, contracts.Errorf(contracts.ErrInvalid, "run %s is not headless", req.RunID))
 		return
 	}
-	if err := ex.Claimed(*rec.Handle, req.ClientPID); err != nil {
-		writeLocalErr(w, err)
+	b, again, ok := d.takeExecClaim(c, req.ClientPID)
+	if !ok {
+		writeLocalErr(w, contracts.Errorf(contracts.ErrConflict, "headless run %s was already claimed", req.RunID))
 		return
 	}
-	b := c.b
-	d.takeExecClaim(c, true) // the secret environment is handed out once
+	if !again {
+		if err := ex.Claimed(*rec.Handle, req.ClientPID); err != nil {
+			d.untakeExecClaim(c)
+			writeLocalErr(w, err)
+			return
+		}
+	}
 	writeLocalJSON(w, http.StatusOK, b)
 }
 
@@ -386,11 +449,15 @@ func (d *Daemon) serveExecProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	if strings.HasSuffix(r.URL.Path, "/started") {
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/started"):
 		err = ex.Started(*rec.Handle, req.PID, req.Group)
-	} else {
+	case strings.HasSuffix(r.URL.Path, "/native"):
+		err = ex.Native(*rec.Handle, req.NativeID)
+	default:
 		err = ex.Exited(*rec.Handle, req.ExitCode, req.Signal, req.NativeID)
 	}
+	d.clearExecBinding(req.RunID) // the claim's environment is no longer handed out
 	if err != nil {
 		writeLocalErr(w, err)
 		return

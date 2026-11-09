@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,10 +32,16 @@ import (
 //     (pending up to childReportHold) blocked the archive, so children that
 //     exited with 143 or were stopped by their parent stayed in the
 //     owner's sidebar for days (docs/operations.md, Automatic cleanup).
+//   - A session unarchived (explicitly or by a resume) after its run ended
+//     is kept from both automatic archives until a new run starts and ends
+//     or someone archives it explicitly (Session.KeptFromAutoArchive): an
+//     unarchive used to be undone within 30 seconds (Oct 31).
 //   - Every automatic archive (that one, archive-when-done, the nightly
 //     sweep) asks the session's node to clean up after it (session.cleanup):
 //     stop processes the session left running and remove the worktrees it
-//     created that are clean and whose branch is merged or pushed.
+//     created that are clean and whose branch is merged or pushed. Detached
+//     jobs it left running are listed, not stopped, and its parent hears of
+//     them (leftrunning.go).
 //   - Once a night (nightlySweepHour, owner's zone) the hub archives
 //     sessions that failed to launch or ended over a day ago, asks every
 //     connected node to sweep (node.sweep: their cleanup, orphan worktrees,
@@ -148,6 +155,9 @@ func (h *Hub) ArchiveFinishedChildren(ctx context.Context) ([]string, error) {
 		if h.ownerTouchedSince(ctx, s, r.RunID, *r.EndedAt) {
 			continue // the owner engaged with it after it ended: his to archive
 		}
+		if s.KeptFromAutoArchive(&r) {
+			continue // unarchived after it ended: kept until it runs and ends again
+		}
 		var pending, planned int
 		// A folded report (a clean exit the parent already has) waits up to
 		// childReportHold to ride along with the parent's next report; it is
@@ -188,12 +198,17 @@ func endedHow(r contracts.Run) string {
 
 // ownerTouchedSince reports whether the owner messaged, typed into
 // (Session.OwnerActiveAt) or attached to the session's run after since.
+// A read-only attach or terminal (the TUI's or web inbox's preview pane,
+// `pyre attach --read-only`) is watching, not using: it does not count
+// (iss_…: two preview-pane views of an idle
+// reviewer kept it out of its parent's archive cascade for nine hours).
 func (h *Hub) ownerTouchedSince(ctx context.Context, s contracts.Session, runID string, since time.Time) bool {
 	if s.OwnerActiveAt != nil && s.OwnerActiveAt.After(since) {
 		return true
 	}
 	var n int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM commands WHERE ref_kind=? AND ref_id=? AND kind IN (?,?) AND issued_at>? AND actor LIKE '%"kind":"owner"%'`,
+	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM commands WHERE ref_kind=? AND ref_id=? AND kind IN (?,?) AND issued_at>? AND actor LIKE '%"kind":"owner"%'
+		AND COALESCE(json_extract(payload,'$.read_only'),0)=0`,
 		string(contracts.KindRun), runID, string(contracts.CmdAttach), string(contracts.CmdTerminalOpen), persistence.Time(since)).Scan(&n)
 	return n > 0
 }
@@ -274,7 +289,7 @@ func (h *Hub) requestCleanup(nodeID string, sessionIDs []string) {
 func (h *Hub) auditCleanups(ctx context.Context, nodeID string, cs []contracts.SessionCleanup) {
 	_ = h.tx(ctx, func(tx *sql.Tx) error {
 		for _, c := range cs {
-			if c.Error == "" && c.ProcessesStopped == 0 && len(c.Worktrees) == 0 {
+			if c.Error == "" && c.ProcessesStopped == 0 && len(c.Worktrees) == 0 && c.LeftRunningCount == 0 {
 				continue
 			}
 			h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionCleanedUp, Automatic: true, Actor: pyreActor, NodeID: nodeID, SessionID: c.SessionID,
@@ -282,6 +297,9 @@ func (h *Hub) auditCleanups(ctx context.Context, nodeID string, cs []contracts.S
 		}
 		return nil
 	})
+	for _, c := range cs {
+		h.noteLeftRunning(ctx, nodeID, c) // leftrunning.go: its parent hears of them
+	}
 }
 
 // cleanupLine summarises one session's cleanup.
@@ -303,6 +321,13 @@ func cleanupLine(c contracts.SessionCleanup) string {
 	}
 	if removed > 0 {
 		parts = append(parts, plural(removed, "worktree", "worktrees")+" removed")
+	}
+	if c.LeftRunningCount > 0 {
+		pids := make([]string, 0, len(c.LeftRunning))
+		for _, p := range c.LeftRunning {
+			pids = append(pids, strconv.Itoa(p.PID))
+		}
+		parts = append(parts, plural(c.LeftRunningCount, "process it started is", "processes it started are")+" still running (pid "+strings.Join(pids, ", ")+"; not stopped)")
 	}
 	if len(kept) > 0 {
 		parts = append(parts, "kept "+strings.Join(kept, ", "))
@@ -531,6 +556,9 @@ func (h *Hub) staleSessions(ctx context.Context) ([]SweptSession, error) {
 		if err != nil || hasArchiveWhenDone(s) {
 			continue
 		}
+		if h.limitResumePending(ctx, s.SessionID) {
+			continue // Pyre resumes it when an account has room (limitresume.go)
+		}
 		if h.sessionLive(ctx, s) {
 			// A live monitor does not keep its ended parent: the parent's
 			// archive ends the monitor (contracts/monitors.go).
@@ -566,6 +594,9 @@ func (h *Hub) staleSessions(ctx context.Context) ([]SweptSession, error) {
 		ended := r.StartedAt
 		if r.EndedAt != nil {
 			ended = *r.EndedAt
+		}
+		if s.KeptFromAutoArchive(&r) {
+			continue // unarchived after it ended: kept until it runs and ends again
 		}
 		c.LaunchFailed = r.State == contracts.RunFailed && isLaunchFailure(r.StateReason)
 		switch {

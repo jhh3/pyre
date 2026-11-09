@@ -285,7 +285,7 @@ func (a *Adapter) gate(ctx context.Context, h contracts.RunHandle) (screenInfo, 
 	case si.Dialog != "":
 		r := queued("dialog on screen: " + si.Dialog)
 		return si, &r, nil
-	case st != contracts.RunWaitingInput:
+	case st != contracts.RunWaitingInput && st != contracts.RunWaitingBackground:
 		r := queued(fmt.Sprintf("runtime not ready for input: %s (%s)", st, reason))
 		return si, &r, nil
 	case !si.HasInputBox:

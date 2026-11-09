@@ -29,9 +29,21 @@ type fakeTokens struct {
 	tok   map[string]string
 	err   error
 	calls int
+	// stall: each fetch waits for it to close (or for its context).
+	stall chan struct{}
 }
 
-func (f *fakeTokens) FetchAccountToken(_ context.Context, id string) (string, time.Time, error) {
+func (f *fakeTokens) FetchAccountToken(ctx context.Context, id string) (string, time.Time, error) {
+	f.mu.Lock()
+	stall := f.stall
+	f.mu.Unlock()
+	if stall != nil {
+		select {
+		case <-stall:
+		case <-ctx.Done():
+			return "", time.Time{}, contracts.Errorf(contracts.ErrUnavailable, "hub request timed out: %v", ctx.Err())
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -388,6 +400,47 @@ func TestTokenHubOutageUsesMemoryCopy(t *testing.T) {
 		t.Fatalf("outage: %v", e.err(err))
 	}
 	e.noTokenAnywhere()
+}
+
+// A slow hub link (the token fetch of every token account taking seconds)
+// costs a launch one short wait, not one round trip per account: the
+// expired copies are refetched together, selection uses them after
+// tokenStaleWait, and the refetch completes in the background.
+func TestTokenSlowHubCostsOneShortWait(t *testing.T) {
+	e := newTokenEnv(t)
+	ctx := context.Background()
+	for _, id := range []string{"acct_tok1", "acct_tok2", "acct_tok3", "acct_tok4"} {
+		e.addToken(id, "synth-"+id, contracts.HarnessClaude)
+	}
+	stall := make(chan struct{})
+	e.toks.mu.Lock()
+	e.toks.stall, e.toks.tok["acct_tok1"] = stall, synthToken+"-new"
+	before := e.toks.calls
+	e.toks.mu.Unlock()
+	e.clock.Advance(tokenCacheFor + time.Minute)
+	start := time.Now()
+	r, err := e.svc.ResolveFor(ctx, ResolveRequest{Harness: contracts.HarnessClaude, RunID: "run_slow", SessionID: "ses_slow"})
+	if err != nil {
+		t.Fatal(e.err(err))
+	}
+	if d := time.Since(start); d > tokenStaleWait+time.Second {
+		t.Fatalf("selection waited %s on the token fetches", d)
+	}
+	if r.CredentialKind != contracts.CredOAuthToken || !strings.HasPrefix(r.Env["CLAUDE_CODE_OAUTH_TOKEN"], synthToken) {
+		t.Fatalf("binding kind=%s", r.CredentialKind)
+	}
+	// The refetches end in the background and refresh the cache.
+	close(stall)
+	waitUntil(t, func() bool {
+		e.toks.mu.Lock()
+		defer e.toks.mu.Unlock()
+		return e.toks.calls-before == 4
+	})
+	waitUntil(t, func() bool {
+		c, ok := e.svc.tok.get("acct_tok1")
+		return ok && c.v.reveal() == synthToken+"-new"
+	})
+	e.svc.Release("run_slow")
 }
 
 func TestOpenAITokenRegistersButIsNotSelected(t *testing.T) {

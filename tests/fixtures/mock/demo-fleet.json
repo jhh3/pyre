@@ -69,7 +69,8 @@
             "resume.native",
             "resume.handoff",
             "transcript.read",
-            "screen.read"
+            "screen.read",
+            "launch.shell_prompt"
           ],
           "probed_at": "2026-10-04T11:57:00Z"
         }
@@ -228,7 +229,8 @@
             "resume.native",
             "resume.handoff",
             "transcript.read",
-            "screen.read"
+            "screen.read",
+            "launch.shell_prompt"
           ],
           "probed_at": "2026-10-04T11:57:00Z"
         }
@@ -389,7 +391,8 @@
             "resume.native",
             "resume.handoff",
             "transcript.read",
-            "screen.read"
+            "screen.read",
+            "launch.shell_prompt"
           ],
           "probed_at": "2026-10-04T11:57:00Z"
         }
@@ -490,7 +493,8 @@
             "resume.native",
             "resume.handoff",
             "transcript.read",
-            "screen.read"
+            "screen.read",
+            "launch.shell_prompt"
           ],
           "probed_at": "2026-10-04T11:57:00Z"
         }
@@ -546,7 +550,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-planner",
@@ -625,7 +630,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-bench",
@@ -697,7 +703,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-api",
@@ -766,7 +773,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-docs",
@@ -836,7 +844,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-encoder",
@@ -905,7 +914,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-scratch",
@@ -967,7 +977,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-question",
@@ -1032,7 +1043,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-shell",
@@ -1092,7 +1104,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-pi",
@@ -1163,7 +1176,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-done",
@@ -1227,7 +1241,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-failed",
@@ -1299,7 +1314,8 @@
         "tags": [
           "demo"
         ],
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_demo-starting",

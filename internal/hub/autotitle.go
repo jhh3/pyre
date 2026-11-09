@@ -8,6 +8,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/autotitle"
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/persistence"
 )
 
 // Automatic session names (W-names). The hub is authoritative for session
@@ -46,13 +47,27 @@ func (h *Hub) applyTitleSuggestionTx(ctx context.Context, tx *sql.Tx, nodeID str
 		return contracts.Errorf(contracts.ErrInvalid, "title suggestion needs session_id")
 	}
 	title := autotitle.Clean(sg.Title)
-	if title == "" {
+	if title == "" || autotitle.IsEnvelope(title) { // older nodes title sessions "The pyre-session plugin sent a message"
 		return nil
 	}
 	if sg.RunID != "" {
 		run, err := h.getRun(ctx, tx, sg.RunID)
 		if err != nil || run.NodeID != nodeID || run.SessionID != sg.SessionID {
 			return nil
+		}
+		// A session is named from its first prompt once: a later run (a
+		// resume, an account switch-over, a recovery) starts with Pyre's
+		// own prompt, which must not replace the name. Native titles
+		// (Claude's, Codex's) may still improve it.
+		if sg.Source == autotitle.SourcePrompt {
+			var earlier int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE session_id=? AND (started_at<? OR (started_at=? AND run_id<?))`,
+				sg.SessionID, persistence.Time(run.StartedAt), persistence.Time(run.StartedAt), sg.RunID).Scan(&earlier); err != nil {
+				return err
+			}
+			if earlier > 0 {
+				return nil
+			}
 		}
 	}
 	s, err := h.getSession(ctx, tx, sg.SessionID)

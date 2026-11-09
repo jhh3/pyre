@@ -130,9 +130,22 @@ type fakeFleetDir struct {
 	asg   []contracts.AccountAssignment
 	err   error
 	calls int
+	// stall: each read waits for it to close (or for its context), like a
+	// hub behind a stalled link.
+	stall chan struct{}
 }
 
-func (f *fakeFleetDir) ListAccounts(_ context.Context, _ contracts.ListAccountsRequest) (contracts.Page[contracts.AccountView], error) {
+func (f *fakeFleetDir) ListAccounts(ctx context.Context, _ contracts.ListAccountsRequest) (contracts.Page[contracts.AccountView], error) {
+	f.mu.Lock()
+	stall := f.stall
+	f.mu.Unlock()
+	if stall != nil {
+		select {
+		case <-stall:
+		case <-ctx.Done():
+			return contracts.Page[contracts.AccountView]{}, contracts.Errorf(contracts.ErrUnavailable, "hub request timed out: %v", ctx.Err())
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -301,6 +314,69 @@ func TestAffinityExplicitAndPreferUnaffected(t *testing.T) {
 	r, err = e.svc.ResolveFor(ctx, ResolveRequest{Harness: contracts.HarnessClaude, Policy: pol, RunID: "run_p"})
 	if err != nil || r.Assignment.AccountID != "acct_synth-c" {
 		t.Fatalf("prefer: %+v %v", r.Assignment, err)
+	}
+}
+
+// A stalled hub link never holds a selection for seconds: with no view
+// yet, selection waits FleetTimeout at most and binds without spread
+// while the read goes on in the background; once a view loaded, later
+// selections use it (up to fleetStaleFor old) without waiting at all,
+// even while every newer read stalls.
+func TestSelectionDoesNotWaitOnStalledFleetView(t *testing.T) {
+	stall := make(chan struct{})
+	dir := &fakeFleetDir{stall: stall}
+	e := newEnv(t, func(c *Config) {
+		c.Fleet, c.FleetTimeout, c.FleetCache, c.NodeName = dir, 300*time.Millisecond, 50*time.Millisecond, "synth-node"
+	})
+	for _, l := range []string{"A", "B", "C"} {
+		e.addAccount("acct_synth-"+strings.ToLower(l), contracts.HarnessClaude, l)
+	}
+	e.obsWin("acct_synth-a", 2, 5)
+	e.obsWin("acct_synth-b", 20, 30)
+	e.obsWin("acct_synth-c", 40, 50)
+	dir.use("acct_synth-a", "node_synth-mac", e.clock.Now().Add(-time.Hour))
+
+	start := time.Now()
+	a := e.resolve("run_1")
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("selection waited %s on a stalled fleet view", d)
+	}
+	if a.AccountID != "acct_synth-a" || !strings.Contains(a.Reason, "fleet view unavailable: the hub did not answer within 300ms") {
+		t.Fatalf("no view: %s %q", a.AccountID, a.Reason)
+	}
+	// The stalled read completes in the background.
+	close(stall)
+	waitUntil(t, func() bool {
+		e.svc.fleet.mu.Lock()
+		defer e.svc.fleet.mu.Unlock()
+		return e.svc.fleet.good != nil
+	})
+	e.svc.Release("run_1")
+
+	// The link stalls again: selection uses the last good view at once.
+	dir.mu.Lock()
+	dir.stall = make(chan struct{})
+	dir.mu.Unlock()
+	t.Cleanup(func() { close(dir.stall) })
+	time.Sleep(100 * time.Millisecond) // past FleetCache
+	start = time.Now()
+	a2 := e.resolve("run_2")
+	if d := time.Since(start); d > 250*time.Millisecond {
+		t.Fatalf("selection waited %s although a good view was cached", d)
+	}
+	if a2.AccountID == "acct_synth-a" || strings.Contains(a2.Reason, "fleet view unavailable") {
+		t.Fatalf("last good view not used: %s %q", a2.AccountID, a2.Reason)
+	}
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

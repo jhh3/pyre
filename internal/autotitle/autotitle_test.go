@@ -20,6 +20,13 @@ func TestFromPrompt(t *testing.T) {
 		{"rotate the synthetic webhook secret and redeploy it", "Rotate the synthetic webhook secret"},
 		{"look at https://example.invalid/x and summarize", "Look at and summarize"},
 		{"   ", ""},
+		// Claude Code's header before a plugin-submitted prompt (a child's
+		// initial prompt, a resumed run, a message between turns).
+		{"The pyre-session plugin sent a message:\nFix a synthetic bug the owner reported in the uploader.\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place.", "Fix a synthetic bug the owner"},
+		{"The pyre-session plugin sent a message:\n[pyre-msg:msg_01SYNTH] from ses_01SYNTH:\nreview the synthetic PR read-only", "Review the synthetic PR read-only"},
+		{"The pyre-session plugin sent a message:\n[pyre-msg:msg_01SYNTH] from ses_01SYNTH:\n[pyre auto-report] Session synth finished its turn", ""},
+		{"The pyre-session plugin sent a message:\nPyre handoff: continue the synthetic work", ""},
+		{"[pyre] Continue where you left off (account switch)", ""},
 	} {
 		if got := FromPrompt(tc.in); got != tc.want {
 			t.Errorf("FromPrompt(%q) = %q, want %q", tc.in, got, tc.want)
@@ -176,5 +183,38 @@ func TestScannerAgyFirstPrompt(t *testing.T) {
 	s.Feed([]string{path})
 	if title, src := s.Best(); src != SourcePrompt || !strings.Contains(strings.ToLower(title), "tile cache") || strings.Contains(title, "METADATA") {
 		t.Fatalf("title %q source %q", title, src)
+	}
+}
+
+func TestIsEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"The pyre-session plugin sent a message", true},
+		{"The pyre-session plugin sent a message:", true},
+		{"The pyre-session plugin sent a", true},
+		{"[pyre-msg:msg_01SYNTH] from owner", true},
+		{"[pyre auto-report] Session synth", true},
+		{"Pyre handoff: synthetic", true},
+		{"Fix synthetic webhook retries", false},
+		{"The synthetic plugin loader", false},
+		{"", false},
+	} {
+		if got := IsEnvelope(tc.in); got != tc.want {
+			t.Errorf("IsEnvelope(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A Claude transcript whose first user record is a plugin-delivered prompt
+// is named from the prompt's body, not Claude Code's header.
+func TestClaudeTranscriptPluginPrompt(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "synthetic-plugin.jsonl")
+	write(t, p, `{"type":"user","message":{"role":"user","content":"The pyre-session plugin sent a message:\nYou are a fresh, independent synthetic code reviewer."}}`+"\n")
+	s := NewScanner(FormatClaude)
+	s.Feed([]string{p})
+	if title, _ := s.Best(); title != "You are a fresh, independent synthetic" {
+		t.Fatalf("got %q", title)
 	}
 }

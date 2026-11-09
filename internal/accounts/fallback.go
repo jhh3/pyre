@@ -100,10 +100,23 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 		return finish(contracts.FallbackIntervention, "harness has no subscription provider")
 	}
 
+	plan.Limit = planLimit(ev)
+
+	if !contracts.ManagedLogins(h) {
+		// agy runs on the machine's own login (credential_kind=ambient,
+		// docs/capabilities.md): there is no other account to move it to,
+		// and stopping it would only end its subagents and background
+		// work. It stays up; the daemon holds its deliveries until the
+		// reset (limitHold) and the parent reads that it stopped on the
+		// limit (iss_…).
+		return finish(contracts.FallbackIntervention, OwnLoginLimitPrefix+": "+string(h)+" runs on this machine's own login, which Pyre does not manage; the run stays up and its turns fail until the limit resets")
+	}
+
 	// Circuit breaker: never switch in a loop. A limit right after an
-	// automatic switch is either a real second limit (a human should look)
-	// or a misdetection (switching again would loop): pause and ask.
-	if why, err := s.switchPaused(ctx, sessionID, asg.AccountID); err != nil {
+	// automatic switch is a misdetection (switching again would loop) unless
+	// the account the session was moved to reported its own limit
+	// (confirmedRepeat); otherwise pause and ask.
+	if why, err := s.switchPaused(ctx, sessionID, asg.AccountID, ev); err != nil {
 		return plan, err
 	} else if why != "" {
 		s.log.Warn("accounts: automatic account switching paused", "session", sessionID, "run", runID, "why", why)
@@ -119,11 +132,20 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 			return plan, err
 		}
 		fromReset = s.recordLimit(ctx, asg.AccountID, provider, fromGrant, ev)
+	} else if asg.AccountID != "" && ev.Kind != LimitAuthInvalid {
+		// The node's own login is account asg.AccountID: a usage or rate
+		// limit is the account's, wherever it is logged in. A refused
+		// login is this copy's alone; the plan itself records it
+		// (ownLoginRejected).
+		fromReset = s.recordLimit(ctx, asg.AccountID, provider, grantRow{}, ev)
 	}
 
 	// 2. Quiesce the old run before anything takes over.
-	q, qerr := s.cfg.Controller.Quiesce(ctx, sessionID, runID)
+	// A limit leaves no choice: the stop proceeds even when it ends
+	// background tasks, and the successor is told so (decision I67).
+	q, qerr := s.cfg.Controller.Quiesce(ctx, sessionID, runID, QuiesceOptions{})
 	plan.UncertainWork = info.TurnInFlight || q.TurnInFlight
+	plan.StoppedTasks = redactTasks(q.Stopped)
 	if qerr != nil || !q.Exited {
 		detail := q.Detail
 		if qerr != nil {
@@ -134,7 +156,7 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 	if _, err := s.ReleaseRun(ctx, runID); err != nil && !contracts.IsCode(err, contracts.ErrNotFound) {
 		s.log.Warn("accounts: release after quiesce", "run", runID, "err", err)
 	}
-	if asg.CredentialKind == contracts.CredAmbient {
+	if asg.CredentialKind == contracts.CredAmbient && !s.ambientMovable(ctx, asg) {
 		return finish(contracts.FallbackIntervention, "run used the ambient default login; automatic account fallback is disabled for ambient runs")
 	}
 
@@ -151,22 +173,10 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 		if cerr != nil {
 			return s.finishNoneEligible(ctx, plan, provider, cerr, fromReset, finish)
 		}
-		kind := contracts.ContinuationHandoff
-		why := ""
-		switch {
-		case !cross:
-			why = fmt.Sprintf("%s does not advertise %s; linked successor with handoff", h, contracts.CapAccountCrossResume)
-		case info.NativeRef == nil:
-			why = "no native session reference; linked successor with handoff"
-		case !sharesTranscriptStore(h, fromGrant.ProfileDir, c.grant.ProfileDir):
-			why = "profiles do not share the transcript store; linked successor with handoff"
-		default:
-			kind = contracts.ContinuationNativeResume
-			why = "native resume over the shared transcript store"
-		}
+		kind, why := continuationKind(info, cross, fromGrant.ProfileDir, c.grant.ProfileDir)
 		cont := Continuation{SessionID: sessionID, PreviousRunID: runID, Harness: h, AccountID: c.acct.AccountID,
 			Kind: kind, UncertainWork: plan.UncertainWork, Reason: c.why,
-			Prompt: continuePrompt(s.accountLabel(ctx, asg.AccountID), acctName(c.acct), ev.Kind, plan.UncertainWork)}
+			Prompt: continuePrompt(s.accountLabel(ctx, asg.AccountID), acctName(c.acct), ev.Kind, plan.UncertainWork) + stoppedTasksNote(plan.StoppedTasks)}
 		if kind == contracts.ContinuationNativeResume {
 			ref := *info.NativeRef
 			cont.Resume = &ref
@@ -196,6 +206,7 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 		if plan.UncertainWork {
 			reason += "; a turn was in flight: its instruction is not replayed"
 		}
+		reason += stoppedTasksReason(plan.StoppedTasks)
 		if kind == contracts.ContinuationNativeResume {
 			return finish(contracts.FallbackNativeResume, reason)
 		}
@@ -204,14 +215,117 @@ func (s *Service) HandleLimitEvent(ctx context.Context, sessionID, runID string,
 	return finish(contracts.FallbackIntervention, "every candidate account refused the successor launch")
 }
 
+// ambientMovable reports whether a run on the node's own login may move to
+// another account when it hits a limit or its login is refused: the login
+// is a registered account that the starter named without strict pinning,
+// or that selection took because no Pyre login here was eligible. A run
+// started on the ambient login itself (--ambient, the node's ambient
+// default) stays: the starter chose the login, not an account. The
+// incident (iss_…): two Codex runs named
+// "personal", the own login, which refused every turn; both were
+// stopped and left, while "code" had room.
+func (s *Service) ambientMovable(ctx context.Context, asg assignmentRow) bool {
+	if asg.AccountID == "" {
+		return false
+	}
+	pinned, named, err := assignmentFlags(ctx, s.db, asg.RunID)
+	if err != nil || pinned {
+		return false
+	}
+	return named || strings.Contains(asg.Reason, ownLoginFallbackReason)
+}
+
+// continuationKind is how a successor on a profile continues the run info
+// describes: a native resume when the harness advertises cross-account
+// resume and both profiles share the transcript store, otherwise a
+// handoff (and why).
+func continuationKind(info RunInfo, cross bool, fromProfile, toProfile string) (contracts.ContinuationKind, string) {
+	switch {
+	case !cross:
+		return contracts.ContinuationHandoff, fmt.Sprintf("%s does not advertise %s; linked successor with handoff", info.Harness, contracts.CapAccountCrossResume)
+	case info.NativeRef == nil:
+		return contracts.ContinuationHandoff, "no native session reference; linked successor with handoff"
+	case !sharesTranscriptStore(info.Harness, fromProfile, toProfile):
+		return contracts.ContinuationHandoff, "profiles do not share the transcript store; linked successor with handoff"
+	}
+	return contracts.ContinuationNativeResume, "native resume over the shared transcript store"
+}
+
+// OwnLoginLimitPrefix starts the reason of a fallback plan for a run on a
+// login Pyre does not manage (agy): the run was not stopped (the hub's
+// limit report says so; keep in sync with internal/hub/limitreport.go).
+const OwnLoginLimitPrefix = "own login limited"
+
 // SwitchPausedPrefix starts the reason of a fallback plan that the switch
 // circuit breaker stopped (the hub words its inbox item and audit line from
 // it; keep in sync with internal/attention and internal/audit).
 const SwitchPausedPrefix = "account switching paused"
 
+// planLimit is the limit a fallback plan records (credential-free detail).
+func planLimit(ev contracts.LimitEvent) *contracts.LimitEvent {
+	l := ev
+	l.Detail = truncate(redact(ev.Detail), 300)
+	if ev.ResetAt != nil {
+		t := ev.ResetAt.UTC()
+		l.ResetAt = &t
+	}
+	return &l
+}
+
+// SessionSwitchMax bounds the automatic switches of one session within
+// SessionSwitchWindow, confirmed repeats included (confirmedRepeat).
+const SessionSwitchMax = 3
+
+// resetSlack is how close two reported resets may be and still read as the
+// same limit (a replay of the previous account's message).
+const resetSlack = 2 * time.Minute
+
+// confirmedRepeat reports whether a limit inside the session's switch window
+// is a real limit of the account the session was moved to, so it switches
+// again instead of pausing: the harness reported a usage or rate limit with
+// a reset still ahead, the session has switched fewer than SessionSwitchMax
+// times in the window, it never left this account in the window (no loop
+// back), and the reset differs from every reset the session already left
+// behind (a replayed message would name the previous account's reset). The
+// incident (iss_…): 18 sessions moved off
+// personal ("org's monthly spend limit · resets 2:20am") onto mobot at
+// 23:14 UTC; 15 minutes later mobot's own "individual spend limit · resets
+// 1am" paused every one of them while five accounts had room.
+func (s *Service) confirmedRepeat(ctx context.Context, sessionID, fromAccountID string, ev contracts.LimitEvent, since time.Time) (bool, error) {
+	now := s.now()
+	if ev.Kind != LimitUsage && ev.Kind != LimitRate || ev.ResetAt == nil || !ev.ResetAt.After(now) {
+		return false, nil
+	}
+	prev, err := sessionSwitches(ctx, s.db, sessionID, since)
+	if err != nil || len(prev) == 0 || len(prev) >= SessionSwitchMax {
+		return false, err
+	}
+	for _, p := range prev {
+		if p.FromAccountID == fromAccountID {
+			return false, nil
+		}
+		var left *time.Time
+		if p.Limit != nil && p.Limit.ResetAt != nil {
+			left = p.Limit.ResetAt
+		} else if cd, err := getCooldown(ctx, s.db, p.FromAccountID); err != nil {
+			return false, err
+		} else if cd != nil {
+			left = &cd.Until
+		}
+		if left == nil {
+			return false, nil // nothing to tell a replay from a new limit by
+		}
+		if d := left.Sub(*ev.ResetAt); d < resetSlack && d > -resetSlack {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // switchPaused returns the breaker's reason when an automatic switch for
 // sessionID must not happen now: the session already switched within
-// SessionSwitchWindow, or NodeSwitchMax different accounts already ran out on
+// SessionSwitchWindow (unless the limit is a confirmed repeat), or
+// NodeSwitchMax different accounts already ran out on
 // this node within NodeSwitchWindow. The node-wide check counts accounts, not
 // switches: one account running out moves every session on it, and moving
 // the rest of them away from an account already known to be out is expected,
@@ -219,11 +333,20 @@ const SwitchPausedPrefix = "account switching paused"
 // does not reset it. A paused limit is not recorded as a cooldown and the run
 // is left running: nothing automatic happens until the owner acts (a
 // misdetected limit must not spread to the next account either).
-func (s *Service) switchPaused(ctx context.Context, sessionID, fromAccountID string) (string, error) {
+func (s *Service) switchPaused(ctx context.Context, sessionID, fromAccountID string, ev contracts.LimitEvent) (string, error) {
 	now := s.now()
-	n, last, err := countSwitches(ctx, s.db, sessionID, now.Add(-s.cfg.SessionSwitchWindow))
+	since := now.Add(-s.cfg.SessionSwitchWindow)
+	n, last, err := countSwitches(ctx, s.db, sessionID, since)
 	if err != nil {
 		return "", err
+	}
+	if n > 0 {
+		if ok, err := s.confirmedRepeat(ctx, sessionID, fromAccountID, ev, since); err != nil {
+			return "", err
+		} else if ok {
+			s.log.Info("accounts: limit right after a switch is the new account's own; switching again", "session", sessionID, "account", fromAccountID)
+			n = 0
+		}
 	}
 	if n > 0 {
 		return fmt.Sprintf("%s: repeated limits within %s (last automatic switch %s)", SwitchPausedPrefix,
@@ -269,6 +392,11 @@ func continuePrompt(from, to, kind string, uncertain bool) string {
 		cause = "to stay ahead of its usage limit"
 	}
 	p := fmt.Sprintf("[pyre] Continue where you left off (switched from %s to %s %s).", acctRef(from), acctRef(to), cause)
+	if from == to {
+		// A limit resume on the account that ran out (decision I70): it
+		// has room again; nothing was switched.
+		p = fmt.Sprintf("[pyre] Continue where you left off (%s has room again after %s).", acctRef(to), strings.TrimPrefix(cause, "because of "))
+	}
 	if uncertain {
 		p += " Your last step was cut off: check its effects before repeating anything."
 	}

@@ -155,7 +155,16 @@ isolated worktree created from it.`,
 				}
 				rs := append([]c.RepoBinding{}, p.Repos...)
 				for _, r := range rp {
-					rs = append(rs, c.RepoBinding{RepoID: r[0], Name: r[0], URL: r[1]})
+					// One binding per repo ID: a repeat replaces its URL.
+					replaced := false
+					for i := range rs {
+						if rs[i].RepoID == r[0] {
+							rs[i].URL, replaced = r[1], true
+						}
+					}
+					if !replaced {
+						rs = append(rs, c.RepoBinding{RepoID: r[0], Name: r[0], URL: r[1]})
+					}
 				}
 				req.Repos = &rs
 			}
@@ -166,7 +175,16 @@ isolated worktree created from it.`,
 				}
 				ls := append([]c.Link{}, p.Links...)
 				for _, l := range lp {
-					ls = append(ls, c.Link{Title: l[0], URL: l[1]})
+					// One link per title: a repeat replaces its URL.
+					replaced := false
+					for i := range ls {
+						if ls[i].Title == l[0] {
+							ls[i].URL, replaced = l[1], true
+						}
+					}
+					if !replaced {
+						ls = append(ls, c.Link{Title: l[0], URL: l[1]})
+					}
 				}
 				req.Links = &ls
 			}
@@ -200,8 +218,8 @@ isolated worktree created from it.`,
 	update.Flags().StringVar(&uName, "name", "", "new name")
 	update.Flags().StringVar(&uDesc, "description", "", "new description")
 	update.Flags().StringVar(&uEnv, "env-profile", "", "environment profile reference")
-	update.Flags().StringSliceVar(&uRepos, "repo", nil, "add a repo binding id=url")
-	update.Flags().StringSliceVar(&uLinks, "link", nil, "add a link title=url")
+	update.Flags().StringSliceVar(&uRepos, "repo", nil, "add or replace a repo binding id=url (same id replaces its URL)")
+	update.Flags().StringSliceVar(&uLinks, "link", nil, "add or replace a link title=url (same title replaces its URL)")
 	update.Flags().StringArrayVar(&uCheckouts, "checkout", nil, "add or replace a checkout node:path:repo:mode[:branch] (mode shared|worktree|plain; node ID or name)")
 	project.AddCommand(update)
 
@@ -291,7 +309,12 @@ when their current turns end (Pyre stops them gracefully first).`,
 	note := &cobra.Command{
 		Use:   `note "title" --body TEXT [--handoff|--decision] [--project P]`,
 		Short: "Publish a note, handoff or decision to shared memory (promptly available to others)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Publish a note, handoff or decision to shared memory.
+
+To read one, use: pyre note show <note_id>; to list them, pyre note ls (or
+pyre notes). A title that is a note ID or a command word (ls, show, ...)
+with no body is refused, so a mistaken read does not create an empty note.`,
+		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			if handoff && decision {
 				return usagef("--handoff and --decision are mutually exclusive")
@@ -326,11 +349,22 @@ when their current turns end (Pyre stops them gracefully first).`,
 	note.Flags().BoolVar(&decision, "decision", false, "this is a decision")
 	note.Flags().StringVar(&np.Project, "project", "", "project ID or name")
 	a.addNotePromote(note) // `pyre note promote` (cmd_connections.go)
+	note.AddCommand(a.noteShowCmd())
+	noteLs := a.notesListCmd("ls [--project P] [--kind K] [--query Q]")
+	noteLs.Aliases = []string{"list"}
+	note.AddCommand(noteLs) // `pyre note ls` is `pyre notes`
 	root.AddCommand(note)
 
+	notes := a.notesListCmd("notes [--project P] [--kind K] [--query Q]")
+	notes.AddCommand(a.noteShowCmd())
+	root.AddCommand(notes)
+}
+
+// notesListCmd lists notes; it is `pyre notes` and `pyre note ls`.
+func (a *App) notesListCmd(use string) *cobra.Command {
 	var nlProject, nlKind, nlQuery string
 	notes := &cobra.Command{
-		Use:   "notes [--project P] [--kind K] [--query Q]",
+		Use:   use,
 		Short: "List notes, handoffs and decisions",
 		Args:  cobra.NoArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
@@ -360,7 +394,49 @@ when their current turns end (Pyre stops them gracefully first).`,
 	notes.Flags().StringVar(&nlProject, "project", "", "project ID or name")
 	notes.Flags().StringVar(&nlKind, "kind", "", "note, handoff or decision")
 	notes.Flags().StringVar(&nlQuery, "query", "", "text match")
-	root.AddCommand(notes)
+	return notes
+}
+
+// noteShowCmd is `pyre note show` and `pyre notes show`.
+func (a *App) noteShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <note_id>",
+		Short: "Show a note, handoff or decision with its full body",
+		Args:  cobra.ExactArgs(1),
+		RunE: a.run(func(cmd *cobra.Command, args []string) error {
+			ops, err := a.connect()
+			if err != nil {
+				return err
+			}
+			n, err := ops.GetNote(cmd.Context(), NoteRef{NoteID: args[0]})
+			if err != nil {
+				return err
+			}
+			return a.emit(n, func(w io.Writer) { printNote(w, n) })
+		}),
+	}
+}
+
+func printNote(w io.Writer, n c.Note) {
+	fmt.Fprintf(w, "%s %s %q\n", n.Kind, n.NoteID, n.Title)
+	fmt.Fprintf(w, "  project: %s\n", strPtr(n.ProjectID))
+	fmt.Fprintf(w, "  author:  %s\n", principalText(n.Author))
+	if n.SessionID != "" {
+		fmt.Fprintf(w, "  session: %s\n", n.SessionID)
+	}
+	fmt.Fprintf(w, "  created: %s (%s)\n", stamp(n.CreatedAt), ago(n.CreatedAt))
+	if n.PromotedTo != "" {
+		fmt.Fprintf(w, "  promoted to: %s\n", n.PromotedTo)
+	}
+	fmt.Fprintln(w)
+	if n.Body == "" {
+		fmt.Fprintln(w, "(empty body)")
+		return
+	}
+	fmt.Fprint(w, n.Body)
+	if !strings.HasSuffix(n.Body, "\n") {
+		fmt.Fprintln(w)
+	}
 }
 
 // textOrFile returns text (or stdin for "-") or the contents of file.

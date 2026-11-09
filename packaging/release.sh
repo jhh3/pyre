@@ -148,7 +148,8 @@ fi
 [ "$MACSIGN" != none ] || MACSIGN=""
 if [ -n "$MACSIGN" ]; then echo "==> macOS signing identity: $MACSIGN"; else echo "==> macOS binaries stay ad-hoc signed (no signing identity; macOS permissions will not carry across releases)" >&2; fi
 # darwin_app DIR SRC: Pyre.app (dev.jhh3.pyre) wrapping pyred, then sign the
-# binaries and the bundle.
+# binaries and the bundle. Pyre.entitlements grants Apple Events, so sessions'
+# osascript gets macOS's Automation consent prompt instead of a silent denial.
 darwin_app() {
   local d=$1 src=$2 app="$1/Pyre.app"
   mkdir -p "$app/Contents/MacOS"
@@ -158,9 +159,9 @@ darwin_app() {
   [ -n "$MACSIGN" ] || return 0
   local b
   for b in pyre pyred pyre-hub; do
-    codesign --force --timestamp --sign "$MACSIGN" --identifier "dev.jhh3.pyre.$b" "$d/bin/$b" || { echo "codesign $b failed" >&2; exit 1; }
+    codesign --force --timestamp --entitlements "$ROOT/packaging/macos/Pyre.entitlements" --sign "$MACSIGN" --identifier "dev.jhh3.pyre.$b" "$d/bin/$b" || { echo "codesign $b failed" >&2; exit 1; }
   done
-  codesign --force --timestamp --sign "$MACSIGN" "$app" || { echo "codesign Pyre.app failed" >&2; exit 1; }
+  codesign --force --timestamp --entitlements "$ROOT/packaging/macos/Pyre.entitlements" --sign "$MACSIGN" "$app" || { echo "codesign Pyre.app failed" >&2; exit 1; }
   codesign --verify --strict "$app" && codesign --verify --strict "$d/bin/pyred" || { echo "codesign verification failed" >&2; exit 1; }
 }
 

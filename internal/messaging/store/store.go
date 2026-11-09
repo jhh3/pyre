@@ -917,10 +917,21 @@ func (s *Store) AckOwnerMail(ctx context.Context, sel OwnerMail, ref string) (in
 	return n, err
 }
 
+// StaleAttemptAfter is how long an attempt may report no outcome while the
+// recipient run is observed idle before the hub returns it to the queue
+// (RequeueStaleAttemptTx). Node attempts are bounded far below this.
+const StaleAttemptAfter = 2 * time.Minute
+
 // ReissueMessage explicitly re-sends a message as a NEW message referencing
 // the original. Indeterminate originals require accept_duplicate_risk;
-// pending originals must be cancelled first; accepted originals are a
-// conflict (the runtime has the work; send a new message).
+// accepted originals are a conflict (the runtime has the work; send a new
+// message). A pending original that was never attempted must be cancelled
+// first, and one with an attempt in flight is refused (its outcome is
+// unknown). A pending original whose every attempt was withdrawn unsent (a
+// known outcome: not delivered) is reissued and superseded in the same
+// transaction, so it is never delivered as well; one still bound by an
+// attempt whose outcome was never reported (a stale attempt returned to the
+// queue) needs accept_duplicate_risk and is superseded too.
 func (s *Store) ReissueMessage(ctx context.Context, req contracts.ReissueMessageRequest) (contracts.MessageView, error) {
 	p, err := principal(ctx)
 	if err != nil {
@@ -939,9 +950,28 @@ func (s *Store) ReissueMessage(ctx context.Context, req contracts.ReissueMessage
 		if orig.Envelope.Recipient.Kind != contracts.AddrSession || orig.Status.Runtime == contracts.DeliveryNotApplicable {
 			return nil, contracts.Errorf(contracts.ErrInvalid, "only runtime-delivered session messages can be reissued").WithRef(contracts.KindMessage, req.MessageID)
 		}
+		supersede := ""
 		switch orig.Status.Runtime {
-		case contracts.DeliveryQueued, contracts.DeliveryNodeReceived, contracts.DeliveryAttempting:
-			return nil, contracts.Errorf(contracts.ErrConflict, "original delivery is still %s; cancel it or wait for an outcome", orig.Status.Runtime).WithRef(contracts.KindMessage, req.MessageID)
+		case contracts.DeliveryAttempting:
+			return nil, contracts.Errorf(contracts.ErrConflict, "original delivery is still attempting: an attempt is in flight and its outcome is unknown; wait for its outcome (an attempt that reports nothing for %s while the recipient is idle returns to the queue)", StaleAttemptAfter).
+				WithRef(contracts.KindMessage, req.MessageID).WithDetail("runtime", orig.Status.Runtime)
+		case contracts.DeliveryQueued, contracts.DeliveryNodeReceived:
+			if orig.Status.BoundRunID != "" {
+				if !req.AcceptDuplicateRisk {
+					return nil, contracts.Errorf(contracts.ErrConflict, "original delivery is %s but still bound to run %s by an attempt whose outcome was never reported; reissuing may duplicate work and requires accept_duplicate_risk", orig.Status.Runtime, orig.Status.BoundRunID).
+						WithRef(contracts.KindMessage, req.MessageID).WithDetail("runtime", orig.Status.Runtime)
+				}
+				supersede = "an earlier attempt's outcome was never reported; duplicate risk accepted"
+				break
+			}
+			withdrawn, err := s.onlyDeferredAttemptsTx(ctx, tx, req.MessageID)
+			if err != nil {
+				return nil, err
+			}
+			if !withdrawn {
+				return nil, contracts.Errorf(contracts.ErrConflict, "original delivery is still %s; cancel it or wait for an outcome", orig.Status.Runtime).WithRef(contracts.KindMessage, req.MessageID)
+			}
+			supersede = "every earlier attempt was withdrawn unsent (not delivered)"
 		case contracts.DeliveryAccepted:
 			// Accepted work is reconciled: the runtime has it. A follow-up is
 			// a new message, not a reissue.
@@ -957,13 +987,20 @@ func (s *Store) ReissueMessage(ctx context.Context, req contracts.ReissueMessage
 		if req.Body != nil {
 			body = *req.Body
 		}
+		mode := orig.Envelope.Mode
+		if req.Mode != "" {
+			if !validMode(req.Mode) {
+				return nil, contracts.Errorf(contracts.ErrInvalid, "invalid message mode %q", req.Mode)
+			}
+			mode = req.Mode
+		}
 		sreq := contracts.SendMessageRequest{
 			Mutation:    contracts.Mutation{OperationID: req.OperationID, CorrelationID: req.MessageID},
 			Recipient:   orig.Envelope.Recipient,
 			ProjectID:   orig.Envelope.ProjectID,
 			ThreadID:    orig.Envelope.ThreadID,
 			InReplyTo:   orig.Envelope.InReplyTo,
-			Mode:        orig.Envelope.Mode,
+			Mode:        mode,
 			Body:        body,
 			Attachments: orig.Envelope.Attachments,
 			RequestAck:  orig.Envelope.RequestAck,
@@ -971,7 +1008,16 @@ func (s *Store) ReissueMessage(ctx context.Context, req contracts.ReissueMessage
 		if len(sreq.Body.Text) > s.cfg.Limits.MaxBodyBytes {
 			return nil, contracts.Errorf(contracts.ErrPayloadTooLarge, "message body too large")
 		}
-		return s.insertTx(ctx, tx, p, contracts.NewID(contracts.PrefixMessage), sreq, orig.Envelope.MessageID, req.AcceptDuplicateRisk)
+		id := contracts.NewID(contracts.PrefixMessage)
+		if supersede != "" {
+			// The original must not be delivered as well: withdraw it (its
+			// node is told to drop it; the pre-paste gate sees it cancelled).
+			if _, err := s.withdrawTx(ctx, tx, orig, contracts.DeliveryCancelled,
+				fmt.Sprintf("superseded by reissue %s by %s:%s: %s", id, p.Kind, p.ID, supersede)); err != nil {
+				return nil, err
+			}
+		}
+		return s.insertTx(ctx, tx, p, id, sreq, orig.Envelope.MessageID, req.AcceptDuplicateRisk)
 	})
 	if err == nil {
 		s.committed()
@@ -1154,6 +1200,49 @@ func (s *Store) SetRuntimeTx(ctx context.Context, tx *sql.Tx, messageID string, 
 		return nv, s.emitDelivery(ctx, tx, nv)
 	}
 	return nv, nil
+}
+
+// RequeueStaleAttemptTx returns a message whose attempt has reported nothing
+// since before staleBefore to node_received (held by the node, retried by
+// it), recording a hub receipt with reason. The caller has established that
+// the recipient run is observed idle, so the attempt started no turn. The
+// binding is kept: the outcome was never reported, so cancel stays refused
+// and a reissue needs accept_duplicate_risk; a later node receipt still
+// applies (accepted, rejected, indeterminate, or a new attempt). ok=false:
+// not attempting, or it made progress since.
+func (s *Store) RequeueStaleAttemptTx(ctx context.Context, tx *sql.Tx, messageID string, staleBefore time.Time, reason string) (contracts.MessageView, bool, error) {
+	v, err := s.GetTx(ctx, tx, messageID)
+	if err != nil {
+		return v, false, err
+	}
+	if v.Status.Runtime != contracts.DeliveryAttempting || v.Status.UpdatedAt.After(staleBefore) {
+		return v, false, nil
+	}
+	now := s.now()
+	for i := len(v.Status.Receipts) - 1; i >= 0; i-- {
+		if r := v.Status.Receipts[i]; r.State == contracts.DeliveryAttempting && r.AttemptID != "" {
+			reason = "attempt " + r.AttemptID + ": " + reason
+			break
+		}
+	}
+	// No AttemptID: this is the hub's observation, not the node reporting
+	// the attempt deferred (onlyDeferredAttemptsTx must not count it).
+	rc := contracts.DeliveryReceipt{
+		MessageID: messageID, SessionID: v.Envelope.Recipient.ID, RunID: v.Status.BoundRunID,
+		State: contracts.DeliveryQueued, Evidence: contracts.EvidenceNone, Detail: reason, ObservedAt: now,
+	}
+	if err := s.recordReceipt(ctx, tx, "", rc); err != nil {
+		return v, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET runtime=?, runtime_reason=?, updated_at=? WHERE message_id=? AND runtime=?`,
+		string(contracts.DeliveryNodeReceived), reason, persistence.Time(now), messageID, string(contracts.DeliveryAttempting)); err != nil {
+		return v, false, err
+	}
+	nv, err := s.GetTx(ctx, tx, messageID)
+	if err != nil {
+		return nv, false, err
+	}
+	return nv, true, s.emitDelivery(ctx, tx, nv)
 }
 
 // MarkNodeReceivedTx records that the recipient node durably committed the

@@ -20,7 +20,7 @@ func synthStatsNode() c.Node {
 
 func TestPrintNodesMachineStats(t *testing.T) {
 	var b bytes.Buffer
-	printNodes(&b, []c.Node{synthStatsNode(), {NodeID: "node_old", Name: "old-pyred"}}, time.Now())
+	printNodes(&b, []c.Node{synthStatsNode(), {NodeID: "node_old", Name: "old-pyred"}}, time.Now(), "")
 	out := b.String()
 	for _, want := range []string{"CPU", "DISK FREE", "35% 4.5/16", "24G/32G warn!", "6.0G/8.0G!", "50G 5%!",
 		"! synth-linux: disk home+data 50G free (5%); memory pressure warn; swap 6.0G of 8.0G used"} {
@@ -32,7 +32,7 @@ func TestPrintNodesMachineStats(t *testing.T) {
 		t.Fatalf("a node without stats got a warning:\n%s", out)
 	}
 	b.Reset()
-	printNode(&b, synthStatsNode())
+	printNode(&b, synthStatsNode(), "")
 	for _, want := range []string{"cpu:         35.2% busy, load 4.50 3.00 2.00", "pressure:    warn (psi some avg10 12.5%)",
 		"disk:        /home/synth (home+data) 50G free of 1000G", "run usage:   run_synth 1.2G rss · 35% cpu · 12 procs · top claude 900M", "WARNING:     swap"} {
 		if !strings.Contains(b.String(), want) {
@@ -48,6 +48,26 @@ func TestPrintSessionUsage(t *testing.T) {
 	printSession(&b, c.SessionView{Session: c.Session{SessionID: "ses_synth", Harness: c.HarnessClaude},
 		Run: &c.Run{RunID: "run_synth", NodeID: "node_synth", State: c.RunRunning, Usage: &u}})
 	if !strings.Contains(b.String(), "usage:     1.2G rss · 35% cpu · 12 procs · top claude 900M (sampled") {
+		t.Fatalf("session show:\n%s", b.String())
+	}
+}
+
+func TestPrintSessionKeptFromAutoArchive(t *testing.T) {
+	ended := time.Now().Add(-time.Hour)
+	unarchived := time.Now().Add(-time.Minute)
+	sv := c.SessionView{Session: c.Session{SessionID: "ses_synth", Harness: c.HarnessClaude, UnarchivedAt: &unarchived},
+		Run: &c.Run{RunID: "run_synth", NodeID: "node_synth", State: c.RunExited, EndedAt: &ended}}
+	var b bytes.Buffer
+	printSession(&b, sv)
+	if !strings.Contains(b.String(), "kept from auto-archive: unarchived") {
+		t.Fatalf("session show:\n%s", b.String())
+	}
+	// A run that ended after the unarchive lifts the hold.
+	later := time.Now()
+	sv.Run.EndedAt = &later
+	b.Reset()
+	printSession(&b, sv)
+	if strings.Contains(b.String(), "kept from auto-archive") {
 		t.Fatalf("session show:\n%s", b.String())
 	}
 }

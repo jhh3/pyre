@@ -22,7 +22,7 @@ var MockCaps = []string{
 }
 
 func (b *Backend) viewLocked(s *c.Session) c.SessionView {
-	v := c.SessionView{Session: *s, Freshness: mockFreshness(b.now())}
+	v := c.SessionView{Session: *s, Freshness: mockFreshness(b.now()), ArchivePending: !s.Archived && slices.Contains(s.Tags, c.TagArchiveWhenDone)}
 	if r, ok := b.runs[s.CurrentRunID]; ok {
 		rc := *r
 		v.Run = &rc
@@ -474,6 +474,7 @@ func (b *Backend) appendTranscript(runID, kind, text, messageID string) {
 }
 
 func (b *Backend) ReadSession(ctx context.Context, req c.ReadSessionRequest) (c.ReadSessionResponse, error) {
+	req = req.SeqWindow()
 	return query(b, ctx, func(p c.Principal) (c.ReadSessionResponse, error) {
 		s, ok := b.sessions[req.SessionID]
 		if !ok {
@@ -526,7 +527,8 @@ func (b *Backend) ReadSession(ctx context.Context, req c.ReadSessionRequest) (c.
 			last = entries[len(entries)-1].Text
 		}
 		resp.Screen = "[mock screen] " + s.Title + " — " + string(r.State) + "\n" + truncate(last, 200) + "\n> "
-		return resp, nil
+		resp.Full = req.Full // mock entries are never cut
+		return req.PickSeq(resp)
 	})
 }
 
@@ -631,6 +633,9 @@ func (b *Backend) ResumeSession(ctx context.Context, req c.ResumeRequest) (c.Sta
 		if !ok {
 			return c.StartSessionResponse{}, notFound(c.KindSession, req.SessionID)
 		}
+		if s.Archived && p.Kind == c.PrincipalSession && p.ID != s.SessionID && !s.StartedBy(p.ID) {
+			return c.StartSessionResponse{}, c.Errorf(c.ErrForbidden, "%s is archived and resuming unarchives it; an agent may unarchive only its own session and the sessions it started", s.SessionID)
+		}
 		prev := b.runs[s.CurrentRunID]
 		if prev != nil && !prev.State.Terminal() {
 			return c.StartSessionResponse{}, c.Errorf(c.ErrConflict, "run %s is still %s; stop it before resuming (no duplicate current runs)", prev.RunID, prev.State).WithRef(c.KindRun, prev.RunID)
@@ -684,6 +689,7 @@ func (b *Backend) ResumeSession(ctx context.Context, req c.ResumeRequest) (c.Sta
 			}
 		}
 		s.CurrentRunID = r.RunID
+		s.Archived, s.ArchivedAt = false, nil // a resumed session is live again
 		b.pendingCmd[r.RunID] = "start"
 		b.emit(c.EvRunStarted, ref(c.KindRun, r.RunID), s.SessionID, s.ProjectID, r)
 		b.emit(c.EvSessionUpdated, ref(c.KindSession, s.SessionID), s.SessionID, s.ProjectID, s)
@@ -790,6 +796,8 @@ func (b *Backend) UpdateSession(ctx context.Context, req c.UpdateSessionRequest)
 			}
 		}
 		switch {
+		case req.CancelArchive:
+			s.Tags = slices.DeleteFunc(slices.Clone(s.Tags), func(t string) bool { return t == c.TagArchiveWhenDone })
 		case req.Archived != nil && *req.Archived && req.WhenDone && b.runLiveLocked(s):
 			// W-archive2: the hub archives after the turn; the mock records
 			// the pending archive only.
@@ -797,9 +805,15 @@ func (b *Backend) UpdateSession(ctx context.Context, req c.UpdateSessionRequest)
 				s.Tags = append(slices.Clone(s.Tags), c.TagArchiveWhenDone)
 			}
 		case req.Archived != nil:
+			if *req.Archived && !s.Archived {
+				t := b.now()
+				s.ArchivedAt = &t
+			}
 			s.Archived = *req.Archived
 			if s.Archived {
 				b.withdrawAttentionLocked(waitingGroup(s.SessionID), c.AttnWithdrawn)
+			} else {
+				s.ArchivedAt = nil
 			}
 			s.Tags = slices.DeleteFunc(slices.Clone(s.Tags), func(t string) bool { return t == c.TagArchiveWhenDone })
 		}

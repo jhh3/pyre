@@ -1,0 +1,16 @@
+# Secret scan for the public export: the default rules, minus files that only
+# carry obviously synthetic token shapes (tests, fixtures, a vendored xterm.js)
+# or public values (a release-key fingerprint, a model name).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "synthetic test values and public identifiers"
+paths = [
+  '''_test\.go$''',
+  '''(^|/)tests?/''',
+  '''/fixtures/''',
+  '''vendor/ws/templates/vendor/xterm\.js$''',
+  '''(^|/)docs/evidence/release/BUILD-''',
+  '''(^|/)internal/accounts/token\.go$''',
+]

@@ -61,8 +61,8 @@ func TestSplitConfigArgs(t *testing.T) {
 
 // The environment generation's -c overlays become per-thread config on
 // thread/start (never app-server flags or CODEX_HOME edits), are persisted
-// with the run, and are re-sent on resume after a pyred restart: a running
-// thread keeps its generation.
+// with the run, and are re-sent when an unloaded thread is resumed after a
+// pyred restart: a running thread keeps its generation.
 func TestCodexManagedConfigPerThread(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, nil)
@@ -90,13 +90,23 @@ func TestCodexManagedConfigPerThread(t *testing.T) {
 	if starts(t, e, e.home) != 1 {
 		t.Fatal("expected one app-server")
 	}
+	// The loaded thread keeps its config across a restart (attached without
+	// overrides); once unloaded, a resume re-sends it.
+	rr, _ := e.a.run(h)
+	if err := rr.hs.connected().call(ctx, "thread/archive", threadIDParams{ThreadID: rr.meta.ThreadID}, nil); err != nil {
+		t.Fatal(err)
+	}
 	a2 := e.restart()
 	if _, err := a2.Recover(ctx, h); err != nil {
 		t.Fatal(err)
 	}
 	b, _ = os.ReadFile(logPath)
 	lines = strings.Split(strings.TrimSpace(string(b)), "\n")
-	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "thread/resume ") || !strings.Contains(last, "synthetic-alpha") || !strings.Contains(last, `"model_reasoning_effort":"low"`) {
+	cold := ""
+	for i := len(lines) - 1; i >= 0 && !strings.HasPrefix(lines[i], "thread/archive "); i-- {
+		cold = lines[i]
+	}
+	if !strings.HasPrefix(cold, "thread/resume ") || !strings.Contains(cold, "synthetic-alpha") || !strings.Contains(cold, `"model_reasoning_effort":"low"`) {
 		t.Fatalf("resume lacks the managed config: %v", lines)
 	}
 	_, _ = a2.Stop(ctx, h)

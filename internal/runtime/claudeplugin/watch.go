@@ -264,20 +264,39 @@ func (w *watcher) maybeRing(ctx context.Context) error {
 		return nil
 	}
 	var ready []Message
+	seen := map[string]time.Time{}
 	for _, p := range w.pending {
 		if now.Sub(p.firstSeen) >= w.o.Grace {
 			ready = append(ready, p.msg)
+			seen[p.msg.ID] = p.firstSeen
 		}
 	}
 	w.mu.Unlock()
 	if len(ready) == 0 {
 		return nil
 	}
-	// Leave messages to the paste path when it already claimed them.
+	// Leave messages to the paste/plugin path while an attempt of it is in
+	// flight, and newer mail behind them (order); an attempt that ends
+	// withdrawn unsent hands the message back to the doorbell. Incident
+	// 2026-10-23: mail seen mid-attempt was dropped here for good, so only
+	// newer mail was announced and the agent read it first.
 	attempted := pasteAttempts(w.o.RunDir)
+	hold := map[string]bool{}
+	var oldestHeld int64
+	for _, m := range ready {
+		if st, ok := attempted[m.ID]; ok && (st == "attempting" || st == "submitted") && now.Sub(seen[m.ID]) < inflightRecheck {
+			hold[m.ID] = true
+			if m.Cursor > 0 && (oldestHeld == 0 || m.Cursor < oldestHeld) {
+				oldestHeld = m.Cursor
+			}
+		}
+	}
 	var ids []string
 	for _, m := range ready {
-		if !attempted[m.ID] {
+		if oldestHeld > 0 && !m.Reminder && m.Cursor > oldestHeld {
+			hold[m.ID] = true
+		}
+		if _, ok := attempted[m.ID]; !ok && !hold[m.ID] {
 			ids = append(ids, m.ID)
 		}
 	}
@@ -295,6 +314,9 @@ func (w *watcher) maybeRing(ctx context.Context) error {
 	var ring []Message
 	w.mu.Lock()
 	for _, m := range ready {
+		if hold[m.ID] {
+			continue // checked again on a later tick
+		}
 		delete(w.pending, m.ID)
 		if still[m.ID] {
 			ring = append(ring, m)
@@ -404,10 +426,17 @@ func clean(s string, n int) string {
 	return s
 }
 
-// pasteAttempts reads the Claude adapter journal: ids with an attempting,
-// submitted or accepted record belong to the paste path.
-func pasteAttempts(runDir string) map[string]bool {
-	out := map[string]bool{}
+// inflightRecheck bounds how long the watcher keeps re-checking a message
+// whose paste/plugin attempt is still in flight (attempts last seconds; a
+// journal left mid-attempt by a crash must not hold mail forever).
+const inflightRecheck = 10 * time.Minute
+
+// pasteAttempts reads the Claude adapter journal: the latest state of each
+// message with an attempting, submitted, accepted or indeterminate record
+// (those belong to the paste/plugin path). A later rejected or cleared
+// record (not submitted, e.g. withdrawn unsent) removes the message.
+func pasteAttempts(runDir string) map[string]string {
+	out := map[string]string{}
 	if runDir == "" {
 		return out
 	}
@@ -428,7 +457,7 @@ func pasteAttempts(runDir string) map[string]bool {
 		}
 		switch r.State {
 		case "attempting", "submitted", "accepted", "indeterminate":
-			out[r.MessageID] = true
+			out[r.MessageID] = r.State
 		case "rejected", "cleared":
 			delete(out, r.MessageID)
 		}

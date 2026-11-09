@@ -26,6 +26,9 @@ type envWiring struct {
 	cfg *configuration.Manager
 	upd *updates.Manager
 	inv updates.Inventory
+	// auto keeps codex at its latest release (nil on --dev-mock test nodes
+	// and with PYRE_AUTO_UPDATE=0).
+	auto *updates.Auto
 	// pyreBin is the pyre CLI used for the agent MCP server ("" = none found).
 	pyreBin string
 }
@@ -115,6 +118,9 @@ func wireEnvironment(in *integrations, cfg *daemon.Config, o runOpts, hubURL, pi
 	}
 	upd, err := updates.New(updates.Options{StateDir: o.state, NodeID: cfg.NodeID, Runs: reg, Reporter: in.rep,
 		HubProtocol: hubProto, External: external, DaemonBase: launcherVer,
+		// Beyond `codex --version`: the app-server subcommand Pyre drives
+		// must exist (without touching the user's CODEX_HOME).
+		Smoke: map[string][]string{"codex": {"app-server", "--help"}},
 		OnDaemonSwitch: func(v string) {
 			// Let the action result reach the hub first, then restart
 			// through the launcher (runs live outside pyred).
@@ -141,6 +147,18 @@ func wireEnvironment(in *integrations, cfg *daemon.Config, o runOpts, hubURL, pi
 	w := &envWiring{cfg: cm, upd: upd, inv: updates.Inventory{NodeID: cfg.NodeID, Tools: upd, Env: cm,
 		Integrations: updates.DefaultIntegrations()}, pyreBin: findPyreCLI()}
 	cfg.Environments = w
+	cfg.HarnessPin = func(ctx context.Context, h contracts.Harness) (string, string, bool) {
+		pin, ok := upd.Pinned(ctx, string(h))
+		if !ok || pin.Digest == "" { // only a managed version differs from the adapter's probe
+			return "", "", false
+		}
+		return pin.Path, pin.Version, true
+	}
+	if !o.devMock && os.Getenv(EnvAutoUpdate) != "0" {
+		w.auto = upd.NewAuto(updates.AutoOptions{Tool: "codex", Source: updates.GitHubCodex{},
+			FileIssue: nodeIssueFiler(in.hub, cfg.NodeID),
+			Logf:      func(f string, a ...any) { log.Info(sprintf(f, a...)) }})
+	}
 	mcp := w.pyreBin != ""
 	cfg.AgentGuide = func(h contracts.Harness, s contracts.Session) string {
 		// Claude (--mcp-config), Codex (per-thread config) and agy (the
@@ -148,6 +166,22 @@ func wireEnvironment(in *integrations, cfg *daemon.Config, o runOpts, hubURL, pi
 		return agentguide.Text(agentguide.Options{CLI: w.pyreBin, MCP: mcp && h != contracts.HarnessShell, WorktreeRoot: cfg.WorktreeRoot, RunTmpDir: daemon.RunTmpRoot(*cfg) != "", Harness: string(h)})
 	}
 	return w
+}
+
+// EnvAutoUpdate=0 turns the automatic codex updater off on this node.
+const EnvAutoUpdate = "PYRE_AUTO_UPDATE"
+
+// nodeIssueFiler files the auto-updater's machine issues with the node
+// credential (nil without a hub: not filed).
+func nodeIssueFiler(hc *client.Client, nodeID string) func(ctx context.Context, title, body string) error {
+	if hc == nil {
+		return nil
+	}
+	return func(ctx context.Context, title, body string) error {
+		_, err := hc.FileIssue(ctx, contracts.FileIssueRequest{Mutation: contracts.Mutation{OperationID: contracts.NewID("op")},
+			Kind: contracts.IssueMachine, Title: title, Body: body, NodeID: nodeID})
+		return err
+	}
 }
 
 // daemonSwitchDelay separates a pyred activation's action result from the
@@ -254,6 +288,13 @@ func (w *envWiring) register(d *daemon.Daemon) {
 		d.RegisterAction(name, daemon.ActionFunc(h))
 	}
 	for name, h := range w.upd.Handlers() {
+		d.RegisterAction(name, daemon.ActionFunc(h))
+	}
+	var autos []*updates.Auto
+	if w.auto != nil {
+		autos = append(autos, w.auto)
+	}
+	for name, h := range updates.AutoHandlers(autos...) {
 		d.RegisterAction(name, daemon.ActionFunc(h))
 	}
 	inv := w.inv

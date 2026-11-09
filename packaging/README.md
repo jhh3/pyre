@@ -187,9 +187,9 @@ twice; `REPRO_PLATFORMS="linux/amd64"` narrows it).
 | --- | --- | --- |
 | `launchd/dev.jhh3.pyre.pyred.plist.in` | `~/Library/LaunchAgents/dev.jhh3.pyre.pyred.plist` | `AbandonProcessGroup`, `KeepAlive{SuccessfulExit=false}`, `ThrottleInterval 10`, `ProcessType Standard`, logs in `~/Library/Logs/pyre/` |
 | `launchd/dev.jhh3.pyre.hub.plist.in` | `~/Library/LaunchAgents/dev.jhh3.pyre.hub.plist` | same supervision; runs only while the user is logged in |
-| `systemd/pyred.service.in` | `~/.config/systemd/user/pyred.service` | scope mode (default): default `KillMode`, `PYRE_SYSTEMD_SCOPE=require`, `MemoryHigh=512M`, `MemoryMax=1G`, `CPUQuota=200%`, `TasksMax=512`; legacy block (`--no-scope`): `KillMode=process`, no caps. `Restart=on-failure`, `RestartSec=2s` |
+| `systemd/pyred.service.in` | `~/.config/systemd/user/pyred.service` | scope mode (default): default `KillMode`, `PYRE_SYSTEMD_SCOPE=require`, `MemoryHigh=2G`, `MemoryMax=4G`, `CPUQuota=200%`, `TasksMax=512`; legacy block (`--no-scope`): `KillMode=process`, no caps. `Restart=on-failure`, `RestartSec=2s` |
 | `systemd/pyre-runs.slice.in` | `~/.config/systemd/user/pyre-runs.slice` | slice for the tmux server scopes (all runs): `MemoryHigh=85%`, `CPUWeight=90`, no `MemoryMax` |
-| `systemd/pyre-hub.service.in` | `~/.config/systemd/user/pyre-hub.service` | `MemoryMax=1G`, `CPUQuota=200%`, `TasksMax=256`, `ProtectSystem=strict`, `ProtectHome=read-only` + `ReadWritePaths=<hub data>` (`--no-harden` drops the sandbox) |
+| `systemd/pyre-hub.service.in` | `~/.config/systemd/user/pyre-hub.service` | `MemoryMax=4G`, `CPUQuota=200%`, `TasksMax=256`, `ProtectSystem=strict`, `ProtectHome=read-only` + `ReadWritePaths=<hub data>` (`--no-harden` drops the sandbox) |
 
 Placeholders are `@NAME@`; blocks between `# BEGIN tag` / `# END tag` are
 dropped when the installer sets `R_DROP_tag=1`. Every rendered file carries

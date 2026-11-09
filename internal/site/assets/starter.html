@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  /* Page-specific styles. The site stylesheet (tokens such as var(--panel),
+     var(--fg), var(--mut), var(--line), var(--link); classes .wrap .card
+     .card-head .card-body .card-title .meta .grid .col .lbl .b .chip .prose)
+     is added before this block, light and dark. Keep it working at 390px. */
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <h1>{{TITLE}}</h1>
+    <p class="sub">{{SUMMARY}}</p>
+  </header>
+
+  <!-- Each element people should comment on gets a stable data-note ID.
+       Never rename an ID once notes exist: its notes stay on the old ID. -->
+  <article class="card" data-note="decision-1">
+    <div class="card-head"><div>
+      <div class="card-title">Decision 1: what we recommend</div>
+      <div class="meta"><span class="b b-medium">Needs a decision</span></div>
+    </div></div>
+    <div class="card-body prose">
+      <p>The recommendation, the options considered, and what happens by default.</p>
+    </div>
+  </article>
+
+  <article class="card" data-note="option-a">
+    <div class="card-head"><div><div class="card-title">Option A</div></div></div>
+    <div class="grid">
+      <div class="col"><p class="lbl">Upside</p><p>…</p></div>
+      <div class="col"><p class="lbl">Cost</p><p>…</p></div>
+    </div>
+  </article>
+
+  <!-- Images and other files go in assets/ and are referenced relatively:
+       <figure><img src="assets/shot.png" alt="…"><figcaption>…</figcaption></figure> -->
+</main>
+</body>
+</html>

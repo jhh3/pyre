@@ -80,8 +80,9 @@ type HeldAnswersAPI interface {
 // owner-facing page, a markdown document with slug ProjectPageSlug that the
 // project's lead keeps current (goal, status, results, open decisions,
 // links, next steps). SetProjectPage writes a new head revision directly
-// (no proposal step); callers are the owner or a top-level session in the
-// project. The page is created on first write.
+// (no proposal step); callers are the owner or a lead of the project (a
+// session in it with no parent, or whose parent is outside it). The page
+// is created on first write.
 const (
 	OpProjectsSetPage  = "projects.set_page"
 	OpProjectsGetPage  = "projects.get_page"

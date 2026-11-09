@@ -26,7 +26,8 @@
         "created_at": "2026-10-04T11:30:00Z",
         "current_run_id": "run_synth-fb-2",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synth-fb-2",
@@ -93,7 +94,8 @@
         "created_at": "2026-10-04T11:30:00Z",
         "current_run_id": "run_synth-fbx-1",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synth-fbx-1",
@@ -155,7 +157,8 @@
           "forked_from": "ses_synth-fbx",
           "handoff_note_id": "note_synth-handoff-1"
         },
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synth-fbx-2",

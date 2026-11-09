@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -120,6 +121,11 @@ func (a *Adapter) ConversationOwner(cwd, sid string) ConversationOwner {
 		own.Default = false
 	}
 	return own
+}
+
+// TranscriptFullText (daemon full reads) delegates to the Claude adapter.
+func (x *ExecAdapter) TranscriptFullText(ctx context.Context, h contracts.RunHandle, seqs []int64) (map[int64]string, error) {
+	return x.base.TranscriptFullText(ctx, h, seqs)
 }
 
 // ResumeOwner is ConversationOwner for the daemon (headless resumes).

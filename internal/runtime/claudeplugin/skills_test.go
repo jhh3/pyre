@@ -11,7 +11,7 @@ import (
 )
 
 // The owner's seven agent slash commands (2026-10-13).
-var wantSkills = []string{"brief", "cleanup", "deliver", "kickoff", "open-items", "pair", "ship"}
+var wantSkills = []string{"brief", "cleanup", "deliver", "kickoff", "open-items", "pair", "review-site", "ship"}
 
 func TestSkillsFrontmatter(t *testing.T) {
 	var names []string

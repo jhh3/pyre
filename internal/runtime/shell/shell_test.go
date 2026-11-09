@@ -65,6 +65,24 @@ func TestPlainShellIsLoginShell(t *testing.T) {
 	}
 }
 
+// The pane's process sees the run's machine identity ($PYRE_NODE_ID and
+// $PYRE_NODE_NAME from pyred's runEnv).
+func TestShellSeesNodeIdentity(t *testing.T) {
+	a, dir := newTestAdapter(t)
+	ctx := context.Background()
+	out := filepath.Join(dir, "node-env")
+	if _, err := a.Launch(ctx, contracts.ResolvedLaunch{RunID: "run_nodeenv", SessionID: "ses_nodeenv", Harness: contracts.HarnessShell, Cwd: dir,
+		Executable: "/bin/sh", Args: []string{"-c", `printf '%s %s' "$PYRE_NODE_ID" "$PYRE_NODE_NAME" > '` + out + `'; exec cat`},
+		StateDir: filepath.Join(dir, "runs", "run_nodeenv"),
+		Env:      map[string]string{"PYRE_SESSION_ID": "ses_nodeenv", "PYRE_NODE_ID": "node_synth-office2", "PYRE_NODE_NAME": "synth-office2"}}); err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	if !eventually(t, 5*time.Second, func() bool { got, _ = os.ReadFile(out); return len(got) > 0 }) || string(got) != "node_synth-office2 synth-office2" {
+		t.Fatalf("pane env: %q", got)
+	}
+}
+
 func TestShellLifecycle(t *testing.T) {
 	a, dir := newTestAdapter(t)
 	ctx := context.Background()

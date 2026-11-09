@@ -136,6 +136,53 @@ func TestCompactSessionsMarkThisMachine(t *testing.T) {
 	}
 }
 
+// A run on a disconnected node reads "unknown (node disconnected; last
+// observed running)", never its last stored state (the hub's decorateRun
+// view; issue iss_…).
+func TestCompactSessionsShowDisconnectedNode(t *testing.T) {
+	o, _ := compactFixture()
+	sv := o.API.(*sessAPI).m["ses_synth-far"]
+	r := *sv.Run
+	r.State, r.StateReason = c.RunUnknown, "node disconnected; last observed running"
+	r.Freshness.Stale, r.Freshness.Reason = true, "node disconnected"
+	sv.Run = &r
+	sv.Freshness.Stale, sv.Freshness.Reason, sv.Freshness.Source = true, "node disconnected", "hub-cache"
+	got := renderSessions(newRenderCtx(context.Background(), o), c.Page[c.SessionView]{SnapshotAt: compactNow, Items: []c.SessionView{sv}})
+	if !strings.Contains(got, "· unknown (node disconnected; last observed running) ·") || strings.Contains(got, "· running") {
+		t.Fatalf("disconnected node's run:\n%s", got)
+	}
+}
+
+// get_session and pyre session show report an archived session as
+// archived, with when, and the JSON carries archived_at (null when not
+// archived; issue iss_…).
+func TestSessionShowArchived(t *testing.T) {
+	o, _ := compactFixture()
+	sv := o.API.(*sessAPI).m["ses_synth-far"]
+	at := compactNow.Add(-5 * time.Minute)
+	sv.Session.Archived, sv.Session.ArchivedAt = true, &at
+	if got := renderSession(newRenderCtx(context.Background(), o), sv); !strings.Contains(got, "· archived ") || !strings.HasSuffix(strings.SplitN(got, "\n", 2)[0], " ago") {
+		t.Fatalf("get_session:\n%s", got)
+	}
+	var b strings.Builder
+	printSessionAcct(&b, sv, "")
+	if !strings.Contains(b.String(), "  archived: ") || !strings.Contains(b.String(), "pyre sessions unarchive ses_synth-far") {
+		t.Fatalf("session show:\n%s", b.String())
+	}
+	raw, _ := json.Marshal(sv)
+	if !strings.Contains(string(raw), `"archived":true,"archived_at":"`) {
+		t.Fatalf("JSON: %s", raw)
+	}
+	sv.Session.Archived, sv.Session.ArchivedAt = false, nil
+	raw, _ = json.Marshal(sv)
+	b.Reset()
+	printSessionAcct(&b, sv, "")
+	if !strings.Contains(string(raw), `"archived":false,"archived_at":null`) || strings.Contains(b.String(), "archived") ||
+		strings.Contains(renderSession(newRenderCtx(context.Background(), o), sv), "archived") {
+		t.Fatalf("unarchived session: %s\n%s", raw, b.String())
+	}
+}
+
 func TestSnippetKeepsPathsWhole(t *testing.T) {
 	path := "/very/long/synthetic/path/to/a/report/file-with-a-long-name.md"
 	s, cut := snippet(strings.Repeat("word ", 30)+path+" tail words here", 160)

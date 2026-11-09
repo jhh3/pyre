@@ -40,6 +40,9 @@ func (h *Hub) RunMaintenance(ctx context.Context) error {
 	if _, _, err := h.FoldTokenAccounts(ctx); err != nil { // accounts_merge.go
 		errs = append(errs, err)
 	}
+	if err := h.requeueStaleAttempts(ctx); err != nil { // staleattempt.go
+		errs = append(errs, err)
+	}
 	if err := h.notifyStuckMail(ctx); err != nil { // stuckmail.go (W-stuckmail)
 		errs = append(errs, err)
 	}
@@ -103,7 +106,8 @@ func (h *Hub) PendingCommands(ctx context.Context, nodeID string) ([]contracts.N
 // payloads and results are dropped after Options.CommandCompactAfter) and
 // operation idempotency records (Options.OperationRetention). Unfinished
 // commands are never touched. It runs at most once per
-// Options.PruneInterval, in short batched transactions (retention.go).
+// Options.PruneInterval, in short batched transactions (retention.go), and
+// then returns free pages to the filesystem (reclaimSpace).
 func (h *Hub) pruneHistory(ctx context.Context) error {
 	now := h.clock.Now()
 	h.pruneMu.Lock()
@@ -123,7 +127,10 @@ func (h *Hub) pruneHistory(ctx context.Context) error {
 	if _, err := sqlitex.PruneOperations(ctx, h.db, time.Now().Add(-h.opt.OperationRetention), sqlitex.PruneBatch); err != nil {
 		return err
 	}
-	return h.pruneAudit(ctx) // W-audit
+	if err := h.pruneAudit(ctx); err != nil { // W-audit
+		return err
+	}
+	return h.reclaimSpace(ctx)
 }
 
 // reportDedupWindow is how far below a node's committed report sequence

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -45,7 +46,8 @@ func newEnv(t *testing.T, mutate func(*Options)) *env {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	o := Options{NodeID: "node_x", TmuxSocket: filepath.Join(dir, "tmux", "t.sock"), StateRoot: filepath.Join(dir, "state"),
 		CodexBin: exe, AppServerEnv: map[string]string{"PYRE_TEST_ROLE": "fakeappserver"}, DisableTUI: true,
-		DeliverTimeout: 5 * time.Second, InterruptTimeout: 2 * time.Second, SSHAlias: "nodex"}
+		DeliverTimeout: 5 * time.Second, InterruptTimeout: 2 * time.Second, SSHAlias: "nodex",
+		OwnerCodexHome: filepath.Join(dir, "owner-codex")} // never the real ~/.codex
 	if mutate != nil {
 		mutate(&o)
 	}
@@ -427,6 +429,217 @@ func TestCodexRecoverAfterDaemonRestart(t *testing.T) {
 	}
 }
 
+// dropConns ends adapter a's app-server connections, as a pyred restart
+// does, and waits until the fake app-server has dropped a's subscription to
+// thread (no other subscriber is left: the TUI is disabled).
+func dropConns(t *testing.T, a *Adapter, thread string) {
+	t.Helper()
+	a.mu.Lock()
+	var socks []string
+	for _, hs := range a.homes {
+		if c := hs.connected(); c != nil {
+			c.close()
+			socks = append(socks, hs.sock)
+		}
+	}
+	a.mu.Unlock()
+	for _, sock := range socks {
+		c, err := dialRPC(context.Background(), sock, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end := time.Now().Add(5 * time.Second)
+		for {
+			var r struct {
+				Thread struct {
+					Subs int `json:"fakeSubscribers"`
+				} `json:"thread"`
+			}
+			if err := c.call(context.Background(), "thread/read", map[string]any{"threadId": thread}, &r); err == nil && r.Thread.Subs == 0 {
+				break
+			}
+			if time.Now().After(end) {
+				t.Fatal("old connection still subscribed")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		c.close()
+	}
+}
+
+// A pyred restart is transparent to a Codex thread's background commands:
+// the new daemon re-attaches to the still-loaded, idle thread without
+// config overrides (with them, codex 0.163 shuts a thread with no other
+// subscriber down and cold-resumes it, killing its commands), so the
+// command keeps running and its exit still wakes the agent.
+func TestCodexRestartKeepsBackgroundCommands(t *testing.T) {
+	t.Parallel()
+	e, rec := newWakeEnv(t, nil)
+	ctx := context.Background()
+	env := map[string]string{"PYRE_SESSION_ID": "ses_x", "PYRE_RUN_ID": "run_k1", "PYRE_CLI": "/synthetic/bin/pyre", "PYRE_SESSION_TOKEN": "synthetic-session-token-0001"}
+	h := e.launch(e.a, "run_k1", e.home, nil, env)
+	if r := dlv(t, e.a, h, "msg_k1", "start it FAKE_BG_MS=1500:k", contracts.ModeQueue); r.State != contracts.DeliveryAccepted {
+		t.Fatalf("%+v", r)
+	}
+	e.wait(e.a, h, 5*time.Second, idle)
+	rr, _ := e.a.run(h)
+	dropConns(t, e.a, rr.meta.ThreadID)
+	a2 := e.restart()
+	a2.wakeSettle = 150 * time.Millisecond
+	if _, err := a2.Recover(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(e.home, "fake-rebuilds.log")); err == nil {
+		t.Fatalf("recover restarted the loaded thread: %s", b)
+	}
+	got := waitNotices(t, a2, h, 1, 5*time.Second)
+	if !strings.Contains(got[0].Text, "`bg-k` (exit 0") || !strings.Contains(got[0].Text, "bg k done") {
+		t.Fatalf("the command did not run to completion across the restart:\n%s", got[0].Text)
+	}
+	rec.waitWakes(t, 1)
+}
+
+func runEnv(runID string) map[string]string {
+	return map[string]string{"PYRE_SESSION_ID": "ses_x", "PYRE_RUN_ID": runID, "PYRE_CLI": "/synthetic/bin/pyre",
+		"PYRE_SESSION_TOKEN": "synthetic-token-" + runID}
+}
+
+// fakeThread reads the fake app-server's view of a thread over a separate
+// connection: the PYRE_RUN_ID its commands get, and whether it is loaded.
+func fakeThread(t *testing.T, a *Adapter, home, thread string) (runID string, loaded bool) {
+	t.Helper()
+	hs, err := a.homeServer(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := dialRPC(context.Background(), hs.sock, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+	var r struct {
+		Thread struct {
+			RunID string `json:"fakeRunId"`
+		} `json:"thread"`
+	}
+	if err := c.call(context.Background(), "thread/read", map[string]any{"threadId": thread}, &r); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = threadLoaded(context.Background(), c, thread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.Thread.RunID, loaded
+}
+
+func lastConfigLine(t *testing.T, e *env) string {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(e.o.StateRoot, "codex", homeKey(e.home), "fake-config.log"))
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	return lines[len(lines)-1]
+}
+
+// A new run resuming a thread that is still loaded (an earlier run's, not
+// unloaded) gets its own config: Codex ignores overrides on a subscribed
+// loaded thread, so the resumed run's commands had no PYRE_* identity and
+// `pyre send` found "no hub configured" (iss_…).
+// Pyred re-adopting that new run after a restart sends no config, and a
+// read of the ended run never reloads the thread.
+func TestCodexNewRunOnLoadedThreadGetsItsConfig(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	h1 := e.launch(e.a, "run_n1", e.home, nil, runEnv("run_n1"))
+	thread := h1.NativeRef.ID
+	if got, _ := fakeThread(t, e.a, e.home, thread); got != "run_n1" {
+		t.Fatalf("first run env: %q", got)
+	}
+	// The first run ends without its thread being unloaded (still loaded
+	// and subscribed by pyred's connection); reading or reconciling it
+	// afterwards does not resume the thread.
+	if err := os.WriteFile(filepath.Join(h1.StateDir, "stopped.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.ReadTranscript(ctx, h1, contracts.ReadSessionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, loaded := fakeThread(t, e.a, e.home, thread); !loaded {
+		t.Fatal("setup: thread not loaded")
+	}
+	h2 := e.launch(e.a, "run_n2", e.home, &contracts.NativeRef{Kind: "codex_thread", ID: thread}, runEnv("run_n2"))
+	if got, _ := fakeThread(t, e.a, e.home, thread); got != "run_n2" {
+		t.Fatalf("resumed run's commands get PYRE_RUN_ID %q, want run_n2 (config ignored on a loaded thread)", got)
+	}
+	// A read of the ended first run leaves the new run's thread alone.
+	if _, err := e.a.ReadTranscript(ctx, h1, contracts.ReadSessionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	rr2, _ := e.a.run(h2)
+	if rr2.hs.threads[thread] != rr2.ts {
+		t.Fatal("a read of the ended run replaced the live run's thread state")
+	}
+	// pyred restart: re-adopting run_n2 attaches without overrides.
+	dropConns(t, e.a, thread)
+	a2 := e.restart()
+	if _, err := a2.Recover(ctx, h2); err != nil {
+		t.Fatal(err)
+	}
+	if last := lastConfigLine(t, e); last != "thread/resume null" {
+		t.Fatalf("re-adopting the same run sent overrides: %s", last)
+	}
+	if got, _ := fakeThread(t, a2, e.home, thread); got != "run_n2" {
+		t.Fatalf("after restart: %q", got)
+	}
+	if _, err := a2.Stop(ctx, h2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a2.ReadTranscript(ctx, h2, contracts.ReadSessionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, loaded := fakeThread(t, a2, e.home, thread); loaded {
+		t.Fatal("reading a stopped run's transcript reloaded its thread")
+	}
+}
+
+// Recovery onto a loaded thread that carries another run's config (Pyre
+// recorded a different run for it) reloads it with this run's config.
+func TestCodexRecoverReconfiguresAnotherRunsThread(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	h := e.launch(e.a, "run_m1", e.home, nil, runEnv("run_m1"))
+	thread := h.NativeRef.ID
+	dropConns(t, e.a, thread)
+	// Another run's settings on the loaded thread (applied with no subscriber).
+	hs, _ := e.a.homeServer(e.home)
+	c, err := dialRPC(ctx, hs.sock, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.call(ctx, "thread/resume", threadResumeParams{ThreadID: thread, Config: threadConfig(runEnv("run_m0"))}, nil); err != nil {
+		t.Fatal(err)
+	}
+	c.close()
+	hs.setConfiguredFor(thread, "run_m0")
+	if got, _ := fakeThread(t, e.a, e.home, thread); got != "run_m0" {
+		t.Fatalf("setup: %q", got)
+	}
+	a2 := e.restart()
+	if _, err := a2.Recover(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(e.o.StateRoot, "codex", homeKey(e.home), "fake-config.log"))
+	if !regexp.MustCompile(`(?m)^thread/archive .*\n(thread/unarchive .*\n)?thread/resume .*synthetic-token-run_m1`).Match(b) {
+		t.Fatalf("recover onto another run's thread did not reload it with its config:\n%s", b)
+	}
+	if got, loaded := fakeThread(t, a2, e.home, thread); got != "run_m1" || !loaded {
+		t.Fatalf("thread carries %q (loaded %v), want run_m1", got, loaded)
+	}
+	if by := hs.configuredFor(thread); by != "run_m1" {
+		t.Fatalf("configured for %q", by)
+	}
+}
+
 // TestCodexThreadIdentityConfig: the shared app-server cannot carry a run's
 // Pyre identity in its environment, so thread/start carries it as per-thread
 // config (shell env + `pyre mcp`), persisted 0600 and re-sent on resume
@@ -436,7 +649,8 @@ func TestCodexThreadIdentityConfig(t *testing.T) {
 	e := newEnv(t, nil)
 	ctx := context.Background()
 	env := map[string]string{"PYRE_SESSION_ID": "ses_x", "PYRE_RUN_ID": "run_c1", "PYRE_SOCKET": "/synthetic/pyred.sock",
-		"PYRE_SESSION_TOKEN": "synthetic-session-token-0000", "PYRE_CLI": "/synthetic/bin/pyre", "UNRELATED": "nope"}
+		"PYRE_SESSION_TOKEN": "synthetic-session-token-0000", "PYRE_CLI": "/synthetic/bin/pyre", "UNRELATED": "nope",
+		"PYRE_NODE_ID": "node_synth-office2", "PYRE_NODE_NAME": "synth-office2"}
 	h := e.launch(e.a, "run_c1", e.home, nil, env)
 	logPath := filepath.Join(e.o.StateRoot, "codex", homeKey(e.home), "fake-config.log")
 	readLog := func() []string {
@@ -451,7 +665,9 @@ func TestCodexThreadIdentityConfig(t *testing.T) {
 	}
 	if cfg["shell_environment_policy.set.PYRE_SESSION_TOKEN"] != "synthetic-session-token-0000" ||
 		cfg["shell_environment_policy.set.PYRE_SOCKET"] != "/synthetic/pyred.sock" ||
-		cfg["shell_environment_policy.set.PYRE_CLI"] != "/synthetic/bin/pyre" {
+		cfg["shell_environment_policy.set.PYRE_CLI"] != "/synthetic/bin/pyre" ||
+		cfg["shell_environment_policy.set.PYRE_NODE_ID"] != "node_synth-office2" ||
+		cfg["shell_environment_policy.set.PYRE_NODE_NAME"] != "synth-office2" {
 		t.Fatalf("shell env overrides: %v", cfg)
 	}
 	if _, ok := cfg["shell_environment_policy.set.UNRELATED"]; ok {
@@ -466,15 +682,34 @@ func TestCodexThreadIdentityConfig(t *testing.T) {
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("thread config file: %v %v", st, err)
 	}
-	// pyred restart: the new adapter re-subscribes with the same config.
+	// pyred restart with the thread still loaded: the new adapter attaches
+	// without overrides (the thread keeps the config it was loaded with;
+	// overrides would restart it, TestCodexRestartKeepsBackgroundCommands).
 	a2 := e.restart()
 	if _, err := a2.Recover(ctx, h); err != nil {
 		t.Fatal(err)
 	}
 	lines = readLog()
-	last := lines[len(lines)-1]
-	if !strings.HasPrefix(last, "thread/resume ") || !strings.Contains(last, `"mcp_servers.pyre"`) || !strings.Contains(last, "synthetic-session-token-0000") {
-		t.Fatalf("resume after restart lacks the identity config: %v", lines)
+	if last := lines[len(lines)-1]; last != "thread/resume null" {
+		t.Fatalf("resume of a loaded thread sent overrides: %v", lines)
+	}
+	// Thread unloaded: the next re-subscribe cold-resumes it with the same
+	// config.
+	rr, _ := a2.run(h)
+	if err := rr.hs.connected().call(ctx, "thread/archive", threadIDParams{ThreadID: rr.meta.ThreadID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	a3 := e.restart()
+	if _, err := a3.Recover(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	lines = readLog()
+	cold := ""
+	for i := len(lines) - 1; i >= 0 && !strings.HasPrefix(lines[i], "thread/archive "); i-- {
+		cold = lines[i] // the first resume after the unload
+	}
+	if !strings.HasPrefix(cold, "thread/resume ") || !strings.Contains(cold, `"mcp_servers.pyre"`) || !strings.Contains(cold, "synthetic-session-token-0000") {
+		t.Fatalf("cold resume after restart lacks the identity config: %v", lines)
 	}
 	if _, err := a2.Stop(ctx, h); err != nil {
 		t.Fatal(err)
@@ -582,6 +817,13 @@ func TestCodexUnits(t *testing.T) {
 	}
 	if le := limitFromError(turnError{Message: "x", CodexErrorInfo: json.RawMessage(`"unauthorized"`)}, time.Now()); le == nil || le.Kind != "auth_invalid" {
 		t.Fatal(le)
+	}
+	if le := limitFromError(turnError{Message: "x", CodexErrorInfo: json.RawMessage(`"usage_limit_exceeded"`)}, time.Now()); le == nil || le.Kind != "usage_limit" {
+		t.Fatal("snake_case usage code", le)
+	}
+	// server's own login (iss_…): a refused login, not a usage limit.
+	if le := limitFromError(turnError{Message: "workspace routing discovery unauthorized (401)", CodexErrorInfo: json.RawMessage(`"other"`)}, time.Now()); le == nil || le.Kind != "auth_invalid" {
+		t.Fatal("401 turn error", le)
 	}
 	if limitFromError(turnError{Message: "context window", CodexErrorInfo: json.RawMessage(`"contextWindowExceeded"`)}, time.Now()) != nil {
 		t.Fatal("false positive")

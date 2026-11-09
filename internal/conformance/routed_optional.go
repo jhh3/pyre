@@ -149,3 +149,14 @@ func (rt routed) SetIssueTriage(ctx context.Context, req c.SetIssueTriageRequest
 	}
 	return t.SetIssueTriage(ctx, req)
 }
+
+// Node avoid flags.
+var _ c.NodeAvoidAPI = routed{}
+
+func (rt routed) AvoidNode(ctx context.Context, req c.AvoidNodeRequest) (c.AvoidNodeResponse, error) {
+	t, err := pickAs[c.NodeAvoidAPI](rt, ctx, c.OpNodesAvoid)
+	if err != nil {
+		return c.AvoidNodeResponse{}, err
+	}
+	return t.AvoidNode(ctx, req)
+}

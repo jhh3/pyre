@@ -107,6 +107,17 @@ func (b execBase) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 	return resp, nil
 }
 
+// TranscriptFullText (daemon full reads) returns the whole text of the
+// rollout entries numbered seqs, as ReadTranscript numbers them.
+func (x *ExecAdapter) TranscriptFullText(ctx context.Context, h contracts.RunHandle, seqs []int64) (map[int64]string, error) {
+	var meta runMeta
+	raw, err := os.ReadFile(filepath.Join(h.StateDir, "run.json"))
+	if err != nil || json.Unmarshal(raw, &meta) != nil || meta.ThreadID == "" || len(seqs) == 0 {
+		return nil, nil
+	}
+	return rolloutFullText(h.StateDir, meta, seqs)
+}
+
 // newRolloutSince returns the thread id of the only thread created since t
 // for cwd: a rollout under home's day folders (t's day and the day before,
 // local time) whose session_meta names cwd and was written at or after t

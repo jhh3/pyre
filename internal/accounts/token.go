@@ -52,6 +52,14 @@ const (
 	// to tokenCacheMax.
 	tokenCacheFor = 10 * time.Minute
 	tokenCacheMax = 12 * time.Hour
+	// tokenFetchTimeout bounds one token fetch from the hub.
+	tokenFetchTimeout = 15 * time.Second
+	// tokenStaleWait: with a cached copy past tokenCacheFor, selection
+	// waits this long (from the refetch's start) for the hub, then uses
+	// the copy while the refetch finishes in the background. A slow hub
+	// link (1-2 s per request) then costs one short wait per launch, not
+	// one round trip per token account.
+	tokenStaleWait = time.Second
 	// TokenProbeModel is the model of the 1-token usage probe.
 	TokenProbeModel = "claude-haiku-4-5-20251001"
 
@@ -96,6 +104,8 @@ type tokenCache struct {
 	mu     sync.Mutex
 	m      map[string]cachedToken
 	probed map[string]time.Time
+	// fetching: the hub fetch in flight per account (one at a time).
+	fetching map[string]*tokenFetch
 	// rejected: the hub UpdatedAt of a token the provider rejected here; a
 	// sync re-attaches the account only for a newer token.
 	rejected map[string]time.Time
@@ -126,15 +136,6 @@ func (c *tokenCache) get(id string) (cachedToken, bool) {
 	return t, ok
 }
 
-func (c *tokenCache) put(id string, t cachedToken) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.m == nil {
-		c.m = map[string]cachedToken{}
-	}
-	c.m[id] = t
-}
-
 func (c *tokenCache) drop(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -162,9 +163,79 @@ func isTokenGone(err error) bool {
 	return contracts.IsCode(err, contracts.ErrNotFound) || contracts.IsCode(err, contracts.ErrForbidden)
 }
 
+// tokenFetch is one hub fetch of an account's token; done closes when it
+// ends, after the cache was updated.
+type tokenFetch struct {
+	done    chan struct{}
+	started time.Time // wall clock
+	v       string
+	err     error
+}
+
+// fetchToken starts the hub fetch of the account's token, or joins the one
+// in flight. It runs detached from the caller (bounded by
+// tokenFetchTimeout), so a caller that stops waiting never cancels it, and
+// it updates the cache itself: a new token replaces the copy, a token gone
+// from the hub drops it.
+func (s *Service) fetchToken(accountID string) *tokenFetch {
+	s.tok.mu.Lock()
+	defer s.tok.mu.Unlock()
+	if f := s.tok.fetching[accountID]; f != nil {
+		return f
+	}
+	if s.tok.fetching == nil {
+		s.tok.fetching = map[string]*tokenFetch{}
+	}
+	f := &tokenFetch{done: make(chan struct{}), started: time.Now()}
+	s.tok.fetching[accountID] = f
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), tokenFetchTimeout)
+		v, upd, err := s.cfg.Tokens.FetchAccountToken(ctx, accountID)
+		cancel()
+		if err == nil && v == "" {
+			err = contracts.Errorf(contracts.ErrNotFound, "hub returned an empty token")
+		}
+		f.v, f.err = v, err
+		s.tok.mu.Lock()
+		switch {
+		case err == nil:
+			if s.tok.m == nil {
+				s.tok.m = map[string]cachedToken{}
+			}
+			s.tok.m[accountID] = cachedToken{v: secret{v: v}, updated: upd, fetched: s.now()}
+		case isTokenGone(err):
+			delete(s.tok.m, accountID)
+		}
+		delete(s.tok.fetching, accountID)
+		s.tok.mu.Unlock()
+		close(f.done)
+	}()
+	return f
+}
+
+// prefetchTokens starts the refetch of every expired cached token of
+// accts' token grants for h at once, so their tokenStaleWait runs
+// concurrently (gather checks the accounts one after another).
+func (s *Service) prefetchTokens(ctx context.Context, accts []contracts.Account, h contracts.Harness) {
+	if s.cfg.Tokens == nil {
+		return
+	}
+	now := s.now()
+	for _, a := range accts {
+		c, ok := s.tok.get(a.AccountID)
+		if !ok || now.Sub(c.fetched) < tokenCacheFor || now.Sub(c.fetched) >= tokenCacheMax {
+			continue
+		}
+		if g, err := s.getGrant(ctx, s.db, a.AccountID, h); err == nil && g.Kind == contracts.CredOAuthToken {
+			s.fetchToken(a.AccountID)
+		}
+	}
+}
+
 // token returns the account's token (cached up to tokenCacheFor; fresh
-// forces a fetch). A hub outage falls back to a cached copy younger than
-// tokenCacheMax.
+// forces a fetch). Past tokenCacheFor the cached copy serves while the hub
+// has not answered within tokenStaleWait (the refetch goes on in the
+// background) and, on a hub error, up to tokenCacheMax.
 func (s *Service) token(ctx context.Context, accountID string, fresh bool) (secret, error) {
 	now := s.now()
 	c, ok := s.tok.get(accountID)
@@ -174,22 +245,43 @@ func (s *Service) token(ctx context.Context, accountID string, fresh bool) (secr
 	if s.cfg.Tokens == nil {
 		return secret{}, contracts.Errorf(contracts.ErrUnavailable, "this node has no hub link to fetch account tokens")
 	}
-	fctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	v, upd, err := s.cfg.Tokens.FetchAccountToken(fctx, accountID)
-	cancel()
-	switch {
-	case err == nil && v != "":
-		t := cachedToken{v: secret{v: v}, updated: upd, fetched: now}
-		s.tok.put(accountID, t)
-		return t.v, nil
-	case err == nil:
-		err = contracts.Errorf(contracts.ErrNotFound, "hub returned an empty token")
+	stale := ok && now.Sub(c.fetched) < tokenCacheMax
+	called := time.Now()
+	f := s.fetchToken(accountID)
+	if fresh && f.started.Before(called) {
+		// A fetch from before this call may predate the token it must see
+		// (add-token): let it end, then fetch again.
+		select {
+		case <-f.done:
+		case <-ctx.Done():
+		}
+		f = s.fetchToken(accountID)
+	}
+	var slow <-chan time.Time
+	if stale && !fresh {
+		t := time.NewTimer(max(0, tokenStaleWait-time.Since(f.started)))
+		defer t.Stop()
+		slow = t.C
+	}
+	select {
+	case <-f.done:
+	case <-slow:
+		s.log.Info("accounts: token refetch slow; using the in-memory copy", "account", accountID)
+		return c.v, nil
+	case <-ctx.Done():
+		if stale {
+			return c.v, nil
+		}
+		return secret{}, contracts.Errorf(contracts.ErrUnavailable, "fetch account token: %v", ctx.Err())
+	}
+	err := f.err
+	if err == nil {
+		return secret{v: f.v}, nil
 	}
 	if isTokenGone(err) {
-		s.tok.drop(accountID)
 		return secret{}, err
 	}
-	if ok && now.Sub(c.fetched) < tokenCacheMax {
+	if stale {
 		s.log.Warn("accounts: token fetch failed; using the in-memory copy", "account", accountID, "err", redact(err.Error()))
 		return c.v, nil
 	}

@@ -107,7 +107,8 @@ func (m *Model) groupMode() groupMode {
 // repoFromPath names the repository a directory belongs to: the
 // directory's own name, except that a worktree maps to its repository
 // (<repo>/.claude/worktrees/x, <repo>/.worktrees/x, and Pyre's own
-// <repo>-worktrees/x), and a home directory reads "~". "" when unknown.
+// <repo>-worktrees/x and <worktree root>/<repo>/x under a folder named
+// worktrees), and a home directory reads "~". "" when unknown.
 func repoFromPath(p string) string {
 	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
 	if p == "" {
@@ -129,6 +130,9 @@ func repoFromPath(p string) string {
 	for i := 0; i < len(parts)-1; i++ {
 		if r := strings.TrimSuffix(parts[i], "-worktrees"); r != parts[i] && r != "" {
 			return r
+		}
+		if parts[i] == "worktrees" && i+2 < len(parts) {
+			return parts[i+1]
 		}
 	}
 	if (len(parts) == 2 && (parts[0] == "home" || parts[0] == "Users")) || p == "/root" {

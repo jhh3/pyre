@@ -463,3 +463,85 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met in time")
 }
+
+// An unarchive after the run ended sticks: neither the child archiver nor
+// the nightly sweep archives the session again until it runs and ends
+// again (Oct 31: four sessions a coordinator unarchived were re-archived
+// 30 seconds later).
+func TestUnarchiveKeptFromAutoArchive(t *testing.T) {
+	f := newChildFixture(t, nil)
+	x, sid := f.x, f.child.Session.SessionID
+	parent := sesPrincipal(f.parent.Session.SessionID)
+	f.observe(contracts.RunRunning, "")
+	zero := 0
+	f.observeExit(&zero)
+	f.process()
+	x.clock.Add(childArchiveGrace + time.Minute)
+	if got, _ := x.h.ArchiveFinishedChildren(context.Background()); len(got) != 1 {
+		t.Fatalf("archived = %v", got)
+	}
+	x.clock.Add(time.Minute)
+	no := false
+	if _, err := x.h.UpdateSession(as(parent), contracts.UpdateSessionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-keep-unarch"}, SessionID: sid, Archived: &no}); err != nil {
+		t.Fatal(err)
+	}
+	sv := x.session(sid)
+	if sv.Session.Archived || sv.Session.UnarchivedAt == nil || !sv.Session.KeptFromAutoArchive(sv.Run) {
+		t.Fatalf("unarchived session not kept: %+v", sv.Session)
+	}
+	x.clock.Add(2 * childEndedArchiveGrace)
+	if got, _ := x.h.ArchiveFinishedChildren(context.Background()); len(got) != 0 {
+		t.Fatalf("re-archived after an unarchive: %v", got)
+	}
+	x.clock.Add(staleAfter + time.Hour)
+	stale, err := x.h.staleSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range stale {
+		if c.SessionID == sid {
+			t.Fatal("the nightly sweep would archive the unarchived session")
+		}
+	}
+
+	// It runs and ends again: the hold is lifted.
+	if _, err := x.h.ResumeSession(as(parent), contracts.ResumeRequest{Mutation: contracts.Mutation{OperationID: "op_synth-keep-resume"}, SessionID: sid}); err != nil {
+		t.Fatal(err)
+	}
+	if sv := x.session(sid); sv.Session.KeptFromAutoArchive(sv.Run) {
+		t.Fatal("kept while its new run is live")
+	}
+	x.clock.Add(time.Minute)
+	f.observe(contracts.RunRunning, "")
+	f.observeExit(&zero)
+	f.process()
+	x.clock.Add(childArchiveGrace + time.Minute)
+	if got, _ := x.h.ArchiveFinishedChildren(context.Background()); len(got) != 1 || got[0] != sid {
+		t.Fatalf("not archived after it ran and ended again: %v", got)
+	}
+
+	// Archiving clears the record; the next unarchive sets it again.
+	if s := x.session(sid).Session; s.UnarchivedAt != nil {
+		t.Fatalf("archived session keeps unarchived_at: %v", s.UnarchivedAt)
+	}
+}
+
+// A resume unarchives an archived session and records it like an explicit
+// unarchive.
+func TestResumeRecordsUnarchive(t *testing.T) {
+	x := newHarness(t)
+	x.connect(nodeMac, 0)
+	v := x.start(owner, "op_synth-rr", nodeMac)
+	setRun(x, v, contracts.RunExited, "")
+	yes := true
+	if _, err := x.h.UpdateSession(as(owner), contracts.UpdateSessionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-rr-arch"}, SessionID: v.Session.SessionID, Archived: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	x.clock.Add(time.Minute)
+	if _, err := x.h.ResumeSession(as(owner), contracts.ResumeRequest{Mutation: contracts.Mutation{OperationID: "op_synth-rr-r"}, SessionID: v.Session.SessionID}); err != nil {
+		t.Fatal(err)
+	}
+	if s := x.session(v.Session.SessionID).Session; s.UnarchivedAt == nil || !s.UnarchivedAt.Equal(x.clock.Now()) {
+		t.Fatalf("unarchived_at after a resume: %v", s.UnarchivedAt)
+	}
+}

@@ -36,6 +36,16 @@ func (a *Adapter) maybeRetry(h contracts.RunHandle, rr *runRef, now time.Time) {
 	}()
 }
 
+// capRetryPending: an automatic continue after a capacity failure is
+// scheduled or being sent, so the agent resumes without new input. A usage
+// limit goes to account fallback instead and is not pending here.
+func capRetryPending(ts *threadState, sending bool) bool {
+	if ts.limit != nil || ts.status.Type == "active" {
+		return false
+	}
+	return sending || !ts.retryAt.IsZero()
+}
+
 // probeLastTurn learns the newest turn's error when the thread reports
 // systemError without one recorded.
 func (a *Adapter) probeLastTurn(rr *runRef) {

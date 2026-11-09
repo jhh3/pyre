@@ -32,6 +32,10 @@ type Node struct {
 	Resources    NodeResources     `json:"resources"`
 	EnrolledAt   time.Time         `json:"enrolled_at"`
 	Labels       map[string]string `json:"labels,omitempty"`
+	// Avoid (additive) lists the node's avoid flags in force when read:
+	// new work should stay off the node until each expires (see
+	// node_avoid.go). Empty when none or from a hub without them.
+	Avoid []NodeAvoid `json:"avoid,omitempty"`
 }
 
 // HarnessInfo reports an installed harness as probed by the node.
@@ -58,6 +62,12 @@ type HarnessInfo struct {
 	// manage (agy: `agy -p /usage`). Percentages and resets only; nil when
 	// not read.
 	Usage *HarnessUsage `json:"usage,omitempty"`
+	// Limit (additive) is the usage or rate limit the own login of a
+	// harness whose login Pyre does not manage (agy) reported on a run on
+	// this node, while its reset is ahead: the kind, a short excerpt of
+	// the harness's message and the reset. Clients do not place new runs
+	// of the harness here until the reset (decision I72). Nil when none.
+	Limit *LimitEvent `json:"limit,omitempty"`
 }
 
 // HarnessUsage is a reading of a machine's own harness login: the usage
@@ -122,6 +132,74 @@ type NodeResources struct {
 	Disks []DiskUsage `json:"disks,omitempty"`
 	// Runs is per-run process-tree usage for this node's live runs.
 	Runs []RunUsage `json:"runs,omitempty"`
+	// MemoryProtection (additive, decision I66) describes the node's
+	// memory protection in one line: the per-run scope caps and the memory
+	// guard's trigger, e.g. "per-run scopes MemoryMax=19.5G
+	// MemorySwapMax=2.0G OOMPolicy=continue; guard on (available < 5% and
+	// swap > 80% used)". Empty from older nodes.
+	MemoryProtection string `json:"memory_protection,omitempty"`
+	// GitHub (additive) is the GitHub API budget of this node's gh login and
+	// the sessions here that called gh most in the last hour (counted by
+	// Pyre's gh shim, internal/ghguard). Nil when gh is absent and no run
+	// called it.
+	GitHub *GitHubBudget `json:"github,omitempty"`
+	// Tools (additive) says which common command-line tools (ProbedTools)
+	// pyred finds on its PATH (plus the usual user bin folders): name ->
+	// present. Presence only: pyred never runs them. A tool missing from
+	// the map is unknown (nil from an older pyred). Placement uses it for
+	// pyre start --needs.
+	Tools map[string]bool `json:"tools,omitempty"`
+}
+
+// ProbedTools are the command-line tools every node reports in
+// NodeResources.Tools (machine-specific setups that decide where a task
+// can run).
+var ProbedTools = []string{"aws", "bun", "doppler", "docker", "ffmpeg", "gcloud", "gh", "git", "go",
+	"jq", "kubectl", "node", "npm", "pnpm", "psql", "python3", "rg", "terraform", "uv", "xvfb-run"}
+
+// GitHubBudget is a node's view of the GitHub API rate limit, which every
+// agent on every machine using the same login shares. pyred samples
+// `gh api rate_limit` (free: it does not count against the limit) at most
+// once a minute.
+type GitHubBudget struct {
+	Core       GitHubLimit `json:"core"`
+	GraphQL    GitHubLimit `json:"graphql"`
+	ObservedAt time.Time   `json:"observed_at,omitzero"` // zero: never sampled
+	// CallsLastHour counts gh calls by this node's runs in the last hour;
+	// TopSessions lists the heaviest callers, most calls first.
+	CallsLastHour int            `json:"calls_last_hour"`
+	TopSessions   []GitHubCaller `json:"top_sessions,omitempty"`
+}
+
+// GitHubLimit is one rate-limit bucket ("core" REST, "graphql").
+type GitHubLimit struct {
+	Limit     int       `json:"limit"`
+	Remaining int       `json:"remaining"`
+	Reset     time.Time `json:"reset,omitzero"`
+}
+
+// GitHubLowFraction is the remaining share of a bucket below which Pyre
+// warns sessions that call gh.
+const GitHubLowFraction = 0.2
+
+// Low reports a sampled bucket with less than GitHubLowFraction left.
+func (l GitHubLimit) Low() bool {
+	return l.Limit > 0 && float64(l.Remaining) < GitHubLowFraction*float64(l.Limit)
+}
+
+// Low reports a sampled budget with either bucket low.
+func (b *GitHubBudget) Low() bool {
+	return b != nil && !b.ObservedAt.IsZero() && (b.Core.Low() || b.GraphQL.Low())
+}
+
+// GitHubCaller is one session's gh use in the last hour: calls let through,
+// calls delayed by the shim's throttle, and calls it refused.
+type GitHubCaller struct {
+	SessionID string `json:"session_id"`
+	RunID     string `json:"run_id,omitempty"`
+	Calls     int    `json:"calls"`
+	Throttled int    `json:"throttled,omitempty"`
+	Refused   int    `json:"refused,omitempty"`
 }
 
 // Memory pressure levels (NodeResources.MemPressure).

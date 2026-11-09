@@ -179,11 +179,13 @@ func keptIgnored(ctx context.Context, wt string) string {
 }
 
 func autoRemove(ctx context.Context, repo contracts.RepoWorktrees, w contracts.Worktree, created time.Time, inUse InUse) contracts.WorktreeRemoval {
-	out := contracts.WorktreeRemoval{Path: w.Path, Branch: w.Branch}
+	out := contracts.WorktreeRemoval{Path: w.Path, Branch: w.Branch, SessionID: MarkerSession(w.Path)}
 	if o, d := autoVerdict(ctx, repo, w, created, inUse); o != "" {
 		out.Outcome, out.Detail = o, d
 		return out
 	}
+	out.Repo = repo.Path
+	out.Head, _ = Git(ctx, w.Path, "rev-parse", "HEAD")
 	if _, err := Git(ctx, repo.Path, "worktree", "remove", w.Path); err != nil {
 		out.Outcome, out.Detail = "failed", err.Error()
 		return out

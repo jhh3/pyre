@@ -14,20 +14,23 @@ import (
 )
 
 // The Aide session's extra arguments reach Claude Code in canonical "="
-// form after Pyre's own, the prompt stays last (a variadic channel list
-// cannot swallow it), a session's own --append-system-prompt joins Pyre's
-// guide in the single flag Claude keeps, and the run records the
-// development channels whose startup warning it may confirm.
+// form after Pyre's own, a session's own --append-system-prompt(-file)
+// joins Pyre's guide in the single file Claude keeps, the prompt is pasted
+// after startup (no plugin module here) instead of riding on argv, and the
+// run records the development channels whose startup warning it may
+// confirm.
 func TestLaunchHarnessArgs(t *testing.T) {
 	f := newFakeEnv(t, nil)
 	work := filepath.Join(f.dir, "work")
 	_ = os.MkdirAll(work, 0o755)
 	argvFile := filepath.Join(f.dir, "aide.argv")
 	stateDir := filepath.Join(f.dir, "runs", "run_aide")
-	_, err := f.a.Launch(context.Background(), contracts.ResolvedLaunch{
+	own := filepath.Join(f.dir, "aide.md")
+	_ = os.WriteFile(own, []byte("Aide autonomy notes."), 0o600)
+	h, err := f.a.Launch(context.Background(), contracts.ResolvedLaunch{
 		RunID: "run_aide", SessionID: "ses_aide", Harness: contracts.HarnessClaude, Cwd: work,
 		Args: []string{"--dangerously-load-development-channels=plugin:sample-bridge@sample",
-			"--append-system-prompt-file=/Users/synthetic/Documents/sample/autonomy/aide.md",
+			"--append-system-prompt-file=" + own,
 			"--append-system-prompt=Session note: synthetic."},
 		AgentGuide: "PYRE GUIDE", InitialPrompt: "synthetic first prompt",
 		Env:      map[string]string{"PYRE_TEST_ROLE": "fakeclaude", "PYRE_SESSION_ID": "ses_aide", "FAKE_ARGV_FILE": argvFile, PermissionsEnv: "ask"},
@@ -45,21 +48,28 @@ func TestLaunchHarnessArgs(t *testing.T) {
 		_ = os.WriteFile(out, raw, 0o644)
 	}
 	// The fake writes one argument per line.
-	if !strings.Contains(string(raw), "\n--append-system-prompt\nPYRE GUIDE\n\nSession note: synthetic.\n") {
-		t.Fatalf("appended prompt not merged: %q", raw)
+	sys := filepath.Join(stateDir, fileSysPrompt)
+	if b, _ := os.ReadFile(sys); string(b) != "PYRE GUIDE\n\nAide autonomy notes.\n\nSession note: synthetic." {
+		t.Fatalf("appended prompt not merged: %q", b)
 	}
 	argv := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
-	if slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, "--append-system-prompt=") }) {
-		t.Fatalf("second --append-system-prompt passed: %q", argv)
+	if slices.ContainsFunc(argv, func(a string) bool {
+		return strings.HasPrefix(a, "--append-system-prompt=") || strings.HasPrefix(a, "--append-system-prompt-file=") || strings.Contains(a, "synthetic")
+	}) {
+		t.Fatalf("prompt text or a second prompt flag passed: %q", argv)
 	}
-	for _, want := range []string{"--dangerously-load-development-channels=plugin:sample-bridge@sample",
-		"--append-system-prompt-file=/Users/synthetic/Documents/sample/autonomy/aide.md"} {
-		if !slices.Contains(argv, want) {
-			t.Fatalf("missing %s in %q", want, argv)
+	if !slices.Contains(argv, "--dangerously-load-development-channels=plugin:sample-bridge@sample") || !slices.Contains(argv, sys) {
+		t.Fatalf("missing channel or prompt file in %q", argv)
+	}
+	if !strings.HasPrefix(h.Data["initial_prompt"], "pasted") {
+		t.Fatalf("initial prompt: %q", h.Data["initial_prompt"])
+	}
+	end := time.Now().Add(10 * time.Second)
+	for !promptRan(filepath.Join(f.dir, "cfg"), "synthetic first prompt") {
+		if time.Now().After(end) {
+			t.Fatal("the pasted first prompt never ran")
 		}
-	}
-	if argv[len(argv)-1] != "synthetic first prompt" {
-		t.Fatalf("prompt not last: %q", argv)
+		time.Sleep(100 * time.Millisecond)
 	}
 	var meta runMeta
 	b, _ := os.ReadFile(filepath.Join(stateDir, fileRun))

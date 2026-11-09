@@ -16,6 +16,7 @@ import (
 	"github.com/jhh3/pyre/internal/client"
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/runtime/mock"
+	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
 
 // fakeHub records what reaches the hub and can be taken down.
@@ -25,6 +26,7 @@ type fakeHub struct {
 	mu            sync.Mutex
 	sent          []sentMsg
 	byOp          map[string]contracts.MessageView
+	digests       map[string]string // operation ID -> request digest, like the hub's operations table
 }
 
 type sentMsg struct {
@@ -109,9 +111,17 @@ func (c *hubClient) SendMessage(ctx context.Context, r contracts.SendMessageRequ
 	}
 	c.h.mu.Lock()
 	defer c.h.mu.Unlock()
+	digest, _ := sqlitex.RequestDigest(r)
 	if v, ok := c.h.byOp[r.OperationID]; ok { // hub dedupe by operation id
+		if c.h.digests[r.OperationID] != digest {
+			return contracts.MessageView{}, contracts.Errorf(contracts.ErrConflict, "operation_id reused with a different request body")
+		}
 		return v, nil
 	}
+	if c.h.digests == nil {
+		c.h.digests = map[string]string{}
+	}
+	c.h.digests[r.OperationID] = digest
 	c.h.sent = append(c.h.sent, sentMsg{bearer: c.bearer, req: r})
 	v := contracts.MessageView{Envelope: contracts.MessageEnvelope{MessageID: r.MessageID, OperationID: r.OperationID, Recipient: r.Recipient, Body: r.Body},
 		Status: contracts.DeliveryStatus{Storage: contracts.StorageStored, Runtime: contracts.DeliveryQueued}}
@@ -261,6 +271,52 @@ func TestLocalSocketHubOutageFallbacksAndOutbox(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "pyred.sock")); !os.IsNotExist(err) {
 		t.Fatal("socket not removed on shutdown")
+	}
+}
+
+// A client retry of a send that names no message ID (the first attempt's
+// reply was lost or late, as when a stalled hub link timed the attempt out
+// after the hub stored it) must reach the hub as the identical request, so
+// the hub replays the stored message instead of answering "operation_id
+// reused with a different request body" (iss_…).
+func TestLocalSendRetryWithoutMessageIDIsIdentical(t *testing.T) {
+	dir := shortDir(t)
+	hub := &fakeHub{byOp: map[string]contracts.MessageView{}}
+	n := startNode(t, dir, Config{Adapters: []contracts.RuntimeAdapter{mock.NewAdapter()}, Upstream: hub.client, NodeName: "retrynode"})
+	api := n.d.LocalAPI()
+	ses := contracts.Principal{Kind: contracts.PrincipalSession, ID: "ses_retry"}
+	ctx := contracts.WithPrincipal(context.Background(), ses)
+	opID := contracts.NewID(contracts.PrefixOperation)
+	req := contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: opID}, InReplyTo: "msg_parent",
+		Recipient: contracts.Address{Kind: contracts.AddrSession, ID: "ses_peer"}, Body: contracts.MessageBody{Text: "ack"}}
+	first, err := api.SendMessage(ctx, req)
+	if err != nil {
+		t.Fatalf("first attempt: %v", err)
+	}
+	retry, err := api.SendMessage(ctx, req)
+	if err != nil {
+		t.Fatalf("retry of the same operation: %v", err)
+	}
+	if retry.Envelope.MessageID != first.Envelope.MessageID || len(hub.sends()) != 1 {
+		t.Fatalf("retry named message %s (first %s); hub received %d", retry.Envelope.MessageID, first.Envelope.MessageID, len(hub.sends()))
+	}
+	opAt, _ := contracts.IDTime(opID)
+	if at, ok := contracts.IDTime(first.Envelope.MessageID); !ok || !at.Equal(opAt) {
+		t.Fatalf("message %s should carry the operation's time %v", first.Envelope.MessageID, opAt)
+	}
+	// The derived ID is scoped to the sender.
+	if got := opMessageID(contracts.Principal{Kind: contracts.PrincipalSession, ID: "ses_other"}, opID); got == first.Envelope.MessageID {
+		t.Fatalf("message ID not scoped to the sender: %s", got)
+	}
+	// A different operation is a different message.
+	req2 := req
+	req2.OperationID = "enc-r1-reply-1" // explicit, non-ULID operation IDs work too
+	second, err := api.SendMessage(ctx, req2)
+	if err != nil || second.Envelope.MessageID == first.Envelope.MessageID || !contracts.ValidID(second.Envelope.MessageID, contracts.PrefixMessage) {
+		t.Fatalf("second operation = %+v %v", second.Envelope, err)
+	}
+	if again, err := api.SendMessage(ctx, req2); err != nil || again.Envelope.MessageID != second.Envelope.MessageID || len(hub.sends()) != 2 {
+		t.Fatalf("retry of explicit operation = %+v %v (hub received %d)", again.Envelope, err, len(hub.sends()))
 	}
 }
 

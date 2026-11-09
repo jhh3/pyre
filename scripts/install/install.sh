@@ -622,7 +622,7 @@ else
     TPL="$TEMPLATES/systemd/pyred.service.in"
     if [ "$SCOPE" = 1 ]; then
       # Limits apply to pyred alone: runs live in pyre-runs.slice scopes.
-      export R_DROP_legacy=1 R_MEMORY_HIGH="${MEM_HIGH:-512M}" R_MEMORY_MAX="${MEM_MAX:-1G}" R_CPU_QUOTA="${CPU_QUOTA:-200%}"
+      export R_DROP_legacy=1 R_MEMORY_HIGH="${MEM_HIGH:-2G}" R_MEMORY_MAX="${MEM_MAX:-4G}" R_CPU_QUOTA="${CPU_QUOTA:-200%}"
       export R_RUNS_MEMORY_HIGH="$RUNS_MEM_HIGH" R_RUNS_CPU_WEIGHT="$RUNS_CPU_WEIGHT"
     else
       export R_DROP_scope=1 R_MEMORY_HIGH="" R_MEMORY_MAX="" R_CPU_QUOTA=""

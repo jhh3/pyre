@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	c "github.com/jhh3/pyre/internal/contracts"
 )
@@ -20,12 +23,16 @@ import (
 
 // ArchiveParams archives or restores one session (MCP archive_session
 // input; no session means the calling session). Force and WhenDone are
-// CLI-only.
+// CLI-only. IncludeChildren lets a session archive itself while sessions
+// it started are still working (the hub refuses otherwise); Cancel cancels
+// a pending archive instead (CancelArchive).
 type ArchiveParams struct {
-	Session     string `json:"session,omitempty"`
-	OperationID string `json:"operation_id,omitempty"`
-	Force       bool   `json:"-"`
-	WhenDone    bool   `json:"-"`
+	Session         string `json:"session,omitempty"`
+	OperationID     string `json:"operation_id,omitempty"`
+	IncludeChildren bool   `json:"include_children,omitempty"`
+	Cancel          bool   `json:"cancel,omitempty"`
+	Force           bool   `json:"-"`
+	WhenDone        bool   `json:"-"`
 }
 
 // ArchiveResult is archive_session's answer: archived now, or scheduled
@@ -43,6 +50,29 @@ type ArchiveResult struct {
 	// Cascade is what the archive does to the sessions under it (archived
 	// with it, or left because the owner is using them); the note says it.
 	Cascade *c.ArchiveCascade `json:"cascade,omitempty"`
+	// Canceled lists the sessions whose pending archive a cancel removed
+	// (the session itself first when it had one).
+	Canceled []c.CascadeSession `json:"canceled,omitempty"`
+}
+
+// cancelResult describes a canceled pending archive.
+func cancelResult(sv c.SessionView) ArchiveResult {
+	r := ArchiveResult{SessionID: sv.Session.SessionID, Title: sv.Session.Title, Archived: sv.Session.Archived, Canceled: sv.ArchiveCanceled}
+	n := len(sv.ArchiveCanceled)
+	switch {
+	case n == 0:
+		r.Note = "no pending archive to cancel"
+	case sv.ArchiveCanceled[0].SessionID == sv.Session.SessionID && n == 1:
+		r.Note = "pending archive canceled"
+	case sv.ArchiveCanceled[0].SessionID == sv.Session.SessionID:
+		r.Note = fmt.Sprintf("pending archive canceled, also for %d session(s) under it", n-1)
+	default:
+		r.Note = fmt.Sprintf("pending archive canceled for %d session(s) under it", n)
+	}
+	if sv.Session.Archived {
+		r.Note += fmt.Sprintf("; the session itself stays archived (pyre sessions unarchive %s)", sv.Session.SessionID)
+	}
+	return r
 }
 
 // approvalResult describes an archive filed for the owner's approval.
@@ -148,7 +178,7 @@ func (o *Ops) Archive(ctx context.Context, p ArchiveParams) (c.SessionView, erro
 	if !p.Force && !sessionEnded(sv) && (o.archivesWhenDone(p, sv) || o.needsApproval(sv)) {
 		// W-archive2: the hub archives an ended session at once and
 		// schedules a live one for when its turn ends.
-		return archiveCall(o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes, WhenDone: true}))
+		return archiveCall(o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes, WhenDone: true, IncludeChildren: p.IncludeChildren}))
 	}
 	// Right after `pyre stop` the node's exit report can trail the stop's
 	// receipt by a moment: give a just-stopped run a few seconds to land.
@@ -167,7 +197,22 @@ func (o *Ops) Archive(ctx context.Context, p ArchiveParams) (c.SessionView, erro
 		return c.SessionView{}, c.Errorf(c.ErrConflict, "session %s (%s) is still %s; archive it when its turn ends (pyre sessions archive --when-done %s) or stop it first (pyre stop %s)",
 			sv.Session.SessionID, orDash(sv.Session.Title), sv.Run.State, sv.Session.SessionID, sv.Session.SessionID)
 	}
-	return archiveCall(o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes}))
+	return archiveCall(o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: sv.Session.SessionID, Archived: &yes, IncludeChildren: p.IncludeChildren}))
+}
+
+// CancelArchive cancels a pending archive of a session (default: the
+// calling session) and of the sessions under it its archive cascaded to,
+// without unarchiving anything.
+func (o *Ops) CancelArchive(ctx context.Context, p ArchiveParams) (c.SessionView, error) {
+	id := ""
+	if sv, err := o.ResolveSession(ctx, p.Session); err == nil {
+		id = sv.Session.SessionID
+	} else if ref := strings.TrimSpace(p.Session); ref == "" || ref == "self" {
+		return c.SessionView{}, err
+	} else if id, err = o.archivedSessionID(ctx, p.Session); err != nil { // an archived lead whose children still wait
+		return c.SessionView{}, err
+	}
+	return o.API.UpdateSession(ctx, c.UpdateSessionRequest{Mutation: mut(p.OperationID), SessionID: id, CancelArchive: true})
 }
 
 // Unarchive restores an archived session to listings.
@@ -386,3 +431,50 @@ func (o *Ops) ArchiveProject(ctx context.Context, p ArchiveProjectParams) (Archi
 }
 
 func strconvQuote(s string) string { return fmt.Sprintf("%q", s) }
+
+// cancelArchives runs `pyre sessions archive --cancel`: each session's
+// pending archive (default: the calling session's) is canceled with the
+// archives it cascaded to.
+func (a *App) cancelArchives(cmd *cobra.Command, ops *Ops, args []string) error {
+	if a.opID != "" && len(args) > 1 {
+		return usagef("--operation-id applies to a single session")
+	}
+	var out []ArchiveResult
+	var firstErr error
+	for _, ref := range args {
+		sv, err := ops.CancelArchive(cmd.Context(), ArchiveParams{Session: ref, OperationID: a.opID})
+		if err != nil {
+			a.warnf("pyre: cancel archive %s: %v", ref, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		out = append(out, cancelResult(sv))
+	}
+	if err := a.emit(out, func(w io.Writer) {
+		for _, r := range out {
+			fmt.Fprintf(w, "%s %q %s\n", r.SessionID, r.Title, r.Note)
+			for _, s := range r.Canceled {
+				if s.SessionID != r.SessionID {
+					fmt.Fprintf(w, "  canceled %s %q\n", s.SessionID, s.Title)
+				}
+			}
+		}
+	}); err != nil {
+		return err
+	}
+	return firstErr
+}
+
+// archivePendingText says when a session with a pending archive is
+// archived ("" when none), for listings and details.
+func archivePendingText(sv c.SessionView) string {
+	switch {
+	case !sv.ArchivePending:
+		return ""
+	case sv.ArchivePendingWith != "":
+		return "archives with " + sv.ArchivePendingWith + " (pending)"
+	}
+	return "archives when its turn ends"
+}

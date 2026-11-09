@@ -17,6 +17,23 @@ import (
 // connected node, else the machine last used from the panel, else the
 // least-loaded connected one.
 func (m *Model) nsDefaultMachine(connected map[string]bool) string {
+	// A machine with an avoid flag is no default while another is
+	// connected (avoid.go).
+	now, avoided, others := m.now(), map[string]bool{}, false
+	for _, n := range m.nodes() {
+		if avoidedNow(n, now) {
+			avoided[n.NodeID] = true
+		} else if connected[n.NodeID] {
+			others = true
+		}
+	}
+	if others {
+		usable := map[string]bool{}
+		for id, ok := range connected {
+			usable[id] = ok && !avoided[id]
+		}
+		connected = usable
+	}
 	if id := m.opts.ClientNodeID; id != "" && connected[id] {
 		return id
 	}
@@ -179,6 +196,9 @@ func (q *nsPanel) machineLines(m *Model, p nsPlan, avail int) []string {
 				row = m.th.key.Render("● "+name) + "  " + load + ag
 			} else {
 				row = m.th.dim.Render("○ ") + name + "  " + load + ag
+			}
+			if b := avoidBadge(n, m.now()); b != "" {
+				row += "  " + m.th.tone(toneWarn, b)
 			}
 		}
 		if on {

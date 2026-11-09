@@ -99,6 +99,23 @@ test('waits while a turn runs (a person typing or attached never blocks it)', as
   expect(w.submitted.length).toBe(1)
 })
 
+// Incident 2026-10-23 (iss_…): Claude starts a
+// side agent right after the main turn ends; its turn.start (agentId set)
+// marked the session busy and only a main turn.complete cleared it, so the
+// idle session never claimed its mail (every attempt withdrawn unsent).
+test('a subagent turn after the main turn ends does not block the next message', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on, msgs().slice(1))
+  await $.session.start({ cwd: '/synthetic', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'owner prompt', turnId: 't0' })
+  await $.turn.complete(done())
+  await $.turn.start({ text: 'side task', turnId: 't-side', agentId: 'agent_synthetic' } as never)
+  await clock.advance(1000)
+  expect(w.claimed).toEqual(['msg_a'])
+  await $.turn.complete(done('agent_synthetic'))
+  expect(w.submitted.length).toBe(1)
+})
+
 test('a dropped prompt is reported, not retried by the module', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on, msgs().slice(1), { drop: 'synthetic policy refusal' })

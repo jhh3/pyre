@@ -62,6 +62,16 @@ type Ops struct {
 	// LaunchWait bounds how long start_session waits for the run to leave
 	// "starting" (awaitLaunch); 0 returns once the launch is queued.
 	LaunchWait time.Duration
+	// Now is the clock for avoid flags (--for/--until, expiry checks in
+	// placement); nil = time.Now. Tests inject one.
+	Now func() time.Time
+}
+
+func (o *Ops) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
 }
 
 // StartRecovery paces StartSession's replays: one single-attempt replay
@@ -362,13 +372,19 @@ type StartParams struct {
 	Tags           []string `json:"tags,omitempty"`
 	OperationID    string   `json:"operation_id,omitempty"`
 	// Without a project, repo/repos name repositories from the repo index
-	// (fuzzy) and fresh asks for new worktrees (quicklaunch.go).
+	// (fuzzy) and fresh asks for new worktrees (quicklaunch.go). With a
+	// project, fresh or branch makes a fresh worktree of its repo instead of
+	// using the recorded (e.g. shared) checkout (freshProjectCheckout).
 	Repos  []string `json:"repos,omitempty"`
 	Fresh  bool     `json:"fresh,omitempty"`
 	Branch string   `json:"branch,omitempty"`
 	// ReportToParent: a session started by a session reports back to it
 	// (turn finished, needs input, exited) unless this is false.
 	ReportToParent *bool `json:"report_to_parent,omitempty"`
+	// NoLead starts a bounded worker (I63): the session never leads its
+	// project, even when its parent is outside it, so it is never asked to
+	// keep the project page (reserved tag c.TagRoleWorker).
+	NoLead bool `json:"no_lead,omitempty"`
 	// Parent makes the new session a child of this session (ID or title).
 	// Empty: the calling session when a session credential is used, else
 	// none (see Ops.ClientCredential).
@@ -386,6 +402,21 @@ type StartParams struct {
 	// node applies to the harness process at every launch of the session
 	// (internal/envfile). Only the path travels and is recorded.
 	EnvFile string `json:"env_file,omitempty"`
+	// IgnoreAvoid starts on a node with a hard avoid flag anyway (the hub
+	// honors it from the owner always, from a session only over a flag the
+	// owner did not set; node_avoid.go). Automatic placement then treats
+	// such a node like a soft-avoided one.
+	IgnoreAvoid bool `json:"ignore_avoid,omitempty"`
+	// Force starts the harness on a node where no login for it has room
+	// (every account there, its own login included, at its 5-hour or
+	// weekly limit until a reset ahead: noRoomOn); without it a named node
+	// is refused and placement skips such nodes (decisions I72, I74).
+	Force bool `json:"force,omitempty"`
+	// Needs lists what the task cannot run without: command-line tools
+	// (doppler, gcloud, docker, ...) and paths (absolute or ~/...).
+	// Placement keeps only nodes that have every one; a named node without
+	// one is refused (needs.go).
+	Needs []string `json:"needs,omitempty"`
 }
 
 func validHarness(h string) bool {
@@ -435,6 +466,9 @@ func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionRe
 		// (quick launch included); the hub records the decision.
 		p.Tags = append(slices.Clone(p.Tags), c.TagReportNone)
 	}
+	if p.NoLead && !slices.Contains(p.Tags, c.TagRoleWorker) {
+		p.Tags = append(slices.Clone(p.Tags), c.TagRoleWorker) // the hub's lead rule reads it (I63)
+	}
 	if p.Project == "" && p.Cwd == "" && (p.Repo != "" || len(p.Repos) > 0) {
 		return o.startFromRepos(ctx, p) // W-quicklaunch
 	}
@@ -443,6 +477,9 @@ func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionRe
 	}
 	if p.Account != "" && p.Ambient {
 		return c.StartSessionResponse{}, usagef("--account and --ambient are mutually exclusive")
+	}
+	if _, err := parseNeeds(p.Needs); err != nil {
+		return c.StartSessionResponse{}, err
 	}
 	var args []string
 	switch p.Permissions {
@@ -478,6 +515,14 @@ func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionRe
 	if err != nil {
 		return c.StartSessionResponse{}, err
 	}
+	if !p.placed {
+		if err := o.checkNeeds(ctx, nodeID, p.Needs); err != nil { // needs.go
+			return c.StartSessionResponse{}, err
+		}
+		if err := o.checkRoom(ctx, nodeID, &p); err != nil { // placement.go
+			return c.StartSessionResponse{}, err
+		}
+	}
 	requested := p.Harness
 	if err := o.harnessPreflight(ctx, &nodeID, &p); err != nil { // ops_harnessfallback.go
 		return c.StartSessionResponse{}, err
@@ -503,15 +548,32 @@ func (o *Ops) StartSession(ctx context.Context, p StartParams) (c.StartSessionRe
 		Mutation: mut(p.OperationID), NodeID: nodeID, Harness: c.Harness(p.Harness), Title: p.Title,
 		Cwd: p.Cwd, InitialPrompt: p.Prompt, Tags: p.Tags, IncludeContext: p.IncludeContext,
 		ParentSessionID: parent, AccountPolicy: accountPolicy(p.Account, p.Ambient, p.StrictAccount), Args: args,
-		ReportToParent: p.ReportToParent,
+		ReportToParent: p.ReportToParent, IgnoreAvoid: p.IgnoreAvoid,
 	}
 	if req.ProjectID, err = o.projectPtr(ctx, p.Project); err != nil {
 		return c.StartSessionResponse{}, err
 	}
-	if req.Checkout, req.Cwd, err = o.launchCheckout(ctx, req.ProjectID, nodeID, p); err != nil {
+	if !p.Fresh && p.Branch == "" {
+		if req.Checkout, req.Cwd, err = o.launchCheckout(ctx, req.ProjectID, nodeID, p); err != nil {
+			return c.StartSessionResponse{}, err
+		}
+		return o.startRecovering(ctx, req)
+	}
+	// An explicit fresh or branch wins over the project's shared checkout
+	// (checkout_select.go); the account checks above ran before it exists.
+	co, wt, err := o.freshProjectCheckout(ctx, req.ProjectID, nodeID, p, req.OperationID)
+	if err != nil {
 		return c.StartSessionResponse{}, err
 	}
-	return o.startRecovering(ctx, req)
+	req.Checkout, req.Cwd = co, wt.Cwd
+	res, err := o.startRecovering(ctx, req)
+	if err != nil {
+		return res, keptWorktrees(err, wt, req.OperationID)
+	}
+	res.Cwd, res.Branch = wt.Cwd, wt.Branch
+	res.Warnings = append(res.Warnings, wt.Warnings...)
+	o.claimWorktrees(ctx, nodeID, wt, res.Session.Session.SessionID, req.OperationID+".claim")
+	return res, nil
 }
 
 // startParent is the new session's parent: --parent, else the calling
@@ -616,7 +678,8 @@ func startIndeterminate(opID string, cause error) error {
 // harness unchecked and unrecorded (resumes would drop them), and would hand
 // --pyre-native-resume to Claude as an unknown option.
 func (o *Ops) checkNodeLaunchArgs(ctx context.Context, nodeID, requested string, p StartParams) error {
-	if len(p.HarnessArgs) == 0 && p.NativeResume == "" && p.EnvFile == "" {
+	shellPrompt := c.Harness(p.Harness) == c.HarnessShell && strings.TrimSpace(p.Prompt) != ""
+	if len(p.HarnessArgs) == 0 && p.NativeResume == "" && p.EnvFile == "" && !shellPrompt {
 		return nil
 	}
 	if p.Harness != requested && (len(p.HarnessArgs) > 0 || p.NativeResume != "") {
@@ -639,6 +702,9 @@ func (o *Ops) checkNodeLaunchArgs(ctx context.Context, nodeID, requested string,
 	}
 	if p.EnvFile != "" && !slices.Contains(h.Capabilities, c.CapLaunchEnvFile) {
 		return usagef("%s's pyred cannot apply an environment file for %s (an older version: it would hand --env-file to the harness); upgrade it or pick another machine", name, p.Harness)
+	}
+	if shellPrompt && !slices.Contains(h.Capabilities, c.CapShellInitialPrompt) {
+		return usagef("%s's pyred cannot run a shell session's prompt (an older version: it would start an idle shell and drop the command); upgrade it, pick another machine, or start the shell with -- -lc 'COMMAND'", name)
 	}
 	return nil
 }
@@ -690,7 +756,11 @@ func startHarnessArgs(p StartParams) ([]string, error) {
 	}
 	if c.Harness(p.Harness) == c.HarnessShell {
 		// A shell's arguments are its command line (`sh -lc 'cmd'`); every
-		// node passes them unchanged, as monitors rely on.
+		// node passes them unchanged, as monitors rely on. The prompt is
+		// typed into the interactive shell those arguments may not start.
+		if strings.TrimSpace(p.Prompt) != "" {
+			return nil, usagef("a shell session takes its command either as --prompt (typed into the interactive login shell) or as shell arguments after -- (-lc 'COMMAND'), not both")
+		}
 		return p.HarnessArgs, nil
 	}
 	if harnessargs.Passthrough(c.Harness(p.Harness)) && c.Harness(p.Harness) != c.HarnessMock {
@@ -730,14 +800,22 @@ type ReadParams struct {
 	Tail    int    `json:"tail,omitempty"`   // latest N entries
 	Cursor  string `json:"cursor,omitempty"` // continue after a previous next_cursor
 	Limit   int    `json:"limit,omitempty"`
+	Seq     int64  `json:"seq,omitempty"`  // one entry by its seq
+	Full    bool   `json:"full,omitempty"` // entries' whole text (bounded, redacted)
 }
 
 func (o *Ops) ReadSession(ctx context.Context, p ReadParams) (c.ReadSessionResponse, error) {
+	if p.Seq < 0 {
+		return c.ReadSessionResponse{}, c.Errorf(c.ErrInvalid, "seq must be positive")
+	}
+	if p.Seq > 0 && (p.Tail > 0 || p.Cursor != "") {
+		return c.ReadSessionResponse{}, c.Errorf(c.ErrInvalid, "seq reads one entry; leave out tail and cursor")
+	}
 	id, err := o.sessionID(ctx, p.Session)
 	if err != nil {
 		return c.ReadSessionResponse{}, err
 	}
-	req := c.ReadSessionRequest{SessionID: id, RunID: p.Run, Cursor: p.Cursor, Limit: p.Limit}
+	req := c.ReadSessionRequest{SessionID: id, RunID: p.Run, Cursor: p.Cursor, Limit: p.Limit, Seq: p.Seq, Full: p.Full}
 	if p.Tail > 0 && p.Cursor == "" {
 		req.Tail, req.Limit = true, p.Tail
 	}
@@ -897,9 +975,16 @@ func (o *Ops) Send(ctx context.Context, p SendParams) (c.MessageView, error) {
 			return c.MessageView{}, err
 		}
 	}
+	steerNote := ""
+	if req.Mode == c.ModeSteer && req.Recipient.Kind == c.AddrSession {
+		if steerNote = o.steerAsQueue(ctx, req.Recipient.ID); steerNote != "" {
+			req.Mode = c.ModeQueue
+		}
+	}
 	mv, err := o.API.SendMessage(ctx, req)
 	if err == nil {
 		o.withDelivery(ctx, &mv, nil) // immediate snapshot (W-stuckmail)
+		withSteerNote(&mv, steerNote)
 	}
 	return mv, err
 }
@@ -970,6 +1055,9 @@ func (o *Ops) Inbox(ctx context.Context, p InboxParams) (c.Page[c.MessageView], 
 			req.Address = &c.Address{Kind: c.AddrOwner, ID: "owner"}
 		}
 	}
+	if req.Box == "inbox" && req.Address != nil && req.Address.Kind == c.AddrSession && req.Address.ID == o.Self.SessionID {
+		o.releaseChildReports(ctx)
+	}
 	if p.WaitSeconds > 0 || p.Limit > 0 {
 		// A long-poll or bounded read is one page.
 		req.Limit = p.Limit
@@ -991,6 +1079,24 @@ func (o *Ops) Inbox(ctx context.Context, p InboxParams) (c.Page[c.MessageView], 
 		o.markRead(ctx, "inbox", pg.Items...)
 	}
 	return pg, err
+}
+
+// releaseChildReports asks the hub to send the reports of this session's
+// children that it holds while the session is mid-turn, so the inbox read
+// that follows lists them. Best effort and bounded: a hub without
+// child_reports.release, or a slow one, leaves them batched until the turn
+// ends, as before.
+func (o *Ops) releaseChildReports(ctx context.Context) {
+	if o.Self.SessionID == "" {
+		return
+	}
+	ra, ok := o.API.(c.ChildReportReleaseAPI)
+	if !ok {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, _ = ra.ReleaseChildReports(rctx, c.ReleaseChildReportsRequest{})
 }
 
 // markRead tells the hub that this session read these messages (their
@@ -1143,7 +1249,22 @@ func (o *Ops) Reissue(ctx context.Context, p ReissueParams) (c.MessageView, erro
 	if p.Text != "" {
 		req.Body = &c.MessageBody{Text: p.Text}
 	}
-	return o.API.ReissueMessage(ctx, req)
+	// A steer reissued to a run that takes queued mail but not steer goes
+	// as queued mail, like Send (steerAsQueue). A failed lookup leaves the
+	// original's mode and the hub's verdict stands.
+	steerNote := ""
+	if orig, err := o.API.GetMessage(ctx, c.GetRequest{ID: p.MessageID}); err == nil &&
+		orig.Envelope.Mode == c.ModeSteer && orig.Envelope.Recipient.Kind == c.AddrSession {
+		if steerNote = o.steerAsQueue(ctx, orig.Envelope.Recipient.ID); steerNote != "" {
+			req.Mode = c.ModeQueue
+		}
+	}
+	mv, err := o.API.ReissueMessage(ctx, req)
+	if err == nil {
+		o.withDelivery(ctx, &mv, nil)
+		withSteerNote(&mv, steerNote)
+	}
+	return mv, err
 }
 
 // ResolveDeliveryParams records a decision about an indeterminate delivery.
@@ -1548,11 +1669,42 @@ func (o *Ops) CreateNote(ctx context.Context, p NoteParams) (c.Note, error) {
 	if strings.TrimSpace(p.Title) == "" {
 		return c.Note{}, usagef("a note title is required")
 	}
+	if looksLikeNoteID(p.Title) && strings.TrimSpace(p.Body) == "" {
+		// rc126: `pyre note <id>` read as "show this note" created an empty
+		// note titled with the ID.
+		return c.Note{}, usagef("%q is a note ID, not a title; to read a note use: pyre note show <id> (MCP get_note)", strings.TrimSpace(p.Title))
+	}
+	if noteCommandWords[strings.ToLower(strings.TrimSpace(p.Title))] && strings.TrimSpace(p.Body) == "" {
+		// rc127: `pyre note ls` created an empty note titled "ls".
+		return c.Note{}, usagef("%q looks like a command, not a note title; to list notes use: pyre note ls (or pyre notes); to read one: pyre note show <id>", strings.TrimSpace(p.Title))
+	}
 	pid, err := o.projectPtr(ctx, p.Project)
 	if err != nil {
 		return c.Note{}, err
 	}
 	return o.API.CreateNote(ctx, c.CreateNoteRequest{Mutation: mut(p.OperationID), Kind: kind, ProjectID: pid, SessionID: o.Self.SessionID, Title: p.Title, Body: p.Body})
+}
+
+// noteCommandWords are bodyless titles refused as likely mistyped commands.
+var noteCommandWords = map[string]bool{"ls": true, "list": true, "show": true, "get": true, "read": true, "cat": true, "search": true, "find": true, "rm": true, "delete": true, "help": true}
+
+// looksLikeNoteID reports whether a would-be note title is a note ID.
+func looksLikeNoteID(title string) bool {
+	return c.ValidID(strings.TrimSpace(title), c.PrefixNote)
+}
+
+// NoteRef names a note (MCP get_note input).
+type NoteRef struct {
+	NoteID string `json:"note_id"`
+}
+
+// GetNote returns one note, body included.
+func (o *Ops) GetNote(ctx context.Context, p NoteRef) (c.Note, error) {
+	id := strings.TrimSpace(p.NoteID)
+	if !c.ValidID(id, c.PrefixNote) {
+		return c.Note{}, usagef("note_id must be a note ID (note_...); `pyre notes` lists them")
+	}
+	return o.API.GetNote(ctx, c.GetRequest{ID: id})
 }
 
 // ContextParams asks for a bounded launch brief (MCP get_context input).
@@ -1637,6 +1789,10 @@ func (o *Ops) MemorySearch(ctx context.Context, p MemorySearchParams) (c.MemoryS
 	}
 	var out c.MemorySearchResult
 	_, err := o.NodeAction(ctx, p.Node, c.ActionMemorySearch, params, &out, "")
+	if err != nil && p.Node == "" && c.IsCode(err, c.ErrUnavailable) {
+		// This node has no (working) Hive: let the hub pick one that has.
+		out, err = o.memorySearchRouted(ctx, params, err)
+	}
 	if out.Hits == nil {
 		out.Hits = []c.MemoryHit{}
 	}

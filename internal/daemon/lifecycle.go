@@ -10,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/repoindex"
+	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
 
 // Session cleanup and the nightly node sweep (W-lifecycle).
@@ -25,7 +27,11 @@ import (
 //   - session.cleanup stops processes the session left running (found by
 //     PYRE_SESSION_ID in their environment: background shells, watchers)
 //     and removes the worktrees it created under repoindex's automatic
-//     rules (clean, branch merged or pushed, nobody working in it);
+//     rules (clean, branch merged or pushed, nobody working in it); it
+//     lists, never stops, the processes the session started that run on
+//     outside its terminal sessions (detached jobs; they lose its Pyre
+//     access, and the hub tells its parent) and marks its run temp
+//     folders archived (removed an hour later; runtmp.go);
 //   - node.sweep does the same for the sessions the nightly sweep archived,
 //     then removes orphan worktrees of the node's repositories (untouched
 //     for a day, same rules) and harness temp folders of sessions untouched
@@ -91,7 +97,9 @@ func (d *Daemon) actionNodeSweep(ctx context.Context, raw json.RawMessage) (any,
 		if ctx.Err() != nil {
 			break
 		}
-		res.Worktrees = append(res.Worktrees, repoindex.SweepRepo(ctx, repo, idle, d.now(), keep, inUse, p.DryRun)...)
+		swept := repoindex.SweepRepo(ctx, repo, idle, d.now(), keep, inUse, p.DryRun)
+		d.recordRemovedWorktrees(ctx, "", swept)
+		res.Worktrees = append(res.Worktrees, swept...)
 	}
 	ids, keys := d.liveTmpKeys()
 	for _, dir := range d.harnessTmpDirs() {
@@ -107,9 +115,14 @@ func (d *Daemon) actionNodeSweep(ctx context.Context, raw json.RawMessage) (any,
 }
 
 // cleanSessions stops each ended session's leftover processes and removes
-// the worktrees it created.
+// the worktrees it created. Processes it started that keep running outside
+// its terminal sessions (detached jobs) are listed, not stopped
+// (SessionCleanup.LeftRunning): the hub tells the session's parent they
+// lost its Pyre access.
 func (d *Daemon) cleanSessions(ctx context.Context, ids []string) []contracts.SessionCleanup {
 	out := make([]contracts.SessionCleanup, 0, len(ids))
+	scan := map[string]leftScan{}
+	stopped := map[int]bool{}
 	for _, id := range ids {
 		sc := contracts.SessionCleanup{SessionID: id}
 		rec, err := d.sessionRun(ctx, id)
@@ -128,15 +141,69 @@ func (d *Daemon) cleanSessions(ctx context.Context, ids []string) []contracts.Se
 		sids, _ := d.st.sessionPanePIDs(ctx, id)
 		if pids := sessionProcesses(id, sids); len(pids) > 0 {
 			sc.ProcessesStopped = stopProcesses(pids, processGrace)
+			for _, pid := range pids {
+				stopped[pid] = true
+			}
 		}
+		scan[id] = leftScan{runs: d.sessionRunIDs(ctx, id), before: runStoppedAt(rec.Run)}
 		sc.Worktrees = repoindex.CleanSession(ctx, d.scanInput(rec), d.worktreeInUse(id))
-		d.removeSessionRunTmp(ctx, id)
+		d.recordRemovedWorktrees(ctx, id, sc.Worktrees)
+		d.markSessionRunTmp(ctx, id) // removed an hour from now, when unused (runtmp.go)
 		if sc.ProcessesStopped > 0 || len(sc.Worktrees) > 0 {
 			d.cfg.Logger.Info("session cleaned up", "session", id, "processes", sc.ProcessesStopped, "worktrees", len(sc.Worktrees))
 		}
 		out = append(out, sc)
 	}
+	if left := leftRunning(scan, stopped); len(left) > 0 {
+		for i := range out {
+			if lp, ok := left[out[i].SessionID]; ok && out[i].Error == "" {
+				out[i].LeftRunning, out[i].LeftRunningCount = lp.procs, lp.count
+				d.cfg.Logger.Info("session left processes running", "session", out[i].SessionID, "processes", lp.count)
+			}
+		}
+	}
 	return out
+}
+
+// leftScan is what leftRunning looks for of one session: processes of its
+// runs (IDs) started before its last run was stopped (zero: any). What
+// started later came from the run's own exit path, such as a SessionEnd
+// hook's detached helper (hive's tick worker, iss_…),
+// not from the agent's work.
+type leftScan struct {
+	runs   []string
+	before time.Time
+}
+
+// runStoppedAt is when r was stopped: when Pyre asked it to stop
+// (adapterDataStopRequested: "<time> <by>"), else when it ended; zero when
+// neither is known.
+func runStoppedAt(r contracts.Run) time.Time {
+	if v, _, _ := strings.Cut(r.AdapterData[adapterDataStopRequested], " "); v != "" {
+		if t, err := sqlitex.ParseTime(v); err == nil && !t.IsZero() {
+			return t
+		}
+	}
+	if r.EndedAt != nil {
+		return *r.EndedAt
+	}
+	return time.Time{}
+}
+
+// leftProcs is what leftRunning found for one session.
+type leftProcs struct {
+	procs []contracts.LeftProcess
+	count int
+}
+
+// sessionRunIDs lists the IDs of the session's runs on this node.
+func (d *Daemon) sessionRunIDs(ctx context.Context, sessionID string) []string {
+	recs, _ := d.st.runs(ctx, `session_id=?`, sessionID)
+	ids := make([]string, 0, len(recs))
+	for _, r := range recs {
+		ids = append(ids, r.Run.RunID)
+	}
+	return ids
 }
 
 type liveCwd struct {
@@ -301,7 +368,8 @@ func hookSessionIDs(path string) []string {
 // sweepTmpDir removes session folders (named by a harness session UUID, up
 // to three levels below root: <cwd-key>/<uuid>) in which no file changed
 // for idle, then the parents they leave empty. Folders of live sessions
-// (live) and everything under a live run's cwd key (liveKeys) are kept.
+// (live), everything under a live run's cwd key (liveKeys) and folders a
+// process has open are kept.
 func sweepTmpDir(root string, idle time.Duration, now time.Time, live, liveKeys map[string]bool, dryRun bool) (removed int, freed int64, err error) {
 	if _, serr := os.Stat(root); serr != nil {
 		return 0, 0, nil
@@ -333,10 +401,14 @@ func sweepTmpDir(root string, idle time.Duration, now time.Time, live, liveKeys 
 		}
 	}
 	find(root, 1)
+	open, known := runTmpOpenPaths([]string{root})
 	for _, dir := range dirs {
 		newest, size, ok := newestChange(dir)
 		if !ok || now.Sub(newest) < idle {
 			continue
+		}
+		if known && inUse(dir, open) {
+			continue // a process (a nested claude, a detached job) still uses it
 		}
 		if !dryRun {
 			if rerr := os.RemoveAll(dir); rerr != nil {

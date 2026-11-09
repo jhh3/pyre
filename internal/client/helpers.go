@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	c "github.com/jhh3/pyre/internal/contracts"
 )
@@ -68,13 +70,28 @@ type PublishMeta struct {
 	OperationID string
 	// ChunkSize defaults to 4 MiB.
 	ChunkSize int64
+	// RetryWindow bounds how long Publish retries through an outage (a
+	// restarting hub or pyred: transport failures, 502/503/504, a few
+	// internal errors) before giving up; 0 = DefaultPublishRetryWindow,
+	// negative = no retries beyond the client's own.
+	RetryWindow time.Duration
 }
+
+// publishProgressEvery spaces upload progress notices (WithNotices).
+const publishProgressEvery = 10 * time.Second
 
 // Publish uploads src as a new artifact version through any
 // contracts.ArtifactAPI (HTTP client, mock, or hub): it computes size and
 // sha256, begins an upload, sends chunks starting from the server's
 // Received offset (resuming after interruptions), and finalizes. The hub
 // verifies digest and size; a mismatch publishes nothing.
+//
+// Through an outage (a hub or pyred restarting) every step is retried for
+// up to meta.RetryWindow, resuming the upload where it stopped; each step
+// is idempotent (operation id or byte range), so a retried publish never
+// creates a second version. Retries and progress are reported to the
+// context's notice sink (WithNotices). Giving up returns "unavailable"
+// saying so, with the operation id that resumes the upload.
 //
 // src is read twice (hash, then upload). A non-seekable src is first
 // spooled to a temporary file.
@@ -100,28 +117,43 @@ func Publish(ctx context.Context, api c.ArtifactAPI, src io.Reader, meta Publish
 	if opID == "" {
 		opID = c.NewID(c.PrefixOperation)
 	}
-	up, err := api.BeginUpload(ctx, c.BeginUploadRequest{
-		Mutation:        c.Mutation{OperationID: opID},
-		ArtifactID:      meta.ArtifactID,
-		ProjectID:       meta.ProjectID,
-		Title:           meta.Title,
-		Description:     meta.Description,
-		Filename:        meta.Filename,
-		MediaType:       meta.MediaType,
-		Size:            size,
-		Digest:          digest,
-		Note:            meta.Note,
-		Provenance:      meta.Provenance,
-		ReviewRequested: meta.ReviewRequested,
-	})
-	if err != nil {
+	retry := &publishRetry{ctx: ctx, window: meta.RetryWindow, opID: opID}
+	if retry.window == 0 {
+		retry.window = DefaultPublishRetryWindow
+	}
+	var up c.Upload
+	if err := retry.do("begin upload", func() error {
+		var err error
+		up, err = api.BeginUpload(ctx, c.BeginUploadRequest{
+			Mutation:        c.Mutation{OperationID: opID},
+			ArtifactID:      meta.ArtifactID,
+			ProjectID:       meta.ProjectID,
+			Title:           meta.Title,
+			Description:     meta.Description,
+			Filename:        meta.Filename,
+			MediaType:       meta.MediaType,
+			Size:            size,
+			Digest:          digest,
+			Note:            meta.Note,
+			Provenance:      meta.Provenance,
+			ReviewRequested: meta.ReviewRequested,
+		})
+		return err
+	}); err != nil {
 		return c.PublishReceipt{}, err
 	}
+	retry.uploadID = up.UploadID
 	// A replayed BeginUpload returns the original (stale) Upload; ask for
-	// the current resume offset.
-	if cur, err := api.GetUpload(ctx, c.GetRequest{ID: up.UploadID}); err == nil {
-		up = cur
-	} else if ctx.Err() != nil {
+	// the current resume offset (best effort: chunks are idempotent by
+	// byte range, so a stale offset only re-sends bytes).
+	_ = retry.do("read upload offset", func() error {
+		cur, err := api.GetUpload(ctx, c.GetRequest{ID: up.UploadID})
+		if err == nil {
+			up = cur
+		}
+		return err
+	})
+	if ctx.Err() != nil {
 		return c.PublishReceipt{}, ctx.Err()
 	}
 	if up.State == "finalized" {
@@ -131,15 +163,25 @@ func Publish(ctx context.Context, api c.ArtifactAPI, src io.Reader, meta Publish
 	}
 	offset := up.Received
 	stalls := 0
+	started, lastNote := time.Now(), time.Now()
 	for offset < size {
 		if err := ctx.Err(); err != nil {
 			return c.PublishReceipt{}, err
 		}
-		if _, err := rs.Seek(offset, io.SeekStart); err != nil {
-			return c.PublishReceipt{}, c.Errorf(c.ErrInvalid, "publish: seek: %v", err)
+		if now := time.Now(); now.Sub(lastNote) >= publishProgressEvery {
+			lastNote = now
+			notify(ctx, fmt.Sprintf("publish: uploaded %s of %s (%d%%) in %s", mib(offset), mib(size), offset*100/size, now.Sub(started).Round(time.Second)))
 		}
 		n := min(meta.ChunkSize, size-offset)
-		got, err := api.UploadChunk(ctx, up.UploadID, offset, io.LimitReader(rs, n))
+		var got c.Upload
+		err := retry.do(fmt.Sprintf("upload at %s of %s", mib(offset), mib(size)), func() error {
+			if _, err := rs.Seek(offset, io.SeekStart); err != nil {
+				return c.Errorf(c.ErrInvalid, "publish: seek: %v", err)
+			}
+			var err error
+			got, err = api.UploadChunk(ctx, up.UploadID, offset, io.LimitReader(rs, n))
+			return err
+		})
 		if err != nil {
 			if recv, ok := receivedFrom(err); ok && recv != offset && recv <= size {
 				offset = recv // server has a different offset; resume there
@@ -161,7 +203,13 @@ func Publish(ctx context.Context, api c.ArtifactAPI, src io.Reader, meta Publish
 		stalls = 0
 		offset = got.Received
 	}
-	return api.FinalizeUpload(ctx, c.FinalizeUploadRequest{Mutation: c.Mutation{OperationID: opID + ".finalize"}, UploadID: up.UploadID})
+	var rec c.PublishReceipt
+	err = retry.do("finalize", func() error {
+		var err error
+		rec, err = api.FinalizeUpload(ctx, c.FinalizeUploadRequest{Mutation: c.Mutation{OperationID: opID + ".finalize"}, UploadID: up.UploadID})
+		return err
+	})
+	return rec, err
 }
 
 // PublishFile publishes the file at path; Filename defaults to its base name.

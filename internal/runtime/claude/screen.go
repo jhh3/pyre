@@ -16,6 +16,9 @@ type screenInfo struct {
 	Placeholder bool
 	Dialog      string // title of a dialog covering the input ("" if none)
 	DialogKind  string // "trust" | "devchannels" | "onboarding" | "permission" | "login" | "unknown"
+	// Prompt: the permission prompt's question and options (DialogKind
+	// "permission", when they could be read).
+	Prompt *tuiPrompt
 	// Onboarding: which first-run onboarding screen is shown ("theme" or
 	// "security"); both are answered with Enter.
 	Onboarding string
@@ -23,8 +26,11 @@ type screenInfo struct {
 	// DevAccept: development-channels warning, its "I am using this for
 	// local development" option is selected.
 	DevAccept bool
-	RuleWidth int // width of the rule above the input box (Claude draws it across the pane)
-	Lines     []string
+	// LimitAutoResume: the usage-limit menu offers "Don’t continue
+	// automatically" (someone chose to wait and continue at the reset).
+	LimitAutoResume bool
+	RuleWidth       int // width of the rule above the input box (Claude draws it across the pane)
+	Lines           []string
 }
 
 // InputEmpty reports an input box with no draft text.
@@ -152,6 +158,9 @@ func parseScreen(plain, escaped string) screenInfo {
 		}
 	}
 	all := strings.Join(lines, "\n")
+	if !si.HasInputBox {
+		si.Prompt = parseTUIPrompt(lines)
+	}
 	switch {
 	case strings.Contains(all, "Is this a project you created or one you trust") ||
 		(strings.Contains(all, "Accessing workspace") && strings.Contains(all, "trust this folder")):
@@ -183,13 +192,19 @@ func parseScreen(plain, escaped string) screenInfo {
 				si.DevAccept = true
 			}
 		}
-	case !si.HasInputBox && (strings.Contains(all, "Do you want to proceed?") ||
+	case !si.HasInputBox && (si.Prompt != nil || strings.Contains(all, "Do you want to proceed?") ||
 		strings.Contains(all, "Do you want to make this edit") || strings.Contains(all, "Do you want to create")):
 		si.DialogKind, si.Dialog = "permission", "permission prompt"
 	case !si.HasInputBox && (strings.Contains(all, "Select login method") || strings.Contains(all, "Please run /login")):
 		si.DialogKind, si.Dialog = "login", "login required"
+	case !si.HasInputBox && limitMenu(lines):
+		si.DialogKind, si.Dialog = "limit", limitMenuDialog
+		si.LimitAutoResume = strings.Contains(all, limitMenuCancelAuto)
 	case !si.HasInputBox && looksLikeDialog(lines):
 		si.DialogKind, si.Dialog = "unknown", dialogTitle(lines)
+	}
+	if si.DialogKind != "permission" {
+		si.Prompt = nil
 	}
 	return si
 }
@@ -228,15 +243,112 @@ func looksLikeDialog(lines []string) bool {
 	return false
 }
 
+// dialogTitle names a dialog Pyre does not know by its own title. Claude
+// draws its dialogs at the bottom of the pane, most under a rule (─, or ▔
+// for a bottom panel) with the title on the first row below it; without a
+// rule, the title is the row above the options. The rows above a dialog are
+// the transcript and status lines (agent rows "● implementer(…)", spinner
+// lines "✻ Waiting for 2 background agents to finish"), never its title:
+// naming the pane's top row made a limit menu read "needs human: ●
+// implementer(…)" (iss_…).
 func dialogTitle(lines []string) string {
-	for _, l := range lines {
-		t := strings.TrimSpace(l)
-		if t == "" || isRule(t) || strings.HasPrefix(t, "▐") || strings.HasPrefix(t, "▝") {
+	anchor := -1 // the dialog's last option or key-hint row
+	for i := len(lines) - 1; i >= 0; i-- {
+		if optionRe.MatchString(lines[i]) || dialogHint(lines[i]) {
+			anchor = i
+			break
+		}
+	}
+	if anchor < 0 {
+		return "unrecognised screen"
+	}
+	top := max(0, anchor-dialogMaxRows)
+	for i := anchor; i >= top; i-- {
+		if !isSeparator(lines[i]) {
 			continue
 		}
-		return truncStr(t, 80)
+		for _, l := range lines[i+1 : anchor+1] {
+			if t := strings.TrimSpace(l); t != "" {
+				return truncStr(t, 80)
+			}
+		}
+		break
+	}
+	// No rule: the nearest row above the options and hints.
+	i := anchor
+	for i >= top && (optionRe.MatchString(lines[i]) || numberedRe.MatchString(lines[i]) || dialogHint(lines[i]) || strings.TrimSpace(lines[i]) == "") {
+		i--
+	}
+	if i >= top {
+		if t := strings.TrimSpace(lines[i]); !isBanner(t) {
+			return truncStr(t, 80)
+		}
 	}
 	return "unrecognised screen"
+}
+
+// dialogMaxRows bounds how far above its last row a dialog's title (or the
+// limit menu's title) is looked for.
+const dialogMaxRows = 30
+
+// numberedRe matches an unselected numbered option row ("   2. No").
+var numberedRe = regexp.MustCompile(`^\s+\d+\.\s`)
+
+// dialogHint reports a dialog's key-hint row ("Enter to confirm · Esc to
+// cancel").
+func dialogHint(l string) bool {
+	return strings.Contains(l, "Enter to confirm") || strings.Contains(l, "Esc to cancel") ||
+		strings.Contains(l, pressEnterToContinue) || strings.Contains(l, "Enter to select")
+}
+
+// isSeparator reports a rule Claude draws above a dialog: the input box's
+// (─) or the top edge of a bottom panel (▔, the usage-limit menu of Claude
+// Code 2.1.304).
+func isSeparator(l string) bool {
+	if isRule(l) {
+		return true
+	}
+	t := strings.TrimSpace(l)
+	return len([]rune(t)) >= 10 && strings.Trim(t, "▔") == ""
+}
+
+// isBanner reports a row of Claude's logo.
+func isBanner(t string) bool { return strings.HasPrefix(t, "▐") || strings.HasPrefix(t, "▝") }
+
+// Claude's usage-limit menu (Claude Code 2.1.304 binary: the rate-limit
+// options dialog). Claude shows it when a turn fails at a usage, session or
+// spend limit: titled "What do you want to do?", with "Stop and wait for
+// limit to reset" (or "Stop") and, as Claude offers them, "Wait here, then
+// continue automatically …", "Don’t continue automatically", "Ask your
+// admin for more usage", "Switch to usage credits" / "Add funds to continue
+// …" and "Upgrade your plan". Its Escape is "Stop": the turn has already
+// ended, and the menu only closes.
+const (
+	limitMenuTitle      = "What do you want to do?"
+	limitMenuDialog     = "Claude's usage-limit menu"
+	limitMenuCancelAuto = "Don’t continue automatically"
+)
+
+var limitMenuOptions = []string{"Stop and wait for limit to reset", "continue automatically", limitMenuCancelAuto,
+	"Ask your admin for more usage", "Switch to usage credits", "Add funds to continue", "Upgrade your plan"}
+
+// limitMenu reports Claude's usage-limit menu at the bottom of the screen:
+// its title with one of its options below it.
+func limitMenu(lines []string) bool {
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-dialogMaxRows; i-- {
+		if strings.TrimSpace(lines[i]) != limitMenuTitle {
+			continue
+		}
+		for _, l := range lines[i+1:] {
+			for _, o := range limitMenuOptions {
+				if strings.Contains(l, o) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // placeholder: an empty input box renders dim (SGR 2) text directly after

@@ -389,6 +389,39 @@ type LaunchContext struct {
 	BriefRevision   string      `json:"brief_revision_id,omitempty"`
 	References      []ObjectRef `json:"references"`
 	MemoryFreshness *Freshness  `json:"memory_freshness,omitempty"`
+	// Role (additive) is the calling session's live role in the project the
+	// context is for (the request's project, else the session's own),
+	// computed when asked by the same rule the project page write checks:
+	// the launch-time lead flag can go stale when a parent joins the project
+	// later. Present whenever a session asks a hub that knows the field;
+	// nil for the owner (and from an older hub).
+	Role *ProjectRole `json:"role,omitempty"`
+}
+
+// ProjectRole is a session's role in a project. ProjectID is "" when the
+// session is in no project. LeadSessionID is the session that leads the
+// project above (or as) the caller: "" when the caller is not in the
+// project or its lineage has no lead (a loop). Lead says the caller itself
+// leads it: it may write the project page and status card.
+//
+// Several sessions can lead one project (each was started in it by a
+// session outside it). PageOwnerSessionID (additive, I63) is the one of
+// them that maintains the page: of the live leads (a current run that has
+// not ended), the one that wrote the page or its status card last, else
+// the longest-running; the caller counts as live. PageOwner says that is
+// the caller. CoLeads are the other live leads, set only when the caller
+// leads. PageUpdatedAt is the last write to the page or its status card by
+// anyone (nil: never written). Hubs before I63 send none of these, so a
+// lead then reads as the page owner. Authorization is unchanged: every
+// lead may write the page.
+type ProjectRole struct {
+	ProjectID          string     `json:"project_id,omitempty"`
+	LeadSessionID      string     `json:"lead_session_id,omitempty"`
+	Lead               bool       `json:"lead"`
+	PageOwnerSessionID string     `json:"page_owner_session_id,omitempty"`
+	PageOwner          bool       `json:"page_owner,omitempty"`
+	CoLeads            []string   `json:"co_leads,omitempty"`
+	PageUpdatedAt      *time.Time `json:"page_updated_at,omitempty"`
 }
 
 // DiscardProposalRequest marks a preserved proposal discarded (its content

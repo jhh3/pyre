@@ -16,6 +16,9 @@ const messageOpenWindow = 72 * time.Hour
 // doneWindow is how far back the done box reaches.
 const doneWindow = 14 * 24 * time.Hour
 
+// asksSinceStep rounds the asks read's since (see getAsks).
+const asksSinceStep = 10 * time.Minute
+
 // pageLimit is the page size of the list calls.
 const pageLimit = 500
 
@@ -62,7 +65,11 @@ func (s *Server) pageAPI() (c.ProjectPageAPI, bool) {
 // are dropped here too): they count only as the "watching" badge of the
 // session they wake, never as project sessions, needs-you or idle.
 func (s *Server) getSessions(ctx context.Context) ([]c.SessionView, error) {
+	if ss, ok := s.patchedSessions(ctx); ok { // sessions_patch.go
+		return ss, nil
+	}
 	return s.sessions.get(ctx, s.now(), func(ctx context.Context) ([]c.SessionView, error) {
+		s.takeDirty() // the full list covers every session marked so far
 		ss, err := all(ctx, func(ctx context.Context, cur string) (c.Page[c.SessionView], error) {
 			return s.api.ListSessions(ctx, c.ListSessionsRequest{PageRequest: c.PageRequest{Cursor: cur, Limit: pageLimit}})
 		})
@@ -92,7 +99,10 @@ func (s *Server) getAsks(ctx context.Context) ([]c.Ask, error) {
 		return nil, nil
 	}
 	return s.asks.get(ctx, s.now(), func(ctx context.Context) ([]c.Ask, error) {
-		since := s.now().Add(-doneWindow)
+		// Rounded down so repeated reads send the same request, which the
+		// client answers from its kept copy when the hub says 304
+		// (contracts/conditional.go); the done box filters by time anyway.
+		since := s.now().Add(-doneWindow).Truncate(asksSinceStep)
 		out, err := all(ctx, func(ctx context.Context, cur string) (c.Page[c.Ask], error) {
 			return api.ListAsks(ctx, c.ListAsksRequest{PageRequest: c.PageRequest{Cursor: cur, Limit: pageLimit}, Since: &since})
 		})
@@ -270,8 +280,9 @@ func (s *Server) loadSnap(ctx context.Context, n need) (*snap, error) {
 		}
 	}
 	sn.mail = groupThreads(mail)
-	// Sessions the mail or asks name that are not active (archived): look
-	// them up once and remember them (titles of ended work rarely change).
+	// Sessions the mail or asks name, and parents of project sessions, that
+	// are not active (archived): look them up once and remember them
+	// (titles of ended work rarely change).
 	var missing []string
 	seen := map[string]bool{}
 	want := func(id string) {
@@ -284,6 +295,11 @@ func (s *Server) loadSnap(ctx context.Context, n need) (*snap, error) {
 	}
 	for _, a := range sn.asks {
 		want(a.SessionID)
+	}
+	for _, v := range sn.active {
+		if v.Session.ProjectID != nil {
+			want(v.Session.Parent()) // isLead: is the parent in the same project?
+		}
 	}
 	for _, m := range mail {
 		want(fromSession(m))

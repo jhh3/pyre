@@ -229,6 +229,23 @@ func (b *Backend) pageProjectLocked(p c.Principal, projectID string) (string, *c
 	return projectID, s, nil
 }
 
+// parentOutsideLocked: s has no parent, or its parent is missing or not in
+// projectID, so s leads the project when it is in it (the hub's rule,
+// hub/projectpage.go projectLeadOf).
+func (b *Backend) parentOutsideLocked(s c.Session, projectID string) bool {
+	if s.Parent() == "" {
+		return true
+	}
+	parent, ok := b.sessions[s.Parent()]
+	return !ok || parent.ProjectID == nil || *parent.ProjectID != projectID
+}
+
+// leadsLocked: s is in projectID and leads it (its parent is outside it,
+// and it is not a bounded worker, TagRoleWorker).
+func (b *Backend) leadsLocked(s c.Session, projectID string) bool {
+	return s.ProjectID != nil && *s.ProjectID == projectID && !s.NoLead() && b.parentOutsideLocked(s, projectID)
+}
+
 func (b *Backend) pageLocked(projectID string) c.ProjectPage {
 	pg := c.ProjectPage{ProjectID: projectID}
 	if d := b.pageDocLocked(projectID); d != nil {
@@ -285,9 +302,9 @@ func (b *Backend) SetProjectPage(ctx context.Context, req c.SetProjectPageReques
 		}
 		switch {
 		case p.Kind == c.PrincipalOwner:
-		case s != nil && s.Parent() == "" && s.ProjectID != nil && *s.ProjectID == projectID:
+		case s != nil && b.leadsLocked(*s, projectID):
 		default:
-			return c.ProjectPage{}, c.Errorf(c.ErrForbidden, "only the owner or a top-level session in project %s writes its page", projectID)
+			return c.ProjectPage{}, c.Errorf(c.ErrForbidden, "only the owner or a lead of project %s (a session in it with no parent, or whose parent is outside it) writes its page", projectID)
 		}
 		summary := strings.TrimSpace(req.Summary)
 		if hasContent {

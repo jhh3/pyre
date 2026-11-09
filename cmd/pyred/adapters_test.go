@@ -77,6 +77,24 @@ func TestDoorbellCommandGating(t *testing.T) {
 	}
 }
 
+// The Codex in-turn mail notice is on with a pyre CLI, off without one or
+// with PYRE_CODEX_DOORBELL=0.
+func TestCodexMailNoticeGating(t *testing.T) {
+	t.Setenv(EnvCodexDoorbell, "")
+	if on, off := codexMailNotice("/abs/pyre"); !on || off != "" {
+		t.Fatalf("default: %v %q", on, off)
+	}
+	if on, off := codexMailNotice(""); on || !strings.Contains(off, "pyre CLI") {
+		t.Fatalf("no CLI: %v %q", on, off)
+	}
+	for _, v := range []string{"0", "false", "OFF", "no"} {
+		t.Setenv(EnvCodexDoorbell, v)
+		if on, _ := codexMailNotice("/abs/pyre"); on {
+			t.Fatalf("%s=%s: on", EnvCodexDoorbell, v)
+		}
+	}
+}
+
 // input.monitor is advertised only when the doorbell is actually enabled.
 func TestClaudeAdvertisesInputMonitorOnlyWhenEnabled(t *testing.T) {
 	state, err := os.MkdirTemp("/tmp", "pyre-ad-")

@@ -189,3 +189,39 @@ func TestLifecycle(t *testing.T) {
 		t.Fatalf("recover without state: %v", err)
 	}
 }
+
+// The conversation reported while the child runs is readable at once
+// (NativeKnown, Observe) and kept by an exit report that names none; an
+// exit report that names one still wins, and invalid ids are refused.
+func TestNativeWhileRunning(t *testing.T) {
+	r := &recorder{found: []string{"thr_found"}}
+	x := newTestAdapter(r)
+	ctx := context.Background()
+	h := launch(t, x, "run_live", nil)
+	_ = x.Claimed(h, os.Getpid())
+	_ = x.Started(h, os.Getpid(), false)
+	if err := x.Native(h, "bogus"); err == nil {
+		t.Fatal("invalid id accepted")
+	}
+	if err := x.Native(h, "thr_live"); err != nil {
+		t.Fatal(err)
+	}
+	obs, _ := x.Observe(ctx, h, "")
+	if obs.State != contracts.RunRunning || obs.NativeRef == nil || obs.NativeRef.ID != "thr_live" || r.known["run_live"] != "thr_live" {
+		t.Fatalf("running: %+v %v", obs, r.known)
+	}
+	_ = x.Native(h, "thr_second") // the first report wins
+	code := 0
+	_ = x.Exited(h, &code, "", "")
+	if obs, _ := x.Observe(ctx, h, ""); obs.NativeRef == nil || obs.NativeRef.ID != "thr_live" || r.asked != 0 {
+		t.Fatalf("exited: %+v asked %d", obs.NativeRef, r.asked)
+	}
+
+	h = launch(t, x, "run_final", nil)
+	_ = x.Claimed(h, os.Getpid())
+	_ = x.Native(h, "thr_early")
+	_ = x.Exited(h, &code, "", "thr_final")
+	if obs, _ := x.Observe(ctx, h, ""); obs.NativeRef == nil || obs.NativeRef.ID != "thr_final" || r.known["run_final"] != "thr_final" {
+		t.Fatalf("final: %+v %v", obs.NativeRef, r.known)
+	}
+}

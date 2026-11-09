@@ -49,7 +49,9 @@ func (a *Adapter) sweepLoop(ctx context.Context) {
 
 // sweepLoaded unloads loaded threads that were unowned at the previous sweep
 // too (a launching or recovering run registers its thread within seconds,
-// so two sweeps apart a thread no run owns is dead) and are not active. It
+// so two sweeps apart a thread no run owns is dead) and are not active. A
+// thread whose exec sessions' process groups still have live processes is
+// kept loaded instead, as an automatic stop keeps it (spare.go). It
 // returns the threads unowned now.
 func (a *Adapter) sweepLoaded(ctx context.Context, prev map[string]bool) map[string]bool {
 	a.mu.Lock()
@@ -84,6 +86,9 @@ func (a *Adapter) sweepLoaded(ctx context.Context, prev map[string]bool) map[str
 			}
 		}
 		hs.mu.Unlock()
+		for _, d := range hs.deferrals() {
+			owned[d.ThreadID] = true // kept for its live background processes (spare.go)
+		}
 		for _, id := range r.Data {
 			if owned[id] {
 				continue
@@ -97,7 +102,17 @@ func (a *Adapter) sweepLoaded(ctx context.Context, prev map[string]bool) map[str
 			if active, parent := threadInfo(ctx, c, id); active || owned[parent] {
 				continue
 			}
-			_ = unloadThread(ctx, c, id)
+			// Its exec sessions' process groups (exited commands' too) die
+			// with the unload: a group with live processes keeps the thread
+			// loaded until it is empty (spare.go, decision I62).
+			if live, ok := hs.liveGroups(ctx, c, id); ok && len(live) > 0 {
+				if subscribeLoaded(ctx, c, id) && a.deferThread(hs, deferral{ThreadID: id, RunID: hs.configuredFor(id), By: "sweep"}, live) {
+					continue
+				}
+			}
+			if unloadThread(ctx, c, id) == nil {
+				hs.forgetGroups(id)
+			}
 		}
 	}
 	return now

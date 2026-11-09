@@ -28,7 +28,7 @@ func (l *LocalAPI) localNode(ctx context.Context) contracts.Node {
 	}
 	return contracts.Node{NodeID: l.d.nodeID, Name: name, Hostname: host, SSHAlias: l.d.cfg.SSHAlias,
 		Platform: runtime.GOOS, Arch: runtime.GOARCH, Harnesses: l.d.harnessInfo(ctx), Versions: l.d.versions(),
-		Capabilities: l.d.capabilities(), Connection: contracts.NodeConnection{State: contracts.ConnDisconnected},
+		Capabilities: l.d.capabilities(ctx), Connection: contracts.NodeConnection{State: contracts.ConnDisconnected},
 		Labels: map[string]string{"pyre.source": "node-local (hub unavailable)"}}
 }
 

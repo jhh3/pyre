@@ -2,7 +2,6 @@ package hub
 
 import (
 	"context"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +10,7 @@ import (
 	"github.com/jhh3/pyre/internal/runtime/claude"
 )
 
-// ---- answer in chat (asks_chat.go) ----
+// ---- owner chat and open asks (asks_chat.go) ----
 
 // chatFixture: a lead (top-level session) with two open asks.
 type chatFixture struct {
@@ -90,49 +89,111 @@ func (f *chatFixture) decisions() []contracts.MessageEnvelope {
 	return f.x.envelopes(`recipient_kind='session' AND recipient_id=? AND envelope LIKE '%pyre ask%'`, f.lead())
 }
 
-func TestAskAnsweredByOwnerMessageToTheSession(t *testing.T) {
+// noted reports whether chat text was recorded on the ask, which stays open.
+func (f *chatFixture) noted(id, text string) contracts.Ask {
+	f.x.t.Helper()
+	a := f.get(id)
+	if a.State != contracts.AskOpen || a.Answer != nil || a.OwnerChat == nil || a.OwnerChat.Text != text {
+		f.x.t.Fatalf("%s: want open with chat %q, got %s %+v %+v", id, text, a.State, a.Answer, a.OwnerChat)
+	}
+	return a
+}
+
+// iss_…: an unrelated owner message decided a
+// yes/no ask. Chat is now recorded on the open asks; it decides nothing.
+func TestOwnerMessageToTheSessionLeavesItsAsksOpen(t *testing.T) {
 	f := newChatFixture(t)
-	f.send("op_synth-chat-msg", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "  Ship it, and add the index.  "}})
+	f.send("op_synth-chat-msg", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "  and all my synthetic desktops are reachable via a single url right?  "}})
 	for _, id := range []string{f.a.AskID, f.b.AskID} {
-		a := f.get(id)
-		if a.State != contracts.AskAnswered || a.Answer == nil || a.Answer.Source != contracts.AskSourceChat ||
-			a.Answer.Text != "Ship it, and add the index." || a.Answer.OptionID != "" || a.Answer.By.Kind != contracts.PrincipalOwner {
-			t.Fatalf("%s: %+v %+v", id, a, a.Answer)
-		}
-		other := f.a.AskID
-		if id == f.a.AskID {
-			other = f.b.AskID
-		}
-		if !slices.Equal(a.Answer.With, []string{other}) {
-			t.Fatalf("%s with: %v", id, a.Answer.With)
-		}
+		f.noted(id, "and all my synthetic desktops are reachable via a single url right?")
 	}
-	// One combined decision, stored but never injected (the session has the
-	// owner's words already).
-	d := f.decisions()
-	if len(d) != 1 || d[0].Mode != contracts.ModeInfo || !strings.Contains(d[0].Body.Text, "owner answered in chat: Ship it, and add the index.") ||
-		!strings.Contains(d[0].Body.Text, "the same words answered") {
-		t.Fatalf("decision: %+v", d)
+	if d := f.decisions(); len(d) != 0 {
+		t.Fatalf("decision sent for chat: %+v", d)
 	}
-	// The deadline default no longer applies.
+	// Words that only mention an option still decide nothing.
+	f.send("op_synth-chat-msg2", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "Ship it, and add the index."}})
+	f.noted(f.a.AskID, "Ship it, and add the index.")
+	// The deadline default still applies.
 	f.x.clock.Add(3 * time.Hour)
 	if err := f.x.h.resolveAsks(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if a := f.get(f.a.AskID); a.State != contracts.AskAnswered {
-		t.Fatalf("defaulted after a chat answer: %+v", a)
-	}
-	// An ask filed after the message is not answered by it, and a repeat
-	// on the decided topic gets the chat decision back.
-	again := f.ask(sesPrincipal(f.lead()), synthAsk("op_synth-chat-a2", "synthetic-deploy", "Ship the synthetic build?", "b"))
-	if again.Status != contracts.AskAlreadyDecided || !strings.Contains(again.Detail, "answered in chat") {
-		t.Fatalf("repeat: %+v", again)
+	if a := f.get(f.a.AskID); a.State != contracts.AskDefaulted || a.Answer.OptionID != "b" {
+		t.Fatalf("default after chat: %+v %+v", a, a.Answer)
 	}
 }
 
-func TestAskNotAnsweredByThreadReplyOrInfo(t *testing.T) {
+// The one narrow exception: the session's only open ask, and his whole
+// text is one of its options.
+func TestOwnerChatThatIsExactlyAnOptionAnswersTheOnlyAsk(t *testing.T) {
 	f := newChatFixture(t)
-	// A reply in the ask's thread is a message to the session, not the answer.
+	// Two open asks: an option label decides neither.
+	f.send("op_synth-chat-two", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "Skip it"}})
+	f.noted(f.b.AskID, "Skip it")
+	if _, err := f.x.h.WithdrawAsk(as(sesPrincipal(f.lead())), contracts.WithdrawAskRequest{Mutation: contracts.Mutation{OperationID: "op_synth-chat-wd"}, AskID: f.a.AskID}); err != nil {
+		t.Fatal(err)
+	}
+	f.send("op_synth-chat-near", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "skip it for now"}})
+	f.noted(f.b.AskID, "skip it for now")
+	f.send("op_synth-chat-one", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "  skip IT. "}})
+	b := f.get(f.b.AskID)
+	if b.State != contracts.AskAnswered || b.Answer.OptionID != "skip" || b.Answer.Source != contracts.AskSourceChat || b.Answer.By.Kind != contracts.PrincipalOwner {
+		t.Fatalf("exact option: %+v %+v", b, b.Answer)
+	}
+	if d := f.decisions(); len(d) != 1 || d[0].Mode != contracts.ModeInfo || !strings.Contains(d[0].Body.Text, "owner chose skip — Skip it in chat: skip IT.") {
+		t.Fatalf("decision: %+v", d)
+	}
+}
+
+// The asking session records the option the owner chose in its chat.
+func TestSessionRecordsTheOwnersChatAnswer(t *testing.T) {
+	f := newChatFixture(t)
+	if _, err := f.x.hold("op_synth-chat-hold", f.b.AskID, "add", ""); err != nil {
+		t.Fatal(err)
+	}
+	lead := sesPrincipal(f.lead())
+	answer := func(p contracts.Principal, op string, item contracts.AnswerAskItem) contracts.AnswerAskResult {
+		t.Helper()
+		resp, err := f.x.h.AnswerAsks(as(p), contracts.AnswerAsksRequest{Mutation: contracts.Mutation{OperationID: op}, Answers: []contracts.AnswerAskItem{item}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Results[0]
+	}
+	other := f.x.start(owner, "op_synth-chat-other", nodeMac)
+	for name, c := range map[string]struct {
+		p    contracts.Principal
+		item contracts.AnswerAskItem
+		code contracts.ErrorCode
+	}{
+		"another session":    {sesPrincipal(other.Session.SessionID), contracts.AnswerAskItem{AskID: f.a.AskID, OptionID: "a", Text: "ship it"}, contracts.ErrForbidden},
+		"no option":          {lead, contracts.AnswerAskItem{AskID: f.a.AskID, Text: "ship it"}, contracts.ErrInvalid},
+		"no quote":           {lead, contracts.AnswerAskItem{AskID: f.a.AskID, OptionID: "a"}, contracts.ErrInvalid},
+		"held by the owner":  {lead, contracts.AnswerAskItem{AskID: f.b.AskID, OptionID: "skip", Text: "skip it"}, contracts.ErrForbidden},
+		"not one of options": {lead, contracts.AnswerAskItem{AskID: f.a.AskID, OptionID: "c", Text: "ship it"}, contracts.ErrInvalid},
+	} {
+		if r := answer(c.p, "op_synth-chat-bad-"+strings.ReplaceAll(name, " ", "-"), c.item); r.Error == nil || r.Error.Code != c.code {
+			t.Errorf("%s: %+v", name, r.Error)
+		}
+	}
+	r := answer(lead, "op_synth-chat-rec", contracts.AnswerAskItem{AskID: f.a.AskID, OptionID: "a", Text: "yes ship it today"})
+	if r.Error != nil || r.Ask.State != contracts.AskAnswered || r.Ask.Answer.OptionID != "a" || r.Ask.Answer.Source != contracts.AskSourceChat ||
+		r.Ask.Answer.By != lead || r.Ask.Answer.Text != "yes ship it today" {
+		t.Fatalf("recorded: %+v", r)
+	}
+	if d := f.decisions(); len(d) != 0 {
+		t.Fatalf("decision sent to the session that recorded it: %+v", d)
+	}
+	var pending int
+	f.x.db.QueryRow(`SELECT decision_pending FROM asks WHERE ask_id=?`, f.a.AskID).Scan(&pending)
+	if pending != 0 {
+		t.Fatal("decision left pending for maintenance")
+	}
+}
+
+func TestAskNotNotedByThreadReplyOrInfo(t *testing.T) {
+	f := newChatFixture(t)
+	// A reply in the ask's thread is a message to the session, not chat.
 	f.send("op_synth-chat-thread", contracts.SendMessageRequest{ThreadID: f.a.ThreadID, InReplyTo: f.a.MessageID,
 		Body: contracts.MessageBody{Text: "What do you think is better?"}})
 	// So is a reply to one of its messages, and an info note (never delivered).
@@ -145,8 +206,8 @@ func TestAskNotAnsweredByThreadReplyOrInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{f.a.AskID, f.b.AskID} {
-		if a := f.get(id); a.State != contracts.AskOpen {
-			t.Fatalf("%s answered: %+v", id, a.Answer)
+		if a := f.get(id); a.State != contracts.AskOpen || a.OwnerChat != nil {
+			t.Fatalf("%s: %+v %+v", id, a.Answer, a.OwnerChat)
 		}
 	}
 }
@@ -156,16 +217,17 @@ func TestAskChatSkipsHeldAnswers(t *testing.T) {
 	if _, err := f.x.hold("op_synth-chat-hold", f.b.AskID, "add", ""); err != nil {
 		t.Fatal(err)
 	}
-	f.send("op_synth-chat-msg2", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "ship it"}})
-	if a := f.get(f.a.AskID); a.State != contracts.AskAnswered || len(a.Answer.With) != 0 {
+	// The held ask is left out, so a is the only one: its option answers it.
+	f.send("op_synth-chat-msg2", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "Wait for the synthetic soak"}})
+	if a := f.get(f.a.AskID); a.State != contracts.AskAnswered || a.Answer.OptionID != "b" {
 		t.Fatalf("a: %+v", a.Answer)
 	}
-	if b := f.get(f.b.AskID); b.State != contracts.AskOpen {
-		t.Fatalf("held ask answered in chat: %+v", b.Answer)
+	if b := f.get(f.b.AskID); b.State != contracts.AskOpen || b.OwnerChat != nil {
+		t.Fatalf("held ask touched by chat: %+v %+v", b.Answer, b.OwnerChat)
 	}
 }
 
-func TestAskAnsweredByInputTypedIntoTheSession(t *testing.T) {
+func TestAskNotedFromInputTypedIntoTheSession(t *testing.T) {
 	f := newChatFixture(t)
 	// The newest prompt (it started the turn) is what counts, by position:
 	// older prompts and meta before it do not, and the node's clock is not
@@ -178,23 +240,16 @@ func TestAskAnsweredByInputTypedIntoTheSession(t *testing.T) {
 		t.Fatalf("transcript reads: %d", f.reads)
 	}
 	for _, id := range []string{f.a.AskID, f.b.AskID} {
-		a := f.get(id)
-		if a.State != contracts.AskAnswered || a.Answer.Source != contracts.AskSourceChat || a.Answer.Text != "go with b for the deploy; skip the index" ||
-			a.Answer.By != askChatOwner || len(a.Answer.With) != 1 {
-			t.Fatalf("%s: %+v", id, a.Answer)
-		}
+		f.noted(id, "go with b for the deploy; skip the index")
 	}
-	if d := f.decisions(); len(d) != 1 || d[0].Mode != contracts.ModeInfo {
+	if d := f.decisions(); len(d) != 0 {
 		t.Fatalf("decision: %+v", d)
 	}
-	// Nothing open: later turns record no check.
+	// The next typed turn replaces the note.
 	f.observeLead(contracts.RunWaitingInput)
+	f.entries = []contracts.TranscriptEntry{f.typed("unrelated: is the synthetic url up?")}
 	f.nextTurn(time.Minute)
-	var n int
-	f.x.db.QueryRow(`SELECT COUNT(*) FROM ask_chat_checks`).Scan(&n)
-	if n != 0 || f.reads != 1 {
-		t.Fatalf("checks with no open ask: %d rows, %d reads", n, f.reads)
-	}
+	f.noted(f.a.AskID, "unrelated: is the synthetic url up?")
 }
 
 // Review of PR #23: a prompt typed while the asking turn ran is queued by
@@ -211,8 +266,8 @@ func TestAskChatIgnoresAPromptQueuedDuringTheAskingTurn(t *testing.T) {
 	if f.reads != 0 {
 		t.Fatalf("transcript read for a queued prompt: %d", f.reads)
 	}
-	if a := f.get(f.a.AskID); a.State != contracts.AskOpen {
-		t.Fatalf("answered by a queued prompt: %+v", a.Answer)
+	if a := f.get(f.a.AskID); a.State != contracts.AskOpen || a.OwnerChat != nil {
+		t.Fatalf("noted from a queued prompt: %+v", a.OwnerChat)
 	}
 	// An ask filed in the turn that just started is not answered by its
 	// own prompt either.
@@ -225,12 +280,8 @@ func TestAskChatIgnoresAPromptQueuedDuringTheAskingTurn(t *testing.T) {
 	f.observeLead(contracts.RunWaitingInput)
 	f.entries = []contracts.TranscriptEntry{f.typed("yes, ship it")}
 	f.nextTurn(time.Minute)
-	if a := f.get(f.a.AskID); a.State != contracts.AskAnswered {
-		t.Fatalf("earlier ask: %+v", a)
-	}
-	if a := f.get(third.AskID); a.State != contracts.AskAnswered {
-		t.Fatalf("ask from the previous turn: %+v", a)
-	}
+	f.noted(f.a.AskID, "yes, ship it")
+	f.noted(third.AskID, "yes, ship it")
 }
 
 func TestAskChatNewestPromptMustBeTyped(t *testing.T) {
@@ -249,8 +300,8 @@ func TestAskChatNewestPromptMustBeTyped(t *testing.T) {
 	// A harness that gave no time: skipped.
 	f.entries = []contracts.TranscriptEntry{{RunID: run, Kind: "user", Text: "go with b"}}
 	f.nextTurn(time.Minute)
-	if a := f.get(f.a.AskID); a.State != contracts.AskOpen {
-		t.Fatalf("answered: %+v", a.Answer)
+	if a := f.get(f.a.AskID); a.State != contracts.AskOpen || a.OwnerChat != nil {
+		t.Fatalf("noted: %+v", a.OwnerChat)
 	}
 	if f.reads != 3 {
 		t.Fatalf("reads: %d", f.reads)
@@ -274,8 +325,8 @@ func TestAskChatIgnoresTheRunsFirstPrompt(t *testing.T) {
 	var n int
 	f.x.db.QueryRow(`SELECT COUNT(*) FROM ask_chat_checks`).Scan(&n)
 	got, _ := f.x.h.GetAsk(as(owner), contracts.GetRequest{ID: a.AskID})
-	if n != 0 || got.State != contracts.AskOpen {
-		t.Fatalf("first prompt of the run: %d checks, %+v", n, got.Answer)
+	if n != 0 || got.State != contracts.AskOpen || got.OwnerChat != nil {
+		t.Fatalf("first prompt of the run: %d checks, %+v", n, got.OwnerChat)
 	}
 }
 
@@ -355,5 +406,17 @@ func TestAskChatSlowNodeIsBounded(t *testing.T) {
 	var attempts int
 	if err := f.x.db.QueryRow(`SELECT attempts FROM ask_chat_checks`).Scan(&attempts); err != nil || attempts != 1 {
 		t.Fatalf("deferred for a retry: %d %v", attempts, err)
+	}
+}
+
+// Asking again on the topic clears the chat note: his earlier words
+// predate the new question.
+func TestAskingAgainClearsTheOwnerChatNote(t *testing.T) {
+	f := newChatFixture(t)
+	f.send("op_synth-chat-note", contracts.SendMessageRequest{Body: contracts.MessageBody{Text: "unrelated question"}})
+	f.noted(f.a.AskID, "unrelated question")
+	again := f.ask(sesPrincipal(f.lead()), synthAsk("op_synth-chat-again", "synthetic-deploy", "Ship the synthetic build?", "b"))
+	if again.Status != contracts.AskMerged || again.Ask.OwnerChat != nil {
+		t.Fatalf("merge: %s %+v", again.Status, again.Ask.OwnerChat)
 	}
 }

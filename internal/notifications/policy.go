@@ -23,6 +23,7 @@ var knownKinds = []contracts.AttentionKind{
 	contracts.AttnApproval, contracts.AttnQuestion, contracts.AttnFailure, contracts.AttnAccountPool,
 	contracts.AttnReviewReady, contracts.AttnMessage, contracts.AttnIndeterminate, contracts.AttnConflict,
 	contracts.AttnComment, contracts.AttnUpdate, contracts.AttnNode, contracts.AttnAsk, contracts.AttnWaiting, contracts.AttnGrantFYI,
+	contracts.AttnSecurity,
 }
 
 // ValidatePrefs checks preferences, returning an ErrInvalid *contracts.Error.
@@ -118,6 +119,12 @@ func Evaluate(p contracts.NotificationPrefs, it contracts.AttentionItem, now tim
 	if enabled := p.Kinds[it.Kind]; it.Kind == contracts.AttnGrantFYI && !enabled {
 		return StateDisabled, "informational (no push unless enabled for " + string(it.Kind) + ")"
 	}
+	if it.Kind == contracts.AttnSecurity {
+		// A possible credential leak (decision I79) pushes through project
+		// mutes and quiet hours: the incident it exists for was at 1:19 AM.
+		// Only turning the kind off stops it.
+		return "", ""
+	}
 	if it.ProjectID != nil && slices.Contains(p.MutedProjects, *it.ProjectID) {
 		return StateDisabled, "project muted"
 	}
@@ -163,6 +170,8 @@ func GenericTitle(k contracts.AttentionKind) string {
 		return "Pyre: a lead is waiting on you"
 	case contracts.AttnGrantFYI:
 		return "Pyre: a standing go-ahead was used"
+	case contracts.AttnSecurity:
+		return "Pyre: possible credential leak"
 	}
 	return "Pyre: needs attention"
 }

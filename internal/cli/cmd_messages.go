@@ -23,7 +23,16 @@ not that the agent read or completed it.
 With --reply-to MSG and a single argument, the reply goes to the original
 sender in the original thread. Use "-" as the text to read stdin.
 --attach takes published IDs (ver_, rev_, note_); local paths are not
-transferable.`,
+transferable.
+
+--steer injects the text into a Codex session's current turn. A session
+whose harness does not take steer (Claude, agy) gets an ordinary queued
+message instead, and the status line says so; a Claude session sees queued
+mail mid-turn. A steer to a session with no live run (its turn ended and
+it stopped, or it archived itself) is sent as queued mail too: Pyre holds
+it and delivers it when the session is resumed, and the status line says
+so. A steer to a session on a disconnected machine is rejected: steering is
+immediate-only.`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
@@ -56,7 +65,7 @@ transferable.`,
 	sf := send.Flags()
 	sf.StringVar(&sp.Thread, "thread", "", "thread ID")
 	sf.StringVar(&sp.ReplyTo, "reply-to", "", "message this replies to")
-	sf.BoolVar(&sp.Steer, "steer", false, "explicit immediate steering (only where the runtime supports it)")
+	sf.BoolVar(&sp.Steer, "steer", false, "immediate steering into the current turn (Codex only; to other harnesses it is sent as an ordinary queued message)")
 	sf.BoolVar(&sp.Info, "info", false, "store and show only; never inject into a runtime")
 	sf.StringSliceVar(&sp.Attach, "attach", nil, "published artifact version / document revision / note ID")
 	sf.BoolVar(&sp.RequestAck, "request-ack", false, "ask the recipient to acknowledge")

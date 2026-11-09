@@ -517,6 +517,9 @@ func (rc *renderCtx) sessionLine(sv c.SessionView) string {
 	if s.Lineage.ParentSessionID != "" {
 		parts = append(parts, "parent "+s.Lineage.ParentSessionID)
 	}
+	if t := archivePendingText(sv); t != "" {
+		parts = append(parts, t)
+	}
 	if f := sv.Flag; f != nil {
 		parts = append(parts, "needs owner: "+clip(firstSet(f.Text, f.Reason), 60))
 	} else if sv.Attention > 0 {
@@ -529,7 +532,11 @@ func (rc *renderCtx) sessionLine(sv c.SessionView) string {
 		parts = append(parts, "monitor for "+t)
 	}
 	if s.Archived {
-		parts = append(parts, "archived")
+		a := "archived"
+		if s.ArchivedAt != nil {
+			a += " " + rc.ago(*s.ArchivedAt)
+		}
+		parts = append(parts, a)
 	}
 	return strings.Join(parts, " · ")
 }
@@ -539,6 +546,11 @@ func compactRunState(sv c.SessionView) string {
 		return "no run"
 	}
 	s := string(sv.Run.State)
+	if sv.Run.Freshness.Stale && sv.Run.Freshness.Reason == "node disconnected" {
+		// The hub's view (decorateRun): unknown, with the last observed
+		// state; the run may have died with its machine.
+		return s + " (" + firstSet(sv.Run.StateReason, "node disconnected") + ")"
+	}
 	if sv.Freshness.Stale || sv.Run.Freshness.Stale {
 		s += "? (stale)"
 	} else if a := sv.Run.Activity; a != nil && a.Text != "" && sv.Run.State == c.RunRunning {
@@ -670,7 +682,7 @@ func renderProjects(rc *renderCtx, pg c.Page[c.Project]) string {
 
 func renderNodes(rc *renderCtx, pg c.Page[c.Node]) string {
 	var b strings.Builder
-	printNodes(&b, append([]c.Node(nil), pg.Items...), pg.SnapshotAt)
+	printNodes(&b, append([]c.Node(nil), pg.Items...), pg.SnapshotAt, rc.selfNode())
 	for _, n := range pg.Items {
 		if n.NodeID == rc.selfNode() && n.NodeID != "" {
 			b.WriteString("you are on " + n.Name + "\n")

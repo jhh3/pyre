@@ -485,6 +485,14 @@ func Cards(views []contracts.AccountView, nodes []contracts.Node, now time.Time)
 				// The harness reports its own login's usage (agy).
 				c.Obs, c.Why = o, "your own login; usage as "+string(hi.Harness)+" reports it"
 				c.LastKnown = o.Stale || now.Sub(o.ObservedAt) > FreshFor
+				if m, reset := MaxUsed(o.Windows); !c.LastKnown && m >= 100 && reset != nil && reset.After(now) {
+					// A window it reports is used up (decision I74).
+					c.Assessment = Assessment{State: AtLimit, Why: "limit reached", Until: reset}
+				}
+			}
+			if l := OwnLimit(hi, now); l != nil {
+				// A run on this login hit its quota (decision I72).
+				c.Assessment = Assessment{State: AtLimit, Why: ownLimitWhy(l), Until: l.ResetAt}
 			}
 			out = append(out, c)
 		}

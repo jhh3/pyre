@@ -110,8 +110,10 @@ func (d *Daemon) registerBuiltinActions() {
 	d.RegisterSyncAction(contracts.ActionDirList, d.actionDirList)
 	d.RegisterSyncAction(contracts.ActionDiagnostics, d.actionDiagnostics)
 	d.RegisterSyncAction(contracts.ActionFsMkdir, d.actionFsMkdir) // W-qlpath
-	d.registerRepoActions()                                        // W-quicklaunch
-	d.registerLifecycleActions()                                   // W-lifecycle
+	d.RegisterSyncAction(contracts.ActionNeedsCheck, d.actionNeedsCheck)
+	d.registerRepoActions()      // W-quicklaunch
+	d.registerLifecycleActions() // W-lifecycle
+	d.registerLimitResume()      // decision I70
 }
 
 func (d *Daemon) actionInventory(ctx context.Context, _ json.RawMessage) (any, error) {

@@ -130,6 +130,20 @@ func deliver(t *testing.T, a *Adapter, h contracts.RunHandle, id, text string, m
 	return r
 }
 
+// waitUserRecord counts id's user records once the transcript shows one (up
+// to 5s): Claude fires UserPromptSubmit, which accepts a delivery, before it
+// writes the prompt's user record, so a count right after Deliver raced it
+// (TestFakePluginStalledWhileIdleFallsBackToPaste, CI 2026-11-02 and -03).
+func waitUserRecord(t *testing.T, a *Adapter, h contracts.RunHandle, id string) int {
+	t.Helper()
+	n := 0
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if n = countUserRecords(t, a, h, id); n > 0 || time.Now().After(end) {
+			return n
+		}
+	}
+}
+
 func countUserRecords(t *testing.T, a *Adapter, h contracts.RunHandle, id string) int {
 	resp, err := a.ReadTranscript(context.Background(), h, contracts.ReadSessionRequest{Limit: 500})
 	if err != nil {
@@ -162,7 +176,7 @@ func TestFakeLaunchDeliverTranscript(t *testing.T) {
 	if r.State != contracts.DeliveryAccepted || !strings.Contains(r.Detail, "already accepted") {
 		t.Fatalf("redeliver %+v", r)
 	}
-	if n := countUserRecords(t, f.a, h, "msg_b1"); n != 1 {
+	if n := waitUserRecord(t, f.a, h, "msg_b1"); n != 1 {
 		t.Fatalf("user records for msg_b1: %d", n)
 	}
 	// Multi-line input keeps its lines.
@@ -311,7 +325,7 @@ func TestFakeCrashBeforeEnterReconcile(t *testing.T) {
 		t.Fatalf("redeliver after clear %+v", r)
 	}
 	f.waitState(a2, h, contracts.RunWaitingInput, 15*time.Second)
-	if n := countUserRecords(t, a2, h, "msg_c1"); n != 1 {
+	if n := waitUserRecord(t, a2, h, "msg_c1"); n != 1 {
 		t.Fatalf("records %d", n)
 	}
 	// A message never attempted reconciles as rejected (safe).

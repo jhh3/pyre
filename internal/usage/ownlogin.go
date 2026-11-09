@@ -107,6 +107,35 @@ func ownCard(v *contracts.AccountView, ids []string, nodes []contracts.Node, now
 	default:
 		c.Assessment = assessOnUse(OwnUse, obs, now)
 	}
+	for _, n := range nodes {
+		for i := range n.Harnesses {
+			h := &n.Harnesses[i]
+			if !in[n.NodeID] || h.Harness != harnessFor(v.Account.Provider) || !h.Available {
+				continue
+			}
+			if l := OwnLimit(h, now); l != nil && (c.State != AtLimit || c.Until == nil || l.ResetAt.After(*c.Until)) {
+				c.Assessment = Assessment{State: AtLimit, Why: ownLimitWhy(l), Until: l.ResetAt}
+			}
+		}
+	}
 	c.Assignments = append(c.Assignments, v.Assignments...)
 	return c
+}
+
+// OwnLimit is the limit a node's own harness login reported on a run
+// (HarnessInfo.Limit: agy at its quota, decision I72) while its reset is
+// ahead of now, else nil.
+func OwnLimit(h *contracts.HarnessInfo, now time.Time) *contracts.LimitEvent {
+	if h == nil || h.Limit == nil || h.Limit.ResetAt == nil || !h.Limit.ResetAt.After(now) {
+		return nil
+	}
+	return h.Limit
+}
+
+// ownLimitWhy is the NOTES words for an own login at its limit.
+func ownLimitWhy(l *contracts.LimitEvent) string {
+	if l.Kind == "rate_limited" {
+		return "rate limited"
+	}
+	return "quota reached"
 }

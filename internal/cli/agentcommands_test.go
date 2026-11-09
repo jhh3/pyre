@@ -13,7 +13,7 @@ func TestAgentCommands(t *testing.T) {
 	e := newEnv(t, nil)
 	r := run(t, e, nil, "commands")
 	expectCode(t, r, 0)
-	for _, u := range []string{"/kickoff [what to build]", "/open-items", "/ship [PR or branch]", "/brief", "/deliver [what]", "/cleanup", "/pair [question]"} {
+	for _, u := range []string{"/kickoff [what to build]", "/open-items", "/ship [PR or branch]", "/brief", "/deliver [what]", "/cleanup", "/pair [question]", "/review-site [page name]"} {
 		if !strings.Contains(r.stdout, "  "+u+" ") {
 			t.Errorf("pyre commands lacks %q:\n%s", u, r.stdout)
 		}
@@ -22,7 +22,7 @@ func TestAgentCommands(t *testing.T) {
 	r = run(t, e, nil, "--json", "commands")
 	expectCode(t, r, 0)
 	got := mustJSON[[]claudeplugin.Skill](t, r)
-	if len(got) != 7 || got[0].Name != "brief" || got[0].Short == "" || got[0].Usage != "/brief" {
+	if len(got) != 8 || got[0].Name != "brief" || got[0].Short == "" || got[0].Usage != "/brief" {
 		t.Fatalf("json: %+v", got)
 	}
 

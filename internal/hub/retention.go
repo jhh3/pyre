@@ -26,6 +26,11 @@ import (
 //     walking the same index from a persisted watermark so each row is
 //     visited once;
 //   - operation records are pruned through operations_created.
+//
+// Deleted rows only free pages inside hub.db. The hub opens it in
+// auto_vacuum=INCREMENTAL mode (assemble, sqlitex.PrepareReclaim) and each
+// retention pass returns free pages beyond a reserve to the filesystem
+// (reclaimSpace, W-dbspace).
 
 // retentionMigrations add the indexes retention needs. A separate
 // namespace keeps the core hub migration registry untouched. Creating them
@@ -155,4 +160,22 @@ func (h *Hub) RunRetention(ctx context.Context) (RetentionStats, error) {
 		errs = append(errs, err)
 	}
 	return st, errors.Join(errs...)
+}
+
+// Space reclamation after each retention pass (W-dbspace). The reserve
+// absorbs a few hours of churn (on server events alone turn over about 10 MB
+// an hour), so the file does not shrink and regrow every pass; the
+// per-pass bound keeps the incremental vacuum well inside one maintenance
+// pass (it runs in 8 MiB write transactions). Variables for tests.
+var (
+	reclaimKeepBytes int64 = 64 << 20
+	reclaimMaxBytes  int64 = 128 << 20
+)
+
+// reclaimSpace returns hub.db's free pages beyond reclaimKeepBytes to the
+// filesystem, at most reclaimMaxBytes per pass. It does nothing until the
+// database is in incremental mode.
+func (h *Hub) reclaimSpace(ctx context.Context) error {
+	_, err := sqlitex.ReclaimFree(ctx, h.db, reclaimKeepBytes, reclaimMaxBytes)
+	return err
 }

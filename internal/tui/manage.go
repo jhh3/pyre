@@ -95,6 +95,9 @@ func (m *Model) viewMachines(w, h int) []string {
 			if st := m.machineStatsCell(n.Resources); st != "" && n.Connection.State == contracts.ConnConnected {
 				row += "  " + st
 			}
+			if b := avoidBadge(n, now); b != "" {
+				row += "  " + m.th.tone(toneWarn, b)
+			}
 			out = append(out, m.markRow(&m.mgmtList, i, sel, trunc(row, w), w))
 		}
 		return out
@@ -121,6 +124,11 @@ func (m *Model) viewMachines(w, h int) []string {
 			seen = ago(now, *n.Connection.LastSeenAt)
 		}
 		out = append(out, "", m.kvl("Last seen", seen, lw))
+		for _, a := range n.Avoid {
+			if a.Active(now) {
+				out = append(out, m.kvl("Avoid", m.th.tone(toneWarn, trunc(avoidDetail(a), w-lw)), lw))
+			}
+		}
 		if n.Connection.ConnectedSince != nil && n.Connection.State == contracts.ConnConnected {
 			out = append(out, m.kvl("Connected", "since "+ago(now, *n.Connection.ConnectedSince), lw))
 		}

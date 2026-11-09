@@ -57,3 +57,24 @@ func TestPrintAccountsPerNodeWithBars(t *testing.T) {
 		t.Fatalf("empty: %s", b.String())
 	}
 }
+
+// pyre accounts shows agy's own login at its quota under GOOGLE with the
+// time it is limited until, instead of "usage unknown" (decision I72).
+func TestPrintAccountsAgyOwnLoginLimited(t *testing.T) {
+	now := time.Date(2026, 10, 25, 3, 41, 0, 0, time.UTC)
+	reset := now.Add(13*time.Hour + 20*time.Minute)
+	nodes := []c.Node{{NodeID: "node_synth-s", Name: "synth-s", Harnesses: []c.HarnessInfo{
+		{Harness: c.HarnessAgy, Available: true, Limit: &c.LimitEvent{Kind: "usage_limit", ResetAt: &reset, At: now}}}}}
+	var b bytes.Buffer
+	printAccounts(&b, nil, nodes, now, nil)
+	out := b.String()
+	if !strings.Contains(out, "GOOGLE") || !strings.Contains(out, "at limit") || !strings.Contains(out, "quota reached until 5:01 PM (in 13h 20m)") ||
+		strings.Contains(out, "usage unknown") {
+		t.Fatalf("accounts:\n%s", out)
+	}
+	b.Reset()
+	printAccounts(&b, nil, nodes, reset.Add(time.Minute), nil)
+	if out := b.String(); !strings.Contains(out, "usage unknown; Pyre does not observe your own login") {
+		t.Fatalf("after the reset:\n%s", out)
+	}
+}

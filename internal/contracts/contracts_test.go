@@ -44,6 +44,29 @@ func TestNewIDSortableUniquePrefixed(t *testing.T) {
 	}
 }
 
+func TestIDTimeAndDerivedID(t *testing.T) {
+	// The real incident's operation and message IDs decode to their mint times.
+	if at, ok := IDTime("op_…"); !ok || !at.Equal(time.Date(2026, 10, 23, 22, 58, 2, 976e6, time.UTC)) {
+		t.Fatalf("IDTime = %v %v", at, ok)
+	}
+	for _, id := range []string{"op_enc-r1-reply-1", "msg_legacy-ws-1", "", "op_01M5NFRM30PSGM2XGCTV96X17!"} {
+		if _, ok := IDTime(id); ok {
+			t.Fatalf("IDTime(%q) should not decode", id)
+		}
+	}
+	now := time.UnixMilli(time.Now().UnixMilli()).UTC()
+	a := DerivedID(PrefixMessage, now, "k")
+	if a != DerivedID(PrefixMessage, now, "k") || a == DerivedID(PrefixMessage, now, "k2") || !ValidID(a, PrefixMessage) || len(a) != len("msg_")+26 {
+		t.Fatalf("DerivedID not deterministic, distinct and well-formed: %s", a)
+	}
+	if at, ok := IDTime(a); !ok || !at.Equal(now) {
+		t.Fatalf("DerivedID time = %v, want %v", at, now)
+	}
+	if z := DerivedID(PrefixMessage, time.Time{}, "k"); !strings.HasPrefix(z, "msg_0000000000") {
+		t.Fatalf("zero time = %s", z)
+	}
+}
+
 func TestErrorMapping(t *testing.T) {
 	e := Errorf(ErrUnavailable, "hub down")
 	if !e.Retryable || e.Code.HTTPStatus() != 503 {

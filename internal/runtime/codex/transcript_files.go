@@ -1,10 +1,13 @@
 package codex
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -133,7 +136,9 @@ func safeThreadID(id string) bool {
 }
 
 // rolloutParsed caches parsed rollouts by path, size and mtime, so paging a
-// stopped run's transcript does not re-parse the file per page.
+// stopped run's transcript does not re-parse the file per page, and a
+// rollout that grew (a running pyre run) is parsed only from where the
+// last parse ended.
 var rolloutParsed = struct {
 	sync.Mutex
 	m map[string]rolloutParse
@@ -142,10 +147,92 @@ var rolloutParsed = struct {
 type rolloutParse struct {
 	size    int64
 	mod     time.Time
-	entries []contracts.TranscriptEntry
+	entries []contracts.TranscriptEntry // default cut, ascending Seq
+	offs    []int64                     // offset of each entry's line
+	end     int64                       // after the last complete line parsed
+	seq     int64                       // entries numbered before end
+	head    []byte                      // the file's first bytes (session_meta)
+	tail    []byte                      // the bytes just before end
 }
 
-const rolloutParsedMax = 8
+const (
+	rolloutParsedMax = 8
+	// Bytes that must be unchanged to parse only what follows a cached
+	// parse: the file's first (its session_meta and thread id) and those
+	// before the parse's end.
+	rolloutHeadCheck = 256
+	rolloutTailCheck = 64
+)
+
+// parsedRollout returns path's entries, parsing only what was appended
+// since a cached parse (Codex only appends to a rollout) when the file did
+// not shrink and its first bytes and those before the parse's end are
+// unchanged; otherwise the whole file.
+func parsedRollout(path string) (rolloutParse, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return rolloutParse{}, false
+	}
+	rolloutParsed.Lock()
+	c, ok := rolloutParsed.m[path]
+	rolloutParsed.Unlock()
+	if ok && c.size == fi.Size() && c.mod.Equal(fi.ModTime()) {
+		return c, true
+	}
+	if !ok || fi.Size() < c.size || !sameEnds(path, c) {
+		c = rolloutParse{}
+	}
+	// Appending never writes into the cached slices' arrays, so a reader
+	// holding the previous parse keeps a consistent view.
+	entries, offs := c.entries[:len(c.entries):len(c.entries)], c.offs[:len(c.offs):len(c.offs)]
+	end, seq, err := search.ScanFile(path, search.FormatCodex, c.end, c.seq, func(p search.Entry, off int64) {
+		entries = append(entries, rolloutEntry(p))
+		offs = append(offs, off)
+	})
+	if err != nil {
+		return rolloutParse{}, false
+	}
+	c = rolloutParse{size: fi.Size(), mod: fi.ModTime(), entries: entries, offs: offs, end: end, seq: seq,
+		head: readAt(path, 0, min(end, rolloutHeadCheck)), tail: readAt(path, end-rolloutTailCheck, end)}
+	rolloutParsed.Lock()
+	if _, had := rolloutParsed.m[path]; !had && len(rolloutParsed.m) >= rolloutParsedMax {
+		for k := range rolloutParsed.m {
+			delete(rolloutParsed.m, k)
+			break
+		}
+	}
+	rolloutParsed.m[path] = c
+	rolloutParsed.Unlock()
+	return c, true
+}
+
+// sameEnds: the first bytes and those just before a cached parse's end
+// are still there.
+func sameEnds(path string, c rolloutParse) bool {
+	if c.end == 0 {
+		return true
+	}
+	return len(c.head) > 0 && len(c.tail) > 0 && string(readAt(path, 0, int64(len(c.head)))) == string(c.head) &&
+		string(readAt(path, c.end-int64(len(c.tail)), c.end)) == string(c.tail)
+}
+
+// readAt returns path's bytes [from, to) (from clamped to 0); nil on error.
+func readAt(path string, from, to int64) []byte {
+	from = max(from, 0)
+	if to <= from {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b := make([]byte, to-from)
+	if _, err := f.ReadAt(b, from); err != nil {
+		return nil
+	}
+	return b
+}
 
 // rolloutTranscript reads a run's transcript from its rollout file, for a
 // stopped run or one whose app-server is confirmed absent (the child report
@@ -160,31 +247,9 @@ func rolloutTranscript(stateDir string, meta runMeta, runID string, req contract
 	if path == "" {
 		return nil, false
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
+	c, ok := parsedRollout(path)
+	if !ok {
 		return nil, false
-	}
-	rolloutParsed.Lock()
-	c, ok := rolloutParsed.m[path]
-	rolloutParsed.Unlock()
-	if !ok || c.size != fi.Size() || !c.mod.Equal(fi.ModTime()) {
-		parsed, err := search.ParseFile(path, search.FormatCodex)
-		if err != nil {
-			return nil, false
-		}
-		c = rolloutParse{size: fi.Size(), mod: fi.ModTime(), entries: make([]contracts.TranscriptEntry, 0, len(parsed))}
-		for _, p := range parsed {
-			c.entries = append(c.entries, rolloutEntry(p))
-		}
-		rolloutParsed.Lock()
-		if len(rolloutParsed.m) >= rolloutParsedMax {
-			for k := range rolloutParsed.m {
-				delete(rolloutParsed.m, k)
-				break
-			}
-		}
-		rolloutParsed.m[path] = c
-		rolloutParsed.Unlock()
 	}
 	var start int64
 	fmt.Sscanf(req.Cursor, "%d", &start)
@@ -203,6 +268,46 @@ func rolloutTranscript(stateDir string, meta runMeta, runID string, req contract
 	return sel, true
 }
 
+// rolloutFullText returns the whole text (newlines kept, no cut) of the
+// rollout entries numbered seqs as rolloutTranscript numbers them. Each is
+// parsed again from its line's offset: the file is not parsed again. A seq
+// with no entry is left out.
+func rolloutFullText(stateDir string, meta runMeta, seqs []int64) (map[int64]string, error) {
+	path := rolloutPath(stateDir, meta)
+	if path == "" {
+		return nil, nil
+	}
+	c, ok := parsedRollout(path)
+	if !ok {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	out := make(map[int64]string, len(seqs))
+	br := bufio.NewReaderSize(f, 64<<10)
+	for _, q := range seqs {
+		i := sort.Search(len(c.entries), func(i int) bool { return c.entries[i].Seq >= q })
+		if i == len(c.entries) || c.entries[i].Seq != q {
+			continue
+		}
+		if _, err := f.Seek(c.offs[i], io.SeekStart); err != nil {
+			return out, err
+		}
+		br.Reset(f)
+		line, err := br.ReadBytes('\n')
+		if err != nil {
+			return out, err
+		}
+		if e, ok := search.CodexLineFull(line[:len(line)-1]); ok {
+			out[q] = e.Text
+		}
+	}
+	return out, nil
+}
+
 // rolloutEntry converts a parsed rollout entry with the live reader's kinds.
 func rolloutEntry(p search.Entry) contracts.TranscriptEntry {
 	e := contracts.TranscriptEntry{Seq: p.Seq, At: p.At, Kind: p.Kind, Text: p.Text}
@@ -215,8 +320,8 @@ func rolloutEntry(p search.Entry) contracts.TranscriptEntry {
 			if i := strings.IndexAny(id, "] "); i > 0 && safeIDRe.MatchString(id[:i]) {
 				e.MessageID = id[:i]
 			}
-		case isWakeNotice(t):
-			e.Kind = "system" // Pyre's background-command notice, not typed input
+		case isWakeNotice(t), isMailNotice(t):
+			e.Kind = "system" // Pyre's background-command or mail notice, not typed input
 		}
 	}
 	if len(e.Text) > 2000 {

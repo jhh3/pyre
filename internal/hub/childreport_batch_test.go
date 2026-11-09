@@ -94,6 +94,32 @@ func TestChildReportBatchedAtMostChildBatchMax(t *testing.T) {
 	}
 }
 
+// iss_…: a node showed a parent whose turn had
+// ended as running ("tool: Bash", its background subagent's tools) and the
+// reports of two idle children waited 16 minutes. Whatever the parent's run
+// state says, they go out together within five minutes.
+func TestChildReportsForParentShownRunningGoOutWithinFiveMinutes(t *testing.T) {
+	f := newChildFixture(t, nil)
+	second := f.startChild("op_synth-child-2", nil)
+	parent := f.parent.Session.SessionID
+	r := *f.x.session(parent).Run
+	r.State, r.StateReason = contracts.RunRunning, "tool: Bash"
+	f.x.report(nodeMac, contracts.ReportRun, r)
+	for _, id := range []string{f.child.Session.SessionID, second.Session.SessionID} {
+		f.observeSession(id, contracts.RunRunning)
+		f.observeSession(id, contracts.RunWaitingInput)
+	}
+	f.process()
+	if n := len(f.allToParent()); n != 0 {
+		t.Fatalf("sent at once to a parent shown running: %v", f.statuses())
+	}
+	f.x.clock.Add(5*time.Minute + time.Second)
+	f.process()
+	if msgs := f.allToParent(); len(msgs) != 1 || !strings.HasPrefix(msgs[0].Envelope.Body.Text, "2 reports from sessions you started") {
+		t.Fatalf("want one digest of both reports within five minutes: %v", f.statuses())
+	}
+}
+
 func TestChildReportCleanExitFoldsIntoNextReport(t *testing.T) {
 	f := newChildFixture(t, nil)
 	f.observe(contracts.RunRunning, "working")
@@ -209,30 +235,43 @@ func (f *childFixture) waitQuiet(what string, minutes int) contracts.SetWaitingO
 	return resp
 }
 
-// A quiet wait sends the parent nothing at the turn's end; the overdue
-// report still fires, carrying the last message the parent never got.
+// reportedTurn runs one turn whose idle report reaches the parent, so a
+// quiet turn after it that ends on the same last message has nothing new
+// to say (quietTurnSkip).
+func (f *childFixture) reportedTurn() {
+	f.x.t.Helper()
+	f.observe(contracts.RunRunning, "working")
+	f.observe(contracts.RunWaitingInput, "idle")
+	f.process()
+	f.x.clock.Add(time.Second)
+}
+
+// A quiet wait whose turn ends on the last message the parent already has
+// sends nothing at the turn's end; the overdue report still fires,
+// carrying that message.
 func TestChildReportQuietWaitSendsNoReport(t *testing.T) {
 	f := newChildFixture(t, nil)
+	f.reportedTurn()
 	f.observe(contracts.RunRunning, "working")
 	resp := f.waitQuiet("synthetic workers and CI", 30)
-	if !resp.Quiet || !strings.Contains(resp.Detail, "quiet") || !strings.Contains(resp.Detail, "not told") {
+	if !resp.Quiet || !strings.Contains(resp.Detail, "quiet") || !strings.Contains(resp.Detail, "only if it is new") {
 		t.Fatalf("response: %+v", resp)
 	}
 	f.observe(contracts.RunWaitingInput, "idle")
 	f.process()
-	if msgs := f.allToParent(); len(msgs) != 0 {
+	if msgs := f.allToParent(); len(msgs) != 1 {
 		t.Fatalf("a quiet wait reported: %v", f.statuses())
 	}
-	if st := f.statuses(); len(st) != 2 || st[0] != "waiting:skipped:"+reportQuietDetail || st[1] != "waiting_overdue:pending:" {
+	if st := f.statuses(); len(st) != 3 || st[1] != "waiting:skipped:"+reportQuietDetail || st[2] != "waiting_overdue:pending:" {
 		t.Fatalf("statuses: %v", st)
 	}
 	f.x.clock.Add(31 * time.Minute)
 	f.process()
 	msgs := f.toParent()
-	if len(msgs) != 1 {
+	if len(msgs) != 2 {
 		t.Fatalf("overdue: %d %v", len(msgs), f.statuses())
 	}
-	body := msgs[0].Body.Text
+	body := msgs[1].Body.Text
 	for _, want := range []string{"synthetic child may be stuck", "a quiet wait", "Its last message: Synthetic final answer: the tests pass."} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("overdue lacks %q:\n%s", want, body)
@@ -242,6 +281,7 @@ func TestChildReportQuietWaitSendsNoReport(t *testing.T) {
 	// Woken in time (a child's report, a message): nothing at all reaches
 	// the parent for the quiet turn.
 	g := newChildFixture(t, nil)
+	g.reportedTurn()
 	g.observe(contracts.RunRunning, "working")
 	g.waitQuiet("synthetic review", 10)
 	g.observe(contracts.RunWaitingInput, "idle")
@@ -249,11 +289,155 @@ func TestChildReportQuietWaitSendsNoReport(t *testing.T) {
 	g.observe(contracts.RunRunning, "woken by a message")
 	g.x.clock.Add(10 * time.Minute)
 	g.process()
-	if n := len(g.allToParent()); n != 0 {
+	if n := len(g.allToParent()); n != 1 {
 		t.Fatalf("woken in time, the parent got %d: %v", n, g.statuses())
 	}
-	if st := g.statuses(); len(st) != 2 || st[1] != "waiting_overdue:skipped:the child started a new turn" {
+	if st := g.statuses(); len(st) != 3 || st[2] != "waiting_overdue:skipped:the child started a new turn" {
 		t.Fatalf("statuses: %v", st)
+	}
+}
+
+// iss_…: a lead's turns reach its parent; then it
+// sets a quiet wait on its build worker and ends that turn, a background
+// task still running, on a new result. The parent gets that result, told
+// the lead may continue on its own. A later quiet turn that ends on the
+// same message, or one the lead reported itself, sends nothing.
+func TestChildReportQuietWaitSendsNewFinalMessage(t *testing.T) {
+	f := newChildFixture(t, nil)
+	last := "The round-2 page isn't final yet."
+	f.x.h.childSummary = func(ctx context.Context, sessionID, runID string) (string, error) { return last, nil }
+	f.reportedTurn()
+	f.observe(contracts.RunRunning, contracts.RunReasonPromptSubmitted)
+	f.waitQuiet("synthetic build worker ses_synth", 180)
+	last = "Round 2 of the design is finished, graded A.\n\nThe build session is still running; its report wakes me."
+	f.observe(contracts.RunWaitingBackground, "turn ended; 1 background task(s) may start a new turn")
+	f.process()
+	msgs := f.toParent()
+	if len(msgs) != 2 {
+		t.Fatalf("the quiet turn's new result: %d %v", len(msgs), f.statuses())
+	}
+	body := msgs[1].Body.Text
+	for _, want := range []string{"synthetic child ended a turn and keeps waiting on its own job: Round 2 of the design is finished, graded A.",
+		"synthetic build worker ses_synth", "may continue on its own", "Its last message: Round 2 of the design is finished", "state: waiting_on_background"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("waiting report lacks %q:\n%s", want, body)
+		}
+	}
+
+	// Woken by the background task, it waits again and ends on the same
+	// message: nothing new for the parent.
+	f.observe(contracts.RunRunning, "background task notification")
+	f.waitQuiet("synthetic build worker ses_synth", 180)
+	f.observe(contracts.RunWaitingInput, "turn ended (Stop)")
+	f.process()
+	if n := len(f.toParent()); n != 2 {
+		t.Fatalf("a repeated last message was reported: %d %v", n, f.statuses())
+	}
+
+	// A new message the child sent the parent itself as the turn ended.
+	f.observe(contracts.RunRunning, contracts.RunReasonPromptSubmitted)
+	f.waitQuiet("synthetic build worker ses_synth", 180)
+	last = "Told you the grade; still waiting on the build."
+	f.childSays(f.child.Session.SessionID, "op_synth-child-says", "Synthetic: graded A.")
+	f.observe(contracts.RunWaitingBackground, "turn ended; 1 background task(s) may start a new turn")
+	f.process()
+	st := f.statuses()
+	if n := len(f.toParent()); n != 3 || st[len(st)-2] != "waiting:skipped:"+childMessagedSkip {
+		t.Fatalf("the child's own message: %d %v", n, st)
+	}
+	if st[1] != "waiting:sent:" || st[3] != "waiting:skipped:"+reportQuietDetail {
+		t.Fatalf("statuses: %v", st)
+	}
+}
+
+// A Claude session that ends its turn while the job it waits on runs in
+// the background goes waiting_on_background, and the job's notification
+// starts its next turn (no UserPromptSubmit from Pyre). That next turn is
+// a new one: its end is reported as usual and the wait is never called
+// stalled (rc135/rc136 release sessions). A wait that really never resumes
+// is still reported.
+func TestChildReportQuietWaitResumedFromBackground(t *testing.T) {
+	f := newChildFixture(t, nil)
+	f.reportedTurn()
+	f.observe(contracts.RunRunning, "working")
+	f.waitQuiet("rc135 release build", 60)
+	f.observe(contracts.RunWaitingBackground, "turn ended; 1 background task(s) may start a new turn")
+	f.process()
+	if n := len(f.allToParent()); n != 1 {
+		t.Fatalf("a quiet wait reported: %v", f.statuses())
+	}
+	f.x.clock.Add(3 * time.Minute)
+	f.observe(contracts.RunRunning, "background task notification")
+	f.observe(contracts.RunWaitingInput, "turn ended (Stop)")
+	f.process()
+	msgs := f.toParent()
+	if len(msgs) != 2 || !strings.Contains(msgs[1].Body.Text, "synthetic child finished") || !strings.Contains(msgs[1].Body.Text, "Synthetic final answer") {
+		t.Fatalf("the resumed turn's end: %d %v", len(msgs), f.statuses())
+	}
+	f.x.clock.Add(61 * time.Minute)
+	f.process()
+	if n := len(f.allToParent()); n != 2 {
+		t.Fatalf("stale alert after the session resumed: %d %v", n, f.statuses())
+	}
+	st := f.statuses()
+	if len(st) != 4 || st[1] != "waiting:skipped:"+reportQuietDetail || st[2] != "waiting_overdue:skipped:the child started a new turn" || st[3] != "idle:sent:" {
+		t.Fatalf("statuses: %v", st)
+	}
+
+	// Never resumed: the background task never woke it.
+	g := newChildFixture(t, nil)
+	g.reportedTurn()
+	g.observe(contracts.RunRunning, "working")
+	g.waitQuiet("rc136 release build", 30)
+	g.observe(contracts.RunWaitingBackground, "turn ended; 1 background task(s) may start a new turn")
+	g.x.clock.Add(31 * time.Minute)
+	g.process()
+	if msgs := g.toParent(); len(msgs) != 2 || !strings.Contains(msgs[1].Body.Text, "synthetic child may be stuck") {
+		t.Fatalf("never resumed: %d %v", len(msgs), g.statuses())
+	}
+
+	// Background waiting without a marker continues the same turn.
+	h := newChildFixture(t, nil)
+	h.observe(contracts.RunRunning, "working")
+	h.observe(contracts.RunWaitingBackground, "turn ended; 1 background task(s) may start a new turn")
+	h.observe(contracts.RunRunning, "background task notification")
+	h.observe(contracts.RunWaitingInput, "turn ended (Stop)")
+	h.process()
+	if st := h.statuses(); len(st) != 1 || st[0] != "idle:sent:" {
+		t.Fatalf("no marker: %v", st)
+	}
+}
+
+// A turn the hub never saw start (shorter than an observation interval)
+// still counts as resumed when the transcript shows activity after the
+// wait's turn ended; without such activity the overdue report goes out.
+func TestChildReportQuietWaitResumedPerTranscript(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		after   time.Duration // newest activity relative to the turn's end
+		alerted bool
+	}{{"resumed", 5 * time.Minute, false}, {"idle", -time.Second, true}, {"within slack", 5 * time.Second, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newChildFixture(t, nil)
+			f.reportedTurn()
+			f.observe(contracts.RunRunning, "working")
+			f.waitQuiet("synthetic CI", 30)
+			f.observe(contracts.RunWaitingInput, "idle")
+			ended := f.x.clock.Now()
+			f.x.h.childActive = func(ctx context.Context, sessionID, runID string) (time.Time, error) {
+				return ended.Add(tc.after), nil
+			}
+			f.x.clock.Add(31 * time.Minute)
+			f.process()
+			if got := len(f.toParent()) == 2; got != tc.alerted {
+				t.Fatalf("alerted=%v, want %v: %v", got, tc.alerted, f.statuses())
+			}
+			if !tc.alerted {
+				if st := f.statuses(); len(st) != 3 || !strings.HasPrefix(st[2], "waiting_overdue:skipped:the child resumed") {
+					t.Fatalf("statuses: %v", st)
+				}
+			}
+		})
 	}
 }
 
@@ -266,6 +450,7 @@ func TestChildReportEndedAfterQuietWaitIsSent(t *testing.T) {
 	}{{"exited", contracts.RunExited}, {"failed", contracts.RunFailed}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newChildFixture(t, nil)
+			f.reportedTurn()
 			f.observe(contracts.RunRunning, "working")
 			f.waitQuiet("synthetic CI", 30)
 			f.observe(contracts.RunWaitingInput, "idle")
@@ -274,21 +459,21 @@ func TestChildReportEndedAfterQuietWaitIsSent(t *testing.T) {
 			f.observe(tc.state, "process "+tc.name)
 			f.process()
 			msgs := f.allToParent()
-			if len(msgs) != 1 || msgs[0].Envelope.Sender.ID != f.child.Session.SessionID {
+			if len(msgs) != 2 || msgs[1].Envelope.Sender.ID != f.child.Session.SessionID {
 				t.Fatalf("ended after a quiet wait: %d %v", len(msgs), f.statuses())
 			}
-			body := msgs[0].Envelope.Body.Text
+			body := msgs[1].Envelope.Body.Text
 			if !strings.Contains(body, "has "+tc.name) || !strings.Contains(body, "Synthetic final answer") {
 				t.Fatalf("ended body:\n%s", body)
 			}
 			f.x.clock.Add(31 * time.Minute)
 			f.process()
-			if n := len(f.allToParent()); n != 1 {
+			if n := len(f.allToParent()); n != 2 {
 				t.Fatalf("overdue after the run ended: %d %v", n, f.statuses())
 			}
 			st := f.statuses()
-			if len(st) != 3 || st[0] != "waiting:skipped:"+reportQuietDetail || st[1] != "waiting_overdue:skipped:the child's run ended (its ended report covers it)" ||
-				!strings.HasPrefix(st[2], "ended:sent:") {
+			if len(st) != 4 || st[1] != "waiting:skipped:"+reportQuietDetail || st[2] != "waiting_overdue:skipped:the child's run ended (its ended report covers it)" ||
+				!strings.HasPrefix(st[3], "ended:sent:") {
 				t.Fatalf("statuses: %v", st)
 			}
 		})
@@ -320,6 +505,41 @@ func TestLeadWaitingOnOwnJobIsNotWaitingOnOwner(t *testing.T) {
 	}
 	if _, err := x.h.SetWaitingOn(as(owner), contracts.SetWaitingOnRequest{Mutation: contracts.Mutation{OperationID: "op_synth-wait-owner"}, What: "x"}); !contracts.IsCode(err, contracts.ErrForbidden) {
 		t.Fatalf("owner call: %v", err)
+	}
+}
+
+// A lead whose wait's turn ended with a background task running, then
+// resumed from that task's notification: the later turn's end is checked
+// as usual (the wait belonged to the earlier turn).
+func TestLeadWaitEndsAtBackgroundStop(t *testing.T) {
+	x := newHarness(t)
+	x.connect(nodeMac, 0)
+	x.h.childSummary = func(ctx context.Context, sessionID, runID string) (string, error) { return "Should I merge it?", nil }
+	lead := x.start(owner, "op_synth-lead", nodeMac)
+	r := *x.session(lead.Session.SessionID).Run
+	r.State = contracts.RunRunning
+	x.report(nodeMac, contracts.ReportRun, r)
+	if _, err := x.h.SetWaitingOn(as(sesPrincipal(lead.Session.SessionID)), contracts.SetWaitingOnRequest{
+		Mutation: contracts.Mutation{OperationID: "op_synth-wait"}, What: "CI", Quiet: true}); err != nil {
+		t.Fatal(err)
+	}
+	waits := func() (n int) {
+		x.db.QueryRow(`SELECT COUNT(*) FROM lead_waits`).Scan(&n)
+		return n
+	}
+	for _, st := range []contracts.RunState{contracts.RunWaitingBackground, contracts.RunRunning} {
+		r.State = st
+		x.report(nodeMac, contracts.ReportRun, r)
+	}
+	if n := waits(); n != 0 {
+		t.Fatalf("checked while waiting on its own job: %d", n)
+	}
+	r.State = contracts.RunWaitingInput
+	x.report(nodeMac, contracts.ReportRun, r)
+	var turn int64
+	x.db.QueryRow(`SELECT turn_seq FROM lead_waits`).Scan(&turn)
+	if n := waits(); n != 1 || turn != 2 {
+		t.Fatalf("the resumed turn's end: %d checks, turn %d", n, turn)
 	}
 }
 

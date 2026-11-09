@@ -61,6 +61,12 @@ func markNamed(ctx context.Context, q querier, assignmentID string) error {
 }
 
 // markPinned records a strict explicit pin on a run's assignment.
+// assignmentFlags reads the pinned and named flags of run's assignment.
+func assignmentFlags(ctx context.Context, q querier, runID string) (pinned, named bool, err error) {
+	err = q.QueryRowContext(ctx, `SELECT pinned, named FROM accounts_assignment WHERE run_id=?`, runID).Scan(&pinned, &named)
+	return pinned, named, err
+}
+
 func markPinned(ctx context.Context, q querier, assignmentID string) error {
 	_, err := q.ExecContext(ctx, `UPDATE accounts_assignment SET pinned=1 WHERE assignment_id=?`, assignmentID)
 	return err
@@ -620,6 +626,30 @@ func countSwitches(ctx context.Context, q querier, sessionID string, since time.
 		return 0, time.Time{}, err
 	}
 	return n, pt(last), nil
+}
+
+// sessionSwitches lists one session's automatic account switches (the
+// plans countSwitches counts) planned at or after since, oldest first.
+func sessionSwitches(ctx context.Context, q querier, sessionID string, since time.Time) ([]contracts.FallbackPlan, error) {
+	rows, err := q.QueryContext(ctx, `SELECT body FROM accounts_fallback
+		WHERE session_id=? AND planned_at >= ? AND json_extract(body,'$.outcome') IN (?,?) AND COALESCE(json_extract(body,'$.reason'),'') NOT LIKE ?
+		ORDER BY planned_at`, sessionID, ft(since), string(contracts.FallbackNativeResume), string(contracts.FallbackHandoff), ProactivePrefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []contracts.FallbackPlan
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		var p contracts.FallbackPlan
+		if json.Unmarshal([]byte(body), &p) == nil {
+			out = append(out, p)
+		}
+	}
+	return out, rows.Err()
 }
 
 // switchedFromAccounts returns the accounts automatic switches moved

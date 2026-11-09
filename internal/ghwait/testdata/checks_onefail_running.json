@@ -1,0 +1,4 @@
+{"total_count":3,"check_runs":[
+{"id":101,"name":"lint","status":"completed","conclusion":"success","html_url":"https://github.com/synth-org/synth-repo/actions/runs/900/job/101","app":{"slug":"github-actions"}},
+{"id":102,"name":"Run Tests shard 3/8","status":"completed","conclusion":"failure","html_url":"https://github.com/synth-org/synth-repo/actions/runs/900/job/102","app":{"slug":"github-actions"}},
+{"id":103,"name":"web","status":"in_progress","conclusion":null,"html_url":"https://github.com/synth-org/synth-repo/actions/runs/900/job/103","app":{"slug":"github-actions"}}]}

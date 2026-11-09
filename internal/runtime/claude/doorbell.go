@@ -73,8 +73,9 @@ var PyreMessagingAllowedTools = []string{
 	"mcp__pyre__reparent_session", // W-reparent: hand sessions to another parent (hub-enforced)
 	// W-asks (I30): decisions go to the owner as asks, never plain mail; a
 	// prompt here would itself need the owner. The hub redirects a child's
-	// ask to its parent and lets a session withdraw only its own asks.
-	"mcp__pyre__ask_owner", "mcp__pyre__find_asks", "mcp__pyre__withdraw_ask",
+	// ask to its parent and lets a session withdraw, or record the owner's chat
+	// answer to, only its own asks.
+	"mcp__pyre__ask_owner", "mcp__pyre__find_asks", "mcp__pyre__answer_ask", "mcp__pyre__withdraw_ask",
 	// W-grants: proposing a standing grant or a project fact only files an
 	// owner ask (the hub records it if he approves, with his own answer);
 	// listing is own project/tree only and revoking only narrows. Creating
@@ -82,7 +83,7 @@ var PyreMessagingAllowedTools = []string{
 	// hub refuses sessions anyway).
 	"mcp__pyre__propose_grant", "mcp__pyre__propose_fact", "mcp__pyre__list_grants", "mcp__pyre__revoke_grant",
 	// W-web-inbox: a lead keeps its project's page current (hub-enforced:
-	// owner or a top-level session in the project).
+	// owner or a lead of the project: no parent, or a parent outside it).
 	"mcp__pyre__update_project_page", "mcp__pyre__get_project_page",
 	// Setup review F5: a session marks its own turn as waiting on its own
 	// job (hub: itself only).
@@ -91,6 +92,10 @@ var PyreMessagingAllowedTools = []string{
 	// prompt; reading is harmless and updating is hub-limited to the owner
 	// and the triage session.
 	"mcp__pyre__report_issue", "mcp__pyre__list_issues", "mcp__pyre__get_issue", "mcp__pyre__update_issue",
+	// Node avoid flags: keeping new work off a machine for a while stops
+	// nothing that runs, always lifts by itself (at most 7 days), and the
+	// hub keeps a session from clearing or weakening the owner's flag.
+	"mcp__pyre__avoid_node",
 }
 
 // runAllowedTools is the permissions.allow list written to every run's

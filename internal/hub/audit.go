@@ -209,6 +209,27 @@ func (h *Hub) auditEvent(ctx context.Context, tx *sql.Tx, ev contracts.Event) {
 			reason += ": " + u.Detail
 		}
 		h.auditTx(ctx, tx, auditRec{Action: contracts.AuditNodeUpdateFailed, Automatic: true, NodeID: node, To: to, Reason: reason, At: ev.OccurredAt})
+	case contracts.EvSecurityAlert:
+		var a contracts.SecurityAlert
+		if json.Unmarshal(ev.Payload, &a) != nil || a.AlertID == "" {
+			return
+		}
+		node := nodeOfOrigin(ev.Origin)
+		sid := firstNonEmpty(a.SessionID, ev.SessionID)
+		if a.RunID != "" {
+			if run, err := h.getRun(ctx, tx, a.RunID); err == nil {
+				if run.NodeID != node && strings.HasPrefix(ev.Origin, "node:") {
+					return // another node's run
+				}
+				sid = run.SessionID
+			}
+		}
+		reason := a.Severity + " " + a.Rule + ": " + a.Reason
+		if a.Command != "" {
+			reason += "; command: " + a.Command
+		}
+		h.auditTx(ctx, tx, auditRec{Action: contracts.AuditSessionSecretEgress, Automatic: true, NodeID: node, SessionID: sid, RunID: a.RunID,
+			To: a.Severity, Reason: reason, At: ev.OccurredAt, Dedupe: "security:" + a.AlertID})
 	case contracts.EvNodeAutomation:
 		var a contracts.NodeAutomation
 		if json.Unmarshal(ev.Payload, &a) != nil {
@@ -228,6 +249,14 @@ func (h *Hub) auditEvent(ctx context.Context, tx *sql.Tx, ev contracts.Event) {
 			action = contracts.AuditNodeBackgroundWake
 		case contracts.AutomationOnboardingAnswered:
 			action = contracts.AuditNodeOnboardingAnswered
+		case contracts.AutomationStopDeferred:
+			action = contracts.AuditNodeStopDeferred
+		case contracts.AutomationStopResumed:
+			action = contracts.AuditNodeStopResumed
+		case contracts.AutomationMemoryGuardKill:
+			action = contracts.AuditNodeMemoryGuardKill
+		case contracts.AutomationMoveHeld:
+			action = contracts.AuditNodeMoveHeld
 		default:
 			return
 		}
@@ -244,8 +273,12 @@ func (h *Hub) auditEvent(ctx context.Context, tx *sql.Tx, ev contracts.Event) {
 		if sid == "" {
 			sid = ev.SessionID
 		}
+		dedupe := action + ":" + a.RunID
+		if a.RunID == "" || action == contracts.AuditNodeMemoryGuardKill {
+			dedupe = action + ":" + ev.EventID // a sweep's thread names no run; a run may lose several processes
+		}
 		h.auditTx(ctx, tx, auditRec{Action: action, Automatic: true, NodeID: node, SessionID: sid, RunID: a.RunID, Reason: a.Detail,
-			At: ev.OccurredAt, Dedupe: action + ":" + a.RunID})
+			At: ev.OccurredAt, Dedupe: dedupe})
 	}
 }
 

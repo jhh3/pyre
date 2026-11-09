@@ -302,7 +302,7 @@ func (l *LocalAPI) SendMessage(ctx context.Context, r contracts.SendMessageReque
 	// A stable message ID is fixed before the first attempt so a retry
 	// through the outbox can never create a second logical message.
 	if r.MessageID == "" {
-		r.MessageID = contracts.NewID(contracts.PrefixMessage)
+		r.MessageID = opMessageID(p, r.OperationID)
 	}
 	var pending int
 	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_outbox WHERE state='pending'`).Scan(&pending); err != nil {
@@ -331,6 +331,17 @@ func (l *LocalAPI) SendMessage(ctx context.Context, r contracts.SendMessageReque
 	}
 	d.kickOutbox()
 	return l.outboxView(o), nil
+}
+
+// opMessageID derives the message ID for a send that names none from its
+// sender and operation ID, so every attempt of one operation reaches the hub
+// as the same request: a client retry after a lost or late reply, or a
+// rerun with an explicit operation ID. A fresh ID per attempt changed the
+// request body, and the hub answered the caller's own retry with "operation_id
+// reused with a different request body" after the first attempt had landed.
+func opMessageID(p contracts.Principal, opID string) string {
+	t, _ := contracts.IDTime(opID)
+	return contracts.DerivedID(contracts.PrefixMessage, t, string(p.Kind)+":"+p.ID+"\x00"+opID)
 }
 
 func (l *LocalAPI) outboxByOp(ctx context.Context, opID string) (outboxRow, bool, error) {

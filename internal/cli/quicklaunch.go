@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +55,14 @@ type QuickParams struct {
 	Progress func(string) `json:"-"`
 	// HarnessArgs: extra harness arguments (StartParams.HarnessArgs).
 	HarnessArgs []string `json:"harness_args,omitempty"`
+	// IgnoreAvoid: StartParams.IgnoreAvoid.
+	IgnoreAvoid bool `json:"ignore_avoid,omitempty"`
+	// Force: StartParams.Force.
+	Force bool `json:"force,omitempty"`
+	// FallbackHarness: StartParams.FallbackHarness.
+	FallbackHarness string `json:"fallback_harness,omitempty"`
+	// Needs: StartParams.Needs.
+	Needs []string `json:"needs,omitempty"`
 }
 
 // QuickLaunchResult is `pyre new --json` output: the start response plus
@@ -286,6 +296,17 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 		connected[n.NodeID] = n.Connection.State == c.ConnConnected
 		names[n.NodeID] = n.Name
 	}
+	if filterNode == "" && len(p.Needs) > 0 {
+		// Only machines with every need are candidates (needs.go).
+		keep, err := o.placeNeeds(ctx, nodes.Items, p.Needs)
+		if err != nil {
+			return res, err
+		}
+		nodes.Items = keep
+		for id := range connected {
+			connected[id] = slices.ContainsFunc(keep, func(n c.Node) bool { return n.NodeID == id })
+		}
+	}
 	// Each spec is a repository some machine has indexed, else one from
 	// the global catalog (GitHub), else an owner/name or clone URL.
 	type choice struct {
@@ -386,7 +407,8 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 				nodeID = id
 				// Several machines hold them all: the least loaded one
 				// (placement.go); recency only breaks ties.
-				if pl, perr := o.placeAmong(ctx, nodes.Items, p.Harness, p.Account, p.Ambient, false, repoindex.Machines(chosen, connected), p.Model != "" || p.Effort != ""); perr == nil {
+				if pl, perr := o.placeAmong(ctx, nodes.Items, p.Harness, p.Account, p.Ambient, false, repoindex.Machines(chosen, connected), p.Model != "" || p.Effort != "",
+					o.avoidProjectFor(ctx, nodes.Items, ""), p.IgnoreAvoid, p.Force, p.FallbackHarness != ""); perr == nil {
 					nodeID = pl.NodeID
 					notePlacement(ctx, pl)
 				}
@@ -428,6 +450,15 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 	opID := p.OperationID
 	if opID == "" {
 		opID = c.NewID(c.PrefixOperation)
+	}
+	// The account checks run before any clone or worktree: a launch they
+	// refuse leaves nothing behind, and one they switch to the fallback
+	// harness starts that harness in the worktree (iss_…).
+	sp := StartParams{Node: nodeID, Harness: p.Harness, Prompt: p.Prompt, Title: p.Title,
+		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags, OperationID: opID, HarnessArgs: p.HarnessArgs,
+		IgnoreAvoid: p.IgnoreAvoid, Force: p.Force, FallbackHarness: p.FallbackHarness, Needs: p.Needs}
+	if err := o.launchChecks(ctx, nodeID, &sp); err != nil {
+		return res, err
 	}
 	var paths []string
 	for i, ch := range choices {
@@ -503,16 +534,72 @@ func (o *Ops) QuickLaunch(ctx context.Context, p QuickParams, pick RepoPicker) (
 		res.Worktrees = &wt
 		cwd = wt.Cwd
 	}
-	start, err := o.StartSession(ctx, StartParams{Node: nodeID, Harness: p.Harness, Cwd: cwd, Prompt: p.Prompt, Title: p.Title,
-		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags, OperationID: opID, HarnessArgs: p.HarnessArgs})
+	sp.Cwd = cwd
+	start, err := o.StartSession(ctx, sp)
+	if err != nil && res.Worktrees != nil {
+		err = keptWorktrees(err, *res.Worktrees, opID)
+	}
 	res.StartSessionResponse = start
+	res.Cwd = cwd
 	if res.Worktrees != nil {
 		res.Warnings = append(res.Warnings, res.Worktrees.Warnings...) // start_session callers see them too
+		res.Branch = res.Worktrees.Branch
 	}
 	if err == nil && res.Worktrees != nil {
 		o.claimWorktrees(ctx, nodeID, *res.Worktrees, start.Session.Session.SessionID, opID+".claim")
 	}
 	return res, err
+}
+
+// launchChecks runs StartSession's account checks for a launch on nodeID
+// before a quick launch clones or creates worktrees: the room check
+// (checkRoom), the Codex preflight (which may switch p to the fallback
+// harness on the same node) and the model for the harness that starts. The
+// StartSession that follows repeats them on the updated p, where they pass
+// unchanged.
+func (o *Ops) launchChecks(ctx context.Context, nodeID string, p *StartParams) error {
+	if err := o.checkNeeds(ctx, nodeID, p.Needs); err != nil { // needs.go
+		return err
+	}
+	if err := o.checkRoom(ctx, nodeID, p); err != nil { // placement.go
+		return err
+	}
+	requested := p.Harness
+	if err := o.harnessPreflight(ctx, &nodeID, p); err != nil { // ops_harnessfallback.go
+		return err
+	}
+	_, err := o.nodeModelArgs(ctx, nodeID, requested, p) // drops a Codex model from a Claude fallback
+	return err
+}
+
+// keptWorktrees says, in a start that failed after its fresh worktrees were
+// created, that they exist and are kept: a retry with the same operation ID
+// gets the same worktrees back (the hub returns the recorded worktree.create
+// result) and starts the session in them. They are not removed here: the
+// node removes only a session's worktrees, and none was started.
+func keptWorktrees(err error, wt c.WorktreeCreateResult, opID string) error {
+	e := c.AsError(err)
+	out := *e
+	out.Details = maps.Clone(e.Details)
+	var parts []string
+	var list []map[string]string
+	for _, w := range wt.Worktrees {
+		at := ""
+		if w.Head != "" {
+			at = " at " + shortHead(w.Head)
+		}
+		parts = append(parts, w.Path+" (branch "+w.Branch+at+")")
+		list = append(list, map[string]string{"path": w.Path, "branch": w.Branch, "head": w.Head})
+	}
+	out.Message += fmt.Sprintf("; the fresh worktree %s was created and is kept: a retry with operation_id %s reuses it", strings.Join(parts, ", "), opID)
+	return out.WithDetail("worktrees", list).WithDetail("operation_id", opID)
+}
+
+func shortHead(h string) string {
+	if len(h) > 10 {
+		return h[:10]
+	}
+	return h
 }
 
 // claimWorktrees names the session started in fresh worktrees in their
@@ -581,7 +668,8 @@ func (o *Ops) folderLaunch(ctx context.Context, p QuickParams) (QuickLaunchResul
 	}
 	res.Folder = folder
 	start, err := o.StartSession(ctx, StartParams{Node: nodeID, Harness: p.Harness, Cwd: folder, Prompt: p.Prompt, Title: p.Title,
-		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags, OperationID: opID, HarnessArgs: p.HarnessArgs})
+		Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags, OperationID: opID, HarnessArgs: p.HarnessArgs,
+		IgnoreAvoid: p.IgnoreAvoid, Force: p.Force, Needs: p.Needs})
 	res.StartSessionResponse = start
 	return res, err
 }
@@ -639,14 +727,20 @@ ambiguous name asks you to choose (or lists the choices when not on a
 terminal). The machine defaults to where the repository exists: the least
 loaded of those machines (CPU, memory, swap, live runs; recency breaks ties),
 named on stderr with the reason; @machine picks one. Claude is the
-default harness; the rest of the line is the first prompt.
+default harness; the rest of the line is the first prompt. For shell it is a
+command, typed into the shell once its rc files have run, then Enter (words
+are joined with single spaces; use --prompt for quoting your local shell
+would strip).
 
 The session starts in the repository's main checkout: the agent decides
 whether to make its own worktree (Claude Code makes them under
 .claude/worktrees). --fresh starts it in a new worktree instead, on a branch
 named from the prompt or title (pyre/fix-share-link-redirect, deduplicated),
-in the repository's worktree folder (<repo>/.worktrees/, or an existing
-<repo>-worktrees/ next to it). --branch names that branch (implies --fresh).
+in <worktree root>/<repo>/<slug> (the machine's pyred --worktree-root,
+default ~/worktrees). --branch names that branch exactly (implies --fresh)
+and the folder <worktree root>/<repo>/<branch> ("/" read as "-"); a branch
+that already exists (locally, in a worktree or on origin) or a folder
+already there fails the launch instead of picking another name.
 The new branch starts at origin's default branch, fetched first (never the
 main checkout's possibly stale local branch), and tracks nothing: push it
 with git push -u origin <branch>. A failed fetch stops the launch; a
@@ -751,6 +845,9 @@ Examples:
 	f.StringVar(&p.Title, "title", "", "session title (default: automatic)")
 	f.StringVar(&p.Prompt, "prompt", "", "first prompt (- reads stdin), instead of trailing words")
 	f.StringSliceVar(&p.Tags, "tag", nil, "tags")
+	f.BoolVar(&p.IgnoreAvoid, "ignore-avoid", false, "start on a machine with a hard avoid flag anyway (see pyre node avoid)")
+	f.StringArrayVar(&p.Needs, "needs", nil, "a tool (doppler, gcloud, docker, ...) or path (/... or ~/...) the task cannot run without (repeatable): only machines with every one are used")
+	f.BoolVar(&p.Force, "force", false, "start on a machine where every account for the harness (its own login included) is at its limit anyway (its turns fail until a reset)")
 	root.AddCommand(cmd)
 
 	var node string
@@ -940,6 +1037,9 @@ func (o *Ops) startFromRepos(ctx context.Context, p StartParams) (c.StartSession
 	}
 	res, err := o.QuickLaunch(ctx, QuickParams{Repos: repos, Node: p.Node, Harness: p.Harness, Prompt: p.Prompt, Title: p.Title,
 		Fresh: p.Fresh, Branch: branch, Account: p.Account, Ambient: p.Ambient, Permissions: p.Permissions, Model: p.Model, Effort: p.Effort, Tags: p.Tags,
-		OperationID: p.OperationID, HarnessArgs: p.HarnessArgs}, nil)
+		OperationID: p.OperationID, HarnessArgs: p.HarnessArgs, IgnoreAvoid: p.IgnoreAvoid, Force: p.Force, FallbackHarness: p.FallbackHarness, Needs: p.Needs}, nil)
+	if res.Placement != nil {
+		notePlacement(ctx, *res.Placement) // the caller's result says where and why (a fallback harness too)
+	}
 	return res.StartSessionResponse, err
 }

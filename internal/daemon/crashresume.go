@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -37,6 +38,10 @@ import (
 // crash loop is not resumed forever). A run whose stop was requested
 // (adapterDataStopRequested) is never resumed. Sessions without a parent
 // are resumed first, then their children, one launch at a time.
+//
+// Monitors (shell sessions running `pyre monitor run`) are relaunched the
+// same way with their recorded command line instead of a native resume,
+// and get no note (monitorrelaunch.go).
 
 const (
 	crashResumeActor         = "crash-resume"
@@ -70,13 +75,16 @@ func (d *Daemon) crashResumeCandidate(rec runRecord) (bool, string) {
 	if !slices.Contains(crashResumeLive, r.State) {
 		return false, "last state " + string(r.State)
 	}
-	switch r.Harness {
-	case contracts.HarnessShell:
+	monitor := monitorRelaunchable(rec.Session, &r)
+	switch {
+	case r.Harness == contracts.HarnessShell && rec.Session.IsMonitor() && !monitor:
+		return false, "monitor started before Pyre recorded monitor commands; re-create it with pyre monitor add"
+	case r.Harness == contracts.HarnessShell && !monitor:
 		return false, "shell sessions do not resume"
-	case contracts.HarnessCodex:
+	case r.Harness == contracts.HarnessCodex:
 		return false, "codex recovery restarts its own runs; not found means stopped or thread gone"
 	}
-	if !contracts.HasCap(r.Capabilities, contracts.CapResumeNative) {
+	if !monitor && !contracts.HasCap(r.Capabilities, contracts.CapResumeNative) {
 		return false, "harness does not resume natively"
 	}
 	if r.AdapterData[adapterDataMode] == modeHeadless {
@@ -108,8 +116,20 @@ func (d *Daemon) clearStopRequested(ctx context.Context, lr *liveRun) {
 }
 
 func (d *Daemon) setStopRequested(ctx context.Context, lr *liveRun, v string) bool {
+	return d.putAdapterData(ctx, lr, adapterDataStopRequested, v, func(cur string) bool { return (cur != "") == (v != "") })
+}
+
+// setAdapterData sets (v != "") or removes one Run.AdapterData key of a
+// live run and stores the run, unless it already reads v.
+func (d *Daemon) setAdapterData(ctx context.Context, lr *liveRun, key, v string) {
+	d.putAdapterData(ctx, lr, key, v, func(cur string) bool { return cur == v })
+}
+
+// putAdapterData sets or removes key unless keep(current value) says to
+// leave it, and reports whether it changed it.
+func (d *Daemon) putAdapterData(ctx context.Context, lr *liveRun, key, v string, keep func(cur string) bool) bool {
 	lr.mu.Lock()
-	if (lr.rec.Run.AdapterData[adapterDataStopRequested] != "") == (v != "") {
+	if keep(lr.rec.Run.AdapterData[key]) {
 		lr.mu.Unlock()
 		return false
 	}
@@ -118,15 +138,15 @@ func (d *Daemon) setStopRequested(ctx context.Context, lr *liveRun, v string) bo
 		ad[k] = val
 	}
 	if v == "" {
-		delete(ad, adapterDataStopRequested)
+		delete(ad, key)
 	} else {
-		ad[adapterDataStopRequested] = v
+		ad[key] = v
 	}
 	lr.rec.Run.AdapterData = ad
 	rec := lr.rec
 	lr.mu.Unlock()
 	if err := sqlitex.Tx(ctx, d.db, func(tx *sql.Tx) error { return putRunTx(ctx, tx, rec, d.now()) }); err != nil {
-		d.noteErr("record stop request for run %s: %v", rec.Run.RunID, err)
+		d.noteErr("record %s for run %s: %v", key, rec.Run.RunID, err)
 	}
 	return true
 }
@@ -321,12 +341,27 @@ func (d *Daemon) crashStop(ctx context.Context, cmd contracts.NodeCommand, rc co
 // when the link comes up) for up to crashHubWait, then are left ended:
 // never resumed blind, since an archive, a stop or a resume elsewhere may
 // have happened meanwhile. A child waits while its parent does.
-func (d *Daemon) crashResumeAll(ctx context.Context, recs []runRecord, aliveAt time.Time) {
+//
+// inPlace are recovered runs a reboot restarted in place (interrupted.go):
+// nothing is launched for them, but they get the same hub check and note.
+// Every resume decision is recorded on the dead run (recordInterruptOutcome)
+// for the parent's interrupted report.
+func (d *Daemon) crashResumeAll(ctx context.Context, recs, inPlace []runRecord, aliveAt time.Time) {
+	same := map[string]bool{}
+	for _, rec := range inPlace {
+		same[rec.Run.RunID] = true
+	}
+	recs = append(slices.Clone(recs), inPlace...)
 	crashResumeOrder(recs) // registered in d.crash by recoverRuns
 	kick := d.crash.kicks()
 	deadline := time.Now().Add(crashHubWait)
 	launched := 0
 	pending := recs
+	leftExited := func(rec runRecord, why string) {
+		if !same[rec.Run.RunID] {
+			d.recordInterruptOutcome(ctx, rec.Run.RunID, contracts.InterruptLeftExited, why, "")
+		}
+	}
 	for len(pending) > 0 {
 		var retry []runRecord
 		waiting := map[string]bool{}
@@ -337,6 +372,7 @@ func (d *Daemon) crashResumeAll(ctx context.Context, recs []runRecord, aliveAt t
 			log := d.cfg.Logger.With("session", rec.Run.SessionID, "run", rec.Run.RunID)
 			if d.crash.stopped(rec.Run.RunID) {
 				log.Info("crash resume: skipped", "reason", "a stop for the run arrived after the restart")
+				leftExited(rec, "a stop for the run arrived after the restart")
 				continue
 			}
 			if p := rec.Session.Parent(); p != "" && waiting[p] {
@@ -350,6 +386,19 @@ func (d *Daemon) crashResumeAll(ctx context.Context, recs []runRecord, aliveAt t
 			}
 			if hv.skip != "" {
 				log.Info("crash resume: skipped", "reason", hv.skip)
+				leftExited(rec, hv.skip)
+				continue
+			}
+			died := diedAt(rec, aliveAt)
+			monitor := monitorRelaunchable(rec.Session, &rec.Run)
+			if same[rec.Run.RunID] {
+				// Restarted in place by its adapter: only the note.
+				rec, drained := rec, hv.drained || monitor
+				d.asyncWG.Add(1)
+				go func() {
+					defer d.asyncWG.Done()
+					d.crashResumeFollow(ctx, rec.Run.SessionID, rec.Run.RunID, rec.Run.RunID, died, drained)
+				}()
 				continue
 			}
 			if launched > 0 {
@@ -362,22 +411,33 @@ func (d *Daemon) crashResumeAll(ctx context.Context, recs []runRecord, aliveAt t
 			launched++
 			d.crash.launching(rec.Run.RunID)
 			policy := crashResumePolicy(rec.Run)
+			kind := contracts.ContinuationNativeResume
+			if monitor {
+				kind = contracts.ContinuationFresh // relaunched with its recorded command (monitorrelaunch.go)
+			}
 			newRun, _, err := d.StartContinuation(ctx, ContinuationRequest{SessionID: rec.Run.SessionID, PreviousRunID: rec.Run.RunID,
-				Kind: contracts.ContinuationNativeResume, Reason: "pyred restarted after the run's process died", NativeOnly: true,
+				Kind: kind, Reason: "pyred restarted after the run's process died", NativeOnly: true,
 				Policy: &policy, Actor: crashResumeActor})
 			if err != nil {
 				// Left ended, as before crash resume existed; pyre node resume or
 				// pyre resume can still bring it back.
 				d.noteErr("crash resume of session %s (run %s) failed: %v", rec.Run.SessionID, rec.Run.RunID, err)
+				leftExited(rec, "the resume failed: "+contracts.AsError(err).Message)
 				continue
 			}
 			d.crash.launched(rec.Run.RunID, newRun)
-			log.Info("crash resume: resumed natively", "new_run", newRun)
-			rec, died, drained := rec, diedAt(rec, aliveAt), hv.drained
+			if monitor {
+				log.Info("crash resume: monitor relaunched", "new_run", newRun)
+			} else {
+				log.Info("crash resume: resumed natively", "new_run", newRun)
+			}
+			d.recordInterruptOutcome(ctx, rec.Run.RunID, contracts.InterruptResumed, "", newRun)
+			// A monitor gets no note: a message would be typed into its shell.
+			rec, quiet := rec, hv.drained || monitor
 			d.asyncWG.Add(1)
 			go func() {
 				defer d.asyncWG.Done()
-				d.crashResumeFollow(ctx, rec.Run.SessionID, rec.Run.RunID, newRun, died, drained)
+				d.crashResumeFollow(ctx, rec.Run.SessionID, rec.Run.RunID, newRun, died, quiet)
 			}()
 		}
 		if len(retry) == 0 {
@@ -386,6 +446,7 @@ func (d *Daemon) crashResumeAll(ctx context.Context, recs []runRecord, aliveAt t
 		if time.Now().After(deadline) {
 			for _, rec := range retry {
 				d.noteErr("crash resume of session %s (run %s): hub unreachable for %s; left ended, not resumed without the hub's view", rec.Run.SessionID, rec.Run.RunID, crashHubWait)
+				leftExited(rec, fmt.Sprintf("the hub could not be reached for %s to confirm the session should resume", crashHubWait))
 			}
 			return
 		}
@@ -469,12 +530,12 @@ func crashHubRetryable(err error) bool {
 
 // crashResumeFollow waits for the resumed run to come up. If a stop for
 // the dead run arrived meanwhile it stops the new run; otherwise (unless
-// the session was drained: pyre node resume sends the owner's note) it
-// sends the session its note through the local API (hub, or the outbox
-// while the hub is unreachable), as the session itself. The note is given
+// quiet: a monitor, or a session drained for a reboot, whose note pyre
+// node resume sends) it sends the session its note through the local API
+// (hub, or the outbox while the hub is unreachable), as the session itself. The note is given
 // up after crashResumeLiveWait; a stop (crashStop promised it) is kept
 // until the run is up or ends, bounded by crashStopWait.
-func (d *Daemon) crashResumeFollow(ctx context.Context, sessionID, oldRun, runID string, died time.Time, drained bool) {
+func (d *Daemon) crashResumeFollow(ctx context.Context, sessionID, oldRun, runID string, died time.Time, quiet bool) {
 	start := time.Now()
 	noNote := false
 	for {
@@ -522,8 +583,8 @@ func (d *Daemon) crashResumeFollow(ctx context.Context, sessionID, oldRun, runID
 	if noNote {
 		return // reported above; a late note would contradict the error
 	}
-	if drained {
-		d.cfg.Logger.Info("crash resume: session was drained for a reboot; the note is left to pyre node resume", "session", sessionID, "run", runID)
+	if quiet {
+		d.cfg.Logger.Info("crash resume: no note (a monitor, or drained for a reboot: pyre node resume sends it)", "session", sessionID, "run", runID)
 		return
 	}
 	tok, ok, err := d.st.tokenForSession(ctx, sessionID)
@@ -535,7 +596,7 @@ func (d *Daemon) crashResumeFollow(ctx context.Context, sessionID, oldRun, runID
 	sctx := WithBearer(contracts.WithPrincipal(ctx, self), tok)
 	req := contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: resumenote.OperationID(sessionID, runID)},
 		MessageID: resumenote.MessageID(sessionID, runID), Recipient: contracts.Address{Kind: contracts.AddrSession, ID: sessionID},
-		Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: resumenote.AfterCrash(died, d.now())}}
+		Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: resumenote.AfterInterrupt(d.interruptNote(ctx, oldRun, runID, died))}}
 	if _, err := d.LocalAPI().SendMessage(sctx, req); err != nil {
 		d.noteErr("crash resume note to session %s: %v", sessionID, err)
 		return

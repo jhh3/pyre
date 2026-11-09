@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -56,11 +57,19 @@ type Resource struct {
 	Mode         Mode      `json:"mode"`
 	FetchedAt    time.Time `json:"fetched_at"`
 	Cached       bool      `json:"cached"`
+	// File is set for file links: the downloaded local path, mime type and size.
+	File *File `json:"file,omitempty"`
+	// Attachments lists files a message or thread read already downloaded.
+	Attachments []File `json:"attachments,omitempty"`
 }
 
 type ResolveOptions struct {
 	Mode       Mode
 	Connection string
+	// Explicit marks a direct request (`outfit get`, MCP get_url) rather than
+	// automatic prompt context: file downloads have no size limit and a
+	// longer deadline.
+	Explicit bool
 }
 
 type Diagnostic struct {
@@ -83,7 +92,11 @@ type candidate struct {
 	url        string
 	arguments  map[string]string
 	mode       Mode
+	explicit   bool
 }
+
+// explicitTimeout bounds explicit resolutions, which may download large files.
+const explicitTimeout = 10 * time.Minute
 
 func (service Service) Resolve(ctx context.Context, prompt string) []Resource {
 	return service.ResolveDetailed(ctx, prompt, ResolveOptions{}).Resources
@@ -97,7 +110,11 @@ func (service Service) ResolveWithMode(ctx context.Context, prompt string, mode 
 }
 
 func (service Service) ResolveDetailed(ctx context.Context, prompt string, options ResolveOptions) Resolution {
-	ctx, cancel := context.WithTimeout(ctx, globalTimeout)
+	timeout := globalTimeout
+	if options.Explicit {
+		timeout = explicitTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	candidates, diagnostics := service.candidates(ctx, extractURLs(prompt), options)
 	if len(candidates) > maxLinks {
@@ -212,7 +229,7 @@ func (service Service) candidates(ctx context.Context, urls []string, options Re
 						inactive = true
 						continue
 					}
-					if !service.Connections.Allows(item.Name) || !service.Connections.AllowsLinks(item.Name) || !service.Connections.AllowsLink(item.Name, resolver.ID) || !service.Connections.AllowsOperation(item.Name, lookup.Operation) {
+					if !service.Connections.Allows(item.Name) || !service.Connections.AllowsLinks(item.Name) || !service.Connections.AllowsLink(item.Name, resolver.ID) || (lookup.Download == "" && !service.Connections.AllowsOperation(item.Name, lookup.Operation)) {
 						policyBlocked = true
 						continue
 					}
@@ -220,7 +237,7 @@ func (service Service) candidates(ctx context.Context, urls []string, options Re
 						modeUnsupported = true
 						continue
 					}
-					if _, ok := runtime.FindOperation(mode, lookup.Operation); !ok {
+					if _, ok := runtime.FindOperation(mode, lookup.Operation); !ok && lookup.Download == "" {
 						tool, err := service.State.Tool(ctx, item.ID, lookup.Operation)
 						if err != nil || tool.Class != "read" {
 							modeUnsupported = true
@@ -231,7 +248,7 @@ func (service Service) candidates(ctx context.Context, urls []string, options Re
 					if options.Mode == ModeHeavy || options.Mode == ModeLight {
 						mode = options.Mode
 					}
-					matches = append(matches, candidate{connection: item, resolver: resolver, lookup: lookup, url: raw, arguments: arguments, mode: mode})
+					matches = append(matches, candidate{connection: item, resolver: resolver, lookup: lookup, url: raw, arguments: arguments, mode: mode, explicit: options.Explicit})
 				}
 			}
 		}
@@ -280,7 +297,7 @@ func (service Service) candidates(ctx context.Context, urls []string, options Re
 func (service Service) resolveOne(ctx context.Context, item candidate) (Resource, error) {
 	if cached, err := service.State.CachedContext(ctx, item.url, item.connection.Name, time.Now()); err == nil {
 		var resource Resource
-		if json.Unmarshal([]byte(cached.Body), &resource) == nil && cacheSatisfies(resource.Mode, item.mode) {
+		if json.Unmarshal([]byte(cached.Body), &resource) == nil && cacheSatisfies(resource.Mode, item.mode) && fileCacheUsable(resource.File, item.explicit) {
 			resource.Mode = item.mode
 			resource.Connection = item.connection.Name
 			resource.Cached = true
@@ -290,6 +307,9 @@ func (service Service) resolveOne(ctx context.Context, item candidate) (Resource
 	limit := item.resolver.Limits.TimeoutMS
 	if limit <= 0 {
 		limit = 10000
+	}
+	if item.lookup.Download != "" {
+		return service.resolveDownload(ctx, item)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, time.Duration(limit)*time.Millisecond)
 	defer cancel()
@@ -317,6 +337,7 @@ func (service Service) resolveOne(ctx context.Context, item candidate) (Resource
 		summaryBytes = 8192
 	}
 	resource.Summary = clip(resource.Summary, summaryBytes)
+	resource.Attachments = downloadedAttachments(result.Data)
 	if item.mode == ModeHeavy {
 		parts := []string{content(result.Data)}
 		for _, read := range item.lookup.HeavyReads {
@@ -335,6 +356,47 @@ func (service Service) resolveOne(ctx context.Context, item candidate) (Resource
 		ttl = 60
 	}
 	_ = service.State.PutContext(ctx, state.ContextItem{Handle: resource.Handle, URL: item.url, ConnectionName: item.connection.Name, ConnectorKey: item.connection.ConnectorKey, Operation: item.lookup.Operation, ResourceType: resource.ResourceType, Title: resource.Title, Body: string(encoded), Arguments: stringArguments(item.arguments), Provenance: map[string]any{"kind": "link", "resolver": item.resolver.ID, "source_url": item.url, "mode": item.mode}, FetchedAt: resource.FetchedAt, ExpiresAt: resource.FetchedAt.Add(time.Duration(ttl) * time.Second)})
+	return resource, nil
+}
+
+// fileCacheUsable keeps a cached file resource only while its download is
+// still on disk, and re-resolves a skipped one for an explicit request.
+func fileCacheUsable(file *File, explicit bool) bool {
+	if file == nil {
+		return true
+	}
+	if file.Path == "" {
+		return !explicit
+	}
+	_, err := os.Stat(file.Path)
+	return err == nil
+}
+
+func (service Service) resolveDownload(ctx context.Context, item candidate) (Resource, error) {
+	var resource Resource
+	var err error
+	switch item.lookup.Download {
+	case "slack-file":
+		resource, err = service.resolveSlackFile(ctx, item, item.explicit)
+	default:
+		err = fmt.Errorf("unknown download kind %s", item.lookup.Download)
+	}
+	if err != nil {
+		return Resource{}, err
+	}
+	resource.Handle = handle(item.connection.Name, item.url)
+	resource.Provider = item.connection.ConnectorKey
+	resource.Connection = item.connection.Name
+	resource.ResourceType = item.resolver.ResourceType
+	resource.URL = item.url
+	resource.Mode = item.mode
+	resource.FetchedAt = time.Now().UTC()
+	encoded, _ := json.Marshal(resource)
+	ttl := item.resolver.Limits.CacheTTLSeconds
+	if ttl <= 0 {
+		ttl = 60
+	}
+	_ = service.State.PutContext(ctx, state.ContextItem{Handle: resource.Handle, URL: item.url, ConnectionName: item.connection.Name, ConnectorKey: item.connection.ConnectorKey, Operation: "download:" + item.lookup.Download, ResourceType: resource.ResourceType, Title: resource.Title, Body: string(encoded), Arguments: stringArguments(item.arguments), Provenance: map[string]any{"kind": "link", "resolver": item.resolver.ID, "source_url": item.url, "mode": item.mode}, FetchedAt: resource.FetchedAt, ExpiresAt: resource.FetchedAt.Add(time.Duration(ttl) * time.Second)})
 	return resource, nil
 }
 
@@ -501,7 +563,24 @@ func render(resources []Resource, contentLimit int) string {
 		if item.UpdatedAt != "" {
 			fmt.Fprintf(&body, "updated: %s\n", text(item.UpdatedAt, 1024))
 		}
-		if item.Summary != "" {
+		if item.File != nil {
+			fmt.Fprintf(&body, "file: %s\n", text(firstNonempty(item.File.Name, item.File.ID), 1024))
+			if item.File.MimeType != "" {
+				fmt.Fprintf(&body, "mime_type: %s\n", text(item.File.MimeType, 256))
+			}
+			fmt.Fprintf(&body, "size_bytes: %d\n", item.File.Size)
+			if item.File.Path != "" {
+				fmt.Fprintf(&body, "local_path: %s\n", text(item.File.Path, 2048))
+				body.WriteString("note: downloaded for you; open local_path with your file Read tool to view it\n")
+			} else {
+				fmt.Fprintf(&body, "not_downloaded: %s\n", text(item.File.Skipped, 512))
+				fmt.Fprintf(&body, "fetch: %s\n", text(item.File.Fetch, 2048))
+			}
+		}
+		for _, file := range item.Attachments {
+			fmt.Fprintf(&body, "attachment: %s (%s, %d bytes) local_path: %s\n", text(firstNonempty(file.Name, file.ID), 256), text(firstNonempty(file.MimeType, "unknown type"), 128), file.Size, text(file.Path, 2048))
+		}
+		if item.Summary != "" && item.File == nil {
 			summaryLimit := 1200
 			if item.Mode == ModeHeavy {
 				summaryLimit = 1600
@@ -646,6 +725,8 @@ func normalize(rule kit.SegmentRule, value string) (string, bool) {
 			return "", false
 		}
 		return trimmed[:10] + "." + trimmed[10:], true
+	case "slack-file":
+		return slackFileID(value)
 	case "opaque-token":
 		return value, len(value) > 0 && len(value) <= 256 && !strings.ContainsAny(value, `/\\`)
 	case "notion-page":

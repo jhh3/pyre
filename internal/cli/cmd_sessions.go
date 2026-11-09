@@ -103,10 +103,11 @@ func (a *App) addSessionCommands(root *cobra.Command) {
 			return nil
 		}),
 	})
-	sessions.AddCommand(a.renameCommand())   // W-names
+	sessions.AddCommand(a.renameCommand()) // W-names
+	sessions.AddCommand(a.repairTitlesCommand())
 	sessions.AddCommand(a.iconCommand())     // W-archive2
 	sessions.AddCommand(a.reparentCommand()) // W-reparent
-	var force, whenDone bool
+	var force, whenDone, includeChildren, cancel bool
 	var archiveWT, pruneWT *worktreeMode // W-quicklaunch
 	archive := &cobra.Command{
 		Use:   "archive [session]...",
@@ -117,9 +118,14 @@ A live session is archived when done (its current turn ends, Pyre stops it
 gracefully, then archives it) when it is the calling session, a session the
 caller started, or --when-done is given; otherwise stop it first
 (pyre stop <session>). --force archives it at once, leaving it running out
-of sight (archiving revokes its Pyre agent tokens). pyre sessions unarchive
-restores one (and cancels a pending archive); pyre sessions ls --all lists
-archived sessions too. --json prints the sessions as an array.`,
+of sight (archiving revokes its Pyre agent tokens). Archiving the calling
+session while sessions it started are still working is refused unless
+--include-children (idle and ended ones are archived with it either way).
+--cancel cancels a pending archive (and the archives it cascaded to)
+without unarchiving; pyre sessions show and ls mark pending archives.
+pyre sessions unarchive restores one (and cancels a pending archive);
+pyre sessions ls --all lists archived sessions too. --json prints the
+sessions as an array.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			if a.opID != "" && len(args) > 1 {
@@ -135,11 +141,14 @@ archived sessions too. --json prints the sessions as an array.`,
 				}
 				args = []string{"self"}
 			}
+			if cancel {
+				return a.cancelArchives(cmd, ops, args)
+			}
 			done := []c.SessionView{}
 			var firstErr error
 			filed := 0
 			for _, ref := range args {
-				sv, err := ops.Archive(cmd.Context(), ArchiveParams{Session: ref, OperationID: a.opID, Force: force, WhenDone: whenDone})
+				sv, err := ops.Archive(cmd.Context(), ArchiveParams{Session: ref, OperationID: a.opID, Force: force, WhenDone: whenDone, IncludeChildren: includeChildren})
 				if r, ok := approvalResult(sv, err); ok { // owner actions: filed, not refused
 					a.warnf("pyre: archive %s: %s", ref, r.Note)
 					filed++
@@ -181,6 +190,8 @@ archived sessions too. --json prints the sessions as an array.`,
 	archiveWT = addWorktreeFlags(archive)
 	archive.Flags().BoolVar(&force, "force", false, "archive even if the session is still live (it keeps running, but its Pyre agent tokens are revoked)")
 	archive.Flags().BoolVar(&whenDone, "when-done", false, "archive a live session when its current turn ends (Pyre stops it gracefully first)")
+	archive.Flags().BoolVar(&includeChildren, "include-children", false, "archiving yourself: also archive sessions you started that are still working")
+	archive.Flags().BoolVar(&cancel, "cancel", false, "cancel a pending archive of the sessions (and of those their archive cascaded to) instead")
 	sessions.AddCommand(archive)
 	sessions.AddCommand(&cobra.Command{
 		Use:   "unarchive <session>",
@@ -292,6 +303,16 @@ them; pyre resume and account switches relaunch with the same arguments.
     --dangerously-load-development-channels plugin:NAME@MARKETPLACE \
     --append-system-prompt-file ~/prompts/agent.md
 
+Shell sessions (--harness shell) start an interactive login shell. --prompt
+CMD is typed into it once its rc files have run, then Enter, exactly as if
+you had typed it: quotes, $ and line breaks reach the shell unchanged, a
+multi-line command stays one command, the shell stays open afterwards, and
+the command is in its history. Arguments after "--" replace the login shell's
+command line instead (-lc 'CMD' runs CMD and exits); give one or the other.
+A shell not ready within 30s (an rc file still running or waiting for input)
+fails the launch without typing anything.
+  pyre start --node nuc --harness shell --cwd ~/src --prompt 'make test 2>&1 | tee log'
+
 --native-resume ID continues an existing Claude conversation started outside
 Pyre (its session id; the transcript must be on the node, e.g. under
 ~/.claude). Stop the original process first: two Claude processes must never
@@ -330,9 +351,15 @@ command exits 7 and names the operation ID; re-running with
 Projects and checkouts (all optional):
   --project P --repo R            run in P's recorded checkout of R on the node
                                   (shared: other sessions may work there too)
+  --project P --repo R --fresh | --branch B
+                                  new isolated worktree at <worktree root>/R/<B>
+                                  on exactly branch B (default pyre/<title slug>),
+                                  made from P's recorded checkout of R: fresh or
+                                  a branch always win over a shared checkout; an
+                                  existing branch or folder fails the launch
   --project P --repo R --worktree B
-                                  new isolated git worktree on branch B, created
-                                  from P's recorded checkout of R on the node
+                                  new or reused git worktree on branch B next to
+                                  P's recorded checkout of R on the node
   --cwd D                         pick one of several recorded checkouts, or use
                                   an unrecorded directory
 Record checkouts with ` + "`pyre project update P --checkout node:/abs/path:R:shared`" + `.
@@ -366,7 +393,7 @@ can tell them what you will change.`,
 				return err
 			}
 			a.notePlaced(&pl)
-			a.warnSharedCheckout(cmd.Context(), ops, res, sp.Worktree != "")
+			a.warnSharedCheckout(cmd.Context(), ops, res, sp.Worktree != "" || sp.Fresh || sp.Branch != "")
 			launchErr := ops.awaitLaunch(cmd.Context(), &res, launchWait)
 			if err := a.emit(res, func(w io.Writer) {
 				s := res.Session
@@ -402,25 +429,31 @@ can tell them what you will change.`,
 	sf.StringVar(&sp.Project, "project", "", "optional project ID or name")
 	sf.StringVar(&sp.Parent, "parent", "", "make it a child of this session (ID or title); default: the calling agent session, none with the owner's credential")
 	sf.StringVar(&sp.Worktree, "worktree", "", "create/use an isolated git worktree on this branch")
-	sf.StringVar(&sp.Repo, "repo", "", "project repo ID: run in the project's recorded checkout of it on the node (shared), or the --worktree source")
+	sf.StringVar(&sp.Repo, "repo", "", "project repo ID: run in the project's recorded checkout of it on the node (shared), or the source of a --fresh/--branch/--worktree worktree")
+	sf.BoolVar(&sp.Fresh, "fresh", false, "with --project --repo: start in a new worktree at <worktree root>/<repo>/<branch> instead of the recorded (shared) checkout")
+	sf.StringVar(&sp.Branch, "branch", "", "with --project --repo: branch for the fresh worktree (implies --fresh), created with exactly this name; one that already exists fails the launch")
 	sf.StringVar(&sp.Account, "account", "", "explicit account: ID, label or rota name, or a unique prefix (at its limit: the best eligible account instead, unless --strict-account)")
 	sf.BoolVar(&sp.StrictAccount, "strict-account", false, "keep --account even when it is at its limit or ineligible (the launch fails)")
-	sf.StringVar(&sp.FallbackHarness, "fallback-harness", "", "claude: when no Codex (OpenAI) account is free, run on Claude instead (reviews, second opinions); default: fail at once")
+	sf.StringVar(&sp.FallbackHarness, "fallback-harness", "", "claude: when no Codex (OpenAI) account is free, run on Claude instead, at launch or when the run hits a usage limit with no other account (reviews, second opinions); default: fail at once")
 	sf.BoolVar(&sp.Ambient, "ambient", false, "use the node's existing default login (no Pyre account assignment)")
 	sf.StringVar(&sp.Permissions, "permissions", "", "ask (harness approval prompts) or bypass (Claude --dangerously-skip-permissions, Codex no approvals and no sandbox); default: the node's pyred --permissions")
 	sf.StringVar(&sp.Model, "model", "", "model for the session (default: the harness's own; choices: pyre models)")
 	sf.StringVar(&sp.Effort, "effort", "", "reasoning effort: low, medium, high, xhigh, max (Codex also ultra); default: the harness's own")
-	sf.StringVar(&sp.Prompt, "prompt", "", "initial prompt (- reads stdin)")
+	sf.StringVar(&sp.Prompt, "prompt", "", "initial prompt (- reads stdin); shell: a command typed into the shell and run")
 	sf.StringVar(&sp.Title, "title", "", "session title")
 	sf.BoolVar(&sp.IncludeContext, "context", false, "include the bounded project brief at launch")
 	sf.StringSliceVar(&sp.Tags, "tag", nil, "tags")
 	sf.StringArrayVar(&sp.HarnessArgs, "harness-arg", nil, "extra harness argument (repeatable; or put them after --); allowlisted per harness, kept across resumes")
 	sf.StringVar(&sp.NativeResume, "native-resume", "", "continue this existing Claude conversation (session id) started outside Pyre")
 	sf.StringVar(&sp.EnvFile, "env-file", "", "absolute path on the node to KEY=VALUE lines for the harness environment (read on the node at every launch; only the path is recorded)")
+	sf.BoolVar(&sp.Force, "force", false, "start on a node where every account for the harness (its own login included) is at its 5-hour or weekly limit anyway (its turns fail until a reset); default: placement skips such nodes and --node is refused")
+	sf.BoolVar(&sp.IgnoreAvoid, "ignore-avoid", false, "start on a node with a hard avoid flag anyway (only the owner overrides the owner's flag; see pyre node avoid)")
+	sf.StringArrayVar(&sp.Needs, "needs", nil, "a tool (doppler, gcloud, docker, psql, ...) or path (/... or ~/...) the task cannot run without (repeatable): placement uses only machines that have every one, and --node without one is refused; `pyre nodes` shows each machine's tools")
 	sf.BoolVar(&dryRun, "dry-run", false, "check the request and print it (canonical harness arguments) without starting")
 	sf.DurationVar(&launchWait, "wait", a.LaunchWait, "wait up to this long for the launch outcome; a launch that fails exits 1 with the reason (0: return once the launch is queued)")
 	var noReport bool
 	sf.BoolVar(&noReport, "no-report", false, "do not report back to the starting session (turn finished, needs input, exited)")
+	sf.BoolVar(&sp.NoLead, "no-lead", false, "a bounded worker: never leads its project, even when started from outside it, so it is never asked to keep the project page (tag "+c.TagRoleWorker+")")
 	start.PreRun = func(cmd *cobra.Command, args []string) {
 		if noReport {
 			f := false
@@ -458,22 +491,38 @@ uses the relay even when ssh would work.`,
 	var rp ReadParams
 	var follow, screen bool
 	read := &cobra.Command{
-		Use:   "read <session> [--tail N] [--follow]",
+		Use:   "read <session> [--tail N] [--follow] [--seq N] [--full]",
 		Short: "Read a session's bounded, redacted transcript",
-		Args:  cobra.ExactArgs(1),
+		Long: `Read a session's bounded, redacted transcript.
+
+Each entry's text is cut at about 2000 bytes ("…[N bytes truncated]").
+--full returns the whole text of the entries read instead (redacted; at
+most 256 KB per entry and 1 MB of full text per read, newest entries
+first; the output says when a bound kept an entry short). --seq N reads
+the one entry numbered N (seqs come from a read or a search hit), e.g. a
+child's final report:
+
+  pyre read <session> --tail 3 --full
+  pyre read <session> --seq 842 --full`,
+		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
+			if rp.Seq != 0 && (rp.Tail != 0 || rp.Cursor != "" || follow) {
+				return withStatus(ExitUsage, errors.New("--seq reads one entry; leave out --tail, --cursor and --follow"))
+			}
 			ops, err := a.connect()
 			if err != nil {
 				return err
 			}
 			rp.Session = args[0]
-			if rp.Tail == 0 && rp.Cursor == "" {
+			if rp.Tail == 0 && rp.Cursor == "" && rp.Seq == 0 {
 				rp.Tail = 40
 			}
 			return a.read(cmd.Context(), ops, rp, follow, screen)
 		}),
 	}
 	read.Flags().IntVar(&rp.Tail, "tail", 0, "latest N entries (default 40)")
+	read.Flags().Int64Var(&rp.Seq, "seq", 0, "only the entry with this seq")
+	read.Flags().BoolVar(&rp.Full, "full", false, "whole entry text instead of the ~2000-byte cut (256 KB per entry, 1 MB per read)")
 	read.Flags().StringVar(&rp.Cursor, "cursor", "", "continue after a previous next_cursor")
 	read.Flags().StringVar(&rp.Run, "run", "", "a specific run (default current)")
 	read.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new entries")
@@ -520,7 +569,12 @@ uses the relay even when ssh would work.`,
 	resume := &cobra.Command{
 		Use:   "resume <session> [--allow-handoff]",
 		Short: "Start a new run that continues a session (native resume, or explicit handoff)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Start a new run that continues a session: a native resume of the same
+conversation, or with --allow-handoff a reconstructed continuation. A monitor
+(pyre monitor add) whose process died relaunches with its recorded command,
+interval, flags and target on its own machine, keeping its --for deadline and
+last output; one that ended deliberately ends again at once.`,
+		Args: cobra.ExactArgs(1),
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
 			if err != nil {
@@ -730,7 +784,7 @@ func (a *App) read(ctx context.Context, ops *Ops, p ReadParams, follow, screen b
 			return nil
 		case <-t.C:
 		}
-		next, err := ops.ReadSession(ctx, ReadParams{Session: p.Session, Run: p.Run, Cursor: cursor})
+		next, err := ops.ReadSession(ctx, ReadParams{Session: p.Session, Run: p.Run, Cursor: cursor, Full: p.Full})
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -785,6 +839,9 @@ func printSessions(w io.Writer, ss []c.SessionView) {
 		if n := len(s.Monitors); n > 0 {
 			state += fmt.Sprintf(" (watching %d)", n)
 		}
+		if t := archivePendingText(s); t != "" {
+			state += " (" + t + ")"
+		}
 		rows = append(rows, []string{s.Session.SessionID, clip(orDash(s.Session.Title), 32), string(s.Session.Harness), node, state, updated, strPtr(s.Session.ProjectID), attn})
 	}
 	table(w, "ID\tTITLE\tHARNESS\tNODE\tSTATE\tUPDATED\tPROJECT\tATTN", rows)
@@ -803,6 +860,23 @@ func printSessionAcct(w io.Writer, sv c.SessionView, acct string) {
 	}
 	if s.Lineage.ReparentedAt != nil { // W-reparent
 		fmt.Fprintf(w, "  reparented: from %s at %s\n", orDash(s.Lineage.ReparentedFrom), s.Lineage.ReparentedAt.Format(time.RFC3339))
+	}
+	if s.Archived {
+		since := ""
+		if s.ArchivedAt != nil {
+			since = " " + ago(*s.ArchivedAt)
+		}
+		fmt.Fprintf(w, "  archived:%s (pyre sessions unarchive %s, or resume it)\n", since, s.SessionID)
+	}
+	if s.KeptFromAutoArchive(sv.Run) {
+		fmt.Fprintf(w, "  archive:   kept from auto-archive: unarchived %s, after its last run ended; Pyre archives it automatically again only after it runs and ends again\n", ago(*s.UnarchivedAt))
+	}
+	if sv.ArchivePending { // archivepending.go
+		if sv.ArchivePendingWith != "" {
+			fmt.Fprintf(w, "  archive:   pending: archived with %s when its pending archive completes (cancel: pyre sessions archive --cancel %s)\n", sv.ArchivePendingWith, sv.ArchivePendingWith)
+		} else {
+			fmt.Fprintf(w, "  archive:   pending: archives when its current turn ends (cancel: pyre sessions archive --cancel %s)\n", s.SessionID)
+		}
 	}
 	if sv.Attention > 0 {
 		fmt.Fprintf(w, "  attention: %d open item(s) (pyre attention --session %s)\n", sv.Attention, s.SessionID)
@@ -891,6 +965,9 @@ func printSessionAcct(w io.Writer, sv c.SessionView, acct string) {
 }
 
 func printTranscript(w io.Writer, resp c.ReadSessionResponse, screen bool) {
+	if resp.Note != "" {
+		fmt.Fprintf(w, "[%s]\n", resp.Note)
+	}
 	if resp.Gap {
 		fmt.Fprintln(w, "[gap: earlier entries were lost or expired]")
 	}
@@ -900,6 +977,9 @@ func printTranscript(w io.Writer, resp c.ReadSessionResponse, screen bool) {
 			text += " [truncated]"
 		}
 		fmt.Fprintf(w, "%s %-9s %s\n", e.At.Local().Format("15:04:05"), e.Kind, strings.TrimRight(text, "\n"))
+	}
+	if resp.FullNote != "" {
+		fmt.Fprintf(w, "[full: %s]\n", resp.FullNote)
 	}
 	if resp.Freshness.Stale {
 		fmt.Fprintf(w, "[stale: observed %s via %s]\n", ago(resp.Freshness.ObservedAt), resp.Freshness.Source)

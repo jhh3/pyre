@@ -91,20 +91,53 @@ func FreshBase(ctx context.Context, repo, gh string) (FreshStart, error) {
 func fetchOrigin(ctx context.Context, repo, url, gh string, refspec ...string) error {
 	args := append([]string{"fetch", "--quiet", "--no-tags", "origin"}, refspec...)
 	err := runFetch(ctx, repo, args)
-	if err == nil || !strings.HasPrefix(NormalizeRemote(url), "github.com/") || !strings.HasPrefix(strings.TrimSpace(url), "https://") {
+	if err == nil {
+		return nil
+	}
+	cred, ok := ghCredential(url, gh)
+	if !ok {
 		return err
+	}
+	if err2 := runFetch(ctx, repo, append(cred, args...)); err2 != nil {
+		return err
+	}
+	return nil
+}
+
+// ghCredential is the git -c prefix that authenticates through gh, for an
+// https GitHub remote when gh (or gh on PATH, when empty) exists.
+func ghCredential(url, gh string) ([]string, bool) {
+	if !strings.HasPrefix(NormalizeRemote(url), "github.com/") || !strings.HasPrefix(strings.TrimSpace(url), "https://") {
+		return nil, false
 	}
 	if gh == "" {
 		gh, _ = exec.LookPath("gh")
 	}
 	if gh == "" {
-		return err
+		return nil, false
 	}
 	helper := "!" + strings.ReplaceAll(gh, " ", `\ `) + " auth git-credential"
-	if err2 := runFetch(ctx, repo, append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + helper}, args...)); err2 != nil {
-		return err
+	return []string{"-c", "credential.helper=", "-c", "credential.helper=" + helper}, true
+}
+
+// OriginHasBranch reports whether origin has branch, asked with this
+// machine's credentials (and gh's for an https GitHub remote, like
+// fetchOrigin). An unreachable origin reads as false: the launch's own
+// fetch has already succeeded by the time this is asked.
+func OriginHasBranch(ctx context.Context, repo, gh, branch string) bool {
+	url, err := Git(ctx, repo, "remote", "get-url", "origin")
+	if err != nil || strings.TrimSpace(url) == "" {
+		return false
 	}
-	return nil
+	if _, err := Git(ctx, repo, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
+		return true
+	}
+	args := []string{"ls-remote", "--exit-code", "--heads", "origin", "refs/heads/" + branch}
+	if runFetch(ctx, repo, args) == nil {
+		return true
+	}
+	cred, ok := ghCredential(url, gh)
+	return ok && runFetch(ctx, repo, append(cred, args...)) == nil
 }
 
 func runFetch(ctx context.Context, repo string, args []string) error {

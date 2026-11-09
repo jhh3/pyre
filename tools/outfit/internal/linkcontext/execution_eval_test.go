@@ -188,6 +188,10 @@ func TestBlessedExecutionEvalCoversEveryDeclaredResolver(t *testing.T) {
 	for _, loaded := range packages {
 		for _, resolver := range loaded.Package.Links {
 			key := loaded.Package.Key + "/" + resolver.ID
+			if downloadOnly(resolver) {
+				// Built-in file fetchers are covered by their own fake-provider tests.
+				continue
+			}
 			declared[key] = true
 			if !covered[key] {
 				missing = append(missing, key)
@@ -438,4 +442,13 @@ func installEvalConnection(t *testing.T, store *state.Store, vault *evalVault, c
 		t.Fatal(err)
 	}
 	return loaded.Package, mode
+}
+
+func downloadOnly(resolver kit.LinkResolver) bool {
+	for _, lookup := range resolver.LookupOptions() {
+		if lookup.Download == "" {
+			return false
+		}
+	}
+	return true
 }

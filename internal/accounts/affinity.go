@@ -24,8 +24,11 @@ package accounts
 //
 // "In use elsewhere" comes from the hub's active assignments
 // (AccountView.Assignments; Config.Fleet), read before the selection
-// transaction with a short timeout and cached briefly. Unreachable hub: no
-// spread, only local stickiness and headroom.
+// transaction and cached briefly. The read runs in the background (bounded
+// by fleetFetchTimeout): selection uses the last good view up to
+// fleetStaleFor old while a newer one loads, and waits at most FleetTimeout
+// only when it has none. Unreachable or slow hub: no spread, only local
+// stickiness and headroom.
 //
 // Concurrency: the race is accepted. Two machines resolving at the same
 // moment can both take the same free account (the hub learns of each
@@ -64,6 +67,13 @@ const (
 	defaultFleetTimeout = 2 * time.Second
 	defaultFleetCache   = 5 * time.Second
 	fleetFailCache      = 30 * time.Second
+	// fleetFetchTimeout bounds one background read: a slow hub link (a
+	// relayed connection takes seconds for the account list) still
+	// completes it for the next launch.
+	fleetFetchTimeout = 20 * time.Second
+	// fleetStaleFor is how long the last good view stands in while a
+	// newer read is loading or failed (affinity is a soft preference).
+	fleetStaleFor = 10 * time.Minute
 )
 
 // fleetUse is the hub's view of which other machines run on each account.
@@ -79,36 +89,86 @@ type fleetUse struct {
 
 type fleetCache struct {
 	mu sync.Mutex
-	at time.Time
-	v  *fleetUse
+	at time.Time // when v was read (wall clock)
+	v  *fleetUse // the latest read, failed or not
+	// good is the latest successful read (at goodAt).
+	good   *fleetUse
+	goodAt time.Time
+	// loading closes when the read in flight ends; nil when none is.
+	loading chan struct{}
 }
 
-// fleetView returns the cached or freshly fetched fleet view; nil when no
-// directory is configured.
+// fleetView returns the fleet view for a selection; nil when no directory
+// is configured. It never waits on the hub for longer than FleetTimeout,
+// and not at all while a good view up to fleetStaleFor old exists (the
+// refresh then runs in the background).
 func (s *Service) fleetView(ctx context.Context) *fleetUse {
 	if s.cfg.Fleet == nil {
 		return nil
 	}
-	s.fleet.mu.Lock()
-	defer s.fleet.mu.Unlock()
 	now := time.Now() // wall clock: the cache must expire even under a fake Config.Now
-	if v := s.fleet.v; v != nil {
-		ttl := s.cfg.FleetCache
+	s.fleet.mu.Lock()
+	ttl := s.cfg.FleetCache
+	if v := s.fleet.v; v != nil && !v.ok {
+		ttl = fleetFailCache
+	}
+	fresh := s.fleet.v != nil && now.Sub(s.fleet.at) < ttl
+	var loading chan struct{}
+	if !fresh {
+		loading = s.loadFleetLocked()
+	}
+	// A negative FleetCache (always read) never serves an older view.
+	if g := s.fleet.good; g != nil && s.cfg.FleetCache >= 0 && now.Sub(s.fleet.goodAt) < fleetStaleFor && (!fresh || !s.fleet.v.ok) {
+		s.fleet.mu.Unlock()
+		return g
+	}
+	if fresh {
+		v := s.fleet.v
+		s.fleet.mu.Unlock()
+		return v
+	}
+	s.fleet.mu.Unlock()
+	t := time.NewTimer(s.cfg.FleetTimeout)
+	defer t.Stop()
+	select {
+	case <-loading:
+		s.fleet.mu.Lock()
+		defer s.fleet.mu.Unlock()
+		return s.fleet.v
+	case <-t.C:
+		return &fleetUse{why: fmt.Sprintf("fleet view unavailable: the hub did not answer within %s", s.cfg.FleetTimeout)}
+	case <-ctx.Done():
+		return &fleetUse{why: "fleet view unavailable: " + ctx.Err().Error()}
+	}
+}
+
+// loadFleetLocked starts a background read of the fleet view unless one is
+// in flight and returns the channel that closes when it ends (caller holds
+// s.fleet.mu).
+func (s *Service) loadFleetLocked() chan struct{} {
+	if s.fleet.loading != nil {
+		return s.fleet.loading
+	}
+	done := make(chan struct{})
+	s.fleet.loading = done
+	timeout := max(s.cfg.FleetTimeout, fleetFetchTimeout)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		v := s.fetchFleet(ctx)
+		cancel()
 		if !v.ok {
-			ttl = fleetFailCache
+			s.log.Info("accounts: fleet view unavailable; selection without machine spread", "why", v.why)
 		}
-		if now.Sub(s.fleet.at) < ttl {
-			return v
+		s.fleet.mu.Lock()
+		at := time.Now()
+		s.fleet.v, s.fleet.at, s.fleet.loading = v, at, nil
+		if v.ok {
+			s.fleet.good, s.fleet.goodAt = v, at
 		}
-	}
-	tctx, cancel := context.WithTimeout(ctx, s.cfg.FleetTimeout)
-	defer cancel()
-	v := s.fetchFleet(tctx)
-	s.fleet.v, s.fleet.at = v, now
-	if !v.ok {
-		s.log.Info("accounts: fleet view unavailable; selection without machine spread", "why", v.why)
-	}
-	return v
+		s.fleet.mu.Unlock()
+		close(done)
+	}()
+	return done
 }
 
 func (s *Service) fetchFleet(ctx context.Context) *fleetUse {

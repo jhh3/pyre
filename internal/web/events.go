@@ -268,7 +268,11 @@ func (s *Server) onEvent(ev c.Event) {
 	}
 	switch ev.Kind {
 	case c.EvSessionCreated, c.EvSessionUpdated, c.EvRunStarted, c.EvRunObserved, c.EvRunEnded:
-		s.sessions.invalidate()
+		if ev.SessionID != "" {
+			s.markSessionDirty(ev.SessionID) // patched on the next read (sessions_patch.go)
+		} else {
+			s.sessions.invalidate()
+		}
 		project()
 	case c.EvProjectChanged:
 		s.projects.invalidate()

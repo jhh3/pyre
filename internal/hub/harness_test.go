@@ -11,6 +11,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
+	"github.com/jhh3/pyre/internal/transport"
 )
 
 // ---- fakes ----
@@ -87,18 +88,27 @@ type fakeTokens struct {
 	mu      sync.Mutex
 	issued  int
 	revoked []string
+	// auth, when set, mints and revokes real credentials (so a test can
+	// authenticate what a run was handed); the counters still record.
+	auth *transport.AuthStore
 }
 
 func (t *fakeTokens) IssueSessionToken(ctx context.Context, sessionID string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.issued++
+	if t.auth != nil {
+		return t.auth.IssueSessionToken(ctx, sessionID)
+	}
 	return "synthetic-session-token-" + sessionID, nil
 }
 func (t *fakeTokens) RevokeSessionTokens(ctx context.Context, sessionID string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.revoked = append(t.revoked, sessionID)
+	if t.auth != nil {
+		return t.auth.RevokeSessionTokens(ctx, sessionID)
+	}
 	return nil
 }
 func (t *fakeTokens) IssueTicket(ctx context.Context, purpose string, ref contracts.ObjectRef, ttl time.Duration) (string, time.Time, error) {

@@ -175,6 +175,76 @@ func TestHeadlessClaimBeforeStart(t *testing.T) {
 	}
 }
 
+// The claim answers within the wait its CLI gives it: a start still on its
+// way is 503 "claim again" (never 404, which is final), and the same claim
+// from the same process gets the binding once the run is there, again if
+// its answer was lost, until it reports the child started.
+func TestHeadlessClaimAnswersWithinWaitAndIsIdempotent(t *testing.T) {
+	w := daemontest.NewWorld()
+	base, err := claude.New(claude.Options{NodeID: "node_test", TmuxSocket: shortSock(t), HookCommand: []string{"true"}, ProfileAsConfigDir: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := startNode(t, t.TempDir(), Config{Adapters: []contracts.RuntimeAdapter{daemontest.New(w, contracts.HarnessClaude)},
+		ExecAdapters: []contracts.RuntimeAdapter{claude.NewExec(base)}, Accounts: &fakeBinder{}})
+	srv := httptest.NewServer(n.d.LocalHandler())
+	defer srv.Close()
+	claim := func(pid int, wait int64, out *ExecBinding) (int, *contracts.Error) {
+		t.Helper()
+		b, _ := json.Marshal(ExecClaimRequest{RunID: "run_wait", Secret: "wait-secret", ClientPID: pid, WaitMS: wait})
+		resp, err := http.Post(srv.URL+PathLocalExecClaim, "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			_ = json.NewDecoder(resp.Body).Decode(out)
+			return resp.StatusCode, nil
+		}
+		var e struct {
+			Error *contracts.Error `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		return resp.StatusCode, e.Error
+	}
+	start := time.Now()
+	code, ce := claim(os.Getpid(), 300, nil)
+	if code != http.StatusServiceUnavailable || ce == nil || ce.Details[ExecClaimAgain] != true {
+		t.Fatalf("claim before the start arrived: %d %+v", code, ce)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("claim ignored its wait: answered after %s", d)
+	}
+	sc := startCmd("ses_wait", "run_wait", contracts.HarnessClaude, t.TempDir())
+	sc.Args = []string{ExecArg + "=" + claimHash("wait-secret")}
+	if res := n.do(command(contracts.CmdStartRun, sc)); res.Error != nil {
+		t.Fatal(res.Error)
+	}
+	n.d.WaitLaunches()
+	var b1, b2 ExecBinding
+	if code, ce := claim(os.Getpid(), 2000, &b1); code != 200 || b1.AccountID != "acct_1" {
+		t.Fatalf("claim: %d %+v %+v", code, ce, b1)
+	}
+	// The answer was lost: the same process claims again and gets it.
+	if code, ce := claim(os.Getpid(), 2000, &b2); code != 200 || b2.Env["CLAUDE_CONFIG_DIR"] != b1.Env["CLAUDE_CONFIG_DIR"] || b2.RunID != "run_wait" {
+		t.Fatalf("repeat claim: %d %+v %+v", code, ce, b2)
+	}
+	// Another process never does.
+	if code, _ := claim(os.Getpid()+1, 2000, nil); code != http.StatusConflict {
+		t.Fatalf("claim by another process: %d", code)
+	}
+	if code := postLocal(t, srv, PathLocalExecStarted, ExecProgress{RunID: "run_wait", Secret: "wait-secret", PID: os.Getpid()}, nil); code != 200 {
+		t.Fatalf("started: %d", code)
+	}
+	// Once the child started the environment is gone.
+	if code, _ := claim(os.Getpid(), 2000, nil); code != http.StatusConflict {
+		t.Fatalf("claim after start: %d", code)
+	}
+	if c := n.d.execClaim("run_wait"); c == nil || len(c.b.Env) != 0 {
+		t.Fatal("binding environment kept after the child started")
+	}
+}
+
 type ownerLocator struct {
 	contracts.RuntimeAdapter
 	shared bool

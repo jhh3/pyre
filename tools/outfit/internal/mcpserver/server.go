@@ -129,7 +129,7 @@ func New(ctx context.Context, store *state.Store, service connection.Service) (*
 		modeValue, _ := arguments["mode"].(string)
 		connectionValue, _ := arguments["connection"].(string)
 		links := linkcontext.Service{State: store, Connections: service, Preferences: preferences}
-		options := linkcontext.ResolveOptions{Connection: connectionValue}
+		options := linkcontext.ResolveOptions{Connection: connectionValue, Explicit: true}
 		if modeValue != "" {
 			mode, err := linkcontext.ParseMode(modeValue)
 			if err != nil || mode == linkcontext.ModeOff {

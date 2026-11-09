@@ -11,7 +11,8 @@ import (
 // Launch context every session gets (setup review F2/F8), with or without
 // IncludeContext: the project's fact sheet (settled facts quoting the
 // owner, contracts/factsheet.go) and the standing grants that hold for it
-// (its parent's tree and its project; standing_grants.go). Children so
+// (its parent's tree and its project; standing_grants.go), and the
+// machines new work should stay off for now (node_avoid.go). Children so
 // start knowing what the owner already settled and approved, instead of
 // re-deriving it from a paraphrased brief.
 
@@ -70,6 +71,12 @@ func (h *Hub) standingContext(ctx context.Context, projectID *string, parentID s
 			b.WriteString(line)
 			refs = append(refs, contracts.ObjectRef{Kind: contracts.KindStandingGrant, ID: g.GrantID})
 		}
+	}
+	if text := h.avoidContext(ctx, projectID); text != "" { // node_avoid.go
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(text)
 	}
 	return b.String(), refs
 }

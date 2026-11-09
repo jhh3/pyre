@@ -61,6 +61,7 @@ machine and session is costing in CPU and memory.
 - **MCP tools:** every session gets the `pyre` MCP server ([agent tools](agents/tools/README.md)).
 - **Search and digest:** search every transcript on every machine (`␣/`); "while you were away" (`␣w`).
 - **Projects (optional):** briefs, versioned documents, artifacts and review comments.
+- **Review site:** agents publish pages people read and annotate item by item; each note reaches the agent ([review site](docs/site.md)).
 - **Audit log and resource stats:** what Pyre did on its own; CPU and memory per machine and session.
 - **Android app:** inbox, approvals, transcripts, messaging, launching and a real terminal ([android](android/README.md)).
 - **Scriptable and signed:** `--json` everywhere; deterministic, signed release tarballs with SBOMs.
@@ -184,6 +185,22 @@ Pyre finds your git repos by itself — no registration step — and any repo wo
 - **Group work (optional):** `pyre project new <name> --repo id=url` gives related sessions a shared brief and
   documents; agents can create projects and move themselves into them too.
 
+## Review site
+
+`pyre site` serves pages your agents write (a folder with a self-contained `index.html` and a `page.json`)
+for people to read and leave notes on, item by item, from any browser. Notes are shared, and each new note is
+sent to the session that owns the page as a Pyre message. It runs on loopback behind ngrok's Google sign-in with
+an email-domain allowlist. Use it when several people should review a proposal, options or a design pass; use an
+ask for a single decision and the project page for status. Agents have the `/review-site` skill.
+
+```sh
+pyre site new launch-plan --title "Launch plan"   # inside a session: notes go to that session
+$EDITOR ~/.local/share/pyre/site/pages/launch-plan/index.html
+pyre site serve --dev                             # http://127.0.0.1:7393; docs/site.md for the tunnel
+```
+
+See [docs/site.md](docs/site.md) for install, auth, page authoring and the notes API.
+
 ## Everyday keys
 
 | Key | Action |
@@ -250,7 +267,7 @@ Run `pyred status` on it. More fixes: [troubleshooting](docs/getting-started.md#
 
 [Getting started](docs/getting-started.md) · [Configuration](docs/configuration.md) ·
 [Operations](docs/operations.md) · [Architecture](docs/architecture.md) ·
-[Agent tools](agents/tools/README.md) · [Android](android/README.md) · [Packaging](packaging/README.md) ·
+[Agent tools](agents/tools/README.md) · [Review site](docs/site.md) · [Android](android/README.md) · [Packaging](packaging/README.md) ·
 [Capabilities](docs/capabilities.md) · [Integrations](docs/integrations.md) ·
 [Product spec](docs/product-spec.md) · [Acceptance](docs/acceptance.md)
 

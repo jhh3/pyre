@@ -227,6 +227,9 @@ func (b *Backend) repoAction(n *c.Node, action string, params c.RawJSON) (any, b
 			return nil, true, c.Errorf(c.ErrInvalid, "worktree.create needs at least one repository")
 		}
 		slug := repoindex.Slug(p.Slug)
+		if p.Branch != "" {
+			slug = strings.ReplaceAll(strings.TrimPrefix(p.Branch, "pyre/"), "/", "-")
+		}
 		if slug == "" && len(p.Repos) > 1 {
 			var names []string
 			for _, r := range p.Repos {
@@ -248,7 +251,7 @@ func (b *Backend) repoAction(n *c.Node, action string, params c.RawJSON) (any, b
 			home = "/Users/demo"
 		}
 		for _, r := range p.Repos {
-			wt := path.Join(r, ".worktrees", slug)
+			wt := path.Join(home, "worktrees", path.Base(r), slug)
 			if len(p.Repos) > 1 {
 				wt = path.Join(home, "pyre-work", slug, path.Base(r))
 			}

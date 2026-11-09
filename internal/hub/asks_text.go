@@ -189,8 +189,11 @@ func askOutcomeBase(a contracts.Ask) string {
 		if a.GrantID != "" {
 			return "answered by " + oneLine(ans.Text, 1000) + "; go ahead with " + askOptionLabel(a, ans.OptionID)
 		}
+		if ans.Source == contracts.AskSourceChat && ans.OptionID != "" {
+			return "owner chose " + askOptionLabel(a, ans.OptionID) + " in chat: " + oneLine(ans.Text, 1000)
+		}
 		if ans.Source == contracts.AskSourceChat {
-			out := "owner answered in chat: " + oneLine(ans.Text, 1000)
+			out := "owner answered in chat: " + oneLine(ans.Text, 1000) // before 2026-10-30
 			if len(ans.With) > 0 {
 				out += " (the same words answered " + strings.Join(ans.With, ", ") + ")"
 			}

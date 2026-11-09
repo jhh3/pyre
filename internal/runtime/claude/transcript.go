@@ -160,6 +160,17 @@ func entriesFromTranscript(runID string, recs []transcriptRecord, startSeq int64
 // transcriptEntry converts one record numbered seq; false when sessions.read
 // does not show it.
 func transcriptEntry(runID string, r transcriptRecord, seq int64) (contracts.TranscriptEntry, bool) {
+	e, ok := fullTranscriptEntry(runID, r, seq)
+	if ok && len(e.Text) > 2000 {
+		e.Text = truncStr(e.Text, 2000)
+		e.Truncated = true
+	}
+	return e, ok
+}
+
+// fullTranscriptEntry is transcriptEntry without the 2000-byte cut (a full
+// read, ReadSessionRequest.Full).
+func fullTranscriptEntry(runID string, r transcriptRecord, seq int64) (contracts.TranscriptEntry, bool) {
 	e := contracts.TranscriptEntry{Seq: seq, RunID: runID, At: r.at()}
 	switch {
 	case r.Type == "user" && r.isPromptRecord():
@@ -199,10 +210,6 @@ func transcriptEntry(runID string, r transcriptRecord, seq int64) (contracts.Tra
 		e.Text = "turn ended (" + (time.Duration(r.DurationMs) * time.Millisecond).String() + ")"
 	default:
 		return e, false
-	}
-	if len(e.Text) > 2000 {
-		e.Text = truncStr(e.Text, 2000)
-		e.Truncated = true
 	}
 	return e, true
 }

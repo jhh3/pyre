@@ -30,6 +30,9 @@ func addOptionalOps(m map[string]rpcFunc, a contracts.API) {
 	if r, ok := a.(contracts.MessageReadAPI); ok { // W-delivery: read = delivered
 		m[contracts.OpMarkMessagesRead] = unary(r.MarkMessagesRead)
 	}
+	if r, ok := a.(contracts.ChildReportReleaseAPI); ok { // held child reports for a parent reading its inbox
+		m[contracts.OpReleaseChildReports] = unary(r.ReleaseChildReports)
+	}
 	if w, ok := a.(contracts.InboxWaitAPI); ok { // W-localwait: node-local doorbell wait
 		m[contracts.OpInboxWait] = unary(w.InboxWait)
 	}
@@ -65,6 +68,9 @@ func addOptionalOps(m map[string]rpcFunc, a contracts.API) {
 	if pg, ok := a.(contracts.ProjectPageAPI); ok { // W-web-inbox: project pages
 		m[contracts.OpProjectsSetPage] = unary(pg.SetProjectPage)
 		m[contracts.OpProjectsGetPage] = unary(pg.GetProjectPage)
+	}
+	if n, ok := a.(contracts.NodeAvoidAPI); ok { // node avoid flags
+		m[contracts.OpNodesAvoid] = unary(n.AvoidNode)
 	}
 	if w, ok := a.(contracts.WaitingOnAPI); ok { // waiting on own job
 		m[contracts.OpSessionsWaitingOn] = unary(w.SetWaitingOn)

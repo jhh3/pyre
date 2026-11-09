@@ -31,7 +31,9 @@ func fingerprint(r contracts.Run) string {
 		Ac string
 		C  []string
 		D  string
-	}{r.State, r.StateReason, r.NativeRef, r.ExitCode, r.Subagents, r.PendingApprovalIDs, r.Lease, r.Freshness.Stale, r.AdapterData["pyre.attached"], r.AccountID, r.Capabilities, activityText(r.Activity)})
+		Lt string `json:",omitempty"` // empty for runs that never hit a limit: their fingerprints are unchanged
+	}{r.State, r.StateReason, r.NativeRef, r.ExitCode, r.Subagents, r.PendingApprovalIDs, r.Lease, r.Freshness.Stale, r.AdapterData["pyre.attached"], r.AccountID, r.Capabilities, activityText(r.Activity),
+		r.AdapterData[contracts.AdapterDataLimitAt]})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
 }
@@ -306,6 +308,7 @@ func (d *Daemon) observeRun(ctx context.Context, lr *liveRun) {
 	}
 	d.applyActivity(ctx, lr, obs.Activity)
 	d.applyLimit(ctx, lr, obs.LimitEvent)
+	d.applySecurity(ctx, lr, obs.SecurityAlerts)
 
 	if obs.State.Terminal() {
 		if obs.NativeRef != nil {
@@ -517,6 +520,9 @@ func (d *Daemon) applyActivity(ctx context.Context, lr *liveRun, line string) {
 }
 
 func (d *Daemon) applyLimit(ctx context.Context, lr *liveRun, ev *contracts.LimitEvent) {
+	lr.mu.Lock()
+	lr.limitedUntil = limitHold(ev, lr.rec.Run.StartedAt, d.now())
+	lr.mu.Unlock()
 	if ev == nil {
 		return
 	}
@@ -534,6 +540,17 @@ func (d *Daemon) applyLimit(ctx context.Context, lr *liveRun, ev *contracts.Limi
 		return
 	}
 	lr.lastLimitAt = ev.At
+	if !ev.At.IsZero() && (ev.Kind == "usage_limit" || ev.Kind == "rate_limited") {
+		// Recorded with this observation's run report (fingerprint): the
+		// hub tells a turn its continue prompt started that hit the limit
+		// again by a newer value (decision I70).
+		ad := make(map[string]string, len(lr.rec.Run.AdapterData)+1)
+		for k, v := range lr.rec.Run.AdapterData {
+			ad[k] = v
+		}
+		ad[contracts.AdapterDataLimitAt] = ftime(ev.At)
+		lr.rec.Run.AdapterData = ad
+	}
 	lr.mu.Unlock()
 	d.cfg.Logger.Warn("run reported a limit event", "run", run.RunID, "kind", ev.Kind)
 	lh, ok := d.cfg.Accounts.(LimitHandler)
@@ -564,6 +581,33 @@ func (d *Daemon) applyLimit(ctx context.Context, lr *liveRun, ev *contracts.Limi
 			d.noteErr("fallback report: %v", err)
 		}
 	}()
+}
+
+// limitHoldMax bounds how long a limit holds deliveries to a run.
+const limitHoldMax = 8 * 24 * time.Hour
+
+// limitHold is until when Pyre's deliveries to a run wait after it reported
+// ev (zero: no hold). A usage or rate limit that names a reset holds them:
+// every turn on that account fails at once ("You've hit your individual
+// spend limit"), so a paste only produces another failed turn and another
+// report to the parent (iss_…). The adapter keeps
+// reporting the limit until a turn ends normally, which lifts the hold; an
+// account switch replaces the run. Limits from before the run started
+// (replayed history) and login failures do not hold.
+func limitHold(ev *contracts.LimitEvent, started, now time.Time) time.Time {
+	if ev == nil || ev.ResetAt == nil || ev.Kind == "auth_invalid" {
+		return time.Time{}
+	}
+	if !ev.At.IsZero() && !started.IsZero() && ev.At.Before(started) {
+		return time.Time{}
+	}
+	if !ev.ResetAt.After(now) {
+		return time.Time{}
+	}
+	if max := now.Add(limitHoldMax); ev.ResetAt.After(max) {
+		return max
+	}
+	return *ev.ResetAt
 }
 
 // limitPlanTimeout bounds one limit fallback (quiesce + successor launch).

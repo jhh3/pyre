@@ -705,3 +705,43 @@ func TestChildReportLaunchFailure(t *testing.T) {
 		}
 	}
 }
+
+// A turn that ended on an error says so instead of "finished" with no
+// message (iss_…).
+func TestChildReportIdleAfterFailedTurnNamesTheError(t *testing.T) {
+	f := newChildFixture(t, nil)
+	f.observe(contracts.RunRunning, "working")
+	f.observe(contracts.RunWaitingInput, "last turn failed: The 'astra' model is not supported when using Codex with a ChatGPT account.")
+	f.process()
+	msgs := f.toParent()
+	if len(msgs) != 1 {
+		t.Fatalf("want one report, got %d: %v", len(msgs), f.statuses())
+	}
+	text := msgs[0].Body.Text
+	if lead, _, _ := strings.Cut(text, "\n"); lead != "synthetic child's turn failed: The 'astra' model is not supported when using Codex with a ChatGPT account." {
+		t.Fatalf("lead line: %q", lead)
+	}
+	for _, want := range []string{"ended its turn with an error", "Error: The 'astra' model"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("report lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "finished its turn") {
+		t.Fatalf("a failed turn reported as finished:\n%s", text)
+	}
+}
+
+func TestTurnFailure(t *testing.T) {
+	for in, want := range map[string]string{
+		"last turn failed":                        "unknown error",
+		"last turn failed: boom · retry 1/4 at 3": "boom",
+		"last turn failed: x":                     "x",
+	} {
+		if got, ok := turnFailure(in); !ok || got != want {
+			t.Errorf("turnFailure(%q) = %q, %v", in, got, ok)
+		}
+	}
+	if _, ok := turnFailure("thread idle"); ok {
+		t.Error("idle reason read as a failure")
+	}
+}

@@ -111,7 +111,11 @@ func TestArchiveCascadeSelfArchivedLead(t *testing.T) {
 	x.observeState(child, contracts.RunRunning)
 	x.observeState(lead, contracts.RunRunning)
 
-	v, err := archiveWhenDone(x, sesPrincipal(lead), "op_synth-lead-self-archive", lead, true)
+	// Its child is mid-turn: archiving itself needs include_children
+	// (archivepending.go).
+	yes := true
+	v, err := x.h.UpdateSession(as(sesPrincipal(lead)), contracts.UpdateSessionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-lead-self-archive"},
+		SessionID: lead, Archived: &yes, WhenDone: true, IncludeChildren: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +242,51 @@ func TestArchiveCascadeLeavesOwnerTouched(t *testing.T) {
 	}
 }
 
+// iss_…: the owner only watching a child in a
+// read-only terminal (the TUI's or web inbox's preview pane) does not make
+// it his: it is archived with its parent. An interactive terminal does.
+func TestArchiveCascadeReadOnlyViewIsNotUse(t *testing.T) {
+	x := newHarness(t)
+	x.connectWide()
+	coord := x.start(owner, "op_synth-coord", nodeMac).Session.SessionID
+	lead := x.startUnder(coord, "op_synth-lead", "synthetic lead")
+	watched := x.startUnder(lead, "op_synth-watched", "synthetic reviewer")
+	typed := x.startUnder(lead, "op_synth-typed", "synthetic chat")
+	x.clock.Add(time.Minute)
+	open := func(sid string, readOnly bool) {
+		t.Helper()
+		run := x.session(sid).Run.RunID
+		if _, err := x.h.QueueTerminalOpen(context.Background(), owner, nodeMac,
+			contracts.TerminalOpenCommand{StreamID: "tstr_synth-" + sid, RunID: run, ReadOnly: readOnly, Cols: 80, Rows: 24}, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open(watched, true)
+	open(watched, true)
+	open(typed, false)
+	x.observeState(lead, contracts.RunExited)
+	yes := true
+	v, err := x.h.UpdateSession(as(sesPrincipal(coord)), contracts.UpdateSessionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-coord-archive"}, SessionID: lead, Archived: &yes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.ArchiveCascade == nil {
+		t.Fatalf("archived with a cascade: %+v", v)
+	}
+	if got := cascadeIDs(v.ArchiveCascade.Archived); !slices.Equal(got, []string{watched}) {
+		t.Fatalf("archived %v, want the watched reviewer %s", got, watched)
+	}
+	if got := cascadeIDs(v.ArchiveCascade.Left); !slices.Equal(got, []string{typed}) {
+		t.Fatalf("left %v, want %s", got, typed)
+	}
+	if !hasArchiveWhenDone(x.session(watched).Session) {
+		t.Fatal("the watched reviewer is archived when done")
+	}
+	if s := x.session(typed).Session; s.Archived || hasArchiveWhenDone(s) {
+		t.Fatal("the interactively attached child is the owner's: left alone")
+	}
+}
+
 // A session may archive any session under it without the owner; a session
 // outside its tree (a sibling, a stranger) still needs his approval.
 func TestArchiveDescendantPermission(t *testing.T) {
@@ -261,5 +310,47 @@ func TestArchiveDescendantPermission(t *testing.T) {
 	}
 	if !x.h.isAncestor(context.Background(), coord, x.session(grand).Session) || x.h.isAncestor(context.Background(), grand, x.session(coord).Session) {
 		t.Fatal("isAncestor")
+	}
+}
+
+// A GitHub wait (`pyre wait gh-pr`, a monitor tagged wait-gh) outlives the
+// session that created it: the archive cascade leaves it running so it can
+// message that session's parent; a plain monitor and a worker go with it.
+func TestArchiveCascadeLeavesGitHubWait(t *testing.T) {
+	x := newHarness(t)
+	x.connectWide()
+	coord := x.start(owner, "op_synth-coord-w", nodeMac).Session.SessionID
+	lead := x.startUnder(coord, "op_synth-lead-w", "synthetic lead")
+	worker := x.startUnder(lead, "op_synth-worker-w", "synthetic worker")
+	shell := func(op, title string, tags ...string) string {
+		t.Helper()
+		resp, err := x.h.StartSession(as(sesPrincipal(lead)), contracts.StartSessionRequest{
+			Mutation: contracts.Mutation{OperationID: op}, NodeID: nodeMac, Harness: contracts.HarnessShell, Cwd: "/home/synth",
+			Title: contracts.MonitorTitlePrefix + title, Tags: append([]string{contracts.TagMonitor, contracts.TagMonitorToPrefix + lead}, tags...)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmds := x.ch.sentKinds(nodeMac, contracts.CmdStartRun)
+		cmd := cmds[len(cmds)-1]
+		x.ack(nodeMac, cmd)
+		run := *resp.Session.Run
+		run.State = contracts.RunRunning
+		x.result(nodeMac, cmd, contracts.OutcomeSucceeded, run)
+		return resp.Session.Session.SessionID
+	}
+	wait := shell("op_synth-wait", "wait gh-pr synth-org/synth-repo#7 until checks-done", contracts.TagWaitGitHub)
+	mon := shell("op_synth-mon", "true")
+	x.observeState(lead, contracts.RunExited)
+	yes := true
+	if _, err := x.h.UpdateSession(as(sesPrincipal(coord)), contracts.UpdateSessionRequest{Mutation: contracts.Mutation{OperationID: "op_synth-coord-archive-w"}, SessionID: lead, Archived: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	if s := x.session(wait).Session; s.Archived || hasArchiveWhenDone(s) {
+		t.Fatalf("the GitHub wait went with its creator: %+v", s)
+	}
+	for _, sid := range []string{worker, mon} {
+		if s := x.session(sid).Session; !s.Archived && !hasArchiveWhenDone(s) {
+			t.Fatalf("%s should be archived with the lead", sid)
+		}
 	}
 }

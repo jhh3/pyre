@@ -67,6 +67,7 @@ const (
 )
 
 var _ sessionhost.Host = (*Server)(nil)
+var _ sessionhost.TreeMarker = (*Server)(nil)
 
 // Server addresses one isolated tmux server by socket path.
 type Server struct {
@@ -459,7 +460,7 @@ func (s *Server) NewSession(ctx context.Context, spec SessionSpec) error {
 			return err
 		}
 	}
-	args, envFile, err := s.newSessionArgs(spec)
+	args, envFile, err := s.newSessionArgsScoped(spec, s.runScope(ctx))
 	if err != nil {
 		return err
 	}
@@ -477,6 +478,12 @@ func (s *Server) NewSession(ctx context.Context, spec SessionSpec) error {
 // newSessionArgs returns the new-session client arguments for spec and the
 // environment file the pane launcher will consume (if any).
 func (s *Server) newSessionArgs(spec SessionSpec) (args []string, envFile string, err error) {
+	return s.newSessionArgsScoped(spec, nil)
+}
+
+// newSessionArgsScoped is newSessionArgs for a pane placed in a per-run
+// scope (sc non-nil; runscope.go).
+func (s *Server) newSessionArgsScoped(spec SessionSpec, sc *supervisor.RunScope) (args []string, envFile string, err error) {
 	w, h := spec.Width, spec.Height
 	if w <= 0 {
 		w = 200
@@ -488,7 +495,7 @@ func (s *Server) newSessionArgs(spec SessionSpec) (args []string, envFile string
 	if spec.Cwd != "" {
 		args = append(args, "-c", spec.Cwd)
 	}
-	cmd, envFile, err := s.paneCommand(spec)
+	cmd, envFile, err := s.paneCommandScoped(spec, sc)
 	if err != nil {
 		return nil, "", err
 	}
@@ -497,11 +504,15 @@ func (s *Server) newSessionArgs(spec SessionSpec) (args []string, envFile string
 
 // respawnArgs returns the respawn-pane client arguments for spec.
 func (s *Server) respawnArgs(spec SessionSpec) (args []string, envFile string, err error) {
+	return s.respawnArgsScoped(spec, nil)
+}
+
+func (s *Server) respawnArgsScoped(spec SessionSpec, sc *supervisor.RunScope) (args []string, envFile string, err error) {
 	args = []string{"respawn-pane", "-k", "-t", PaneTarget(spec.Name)}
 	if spec.Cwd != "" {
 		args = append(args, "-c", spec.Cwd)
 	}
-	cmd, envFile, err := s.paneCommand(spec)
+	cmd, envFile, err := s.paneCommandScoped(spec, sc)
 	if err != nil {
 		return nil, "", err
 	}
@@ -515,7 +526,7 @@ func (s *Server) RespawnPane(ctx context.Context, name string, spec SessionSpec)
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	args, envFile, err := s.respawnArgs(spec)
+	args, envFile, err := s.respawnArgsScoped(spec, s.runScope(ctx))
 	if err != nil {
 		return err
 	}
@@ -700,20 +711,46 @@ func (s *Server) KillSession(ctx context.Context, name string) error {
 	return err
 }
 
-// TerminateSession ends the session's pane process group (each pane leads
-// its own group: tmux setsid()s it) with SIGTERM, waits up to grace for the
-// whole group to exit, escalates to SIGKILL, then kills the session. Unlike
-// kill-session alone (SIGHUP), it returns only once the processes are gone.
+// TerminateSession ends the session's process tree (tree.go): the pane's
+// process group (each pane leads its own group: tmux setsid()s it), the
+// rest of its terminal session, its descendants, and what MarkTree
+// recorded before a graceful exit orphaned it, plus (Linux) the leftovers
+// of the session's own run scope whose terminal session lost its leader
+// (scopeLeftovers). It sends SIGTERM, waits up
+// to grace for all of it to exit, escalates to SIGKILL, then kills the
+// session. Unlike kill-session alone (SIGHUP), it returns only once the
+// processes are gone. A pane that is already dead still has its group and
+// session cleaned up, unless its PID now belongs to another process.
 func (s *Server) TerminateSession(ctx context.Context, name string, grace time.Duration) error {
-	if p, err := s.Pane(ctx, name); err == nil && p.PID > 0 && !p.Dead {
-		_ = osutil.KillGroup(p.PID, false)
+	refs := s.takeTree(name)
+	leader := 0
+	if p, err := s.Pane(ctx, name); err == nil && p.PID > 0 {
+		switch {
+		case !p.Dead:
+			leader = p.PID
+			refs = append(refs, snapshotTree(p.PID, true)...)
+		case !leaderReused(p.PID):
+			leader = p.PID
+			refs = append(refs, snapshotTree(p.PID, false)...)
+		}
+	}
+	refs = append(refs, scopeLeftovers(name)...) // orphans that left the tree before the stop
+	alive := func() bool { return (leader > 0 && groupAlive(leader)) || len(liveRefs(refs)) > 0 }
+	signal := func(force bool) {
+		if leader > 0 {
+			_ = osutil.KillGroup(leader, force)
+		}
+		signalRefs(refs, force)
+	}
+	if leader > 0 || len(refs) > 0 {
+		signal(false)
 		end := time.Now().Add(grace)
-		for time.Now().Before(end) && groupAlive(p.PID) {
+		for time.Now().Before(end) && alive() {
 			time.Sleep(50 * time.Millisecond)
 		}
-		if groupAlive(p.PID) {
-			_ = osutil.KillGroup(p.PID, true)
-			for i := 0; i < 40 && groupAlive(p.PID); i++ {
+		if alive() {
+			signal(true)
+			for i := 0; i < 40 && alive(); i++ {
 				time.Sleep(50 * time.Millisecond)
 			}
 		}
@@ -759,11 +796,12 @@ func (s *Server) Pane(ctx context.Context, name string) (PaneInfo, error) {
 }
 
 // pane reads the active pane once; signal is #{pane_dead_signal}.
+// #{pane_tty} comes last: an empty dead signal must not shift it.
 func (s *Server) pane(ctx context.Context, name string) (PaneInfo, string, error) {
 	// display-message silently prints nothing for a missing target, so use
 	// list-panes, which fails with "can't find session".
 	out, err := s.Run(ctx, nil, "list-panes", "-t", PaneTarget(name), "-F",
-		"#{pane_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_dead_signal}")
+		"#{pane_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_dead_signal}\t#{pane_tty}")
 	if err != nil {
 		return PaneInfo{}, "", err
 	}
@@ -811,6 +849,9 @@ func parsePane(out string) (PaneInfo, error) {
 	if len(f) > 6 {
 		p.Width, _ = strconv.Atoi(f[5])
 		p.Height, _ = strconv.Atoi(f[6])
+	}
+	if len(f) > 8 {
+		p.TTY = f[8]
 	}
 	return p, nil
 }

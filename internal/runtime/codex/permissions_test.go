@@ -35,5 +35,9 @@ func TestCodexPermissionsBypass(t *testing.T) {
 				t.Fatalf("TUI argv carries a permission override %q (codex refuses it on resume --remote): %v", bad, argv)
 			}
 		}
+		// An unattended update prompt keeps the TUI from attaching to the thread.
+		if !slices.Contains(argv, "check_for_update_on_startup=false") {
+			t.Fatalf("TUI argv lacks the update-check opt-out: %v", argv)
+		}
 	}
 }

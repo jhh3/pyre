@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -369,25 +370,62 @@ type memNotes struct {
 	updates   []contracts.UpdateNoteSyncRequest
 	failNext  int
 	listCalls int
+	// noFilter simulates a hub that predates sync_states (strict decoding
+	// refuses the field).
+	noFilter bool
+	// listed counts notes returned, filtered counts filtered list calls.
+	listed, filtered int
 }
 
+// ListNotes pages in insertion order with a keyset cursor ("@"+index of the
+// last note returned) like the hub's note_id cursor: valid whatever the
+// filter, and never skipping a note that left the filtered set.
 func (m *memNotes) ListNotes(_ context.Context, req contracts.ListNotesRequest) (contracts.Page[contracts.Note], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.listCalls++
+	if len(req.SyncStates) > 0 {
+		if m.noFilter {
+			return contracts.Page[contracts.Note]{}, contracts.Errorf(contracts.ErrInvalid, `invalid request body: json: unknown field "sync_states"`)
+		}
+		m.filtered++
+	}
 	start := 0
 	if req.Cursor != "" {
-		start, _ = strconv.Atoi(req.Cursor)
+		i, err := strconv.Atoi(strings.TrimPrefix(req.Cursor, "@"))
+		if err != nil || !strings.HasPrefix(req.Cursor, "@") {
+			return contracts.Page[contracts.Note]{}, contracts.Errorf(contracts.ErrInvalid, "invalid cursor")
+		}
+		start = i + 1
 	}
 	limit := req.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	end := min(start+limit, len(m.notes))
-	pg := contracts.Page[contracts.Note]{Items: append([]contracts.Note(nil), m.notes[start:end]...)}
-	if end < len(m.notes) {
-		pg.NextCursor = strconv.Itoa(end)
+	want := func(n contracts.Note) bool {
+		if len(req.SyncStates) == 0 {
+			return true
+		}
+		st := n.SyncState
+		if st == "" {
+			st = SyncPending
+		}
+		return slices.Contains(req.SyncStates, st)
 	}
+	pg := contracts.Page[contracts.Note]{}
+	last := -1
+	for i := start; i < len(m.notes); i++ {
+		if !want(m.notes[i]) {
+			continue
+		}
+		if len(pg.Items) == limit {
+			pg.NextCursor = "@" + strconv.Itoa(last)
+			break
+		}
+		pg.Items = append(pg.Items, m.notes[i])
+		last = i
+	}
+	m.listed += len(pg.Items)
 	return pg, nil
 }
 

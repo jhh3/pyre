@@ -12,6 +12,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/runtime/doing"
+	"github.com/jhh3/pyre/internal/secretegress"
 )
 
 // evidence of one Pyre message: a userMessage item whose clientId is the
@@ -84,11 +85,26 @@ type threadState struct {
 	wakeArmed   bool
 	wakeMute    time.Time
 	closing     bool
-	runningCmds map[string]bool // commandExecution items started, not yet completed
-	wakeIgnore  map[string]bool // their exits are Pyre's own kills (interrupt)
+	runningCmds map[string]string // commandExecution items started, not yet completed: id -> command
+	wakeIgnore  map[string]bool   // their exits are Pyre's own kills (interrupt)
+	inTurn      []bgDone          // exec_command exits inside the active turn, judged at its end
+	// Local-agent wake (agentwake.go): finished subagents waiting for an
+	// idle root, and those that finished inside the active turn.
+	agentWakes []agentDone
+	agentHeld  []agentDone
+	backfill   *backfill   // a recovered run's rollout backfill of missed completions (bgrecover.go)
+	lost       *serverLoss // the app-server died with this thread's work in it (serverlost.go)
+	// In-turn mail doorbell (mailnotice.go): the run's notice record,
+	// loaded from its state dir on first use.
+	notice       mailNoticeRecord
+	noticeLoaded bool
 	// changes counts app-server notifications and requests for this thread
 	// (and its subagents); Adapter.ChangeStamp exposes it lock-free.
 	changes atomic.Int64
+	// decoys are the run's planted credentials; security its flagged
+	// commands, newest last (secretcheck.go, decision I79).
+	decoys   secretegress.Decoys
+	security []contracts.SecurityAlert
 }
 
 func newThreadState(runID, sessionID, threadID string) *threadState {
@@ -166,12 +182,16 @@ func (ts *threadState) onItem(it item, turnID string, started bool, at time.Time
 			ts.inflight.Done(it.ID)
 		}
 	}
+	if it.Type == "userMessage" && strings.HasPrefix(it.ClientID, mailNoticeIDPrefix) {
+		return // Pyre's mail notice steered into the turn: the work goes on
+	}
 	if it.Type == "userMessage" {
 		ts.inflight.Clear()
 	}
 	switch it.Type {
 	case "commandExecution":
 		if started {
+			ts.checkCommand(it, at)
 			ts.activity = "running: " + oneLine(it.Command, 140)
 		} else {
 			ts.activity = "command finished: " + oneLine(it.Command, 120)
@@ -258,10 +278,12 @@ func limitFromError(e turnError, at time.Time) *contracts.LimitEvent {
 	var code string
 	_ = json.Unmarshal(e.CodexErrorInfo, &code)
 	kind := ""
+	// The app-server names codes in camelCase; the rollout (and some
+	// builds' notifications) in snake_case.
 	switch code {
-	case "usageLimitExceeded", "sessionBudgetExceeded":
+	case "usageLimitExceeded", "sessionBudgetExceeded", "usage_limit_exceeded", "session_budget_exceeded":
 		kind = "usage_limit"
-	case "rateLimitExceeded":
+	case "rateLimitExceeded", "rate_limit_exceeded":
 		kind = "rate_limited"
 	case "unauthorized":
 		kind = "auth_invalid"

@@ -36,6 +36,8 @@
 //	update.result failure          -> "update" (grouped per tool+node; a later success withdraws it)
 //	account.grant dead|expired     -> "node" "Re-login needed for <label> on <node>" (grouped per
 //	                                  grant; a later valid or revoked state withdraws it)
+//	security.alert severity high  -> "security" (urgent, grouped per session; a tool call looked like a
+//	                                  credential leaving the machine or used a decoy, decision I79)
 //	ask.changed open (created or merged), run.observed running, run.ended, session archived
 //	                               -> the session's "waiting" item withdrawn (raised by the hub at a
 //	                                  top-level session's turn end, Store.RaiseWaiting; one per session)

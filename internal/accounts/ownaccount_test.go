@@ -17,10 +17,17 @@ const synthOwnEmail = "synth-own@example.invalid"
 // matching account (no Pyre login anywhere) and another person's account.
 func ownEnv(t *testing.T) *testEnv {
 	t.Helper()
+	return ownEnvLatest(t, nil)
+}
+
+// ownEnvLatest is ownEnv with the hub's latest usage of the own login's
+// account (what `pyre accounts` shows for it).
+func ownEnvLatest(t *testing.T, latest *contracts.AccountObservation) *testEnv {
+	t.Helper()
 	e := newEnv(t, func(c *Config) {
 		c.Fleet = ownFleet{views: []contracts.AccountView{
 			{Account: contracts.Account{AccountID: "acct_synth-other", Provider: contracts.ProviderOpenAI, RotaRef: "synth-other@example.invalid", Kind: "subscription"}},
-			{Account: contracts.Account{AccountID: "acct_synth-own", Provider: contracts.ProviderOpenAI, RotaRef: synthOwnEmail, Label: "own", Kind: "subscription"}},
+			{Account: contracts.Account{AccountID: "acct_synth-own", Provider: contracts.ProviderOpenAI, RotaRef: synthOwnEmail, Label: "own", Kind: "subscription"}, Latest: latest},
 			{Account: contracts.Account{AccountID: "acct_synth-anth", Provider: contracts.ProviderAnthropic, RotaRef: synthOwnEmail}},
 		}}
 	})

@@ -177,7 +177,7 @@ func TestCreateSingleDedupAndIgnore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(r, ".worktrees", "fix-share-link-redirect")
+	want := filepath.Join(home, "worktrees", "app", "fix-share-link-redirect") // no root configured: ~/worktrees
 	if res.Cwd != want || res.Branch != "pyre/fix-share-link-redirect" {
 		t.Fatalf("got %+v", res)
 	}
@@ -191,18 +191,76 @@ func TestCreateSingleDedupAndIgnore(t *testing.T) {
 	if err != nil || res2.Branch != "pyre/fix-share-link-redirect-2" || filepath.Base(res2.Cwd) != "fix-share-link-redirect-2" {
 		t.Fatalf("dedup: %+v %v", res2, err)
 	}
-	// An existing <repo>-worktrees sibling is the repo's convention.
+	// A configured root holds <root>/<repo>/<slug>, whatever the repo's own folders.
 	r2 := mkrepo(t, filepath.Join(home, "code", "lib"))
 	_ = os.MkdirAll(filepath.Join(home, "code", "lib-worktrees"), 0o755)
-	res3, err := Create(context.Background(), contracts.WorktreeCreateParams{Repos: []string{r2}, Branch: "pyre/x"}, now)
-	if err != nil || res3.Cwd != filepath.Join(home, "code", "lib-worktrees", "x") {
-		t.Fatalf("sibling convention: %+v %v", res3, err)
+	_ = os.MkdirAll(filepath.Join(r2, ".worktrees"), 0o755)
+	root := filepath.Join(home, "fast", "worktrees")
+	res3, err := CreateWith(context.Background(), contracts.WorktreeCreateParams{Repos: []string{r2}, Slug: "tidy up"}, now, CreateOptions{Root: root})
+	if err != nil || res3.Cwd != filepath.Join(root, "lib", "tidy-up") || res3.Branch != "pyre/tidy-up" {
+		t.Fatalf("configured root: %+v %v", res3, err)
 	}
 	if _, err := Create(context.Background(), contracts.WorktreeCreateParams{Repos: []string{filepath.Join(r, "sub")}}, now); err == nil {
 		t.Fatal("non-repo path accepted")
 	}
 	if _, err := Create(context.Background(), contracts.WorktreeCreateParams{Repos: []string{r}, Branch: "--force"}, now); err == nil {
 		t.Fatal("bad branch accepted")
+	}
+}
+
+// A named branch is created with exactly that name at <root>/<repo>/<branch>,
+// whatever the title says, and an existing one fails the launch instead of
+// picking another name.
+func TestCreateNamedBranch(t *testing.T) {
+	home := isolate(t)
+	r := mkrepo(t, filepath.Join(home, "code", "video-editor"))
+	root := filepath.Join(home, "fast", "worktrees")
+	opts := CreateOptions{Root: root}
+	ctx := context.Background()
+	now := time.Now()
+	res, err := CreateWith(ctx, contracts.WorktreeCreateParams{Repos: []string{r}, Branch: "upstream-ui-survey", Slug: "Bounded upstream UI commit triage"}, now, opts)
+	want := filepath.Join(root, "video-editor", "upstream-ui-survey")
+	if err != nil || res.Cwd != want || res.Branch != "upstream-ui-survey" || res.Worktrees[0].Path != want {
+		t.Fatalf("named branch: %+v %v", res, err)
+	}
+	if got := git(t, want, "rev-parse", "--abbrev-ref", "HEAD"); got != "upstream-ui-survey" {
+		t.Fatalf("checked out %q", got)
+	}
+	// A slash in the name is one folder level: feat/x -> feat-x.
+	res, err = CreateWith(ctx, contracts.WorktreeCreateParams{Repos: []string{r}, Branch: "feat/x"}, now, opts)
+	if err != nil || res.Cwd != filepath.Join(root, "video-editor", "feat-x") || res.Branch != "feat/x" {
+		t.Fatalf("slash branch: %+v %v", res, err)
+	}
+	// Again: the branch exists (checked out in that worktree), so it fails.
+	_, err = CreateWith(ctx, contracts.WorktreeCreateParams{Repos: []string{r}, Branch: "upstream-ui-survey"}, now, opts)
+	if contracts.CodeOf(err) != contracts.ErrConflict || !strings.Contains(err.Error(), "branch upstream-ui-survey already exists") || !strings.Contains(err.Error(), want) {
+		t.Fatalf("existing branch: %v", err)
+	}
+	// A local branch with no worktree also fails.
+	git(t, r, "branch", "kept")
+	if _, err = CreateWith(ctx, contracts.WorktreeCreateParams{Repos: []string{r}, Branch: "kept"}, now, opts); contracts.CodeOf(err) != contracts.ErrConflict {
+		t.Fatalf("existing local branch: %v", err)
+	}
+	// A folder already at the path fails, and nothing is created.
+	_ = os.MkdirAll(filepath.Join(root, "video-editor", "taken"), 0o755)
+	if _, err = CreateWith(ctx, contracts.WorktreeCreateParams{Repos: []string{r}, Branch: "taken"}, now, opts); contracts.CodeOf(err) != contracts.ErrConflict || branchExists(ctx, r, "taken") {
+		t.Fatalf("existing folder: %v", err)
+	}
+}
+
+// A named branch that exists only on origin fails too: the new branch would
+// diverge from it.
+func TestCreateNamedBranchOnOrigin(t *testing.T) {
+	home := isolate(t)
+	clone, _ := laggingClone(t, home)
+	origin := filepath.Join(home, "origin.git")
+	git(t, origin, "branch", "theirs", "main")
+	_, err := CreateWith(context.Background(), contracts.WorktreeCreateParams{Repos: []string{clone}, Branch: "theirs"}, time.Now(), CreateOptions{Root: filepath.Join(home, "wt")})
+	if contracts.CodeOf(err) != contracts.ErrConflict || !strings.Contains(err.Error(), "exists on origin") {
+		t.Fatalf("origin branch: %v", err)
+	}
+	if branchExists(context.Background(), clone, "theirs") {
+		t.Fatal("branch created despite the conflict")
 	}
 }
 

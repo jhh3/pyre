@@ -31,9 +31,9 @@ export interface AskAnswer {
   by: Principal;
   by_default?: boolean;
   at: string;
-  /** "chat": the owner wrote to the session itself instead of answering here (text is what he wrote). */
+  /** "chat": the owner answered in the session's chat (option_id what he chose, text his words; by the session when it recorded it). */
   source?: string;
-  /** Other asks the same chat input answered. */
+  /** Legacy: other asks the same chat input answered. */
   with?: string[] | null;
 }
 
@@ -68,6 +68,8 @@ export interface Ask {
   deadline_rule?: string;
   state: AskState;
   answer?: AskAnswer | null;
+  /** The owner wrote to the session while this ask was open; it stays open until he answers it here or the session records his choice. */
+  owner_chat?: { text: string; at: string } | null;
   updates?: AskUpdate[];
   count: number;
   superseded_by?: string;

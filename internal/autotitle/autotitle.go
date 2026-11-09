@@ -68,15 +68,9 @@ const MaxTitleRunes = 60
 // headers, slash commands, XML-ish tags, URLs and code are dropped; the first
 // sentence is kept, at most six words. "" when nothing usable remains.
 func FromPrompt(prompt string) string {
-	s := prompt
-	// A Pyre-delivered message: drop the header line ("[pyre-msg:…] from …:").
-	if i := strings.Index(s, "[pyre-msg:"); i >= 0 {
-		rest := s[i:]
-		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
-			s = s[:i] + rest[nl+1:]
-		} else if j := strings.Index(rest, "]"); j >= 0 {
-			s = s[:i] + rest[j+1:]
-		}
+	s, ok := StripEnvelope(prompt)
+	if !ok {
+		return "" // Pyre's own text (a report, a nudge): not what the session is about
 	}
 	s = stripTags(s)
 	if i := strings.Index(s, "```"); i >= 0 {
@@ -126,6 +120,85 @@ func FromPrompt(prompt string) string {
 	r = []rune(t)
 	r[0] = unicode.ToUpper(r[0])
 	return string(r)
+}
+
+// pluginHeaderRe matches the line Claude Code puts before a prompt a plugin
+// submitted ("The pyre-session plugin sent a message:"): a session started
+// with an initial prompt, a resumed or switched-over run and every Pyre
+// message delivered between turns begin with it.
+var pluginHeaderRe = regexp.MustCompile(`^The [\w.@/-]+ plugin sent a message:?$`)
+
+// envelopeLinePrefixes start lines Claude Code or Pyre wrap around a
+// delivered prompt; such lines are dropped, the rest of the prompt is kept.
+var envelopeLinePrefixes = []string{
+	"This is how Claude Code surfaces a prompt", // Claude Code's note after a plugin's prompt
+}
+
+// pyreOnlyPrefixes start prompts that are Pyre's own text, not a task: the
+// whole prompt is skipped (the next prompt names the session).
+var pyreOnlyPrefixes = []string{
+	"[pyre auto-report]", "[pyre] ", "[pyre ask", "Pyre handoff:",
+	"Your turn ended with a question for the owner", // claude.AskNudgeText
+	"You lead this project and did work this turn",  // claude.PageNudgeText
+	"This session is being continued from a previous conversation",
+}
+
+// StripEnvelope removes Pyre's and Claude Code's delivery envelopes from a
+// prompt: the plugin header line, the "[pyre-msg:…] from …:" header and
+// Claude Code's trailing note. ok is false when what remains is Pyre's own
+// text (an auto-report, a nudge, a handoff) rather than a task.
+func StripEnvelope(prompt string) (string, bool) {
+	lines := strings.Split(prompt, "\n")
+	out := lines[:0:0]
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if pluginHeaderRe.MatchString(t) || hasAnyPrefix(t, envelopeLinePrefixes) {
+			continue
+		}
+		out = append(out, line)
+	}
+	s := strings.TrimSpace(strings.Join(out, "\n"))
+	if hasAnyPrefix(s, pyreOnlyPrefixes) {
+		return "", false
+	}
+	// A Pyre-delivered message: drop the header ("[pyre-msg:…] from …:").
+	if i := strings.Index(s, "[pyre-msg:"); i >= 0 {
+		rest := s[i:]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			s = s[:i] + rest[nl+1:]
+		} else if j := strings.Index(rest, "]"); j >= 0 {
+			s = s[:i] + rest[j+1:]
+		}
+		s = strings.TrimSpace(s)
+		if hasAnyPrefix(s, pyreOnlyPrefixes) {
+			return "", false
+		}
+	}
+	return s, true
+}
+
+// IsEnvelope reports whether a title is (the start of) one of those
+// envelopes rather than a name: such a title is never applied, and the
+// sessions that got one are repaired (pyre sessions repair-titles).
+func IsEnvelope(title string) bool {
+	t := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(title), ".:…"))
+	if t == "" {
+		return false
+	}
+	if pluginHeaderRe.MatchString(t) || strings.HasPrefix(t, "[pyre") || hasAnyPrefix(t, envelopeLinePrefixes) || hasAnyPrefix(t, pyreOnlyPrefixes) {
+		return true
+	}
+	// A cut title: "The pyre-session plugin sent a" and the like.
+	return strings.HasPrefix(t, "The ") && strings.Contains(t, " plugin sent")
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 var danglingWord = map[string]bool{"and": true, "or": true, "the": true, "a": true, "an": true, "to": true, "of": true, "for": true,

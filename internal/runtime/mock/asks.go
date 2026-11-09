@@ -396,8 +396,10 @@ func (b *Backend) GetAsk(ctx context.Context, req c.GetRequest) (c.Ask, error) {
 
 func (b *Backend) AnswerAsks(ctx context.Context, req c.AnswerAsksRequest) (c.AnswerAsksResponse, error) {
 	return mutate(b, ctx, c.OpAsksAnswer, req.Mutation, req, func(p c.Principal) (c.AnswerAsksResponse, error) {
-		if err := requireOwner(p); err != nil {
-			return c.AnswerAsksResponse{}, err
+		if p.Kind != c.PrincipalSession { // a session records the owner's chat answer to its own ask (hub: checkSessionAnswerTx)
+			if err := requireOwner(p); err != nil {
+				return c.AnswerAsksResponse{}, err
+			}
 		}
 		if len(req.Answers) == 0 {
 			return c.AnswerAsksResponse{}, c.Errorf(c.ErrInvalid, "answers is empty")
@@ -422,6 +424,10 @@ func (b *Backend) answerAsksLocked(p c.Principal, opID string, items []c.AnswerA
 		case a.State != c.AskOpen:
 			res.Error = c.Errorf(c.ErrConflict, "ask is already %s", a.State).WithRef(c.KindAsk, a.AskID)
 			res.Ask = clonePtr(a)
+		case p.Kind == c.PrincipalSession && (p.ID != a.SessionID || a.Proposal != nil):
+			res.Error = c.Errorf(c.ErrForbidden, "only the owner or the session that asked answers %s", a.AskID).WithRef(c.KindAsk, a.AskID)
+		case p.Kind == c.PrincipalSession && ((it.OptionID == "" && len(it.Items) == 0) || strings.TrimSpace(it.Text) == ""):
+			res.Error = c.Errorf(c.ErrInvalid, "name the option the owner chose and quote his words")
 		case it.OptionID == "" && strings.TrimSpace(it.Text) == "" && len(it.Items) == 0:
 			res.Error = c.Errorf(c.ErrInvalid, "an answer needs an option or text")
 		default:
@@ -431,6 +437,9 @@ func (b *Backend) answerAsksLocked(p c.Principal, opID string, items []c.AnswerA
 			}
 			a.State = c.AskAnswered
 			a.Answer = &c.AskAnswer{OptionID: it.OptionID, Items: it.Items, Text: strings.TrimSpace(it.Text), By: p, At: now}
+			if p.Kind == c.PrincipalSession {
+				a.Answer.Source = c.AskSourceChat
+			}
 			a.UpdatedAt = now
 			b.withdrawAttentionLocked("ask:"+a.AskID, c.AttnHandled)
 			b.ackAskMailLocked(a)

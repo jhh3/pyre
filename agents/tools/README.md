@@ -17,7 +17,9 @@ The short working guide that sessions receive is `pyre guide`
 ## Identity and connection inside a session
 
 The node daemon starts sessions with `PYRE_SOCKET`, `PYRE_SESSION_TOKEN`,
-`PYRE_SESSION_ID`, `PYRE_RUN_ID` and `PYRE_NODE_ID`. Both the CLI and the MCP
+`PYRE_SESSION_ID`, `PYRE_RUN_ID`, `PYRE_NODE_ID` and `PYRE_NODE_NAME` (the
+machine's Pyre name, which can differ from its OS hostname and Tailscale name;
+`pyre nodes` marks the machine "(this machine)"). Both the CLI and the MCP
 server pick these up: calls go to the local daemon and act as the session
 (the hub records it as the sender; a session cannot claim another identity).
 `pyre inbox` defaults to the session's own inbox, `pyre start` records the

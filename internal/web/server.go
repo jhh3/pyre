@@ -81,6 +81,7 @@ type Server struct {
 	live  atomic.Bool // the hub event stream is delivering
 
 	sessions  cached[[]c.SessionView]
+	sessPatch sessPatch // per-session refresh (sessions_patch.go)
 	projects  cached[[]c.Project]
 	asks      cached[[]c.Ask]
 	attention cached[[]c.AttentionItem]
@@ -123,10 +124,13 @@ func New(opts Options) (*Server, error) {
 	}
 	s := &Server{opts: opts, api: opts.API, now: opts.Now, logf: opts.Logf, read: rs,
 		pages: map[string]*cached[pageInfo]{}, known: map[string]c.SessionView{}}
-	// Events keep these current; maxAge bounds staleness if the stream is down.
+	// Events keep these current; maxAge bounds staleness if the stream is
+	// down, and the longer liveMaxAge is a safety net while it delivers.
 	s.sessions.maxAge = time.Minute
+	s.sessions.liveMaxAge, s.sessions.live = 5*time.Minute, &s.live
 	s.projects.maxAge = 5 * time.Minute
 	s.asks.maxAge = time.Minute
+	s.asks.liveMaxAge, s.asks.live = 10*time.Minute, &s.live
 	s.attention.maxAge = time.Minute
 	s.held.maxAge = time.Minute
 	s.bus = newBroker(opts.Debounce)

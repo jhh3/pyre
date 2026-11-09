@@ -9,11 +9,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -41,6 +43,9 @@ func TestMain(m *testing.M) {
 		return
 	}
 	if os.Getenv("PYRE_TEST_ROLE") == "pyrerun" {
+		if d, err := time.ParseDuration(os.Getenv("PYRE_TEST_CODEX_STDIN_IDLE")); err == nil {
+			codexStdinIdle = d
+		}
 		var args []string
 		_ = json.Unmarshal([]byte(os.Getenv("PYRE_TEST_ARGS")), &args)
 		a := NewApp()
@@ -92,7 +97,29 @@ func fakeCodexMain() {
 		b, _ := json.Marshal(rec)
 		_ = os.WriteFile(p, b, 0o600)
 	}
+	if p := os.Getenv("FAKE_STALL_COUNT"); p != "" {
+		// Stuck before its thread on its first FAKE_STALL_N starts: stdin
+		// read, nothing printed. Each start leaves its stdin and pid.
+		b, _ := os.ReadFile(p)
+		n := len(b) + 1
+		_ = os.WriteFile(p, bytes.Repeat([]byte("x"), n), 0o600)
+		_ = os.WriteFile(p+".stdin."+strconv.Itoa(n), in, 0o600)
+		_ = os.WriteFile(p+".pid."+strconv.Itoa(n), []byte(strconv.Itoa(os.Getpid())), 0o600)
+		if limit, _ := strconv.Atoi(os.Getenv("FAKE_STALL_N")); n <= limit {
+			if os.Getenv("FAKE_STALL_HARD") != "" {
+				signal.Ignore(syscall.SIGTERM) // stuck past SIGTERM too
+			}
+			time.Sleep(time.Minute)
+		}
+	}
 	os.Stdout.WriteString(`{"type":"thread.started","thread_id":"` + fakeThreadID + `"}` + "\n")
+	if os.Getenv("FAKE_OVERLOAD") != "" { // OpenAI at capacity: a retry, then the failed turn
+		os.Stdout.WriteString(`{"type":"error","message":"Reconnecting... 1/5 (server_overloaded: synthetic)"}` + "\n")
+		os.Stdout.WriteString(`{"type":"turn.failed","error":{"message":"synthetic capacity"}}` + "\n")
+	}
+	if d, err := time.ParseDuration(os.Getenv("FAKE_SLEEP")); err == nil {
+		time.Sleep(d) // a long turn
+	}
 	os.Stdout.WriteString(`{"type":"turn.started"}` + "\n")
 	os.Stdout.WriteString(`{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"OK"}}` + "\n")
 	os.Stdout.Write(in)
@@ -124,11 +151,13 @@ type fakeNode struct {
 	refuse  bool         // the claim answers "no eligible subscription"
 	start   bool         // records runs itself with the node credential (localExecStartPath)
 	deny    bool         // the start answers forbidden (the hub refused the node)
+	again   int          // the first claims answer "still on its way; claim again"
 	mu      sync.Mutex
 	starts  []map[string]any
 	claims  []map[string]any
 	started []map[string]any
 	exited  []map[string]any
+	native  []map[string]any // with "exited_before": exit reports received before it
 }
 
 func (f *fakeNode) serve(t *testing.T, sock string) {
@@ -163,6 +192,20 @@ func (f *fakeNode) serve(t *testing.T, sock string) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": c.Errorf(c.ErrCapacityExhausted, "no eligible anthropic subscription on this node (synthetic)")})
 			return
 		}
+		f.mu.Lock()
+		again := len(f.claims) < f.again
+		f.mu.Unlock()
+		if again {
+			var m map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&m)
+			f.mu.Lock()
+			f.claims = append(f.claims, m)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": c.Errorf(c.ErrUnavailable, "headless run run_synth-run has not reached this node yet (synthetic); claim again").
+				WithDetail(execClaimAgain, true)})
+			return
+		}
 		claim(w, r)
 	})
 	start := rec(&f.starts, map[string]string{"session_id": "ses_synth-run", "run_id": "run_synth-run"})
@@ -180,6 +223,15 @@ func (f *fakeNode) serve(t *testing.T, sock string) {
 	})
 	mux.HandleFunc("POST "+localExecStartedPath, rec(&f.started, map[string]string{}))
 	mux.HandleFunc("POST "+localExecExitedPath, rec(&f.exited, map[string]string{}))
+	mux.HandleFunc("POST "+localExecNativePath, func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		f.mu.Lock()
+		m["exited_before"] = len(f.exited)
+		f.native = append(f.native, m)
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]string{})
+	})
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +260,26 @@ func newRunEnv(t *testing.T) runEnv {
 			t.Fatal(err)
 		}
 	}
+	// The machine's own logins (HOME=dir): a fallback refuses to run with
+	// none at all.
+	synthLogin(t, filepath.Join(dir, ".claude"), "claude")
+	synthLogin(t, filepath.Join(dir, ".codex"), "codex")
 	return runEnv{dir: dir, bin: bin, sock: filepath.Join(dir, "pyred.sock"), startLog: filepath.Join(dir, "start.json"), fakeOut: filepath.Join(dir, "fake.json")}
+}
+
+// synthLogin writes a synthetic subscription login for harness h in home
+// and returns home.
+func synthLogin(t *testing.T, home, h string) string {
+	t.Helper()
+	p, body := filepath.Join(home, ".credentials.json"), `{"claudeAiOauth":{"accessToken":"synthetic"}}`
+	if h == "codex" {
+		p, body = filepath.Join(home, "auth.json"), `{"auth_mode":"chatgpt","tokens":{"refresh_token":"synthetic"}}`
+	}
+	_ = os.MkdirAll(home, 0o700)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home
 }
 
 // command runs `pyre ARGS` (role pyrerun) or, with direct, the fake claude
@@ -288,6 +359,78 @@ func TestPyreRunRecordsAndPassesThrough(t *testing.T) {
 	}
 }
 
+// A claim the node answers "claim again" (the start still on its way over
+// a slow hub link) is claimed once more, not given up on: the command runs
+// once on the binding, even with --fallback fail, and each claim tells the
+// node to answer before this process's own deadline.
+func TestPyreRunClaimsAgainOnce(t *testing.T) {
+	e := newRunEnv(t)
+	node := &fakeNode{again: 1}
+	node.serve(t, e.sock)
+	_, se, code := output(t, e.command(false, nil, []string{"FAKE_EXIT=5"}, "run", "--fallback", "fail", "--setup-timeout", "4s", "--", "claude", "-p", "x"))
+	if code != 5 || strings.Contains(se, "pyre run:") {
+		t.Fatalf("code %d stderr %q", code, se)
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if len(node.claims) != 2 || len(node.started) != 1 || len(node.exited) != 1 {
+		t.Fatalf("claims %v started %v exited %v", node.claims, node.started, node.exited)
+	}
+	for _, cl := range node.claims {
+		wait, _ := cl["wait_ms"].(float64)
+		if cl["secret"] != node.claims[0]["secret"] || cl["client_pid"] != node.claims[0]["client_pid"] || wait <= 0 || wait >= 4000 {
+			t.Fatalf("claim %v", cl)
+		}
+	}
+
+	// Still not there after the second claim: exit 75 with the node's
+	// reason, after exactly two claims.
+	u := newRunEnv(t)
+	slow := &fakeNode{again: 5}
+	slow.serve(t, u.sock)
+	_, se, code = output(t, u.command(false, nil, nil, "run", "--fallback", "fail", "--setup-timeout", "2s", "--", "claude", "-p", "x"))
+	if code != ExitPyreUnavailable || !strings.Contains(se, "has not reached this node yet") {
+		t.Fatalf("code %d stderr %q", code, se)
+	}
+	slow.mu.Lock()
+	defer slow.mu.Unlock()
+	if len(slow.claims) != 2 {
+		t.Fatalf("claims %d, want 2", len(slow.claims))
+	}
+	// A slow claim is not an outage: the next call is not told to skip Pyre.
+	if _, err := os.Stat(filepath.Join(u.dir, fmt.Sprintf("pyre-run-down-%d", os.Getuid()))); err == nil {
+		t.Fatal("a slow claim wrote the down marker")
+	}
+}
+
+// With no subscription account bound and no own login at all, pyre run
+// exits 75 with a clear line instead of running into the provider's 401,
+// and a fresh down marker does not make it skip trying Pyre.
+func TestPyreRunNoOwnLogin(t *testing.T) {
+	hs := []string{"codex"}
+	if runtime.GOOS != "darwin" { // macOS keeps Claude's login in the Keychain
+		hs = append(hs, "claude")
+	}
+	for _, h := range hs {
+		e := newRunEnv(t) // nothing listens
+		empty := filepath.Join(e.dir, "empty-"+h)
+		_ = os.MkdirAll(empty, 0o700)
+		env, args := []string{"CODEX_HOME=" + empty}, []string{"run", "--", "codex", "exec", "x"}
+		if h == "claude" {
+			env, args = []string{"CLAUDE_CONFIG_DIR=" + empty}, []string{"run", "--", "claude", "-p", "x"}
+		}
+		_ = os.WriteFile(filepath.Join(e.dir, fmt.Sprintf("pyre-run-down-%d", os.Getuid())), nil, 0o600)
+		_, se, code := output(t, e.command(false, nil, env, args...))
+		if code != ExitPyreUnavailable || !strings.Contains(se, "no subscription account bound and this machine has no own "+h+" login") ||
+			!strings.Contains(se, "no Pyre node daemon") {
+			t.Fatalf("%s: code %d stderr %q", h, code, se)
+		}
+		if _, err := os.Stat(e.fakeOut); err == nil {
+			t.Fatalf("%s: ran the command with no login", h)
+		}
+	}
+}
+
 // A --resume in the command tells the node which conversation it continues.
 func TestPyreRunResumeHint(t *testing.T) {
 	if got := resumeID([]string{"-p", "x", "--resume", fakeSessionID, "--output-format", "json"}); got != fakeSessionID {
@@ -310,8 +453,9 @@ func TestPyreRunResumeHint(t *testing.T) {
 	}
 }
 
-// Without a node daemon the command runs exactly as given after one warning
-// line on stderr; the output and exit code are the command's.
+// Without a node daemon the command runs as given after one warning line on
+// stderr; the output and exit code are the command's. The caller's
+// ANTHROPIC_API_KEY never reaches it (subscriptions only).
 func TestPyreRunFallsBackWithoutNode(t *testing.T) {
 	e := newRunEnv(t) // nothing listens on the socket
 	env := []string{"FAKE_EXIT=0"}
@@ -326,8 +470,8 @@ func TestPyreRunFallsBackWithoutNode(t *testing.T) {
 	}
 	b, _ := os.ReadFile(e.fakeOut)
 	_ = json.Unmarshal(b, &fake)
-	if fake.APIKey != "synthetic-key" {
-		t.Fatal("fallback changed the environment")
+	if fake.APIKey != "" {
+		t.Fatal("fallback passed the caller's API key")
 	}
 	if _, err := os.Stat(e.startLog); err == nil {
 		t.Fatal("fallback recorded a run")
@@ -447,8 +591,8 @@ func TestCodexThreadScanner(t *testing.T) {
 // The calling session's identity never reaches the child.
 func TestWithoutSessionIdentity(t *testing.T) {
 	env := withoutSessionIdentity([]string{"PYRE_SESSION_ID=ses_synth-parent", "PYRE_RUN_ID=run_synth-parent", "PYRE_SESSION_TOKEN=synthetic-token",
-		"PYRE_PARENT_SESSION_ID=ses_synth-gp", "PYRE_CLAUDE_STATE_DIR=/synthetic/run", "PYRE_SOCKET=/synthetic/pyred.sock", "PYRE_NODE_ID=node_synth", "HOME=/synthetic"})
-	if strings.Join(env, " ") != "PYRE_SOCKET=/synthetic/pyred.sock PYRE_NODE_ID=node_synth HOME=/synthetic" {
+		"PYRE_PARENT_SESSION_ID=ses_synth-gp", "PYRE_CLAUDE_STATE_DIR=/synthetic/run", "PYRE_SOCKET=/synthetic/pyred.sock", "PYRE_NODE_ID=node_synth", "PYRE_NODE_NAME=synth-node", "HOME=/synthetic"})
+	if strings.Join(env, " ") != "PYRE_SOCKET=/synthetic/pyred.sock PYRE_NODE_ID=node_synth PYRE_NODE_NAME=synth-node HOME=/synthetic" {
 		t.Fatalf("env %q", env)
 	}
 }
@@ -521,18 +665,20 @@ func TestPyreRunCodexExec(t *testing.T) {
 }
 
 // Fallback for codex: the own login is CODEX_HOME (or ~/.codex), the
-// command runs as given but still without the calling session's identity.
+// command runs as given but still without the calling session's identity
+// or the caller's OPENAI_API_KEY.
 func TestPyreRunCodexFallback(t *testing.T) {
 	e := newRunEnv(t) // nothing listens
-	_, se, code := output(t, e.command(false, nil, []string{"CODEX_HOME=/synthetic/own-codex", "OPENAI_API_KEY=synthetic-openai", "PYRE_SESSION_TOKEN=synthetic-parent-token"},
+	own := synthLogin(t, filepath.Join(e.dir, "own-codex"), "codex")
+	_, se, code := output(t, e.command(false, nil, []string{"CODEX_HOME=" + own, "OPENAI_API_KEY=synthetic-openai", "PYRE_SESSION_TOKEN=synthetic-parent-token"},
 		"run", "--", "codex", "exec", "x"))
-	if code != 0 || !strings.Contains(se, "CODEX_HOME=/synthetic/own-codex") {
+	if code != 0 || !strings.Contains(se, "CODEX_HOME="+own) {
 		t.Fatalf("fallback: code %d stderr %q", code, se)
 	}
 	var fake map[string]any
 	b, _ := os.ReadFile(e.fakeOut)
 	_ = json.Unmarshal(b, &fake)
-	if fake["codex_home"] != "/synthetic/own-codex" || fake["openai_key"] != "synthetic-openai" || fake["session_token"] != "" {
+	if fake["codex_home"] != own || fake["openai_key"] != "" || fake["session_token"] != "" {
 		t.Fatalf("fallback child env %v", fake)
 	}
 	f := newRunEnv(t)
@@ -641,8 +787,9 @@ func TestPyreRunFileStdoutNoHang(t *testing.T) {
 func TestPyreRunFallbackModes(t *testing.T) {
 	e := newRunEnv(t)
 	(&fakeNode{refuse: true}).serve(t, e.sock)
-	_, se, code := output(t, e.command(false, nil, []string{"CLAUDE_CONFIG_DIR=/synthetic/own"}, "run", "--", "claude", "-p", "x"))
-	if code != 0 || !strings.Contains(se, "Pyre declined the run: ") || !strings.Contains(se, "CLAUDE_CONFIG_DIR=/synthetic/own") {
+	own := synthLogin(t, filepath.Join(e.dir, "own"), "claude")
+	_, se, code := output(t, e.command(false, nil, []string{"CLAUDE_CONFIG_DIR=" + own}, "run", "--", "claude", "-p", "x"))
+	if code != 0 || !strings.Contains(se, "Pyre declined the run: ") || !strings.Contains(se, "CLAUDE_CONFIG_DIR="+own) {
 		t.Fatalf("refused, own: code %d stderr %q", code, se)
 	}
 	_ = os.Remove(e.fakeOut)
@@ -746,5 +893,439 @@ func TestPyreRunWithoutLoginOldNode(t *testing.T) {
 	_, se, code = output(t, d.command(false, nil, []string{"PYRE_TEST_NOAPI=1"}, "run", "--fallback", "fail", "--", "claude", "-p", "x"))
 	if code != ExitPyreUnavailable || !strings.Contains(se, "Pyre declined the run: this machine's node did not record the run: a node credential") {
 		t.Fatalf("hub refused the node: code %d stderr %q", code, se)
+	}
+}
+
+// A long codex exec (a 20-minute review) names its thread to the node
+// while it still runs, from a pipe or a file stdout, so pyre read shows its
+// transcript before it ends instead of nothing until the exit report
+// (iss_…).
+func TestPyreRunReportsNativeWhileRunning(t *testing.T) {
+	e := newRunEnv(t)
+	home := "/synthetic/profiles/acct_synth-c/codex"
+	node := &fakeNode{binding: &execBinding{RunID: "run_synth-run", SessionID: "ses_synth-run", AccountID: "acct_synth-c", ProfileDir: home,
+		Env: map[string]string{"CODEX_HOME": home}}}
+	node.serve(t, e.sock)
+	args := []string{"run", "--", "codex", "exec", "--json", "prompt"}
+	env := []string{"FAKE_SLEEP=3s"}
+	// A pipe stdout.
+	if _, _, code := output(t, e.command(false, nil, env, args...)); code != 0 {
+		t.Fatalf("pipe run exit %d", code)
+	}
+	// A file stdout, as `> out.jsonl` opens it.
+	out, _ := os.OpenFile(filepath.Join(e.dir, "out.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	defer out.Close()
+	cmd := e.command(false, nil, env, args...)
+	cmd.Stdout = out
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if len(node.native) != 2 || len(node.exited) != 2 {
+		t.Fatalf("native reports %v, exit reports %v", node.native, node.exited)
+	}
+	for i, m := range node.native {
+		if m["native_id"] != fakeThreadID || m["run_id"] != "run_synth-run" || m["secret"] == "" || m["exited_before"] != i {
+			t.Fatalf("native report %d (want before exit %d): %v", i, i, m)
+		}
+	}
+}
+
+// codex exec --json output as pyre run's caller sees it on stderr: error
+// and turn.failed events repeated (not an item of type error, a warning),
+// split across writes; nothing printed for a while said so, once codex
+// prints that said too.
+func TestCodexWatch(t *testing.T) {
+	var se bytes.Buffer
+	w := &codexWatch{stderr: &se}
+	if w.quietNotice(3*time.Minute) || !strings.Contains(se.String(), "codex has printed nothing in 3m0s") {
+		t.Fatalf("no-output notice: %q", se.String())
+	}
+	se.Reset()
+	out := `{"type":"thread.started","thread_id":"` + fakeThreadID + `"}` + "\n" +
+		`{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Codex is ignoring 1 unrecognized configuration setting"}}` + "\n" +
+		`{"type":"error","message":"Reconnecting... 2/5 (server_overloaded:\n try later)"}` + "\n" +
+		`{"type":"turn.failed","error":{"message":"synthetic capacity"}}` + "\n"
+	for i := 0; i < len(out); i += 7 {
+		w.feed([]byte(out[i:min(i+7, len(out))]))
+	}
+	want := "pyre run: codex has started printing\npyre run: codex: Reconnecting... 2/5 (server_overloaded: try later)\npyre run: codex: turn failed: synthetic capacity\n"
+	if se.String() != want {
+		t.Fatalf("stderr %q\nwant   %q", se.String(), want)
+	}
+	if !w.quietNotice(time.Hour) {
+		t.Fatal("codex printed: no notice")
+	}
+	if !codexJSONOutput([]string{"exec", "--json", "-"}) || codexJSONOutput([]string{"exec", "--", "--json"}) {
+		t.Fatal("codexJSONOutput")
+	}
+}
+
+// pyre run -- codex exec --json: codex's error events reach stderr whether
+// stdout is a pipe or a (write-only) file, including those printed just
+// before it exits.
+func TestPyreRunCodexErrorsOnStderr(t *testing.T) {
+	e := newRunEnv(t)
+	node := &fakeNode{binding: &execBinding{RunID: "run_synth-run", SessionID: "ses_synth-run", Env: map[string]string{"CODEX_HOME": "/synthetic/codex"}}}
+	node.serve(t, e.sock)
+	args := append([]string{"run", "--", "codex"}, codexArgs...)
+	want := "pyre run: codex: Reconnecting... 1/5 (server_overloaded: synthetic)\npyre run: codex: turn failed: synthetic capacity\n"
+	_, se, _ := output(t, e.command(false, nil, []string{"FAKE_OVERLOAD=1"}, args...))
+	if !strings.Contains(se, want) {
+		t.Fatalf("pipe stdout: stderr %q", se)
+	}
+	out, _ := os.OpenFile(filepath.Join(e.dir, "codex.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	defer out.Close()
+	cmd := e.command(false, nil, []string{"FAKE_OVERLOAD=1"}, args...)
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = out, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("file stdout: stderr %q", stderr.String())
+	}
+}
+
+// The watcher says when a file stdout stays empty, repeats it, and stops
+// once codex writes.
+func TestCodexWatchQuietFile(t *testing.T) {
+	defer func(a, e, p time.Duration) { codexQuietAfter, codexQuietEvery, codexWatchPoll = a, e, p }(codexQuietAfter, codexQuietEvery, codexWatchPoll)
+	codexQuietAfter, codexQuietEvery, codexWatchPoll = 30*time.Millisecond, 30*time.Millisecond, 5*time.Millisecond
+	f, _ := os.OpenFile(filepath.Join(t.TempDir(), "codex.jsonl"), os.O_WRONLY|os.O_CREATE, 0o600)
+	defer f.Close()
+	var se syncBuffer
+	w := &codexWatch{stderr: &se, file: f}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); w.run(stop) }()
+	time.Sleep(100 * time.Millisecond)
+	f.WriteString(`{"type":"thread.started","thread_id":"` + fakeThreadID + `"}` + "\n")
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	<-done
+	s := se.String()
+	if n := strings.Count(s, "codex has printed nothing"); n < 2 || !strings.HasSuffix(s, "pyre run: codex has started printing\n") {
+		t.Fatalf("stderr %q", s)
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+// A codex exec --json that prints nothing within --codex-stall is stopped
+// and started once more with the same stdin (a pipe, or a file read again
+// from where it began), and its output and exit are the second start's;
+// the node hears both children and one exit.
+func TestPyreRunCodexStallStartsAgain(t *testing.T) {
+	e := newRunEnv(t)
+	node := &fakeNode{binding: &execBinding{RunID: "run_synth-run", SessionID: "ses_synth-run", Env: map[string]string{"CODEX_HOME": "/synthetic/codex"}}}
+	node.serve(t, e.sock)
+	count := filepath.Join(e.dir, "stall")
+	env := []string{"FAKE_STALL_COUNT=" + count, "FAKE_STALL_N=1", "FAKE_EXIT=3", "PYRE_RUN_CODEX_STALL=1500ms"}
+	stdin := []byte("piped prompt \x00\xff\n")
+	start := time.Now()
+	so, se, code := output(t, e.command(false, stdin, env, "run", "--", "codex", "exec", "--json", "-"))
+	if code != 3 || strings.Count(so, `"thread.started"`) != 1 || !strings.HasSuffix(so, string(stdin)) {
+		t.Fatalf("code %d stdout %q stderr %q", code, so, se)
+	}
+	if !strings.Contains(se, "codex printed nothing in 1.5s") || !strings.Contains(se, "starting it once more") {
+		t.Fatalf("stderr %q", se)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Fatalf("took %s", d)
+	}
+	for _, n := range []string{"1", "2"} {
+		if b, _ := os.ReadFile(count + ".stdin." + n); !bytes.Equal(b, stdin) {
+			t.Fatalf("start %s read stdin %q", n, b)
+		}
+	}
+	assertGone(t, count+".pid.1")
+	node.mu.Lock()
+	if len(node.started) != 2 || node.started[0]["pid"] == node.started[1]["pid"] || len(node.exited) != 1 ||
+		node.exited[0]["exit_code"] != float64(3) || node.exited[0]["native_id"] != fakeThreadID {
+		t.Fatalf("started %v exited %v", node.started, node.exited)
+	}
+	node.mu.Unlock()
+
+	// stdin and stdout regular files (`< prompt > out.jsonl`).
+	f := newRunEnv(t)
+	(&fakeNode{binding: &execBinding{RunID: "run_synth-run", SessionID: "ses_synth-run", Env: map[string]string{"CODEX_HOME": "/synthetic/codex"}}}).serve(t, f.sock)
+	count = filepath.Join(f.dir, "stall")
+	inPath := filepath.Join(f.dir, "prompt.txt")
+	_ = os.WriteFile(inPath, []byte("skip|file prompt\n"), 0o600)
+	in, _ := os.Open(inPath)
+	defer in.Close()
+	_, _ = in.Seek(5, io.SeekStart) // the caller already read "skip|"
+	out, _ := os.OpenFile(filepath.Join(f.dir, "out.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	defer out.Close()
+	cmd := f.command(false, nil, []string{"FAKE_STALL_COUNT=" + count, "FAKE_STALL_N=1", "PYRE_RUN_CODEX_STALL=1500ms"}, "run", "--", "codex", "exec", "--json", "x")
+	var stderr bytes.Buffer
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%v: %s", err, stderr.String())
+	}
+	for _, n := range []string{"1", "2"} {
+		if b, _ := os.ReadFile(count + ".stdin." + n); string(b) != "file prompt\n" {
+			t.Fatalf("start %s read stdin %q", n, b)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.dir, "out.jsonl")); bytes.Count(b, []byte(`"thread.started"`)) != 1 {
+		t.Fatalf("file stdout %q", b)
+	}
+}
+
+// A second stall ends pyre run with 124 and a clear error, both children
+// gone; the node hears exit 124.
+func TestPyreRunCodexStallTwiceExits(t *testing.T) {
+	e := newRunEnv(t)
+	node := &fakeNode{binding: &execBinding{RunID: "run_synth-run", SessionID: "ses_synth-run", Env: map[string]string{"CODEX_HOME": "/synthetic/codex"}}}
+	node.serve(t, e.sock)
+	count := filepath.Join(e.dir, "stall")
+	so, se, code := output(t, e.command(false, nil, []string{"FAKE_STALL_COUNT=" + count, "FAKE_STALL_N=9"},
+		"run", "--codex-stall", "1s", "--", "codex", "exec", "--json", "x"))
+	if code != ExitCodexStalled || so != "" || !strings.Contains(se, "printed nothing in 1s again") || !strings.Contains(se, "giving up (exit 124)") {
+		t.Fatalf("code %d stdout %q stderr %q", code, so, se)
+	}
+	if b, _ := os.ReadFile(count); len(b) != 2 {
+		t.Fatalf("%d starts", len(b))
+	}
+	assertGone(t, count+".pid.1")
+	assertGone(t, count+".pid.2")
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if len(node.started) != 2 || len(node.exited) != 1 || node.exited[0]["exit_code"] != float64(ExitCodexStalled) {
+		t.Fatalf("started %v exited %v", node.started, node.exited)
+	}
+}
+
+// --codex-stall 0 (or the variable) leaves a quiet codex running; bad
+// values are usage errors.
+func TestPyreRunCodexStallOff(t *testing.T) {
+	e := newRunEnv(t) // without Pyre: the own login, still watched
+	count := filepath.Join(e.dir, "stall")
+	cmd := e.command(false, nil, []string{"FAKE_STALL_COUNT=" + count, "FAKE_STALL_N=1", "PYRE_RUN_CODEX_STALL=0"}, "run", "--", "codex", "exec", "--json", "x")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if b, _ := os.ReadFile(count); len(b) != 1 {
+		t.Fatalf("%d starts with the stall check off", len(b))
+	}
+	_ = cmd.Process.Signal(syscall.SIGTERM) // forwarded to the child
+	_ = cmd.Wait()
+	assertGone(t, count+".pid.1")
+	for _, bad := range [][]string{{"run", "--codex-stall", "-1s", "--", "codex", "exec", "x"}} {
+		if _, se, code := output(t, e.command(false, nil, nil, bad...)); code != 2 || !strings.Contains(se, "--codex-stall must not be negative") {
+			t.Fatalf("%v: code %d stderr %q", bad, code, se)
+		}
+	}
+	if _, se, code := output(t, e.command(false, nil, []string{"PYRE_RUN_CODEX_STALL=soon"}, "run", "--", "codex", "exec", "x")); code != 2 || !strings.Contains(se, "PYRE_RUN_CODEX_STALL") {
+		t.Fatalf("bad variable: code %d stderr %q", code, se)
+	}
+}
+
+// The stall window of a piped stdin starts when the caller closes it: a
+// codex waiting for its input is not stuck.
+func TestPyreRunCodexStallWaitsForStdin(t *testing.T) {
+	e := newRunEnv(t)
+	count := filepath.Join(e.dir, "stall")
+	cmd := e.command(false, nil, []string{"FAKE_STALL_COUNT=" + count, "PYRE_RUN_CODEX_STALL=500ms"}, "run", "--", "codex", "exec", "--json", "-")
+	cmd.Stdin = nil
+	w, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var so, se bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &so, &se
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write([]byte("slow "))
+	time.Sleep(1500 * time.Millisecond) // three windows with stdin still open
+	_, _ = w.Write([]byte("caller\n"))
+	w.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("%v: %s", err, se.String())
+	}
+	if b, _ := os.ReadFile(count); len(b) != 1 || strings.Contains(se.String(), "printed nothing") || !strings.HasSuffix(so.String(), "slow caller\n") {
+		t.Fatalf("%d starts, stdout %q stderr %q", len(b), so.String(), se.String())
+	}
+}
+
+// stdinCopy replays everything the caller sent, to a pipe made before or
+// after it arrived.
+func TestStdinCopyReplays(t *testing.T) {
+	src, w := io.Pipe()
+	s := newStdinCopy(src)
+	r1, err := s.pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		w.Write(bytes.Repeat([]byte("a"), 200<<10))
+		w.Write([]byte("end"))
+		w.Close()
+	}()
+	b1, _ := io.ReadAll(r1)
+	<-s.done
+	r2, _ := s.pipe()
+	b2, _ := io.ReadAll(r2)
+	if len(b1) != 200<<10+3 || !bytes.Equal(b1, b2) {
+		t.Fatalf("replay %d vs %d bytes", len(b1), len(b2))
+	}
+}
+
+// assertGone fails unless the process whose pid is in path has ended.
+func assertGone(t *testing.T, path string) {
+	t.Helper()
+	b, _ := os.ReadFile(path)
+	pid, _ := strconv.Atoi(string(b))
+	if pid <= 0 {
+		t.Fatalf("no pid in %s", path)
+	}
+	for i := 0; i < 100; i++ {
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Fatalf("stalled codex %d still running", pid)
+}
+
+// A stalled codex that ignores SIGTERM gets SIGKILL after the grace; a
+// caller's signal while it is being stopped means no second start.
+func TestPyreRunCodexStallCallerSignal(t *testing.T) {
+	e := newRunEnv(t)
+	(&fakeNode{binding: &execBinding{RunID: "run_synth-run", SessionID: "ses_synth-run", Env: map[string]string{"CODEX_HOME": "/synthetic/codex"}}}).serve(t, e.sock)
+	count := filepath.Join(e.dir, "stall")
+	cmd := e.command(false, nil, []string{"FAKE_STALL_COUNT=" + count, "FAKE_STALL_N=9", "FAKE_STALL_HARD=1", "PYRE_RUN_CODEX_STALL=1s"},
+		"run", "--", "codex", "exec", "--json", "x")
+	var se bytes.Buffer
+	cmd.Stdout, cmd.Stderr = io.Discard, &se
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second) // stopped at 1s, ignoring SIGTERM
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	_ = cmd.Wait()
+	if b, _ := os.ReadFile(count); len(b) != 1 || strings.Contains(se.String(), "starting it once more") {
+		t.Fatalf("%d starts after the caller's SIGTERM; stderr %q", len(b), se.String())
+	}
+	ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("pyre run ended %v, want the child's SIGKILL", ws)
+	}
+	assertGone(t, count+".pid.1")
+}
+
+// An own login that bills an API key is never run on: a fallback onto it
+// exits 75 without starting the command (Codex auth.json in API-key mode,
+// Claude's apiKeyHelper), whichever --fallback.
+func TestPyreRunFallbackRefusesAPIKeyLogin(t *testing.T) {
+	e := newRunEnv(t) // nothing listens
+	home := filepath.Join(e.dir, "own-codex")
+	_ = os.MkdirAll(home, 0o700)
+	_ = os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-not-a-key"}`), 0o600)
+	_, se, code := output(t, e.command(false, nil, []string{"CODEX_HOME=" + home}, "run", "--", "codex", "exec", "x"))
+	if code != ExitPyreUnavailable || !strings.Contains(se, "API-key login") || strings.Contains(se, "synthetic-not-a-key") {
+		t.Fatalf("codex: code %d stderr %q", code, se)
+	}
+	if _, err := os.Stat(e.fakeOut); err == nil {
+		t.Fatal("codex ran on an API-key login")
+	}
+	cfg := filepath.Join(e.dir, "own-claude")
+	_ = os.MkdirAll(cfg, 0o700)
+	_ = os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(`{"apiKeyHelper":"/synthetic/helper"}`), 0o600)
+	_, se, code = output(t, e.command(false, nil, []string{"CLAUDE_CONFIG_DIR=" + cfg}, "run", "--", "claude", "-p", "x"))
+	if code != ExitPyreUnavailable || !strings.Contains(se, "apiKeyHelper") {
+		t.Fatalf("claude: code %d stderr %q", code, se)
+	}
+	if _, err := os.Stat(e.fakeOut); err == nil {
+		t.Fatal("claude ran on an API-key login")
+	}
+}
+
+// A codex exec whose prompt is an argument, under a caller that leaves a
+// pipe open with no input (a background shell's inherited stdin), gets an
+// empty stdin after the idle cutoff instead of waiting forever; input the
+// caller pipes and closes still reaches it.
+func TestPyreRunCodexInheritedStdin(t *testing.T) {
+	e := newRunEnv(t)
+	cmd := e.command(false, nil, []string{"PYRE_TEST_CODEX_STDIN_IDLE=300ms"}, "run", "--", "codex", "exec", "--json", "a prompt")
+	cmd.Stdin = nil
+	w, err := cmd.StdinPipe() // never written, closed only after the run
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	var so, se syncBuffer
+	cmd.Stdout, cmd.Stderr = &so, &se
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil || !strings.Contains(so.String(), `"thread.started"`) || !strings.Contains(se.String(), "codex exec gets an empty stdin") {
+			t.Fatalf("%v: stdout %q stderr %q", err, so.String(), se.String())
+		}
+	case <-time.After(20 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("codex still waiting on an open stdin; stderr %q", se.String())
+	}
+	// Piped input that arrives is passed (the cutoff is for no input).
+	so2, se2, code := output(t, e.command(false, []byte("diff context\n"), []string{"PYRE_TEST_CODEX_STDIN_IDLE=300ms"}, "run", "--", "codex", "exec", "--json", "review this"))
+	if code != 0 || !strings.HasSuffix(so2, "diff context\n") || strings.Contains(se2, "empty stdin") {
+		t.Fatalf("piped: code %d stdout %q stderr %q", code, so2, se2)
+	}
+}
+
+// With the prompt on stdin ("-"), an open stdin is waited for, and the
+// quiet notice says the caller has not closed it instead of promising a
+// stop it cannot make yet.
+func TestCodexWatchQuietStdinOpen(t *testing.T) {
+	var b bytes.Buffer
+	w := &codexWatch{stderr: &b, then: "pyre run stops it at 5m0s and starts it once more", stdinOpen: func() bool { return true }}
+	if w.quietNotice(3 * time.Minute) {
+		t.Fatal("printed")
+	}
+	if !strings.Contains(b.String(), "its stdin is still open") || strings.Contains(b.String(), "stops it at") {
+		t.Fatalf("notice %q", b.String())
+	}
+}
+
+func TestCodexPromptArg(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"exec", "--json", "hi"}, true},
+		{[]string{"exec", "--json", "-"}, false},
+		{[]string{"exec", "--json"}, false},
+		{[]string{"exec", "-m", "gpt", "-o", "out.txt", "hi"}, true},
+		{[]string{"exec", "-m", "gpt"}, false},
+		{[]string{"exec", "resume", fakeThreadID, "more"}, true},
+		{[]string{"exec", "resume", fakeThreadID, "-"}, false},
+		{[]string{"exec", "resume", fakeThreadID}, false},
+		{[]string{"exec", "resume", "--last", "more"}, true},
+		{[]string{"exec", "review"}, false},
+		{[]string{"exec", "--json", "--", "-x prompt"}, true},
+		{[]string{"exec", "--", "-"}, false},
+	} {
+		if got := codexPromptArg(tc.args); got != tc.want {
+			t.Errorf("%v: got %v", tc.args, got)
+		}
 	}
 }

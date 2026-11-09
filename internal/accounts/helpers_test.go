@@ -274,6 +274,17 @@ type fakeController struct {
 	quiesceBlock    chan struct{}
 	quiesceBlockRun string
 	onQuiesce       func(*fakeController) // under mu, after a stop
+	// dialogTasks: background tasks only the harness's exit dialog shows
+	// (a proactive stop is refused; another stop ends them).
+	dialogTasks []string
+	quiesceOpts []QuiesceOptions
+	bg          map[string][]string // session -> what BackgroundWork reports
+}
+
+func (c *fakeController) BackgroundWork(_ context.Context, sessionID, _ string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bg[sessionID]
 }
 
 func (c *fakeController) CurrentRun(_ context.Context, sessionID string) (RunInfo, error) {
@@ -286,7 +297,18 @@ func (c *fakeController) CurrentRun(_ context.Context, sessionID string) (RunInf
 	return r, nil
 }
 
-func (c *fakeController) Quiesce(ctx context.Context, sessionID, runID string) (QuiesceResult, error) {
+func (c *fakeController) Quiesce(ctx context.Context, sessionID, runID string, opt QuiesceOptions) (QuiesceResult, error) {
+	c.mu.Lock()
+	c.quiesceOpts = append(c.quiesceOpts, opt)
+	if opt.Proactive && len(c.dialogTasks) > 0 {
+		// Like the Claude adapter's guarded stop: the exit dialog listed
+		// tasks, it was cancelled and nothing stopped.
+		c.order = append(c.order, "refused:"+runID)
+		tasks := c.dialogTasks
+		c.mu.Unlock()
+		return QuiesceResult{Refused: tasks, Detail: "not stopped"}, nil
+	}
+	c.mu.Unlock()
 	c.mu.Lock()
 	block := c.quiesceBlock
 	if c.quiesceBlockRun != runID {
@@ -309,7 +331,12 @@ func (c *fakeController) Quiesce(ctx context.Context, sessionID, runID string) (
 	if c.quiesceErr != nil {
 		return QuiesceResult{}, c.quiesceErr
 	}
-	return QuiesceResult{Exited: !c.notExited, TurnInFlight: c.turnInFlight}, nil
+	res := QuiesceResult{Exited: !c.notExited, TurnInFlight: c.turnInFlight}
+	if !opt.Proactive {
+		// An unguarded stop ends the run's background tasks.
+		res.Stopped = append(append(res.Stopped, c.bg[sessionID]...), c.dialogTasks...)
+	}
+	return res, nil
 }
 
 func (c *fakeController) StartContinuation(ctx context.Context, k Continuation) (ContinuationResult, error) {

@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -53,6 +54,44 @@ var (
 // IDs generated in the same millisecond by one process are monotonic.
 func NewID(prefix string) string {
 	return prefix + "_" + newULID(time.Now())
+}
+
+// DerivedID returns a deterministic ULID-shaped ID: the same prefix, time
+// and key always give the same ID. The time part is t's millisecond (the
+// zero time encodes as 0) and the remaining 80 bits come from a SHA-256 of
+// key. Use it where every retry of one operation must name the same object.
+func DerivedID(prefix string, t time.Time, key string) string {
+	var ms uint64
+	if !t.IsZero() && t.UnixMilli() > 0 {
+		ms = uint64(t.UnixMilli())
+	}
+	sum := sha256.Sum256([]byte(key))
+	var b [16]byte
+	var tb [8]byte
+	binary.BigEndian.PutUint64(tb[:], ms)
+	copy(b[0:6], tb[2:8])
+	copy(b[6:], sum[:10])
+	return prefix + "_" + encodeBase32(b)
+}
+
+// IDTime returns the creation time encoded in an ID whose body is a ULID
+// (as NewID makes); ok is false for any other body.
+func IDTime(id string) (time.Time, bool) {
+	body := id[strings.IndexByte(id, '_')+1:]
+	if len(body) != 26 {
+		return time.Time{}, false
+	}
+	var v uint64
+	for i := 0; i < 26; i++ {
+		d := strings.IndexByte(crockford, body[i])
+		if d < 0 {
+			return time.Time{}, false
+		}
+		if i < 10 { // 2 padding bits + 48-bit millisecond time
+			v = v<<5 | uint64(d)
+		}
+	}
+	return time.UnixMilli(int64(v)).UTC(), true
 }
 
 func newULID(t time.Time) string {

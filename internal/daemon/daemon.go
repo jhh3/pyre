@@ -51,6 +51,8 @@ type Daemon struct {
 	// one sample per interval, cached in between.
 	hostStats *sysstats.Sampler
 	runStats  *sysstats.RunSampler
+	// gh is the GitHub API budget guard (ghguard.go).
+	gh ghGuard
 
 	adapters  map[string]contracts.RuntimeAdapter // by adapter name
 	execs     execClaims                          // headless runs waiting for their CLI (execrun.go)
@@ -68,9 +70,13 @@ type Daemon struct {
 	pollKick   chan struct{}
 	pollSem    chan struct{}
 	outboxKick chan struct{}
-	wg         sync.WaitGroup
-	asyncWG    sync.WaitGroup // launches and async actions (finish even on shutdown)
-	cancel     context.CancelFunc
+	runTmpKick chan struct{} // a run ended: sweep run temp folders (runtmp.go)
+	// startupSwept is closed once maintenanceLoop's startup harness temp
+	// sweep has run (tests wait for it before laying out folders).
+	startupSwept chan struct{}
+	wg           sync.WaitGroup
+	asyncWG      sync.WaitGroup // launches and async actions (finish even on shutdown)
+	cancel       context.CancelFunc
 	// In-flight launches (record committed, handle not yet recorded and not
 	// failed) and the shutdown drain flag (W-resilience).
 	launchMu   sync.Mutex
@@ -89,7 +95,12 @@ type Daemon struct {
 	// the previous pyred's last alive stamp.
 	crashResume []runRecord
 	aliveAt     time.Time
-	crash       crashSet // candidates being resumed, for stops aimed at them
+	crash       crashSet    // candidates being resumed, for stops aimed at them
+	inPlace     []runRecord // recovered runs a reboot restarted in place (interrupted.go)
+	bootOnce    sync.Once   // bootAt: the machine's boot time (interrupted.go)
+	bootAt      time.Time
+
+	limitResumeMu sync.Mutex // one session.limit_resume at a time (limitresume.go)
 }
 
 // liveRun is the in-memory state of a run the daemon supervises.
@@ -107,11 +118,18 @@ type liveRun struct {
 	lastActivity string
 	activityAt   time.Time
 	lastLimitAt  time.Time
+	// limitedUntil: the run reported a usage or rate limit naming this
+	// reset and has not finished a turn since; Pyre's deliveries wait for
+	// the reset or the account switch's successor (applyLimit).
+	limitedUntil time.Time
 
 	// stamp is the adapter's change stamp taken when the last observation
 	// started; observedAt is when that observation started.
 	stamp      string
 	observedAt time.Time
+
+	// securitySeen: security alerts already reported (secretegress.go).
+	securitySeen map[string]bool
 }
 
 func (lr *liveRun) snapshot() (runRecord, bool) {
@@ -132,7 +150,7 @@ func New(cfg Config) (*Daemon, error) {
 	_ = fileperm.Restrict(cfg.StateDir, 0o700)
 	d := &Daemon{cfg: cfg, start: cfg.Clock.Now(), live: map[string]*liveRun{}, actions: map[string]actionEntry{},
 		adapters: map[string]contracts.RuntimeAdapter{}, byHarness: map[contracts.Harness]contracts.RuntimeAdapter{},
-		upstreams: map[string]contracts.API{}, hostStats: sysstats.NewSampler(sysstats.DefaultPaths(cfg.StateDir)...), runStats: sysstats.NewRunSampler(), actSem: make(chan struct{}, cfg.MaxActions), pollSem: make(chan struct{}, cfg.Poll.MaxConcurrent), pollKick: make(chan struct{}, 1), outboxKick: make(chan struct{}, 1)}
+		upstreams: map[string]contracts.API{}, hostStats: sysstats.NewSampler(sysstats.DefaultPaths(cfg.StateDir)...), runStats: sysstats.NewRunSampler(), actSem: make(chan struct{}, cfg.MaxActions), pollSem: make(chan struct{}, cfg.Poll.MaxConcurrent), pollKick: make(chan struct{}, 1), outboxKick: make(chan struct{}, 1), runTmpKick: make(chan struct{}, 1), startupSwept: make(chan struct{})}
 	db := cfg.DB
 	if db == nil {
 		path := filepath.Join(cfg.StateDir, "pyred.db")
@@ -284,11 +302,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return err
 	}
 	d.refreshProbes(ctx)
-	loops := []func(context.Context){d.engine.Run, d.pollLoop, d.heartbeatLoop, d.outboxLoop, d.maintenanceLoop, d.searchLoop, d.repoLoop, d.githubLoop, d.aliveLoop}
-	if recs := d.crashResume; len(recs) > 0 {
-		d.crashResume = nil
+	loops := []func(context.Context){d.engine.Run, d.pollLoop, d.heartbeatLoop, d.outboxLoop, d.maintenanceLoop, d.searchLoop, d.repoLoop, d.githubLoop, d.aliveLoop, d.memoryGuardLoop}
+	if recs, inPlace := d.crashResume, d.inPlace; len(recs)+len(inPlace) > 0 {
+		d.crashResume, d.inPlace = nil, nil
 		aliveAt := d.aliveAt
-		loops = append(loops, func(ctx context.Context) { d.crashResumeAll(ctx, recs, aliveAt) })
+		loops = append(loops, func(ctx context.Context) { d.crashResumeAll(ctx, recs, inPlace, aliveAt) })
 	}
 	for _, p := range d.cfg.Periodic {
 		p := p
@@ -389,6 +407,18 @@ func (d *Daemon) recoverRuns(ctx context.Context) error {
 			lr.recovered = true
 			lr.rec.Handle = &h
 			d.cfg.Logger.Info("recovered run", "run", rec.Run.RunID, "session", rec.Run.SessionID)
+			if boot := d.bootTime(); restartedInPlace(rec.Run, boot, d.aliveAt) {
+				// Started before the machine booted: the adapter brought it
+				// back (Codex reloads its thread), but its process and
+				// whatever it had in flight did not survive.
+				lr.rec.Run.AdapterData = withInterrupted(lr.rec.Run.AdapterData, contracts.InterruptMachineRestarted, boot,
+					interruptedDiedAt(rec, d.aliveAt, boot, contracts.InterruptMachineRestarted), contracts.InterruptResumed, "", rec.Run.RunID)
+				if err := d.persistAndReport(ctx, lr.rec); err != nil {
+					return err
+				}
+				d.inPlace = append(d.inPlace, lr.rec)
+				d.cfg.Logger.Info("recovered run was restarted by the machine's reboot", "run", rec.Run.RunID, "session", rec.Run.SessionID, "boot", ftime(boot))
+			}
 			// Provider-less harnesses (shell) and runs launched without an
 			// assignment (ambient login) have nothing to re-validate.
 			needsCheck := contracts.ProviderFor(rec.Run.Harness) != "" && rec.Run.AccountID != ""
@@ -402,14 +432,28 @@ func (d *Daemon) recoverRuns(ctx context.Context) error {
 				lr.rec.Run.AdapterData["pyre.account_check"] = redact(contracts.AsError(err).Message)
 			}
 		case contracts.IsCode(rerr, contracts.ErrNotFound):
-			d.endRun(ctx, lr, contracts.RunExited, "run process not found after pyred restart (exit not observed)", nil)
-			if ok, why := d.crashResumeCandidate(rec); ok {
+			// The process did not survive: say why and what Pyre does
+			// about it (interrupted.go; the hub reports it to the parent).
+			ok, why := d.crashResumeCandidate(rec)
+			boot := d.bootTime()
+			cause := interruptCause(rec.Run, boot, d.aliveAt)
+			reason := "run process not found after pyred restart (exit not observed)"
+			if cause == contracts.InterruptMachineRestarted {
+				reason += ": the machine restarted"
+			}
+			outcome, detail := contracts.InterruptResuming, ""
+			if !ok {
+				outcome, detail = contracts.InterruptLeftExited, why
+			}
+			lr.rec.Run.AdapterData = withInterrupted(lr.rec.Run.AdapterData, cause, boot, interruptedDiedAt(rec, d.aliveAt, boot, cause), outcome, detail, "")
+			d.endRun(ctx, lr, contracts.RunExited, reason, nil)
+			if ok {
 				// Registered before the hub link starts, so a stop the hub
 				// queued for this run always finds it (crashStop).
 				d.crash.add(rec.Run.RunID)
 				d.crashResume = append(d.crashResume, rec)
 			} else {
-				d.cfg.Logger.Info("run gone after restart; not resumed", "run", rec.Run.RunID, "session", rec.Run.SessionID, "reason", why)
+				d.cfg.Logger.Info("run gone after restart; not resumed", "run", rec.Run.RunID, "session", rec.Run.SessionID, "reason", why, "cause", cause)
 			}
 			continue
 		default:
@@ -537,6 +581,7 @@ func (d *Daemon) endRun(ctx context.Context, lr *liveRun, state contracts.RunSta
 	}
 	d.releaseAccount(rec.Run.RunID)
 	d.engine.Kick(rec.Run.SessionID)
+	d.kickRunTmpSweep()
 }
 
 // refreshProbes probes adapters (bounded: at most once per 5 minutes).
@@ -578,11 +623,19 @@ func (d *Daemon) harnessInfo(ctx context.Context) []contracts.HarnessInfo {
 		}
 		hi := contracts.HarnessInfo{Harness: h, Version: p.Version, Executable: p.Executable, Available: p.Available,
 			Reason: p.Reason, Capabilities: p.Capabilities, ProbedAt: at, Models: p.Models, Efforts: p.Efforts}
+		if d.cfg.HarnessPin != nil && p.Available {
+			if exe, v, ok := d.cfg.HarnessPin(ctx, h); ok {
+				hi.Executable, hi.Version = exe, v
+			}
+		}
 		if d.cfg.OwnLogin != nil && p.Available {
 			hi.Login = d.cfg.OwnLogin(h)
 		}
 		if d.cfg.OwnUsage != nil && p.Available {
 			hi.Usage = d.cfg.OwnUsage(h)
+		}
+		if d.cfg.OwnLimit != nil && p.Available {
+			hi.Limit = d.cfg.OwnLimit(ctx, h)
 		}
 		out = append(out, hi)
 	}
@@ -594,13 +647,19 @@ func (d *Daemon) versions() map[string]string {
 	return map[string]string{"pyred": buildinfo.Version, "protocol": fmt.Sprint(contracts.ProtocolVersion), "go": runtime.Version()}
 }
 
-func (d *Daemon) capabilities() []string {
+func (d *Daemon) capabilities(ctx context.Context) []string {
 	caps := []string{"local_api", "worktree_checkout", "delivery.inbox"}
+	if d.cfg.MemoryAvailable != nil && d.cfg.MemoryAvailable(ctx) {
+		caps = append(caps, contracts.NodeCapMemoryHive) // the hub may route other nodes' memory searches here
+	}
 	if d.cfg.SSHAlias != "" {
 		caps = append(caps, "attach.ssh_tmux")
 	}
 	if d.cfg.Terminal != nil {
 		caps = append(caps, contracts.TerminalFit) // relayed streams can be fitted to the window
+	}
+	if _, ok := d.limitResumer(); ok {
+		caps = append(caps, contracts.NodeCapLimitResume) // the hub may resume limited sessions here (decision I70)
 	}
 	return caps
 }
@@ -622,6 +681,9 @@ func (d *Daemon) resources(ctx context.Context) (contracts.NodeResources, AgentU
 		AgentRSSMB: math.Round(agents.RSSMB*10) / 10, AgentCPUPct: math.Round(agents.CPUPct*10) / 10, ObservedAt: d.now()}
 	h.Apply(&r)
 	r.Runs = sysstats.Contract(d.runStats.Sample(ctx, d.runRoots(ctx)))
+	r.MemoryProtection = d.memoryProtection(ctx)
+	r.GitHub = d.ghBudget()
+	r.Tools = toolFacts()
 	return r, agents
 }
 
@@ -715,7 +777,7 @@ func (d *Daemon) Hello(ctx context.Context) (contracts.NodeHello, error) {
 	}
 	return contracts.NodeHello{NodeID: d.nodeID, Protocol: contracts.ProtocolVersion, MinProtocol: contracts.MinProtocolVersion,
 		PyredVersion: buildinfo.Version, Hostname: host, Platform: runtime.GOOS, Arch: runtime.GOARCH,
-		Harnesses: d.harnessInfo(ctx), Versions: d.versions(), Capabilities: d.capabilities(),
+		Harnesses: d.harnessInfo(ctx), Versions: d.versions(), Capabilities: d.capabilities(ctx),
 		Resources: d.Resources(ctx), LiveRuns: live}, nil
 }
 
@@ -740,10 +802,21 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 func (d *Daemon) maintenanceLoop(ctx context.Context) {
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
+	var kicked time.Time
+	d.startupHarnessTmpSweep()
+	close(d.startupSwept)
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.runTmpKick:
+			// A run ended; the ticker's pass covers kicks that come sooner.
+			if time.Since(kicked) >= runTmpKickEvery {
+				kicked = time.Now()
+				d.sweepRunTmp(ctx)
+				d.sweepHarnessTmp(ctx)
+			}
+			continue
 		case <-t.C:
 		}
 		if err := d.st.pruneSecrets(ctx); err != nil && ctx.Err() == nil {
@@ -752,7 +825,9 @@ func (d *Daemon) maintenanceLoop(ctx context.Context) {
 		if _, err := d.db.ExecContext(ctx, `DELETE FROM daemon_outbox WHERE state != 'pending' AND updated_at < ?`, ftime(d.now().Add(-7*24*time.Hour))); err != nil && ctx.Err() == nil {
 			d.noteErr("prune outbox: %v", err)
 		}
+		d.reclaimDBSpace(ctx) // dbspace.go (W-dbspace)
 		d.sweepRunTmp(ctx)
+		d.sweepHarnessTmp(ctx)
 	}
 }
 
@@ -811,6 +886,9 @@ type deliveryRuns Daemon
 func (r *deliveryRuns) target(lr *liveRun) delivery.Target {
 	rec, attached := lr.snapshot()
 	t := delivery.Target{Run: rec.Run, Adapter: lr.adapter, Attached: attached}
+	lr.mu.Lock()
+	t.LimitedUntil = lr.limitedUntil
+	lr.mu.Unlock()
 	if rec.Handle != nil {
 		t.Handle = *rec.Handle
 	}

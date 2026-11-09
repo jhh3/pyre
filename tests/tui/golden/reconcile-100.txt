@@ -19,7 +19,7 @@
                                                    │ Harnesses
                                                    │ ✓ claude  2.1.289  15 capabilities
                                                    │ ✓ codex   0.160.0  13 capabilities
-                                                   │ ✓ shell   tmux 3.5a  4 capabilities
+                                                   │ ✓ shell   tmux 3.5a  5 capabilities
                                                    │
                                                    │ Sessions by memory
                                                    │  1.2G 35%  coordinator                  11 pro…

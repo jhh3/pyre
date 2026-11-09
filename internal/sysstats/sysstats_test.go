@@ -413,3 +413,52 @@ func TestRealProbe(t *testing.T) {
 	}
 	t.Logf("probe wall %s (incl. 10 s sleep)", time.Since(start).Round(time.Millisecond))
 }
+
+// Memory is the memory guard's uncached, memory-only sample: Linux reads
+// meminfo and PSI; macOS reads sysctls and runs vm_stat only under warn or
+// critical pressure.
+func TestMemorySample(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "meminfo"), synthMeminfo)
+	write(t, filepath.Join(root, "pressure/memory"), "some avg10=45.00 avg60=3.00 avg300=1.00 total=123\n")
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s := linuxSampler(t, root, clk)
+	h := s.Memory(context.Background())
+	if h.MemTotalMB != 32000 || h.MemAvailMB != 8000 || h.SwapTotalMB != 8192 || h.SwapUsedMB != 6144 || h.Pressure != "critical" || len(h.Disks) != 0 {
+		t.Fatalf("linux: %+v", h)
+	}
+	write(t, filepath.Join(root, "meminfo"), "MemTotal: 32768000 kB\nMemAvailable: 1024000 kB\n")
+	if h := s.Memory(context.Background()); h.MemAvailMB != 1000 || h.SwapTotalMB != 0 {
+		t.Fatalf("not cached: %+v", h)
+	}
+
+	d := NewSampler()
+	d.GOOS, d.Now = "darwin", clk.now
+	level := uint32(1)
+	d.Sysctl = func(name string) ([]byte, error) {
+		switch name {
+		case "hw.memsize":
+			return le(uint64(16 << 30)), nil
+		case "vm.swapusage":
+			return le(uint64(9216<<20), uint64(1350<<20), uint64(7866<<20), uint32(16384), uint32(1)), nil
+		case "kern.memorystatus_vm_pressure_level":
+			return le(level), nil
+		}
+		return nil, errors.New("synthetic: no such sysctl")
+	}
+	execs := 0
+	d.Exec = func(_ context.Context, name string, _ ...string) (string, error) {
+		execs++
+		if name == "vm_stat" {
+			return synthVMStat, nil
+		}
+		return "", errors.New("synthetic: unexpected exec " + name)
+	}
+	if h := d.Memory(context.Background()); h.Pressure != "normal" || h.MemAvailMB != 0 || execs != 0 || h.SwapUsedMB != 7866 {
+		t.Fatalf("darwin normal: %+v execs %d", h, execs)
+	}
+	level = 4
+	if h := d.Memory(context.Background()); h.Pressure != "critical" || h.MemAvailMB != 16384-13746 || execs != 1 {
+		t.Fatalf("darwin critical: %+v execs %d", h, execs)
+	}
+}

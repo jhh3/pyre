@@ -233,7 +233,7 @@ Service definitions (templates in `packaging/`):
   (agents, shells, Codex app-servers) lives in that scope; tmux builds with
   systemd support also put each pane in a `tmux-spawn-*.scope` in the same
   slice. `pyred.service` therefore keeps the default `KillMode=control-group`
-  and caps pyred alone (`MemoryHigh=512M`, `MemoryMax=1G`, `CPUQuota=200%`,
+  and caps pyred alone (`MemoryHigh=2G`, `MemoryMax=4G`, `CPUQuota=200%`,
   `TasksMax=512`, `ManagedOOMPreference=avoid`); `Restart=on-failure`,
   `RestartSec=2s`, start-limit 10 per 5 min, `LimitNOFILE=8192`,
   `TimeoutStopSec=30s` (launchd `ExitTimeOut` 30). On SIGTERM pyred refuses
@@ -267,6 +267,8 @@ Service definitions (templates in `packaging/`):
   command records). Constant reclaim at `MemoryHigh` made it the top pgscan
   candidate. `pyre-runs.slice` (rendered next to the unit)
   carries `MemoryHigh=85%` (reclaim pressure, no kill) and `CPUWeight=90`.
+  Each pane then moves itself into its own `pyre-run-<session>-<suffix>.scope`
+  in that slice, with a per-run memory cap (see Memory protection).
   Because "-" is hierarchy in slice names, the slice sits at
   `user@UID.service/pyre.slice/pyre-runs.slice`. The unit sets
   `PYRE_SYSTEMD_SCOPE=require`: if the scope cannot be created, pyred refuses
@@ -285,7 +287,7 @@ Service definitions (templates in `packaging/`):
   when pyred itself runs as a systemd user service and `systemd-run --user
   --scope` works, else the server starts directly), `on` (try a scope even from
   a shell), `off`. `PYRE_SYSTEMD_SLICE` overrides the slice name.
-- systemd hub: `MemoryMax=1G`, `CPUQuota=200%`, `TasksMax=256`,
+- systemd hub: `MemoryMax=4G`, `CPUQuota=200%`, `TasksMax=256`,
   `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
   `ProtectHome=read-only` with `ReadWritePaths=<hub data>`. In a user unit
   these need unprivileged user namespaces; if the unit fails with
@@ -336,10 +338,27 @@ version and protocol range).
 same data directory refuses to start. Maintenance bounds `hub.db`: events keep
 7 days or 200 000 entries; finished node commands are deleted 7 days after
 completion and lose payloads/results over 1 KiB after 1 day; operation records
-keep 30 days; audit 90 days / 100 000 entries. Every retention pass runs in
+keep 7 days; audit 90 days / 100 000 entries. Every retention pass runs in
 write transactions of at most 500 rows with a short pause between them, so it
 never holds the write lock long. `command.result` events no longer copy
 results over 1 KiB (the command record keeps them for `commands.get`).
+
+Deleted rows free pages inside the file; SQLite does not shrink it by itself.
+`hub.db` and `pyred.db` run in `auto_vacuum=INCREMENTAL` mode, and each
+retention pass (hub: hourly; pyred: every 10 minutes) returns free pages
+beyond a 64 MiB reserve to the filesystem, at most 128 MiB (hub) / 256 MiB
+(pyred) per pass, in 8 MiB write transactions. An existing database is
+switched to that mode by one full VACUUM at service start, only when at
+least a quarter of it and 256 MiB are free pages and the disk has twice the
+live data free (the log says `vacuumed once to enable incremental vacuum`,
+or why not); until then free pages are reused and the file keeps its size.
+That VACUUM delays the start by about a second per few hundred MB of live
+data. `pyre-hub compact` also leaves the database in incremental mode.
+
+The node's transcript search index (`search_fts` in `pyred.db`) indexes each
+transcript file once, even when account profiles name it under several
+paths (they share one transcript store through symlinks); entries indexed
+per path by earlier versions are deleted in the background after upgrade.
 
 A database that grew before this (2026-10-08: 5.5 GB, 2.9 GB of it finished
 transcript reads) shrinks once offline:
@@ -475,6 +494,23 @@ write, report the outage. Node and connection timestamps come from the
 hub's clock, so a node whose clock is off does not look fresher or older
 than it is.
 
+Restarts (an upgrade) are ridden out, not reported as failures (decision
+I64). A request the hub or pyred stops serving while it shuts down is
+answered `503 unavailable` ("request interrupted ... retry"), never `500
+internal error`. `pyre publish` and MCP `publish` keep retrying an upload
+through such an outage (connection refused or dropped, 502/503/504, up to
+three internal errors in a row) for up to 2 minutes, resuming from the bytes
+the hub already has and printing why (`pyre: publish: upload at 120.0 MiB of
+350.0 MiB failed (...); hub restarting? retrying in 4s`) plus progress every
+10 s. Every step is idempotent, so one publish makes one version. On giving
+up the error says `hub unavailable (restarting?) after 2m0s of retries` and
+names the operation id that resumes the upload (`pyre publish FILE
+--operation-id op_...`). Any CLI or MCP call through `PYRE_SOCKET` whose
+socket is missing or refuses connections (pyred restarting) waits up to 30 s
+for it (`pyre: pyred restarting, retrying ...` on stderr; `PYRE_SOCKET_WAIT`
+changes the wait, `0` fails at once). Nothing was sent, so even a mutation
+is safe to resend.
+
 ### Automatic cleanup (sessions, worktrees, temp folders)
 
 The hub drives it; nodes do the file work (`internal/hub/lifecycle.go`,
@@ -491,12 +527,17 @@ The hub drives it; nodes do the file work (`internal/hub/lifecycle.go`,
   between turns) is not finished. Audit: `session.archived` (automatic, by
   Pyre; reason "exited cleanly …" or "exited child (exit 143), report
   delivered, untouched for an hour"); unarchive it like any archived
-  session. The archive itself sends the parent nothing: the ended report
+  session. An unarchive (explicit, or by a resume) after the run ended
+  sticks: neither this pass nor the nightly sweep archives the session
+  again until a new run starts and ends, or someone archives it
+  explicitly (`Session.unarchived_at`; `pyre sessions show` prints
+  "kept from auto-archive"). The archive itself sends the parent nothing: the ended report
   is already settled when it happens, a report whose child Pyre archived
   is never re-sent (only a parent that archived the child suppresses its
   reports: `archivedBy`, `reportParentArchivedDetail`), and a folded
   "also exited" line still rides along with the parent's next report
-  unchanged.
+  unchanged. The one exception is the cleanup after it finding processes
+  the child left running (below): the parent gets that one line.
 - **Sessions under an archived one**: when the owner or a session
   archives a session (itself, one under it, or any on the owner's say),
   its live descendants (lineage, `Session.Parent`, through already
@@ -508,13 +549,25 @@ The hub drives it; nodes do the file work (`internal/hub/lifecycle.go`,
   when its turn ends) and its own descendants follow when it is archived;
   an ended one is archived now. A descendant the owner started, or
   attached to, messaged or typed into since it was created is left alone
-  with what it started. Audit: `session.archive_scheduled` or
+  with what it started; only an interactive attach counts (a read-only
+  view, such as the TUI or web inbox preview pane, does not). Audit: `session.archive_scheduled` or
   `session.archived` by Pyre, reason "archived with ancestor ses_…". The
   archive answer (`SessionView.archive_cascade`, MCP `archive_session`
   note) and the session's final report to its parent say "also archived
   3 sessions it started; left 1 the owner is using: …". Pyre's own
   archives (finished children, the nightly sweep) do not cascade. A
   session may archive any session under it without the owner's approval.
+- **Archive when done across an account switch (decision I68)**: a run
+  pyred stopped for an account switch (`pyre.account_switch`) is not the
+  end of the work. A pending archive waits for the successor run (same
+  session, same session credential) and completes after the successor's
+  turn: for a limit switch, once the hub saw the successor running (or
+  5 minutes after its start); a proactive move's idle successor is
+  stopped at once. A switch that left the session ended (no account had
+  room, intervention) keeps the archive pending until the session is
+  resumed or archived directly. Archive when done asked between the
+  switch's stop and the successor's start (no fallback plan yet, at most
+  2 minutes) is scheduled, not applied on the spot.
 - **Session cleanup** (`session.cleanup` node action) follows every
   automatic archive:
   - stop processes in the terminal sessions of the session's runs (the
@@ -525,6 +578,37 @@ The hub drives it; nodes do the file work (`internal/hub/lifecycle.go`,
     matched. pyred drops `PYRE_SESSION_ID`, `PYRE_RUN_ID`,
     `PYRE_SESSION_TOKEN` and `PYRE_PARENT_SESSION_ID` from its own
     environment at startup.
+  - list (never stop) the processes the session started that are still
+    running outside those terminal sessions, such as a detached job
+    (`setsid -f`, `systemd-run --user --unit -E PYRE_SESSION_ID`): on
+    Linux, one pass over `/proc` for the processes whose own environment
+    carries the session's `PYRE_SESSION_ID` or whose cgroup is one of its
+    runs' scopes (`pyre-run-<run_id>-*.scope`). Only processes that
+    started before the run was stopped count (`/proc/<pid>/stat`
+    starttime against `/proc/uptime`; the stop is when Pyre asked the run
+    to stop, else when it ended): what the run's own exit path spawns,
+    such as the hive plugin's SessionEnd hook detaching
+    `python3 -m hive.tick_worker` with the session's environment inside
+    its scope, is not the agent's work (iss_…). A
+    run that exits by itself has no stop request, so a SessionEnd helper
+    of it may still be listed. Zombies are skipped, at
+    most 8 are listed with their redacted, clipped command lines, all are
+    counted (`SessionCleanup.left_running`, `left_running_count`). macOS
+    and Windows report none. They lose the session's Pyre access with the
+    archive (its credential is revoked), so the parent of a session that
+    reports to it is told in one line, "2 processes it started are still
+    running (pid 4242, cmd python3 score.py; pid 4243, cmd sleep 600);
+    they lose this session's Pyre access now that it is archived": added
+    to the session's final report when that is still waiting to go (held
+    for a busy or stopped parent), otherwise sent as a short report of its
+    own (once per run; `internal/hub/leftrunning.go`). The
+    `session.cleaned_up` audit names them too. A job started with
+    `systemd-run --user --unit` and only `-E PYRE_SOCKET -E
+    PYRE_SESSION_TOKEN` carries neither marker and is not found.
+  - mark the session's run temp folders archived (a `.archived` file with
+    the time); the maintenance pass removes them an hour later when no
+    process holds them, so a job the session left running keeps its
+    `$TMPDIR` files for that hour.
   - remove worktrees whose pyre-created marker names the session. Pyre
     writes the marker, with a one-time claim token, when it creates fresh
     worktrees for a launch (`worktree.create`: quick launch, the TUI's new
@@ -545,7 +629,20 @@ The hub drives it; nodes do the file work (`internal/hub/lifecycle.go`,
     process's current directory is inside it (processes are listed again
     right before each removal). The local branch is deleted when merged,
     or when `git ls-remote` confirms the remote still has it; otherwise
-    it is kept. Audit: `session.cleaned_up`.
+    it is kept. Audit: `session.cleaned_up`. Each removal (session, main
+    checkout, path, branch, full commit; also those of the nightly orphan
+    sweep, by the marker's session) is recorded in the node's
+    `daemon_meta` (`removed_worktrees/<session>`). A resume whose working
+    directory is missing and is, contains or holds a recorded removal
+    re-adds it at the same path first (`internal/daemon/worktreerestore.go`,
+    `repoindex.Restore`): on the kept branch, else on a new branch of that
+    name at the recorded commit (upstream origin/<branch> when it exists),
+    else detached, with the marker naming the session again. Other missing
+    folders are never created. When neither the branch nor the commit is
+    left, the resume fails saying so and naming the branch to start a fresh
+    session on. A read of a session whose latest run failed at launch
+    returns that run's error as `note` and the newest run that started
+    (`run_id`), instead of the node's not_found.
 - **Nightly sweep** (first hub pass between 03:30 and 05:00 in the owner's
   notification time zone, default America/Los_Angeles; a hub that is down
   then skips that night; recorded in `hub_meta` `lifecycle.last_sweep`):
@@ -614,6 +711,57 @@ leaves the note to `node resume`, which then finds the session live, sends
 the owner's restart note under the same stable message ID and removes the
 tag. A note pyred already stored under that ID counts as sent.
 
+Monitors (`pyre monitor add`) come back too. A monitor is a shell session,
+so drain skips it, but pyred records its command line on its run
+(`pyre.monitor_args`), and when a reboot or crash kills it (state reason
+`exit not observed`) pyred relaunches it at start-up with the same
+command, interval, `--until-change`/`--initial`, target session and
+directory, with no restart note. The loop keeps its state in
+`<state dir>/monitors/<monitor>.json`, so the relaunch keeps the original
+`--for` deadline, the wake budget and the last output the target saw: an
+unchanged output after the reboot wakes nobody, and a change the target had
+not been told about yet is still reported. Monitors that ended deliberately
+stay ended: `--until-change` fired, `--for` ran out, the wake budget was
+spent or the target was archived (the exit is observed, and the state file
+says so if one is resumed by hand), or it was stopped or removed
+(`pyre monitor rm`). `node resume` relaunches any the restart ended that
+pyred did not (for example while the hub was unreachable) and lists them
+under "monitors"; `pyre resume <monitor>` relaunches one by hand on its
+own node. A monitor started before this (no recorded command) cannot be
+relaunched: `node resume` lists it as skipped; re-create it with
+`pyre monitor add`.
+
+GitHub waits (`pyre wait gh-pr <url|o/r#N> --until checks-done|checks-fail|merged|closed|review-from:<login>|comment[:<login>]|head-changed [--after T]`,
+`pyre wait gh-run <url|o/r ID> --until done|failed`, MCP `wait_github`) are
+monitors of their own kind (tag `wait-gh`), so they come back the same way;
+their loop state is `<state dir>/ghwait/waits/<wait>.json` (start, head at
+start, done). A wait sends its session one summarized message when the
+condition is met, at `--timeout` (default 2h), or when an error needs a
+person (401/403/404) or a transient one lasts 10 minutes. It outlives the
+session that created it (the archive cascade skips it) and messages that
+session's parent once the session is archived or ended. Waits on one
+target on one machine share a poller: the waiter that finds
+`<state dir>/ghwait/snaps/<target>.json` due fetches under
+`ghwait/locks/<target>.lock`, and the others read its snapshot. Requests
+go to GitHub's REST API with the node's gh token (`$GH_TOKEN`, else `gh
+auth token`), each through the gh shim's per-session budget, with
+If-None-Match from `ghwait/cache/` (a 304 does not count against the rate
+limit). It polls every 30 s while checks run (60 s after 10 minutes), 2
+min for an idle open PR, 5 min once merged, closed or completed, and
+doubles that below a fifth of the hourly limit. checks-done and checks-fail
+are rerun-safe: each poll also reads the head's Actions runs
+(`actions/runs?head_sha=`, ETag'd), and a check run that finished before
+its run's latest attempt started counts as pending while that attempt is
+queued or running (GitHub keeps listing the old attempt's failure for a
+while after `gh run rerun`); such a run with no pending check yet counts
+as one pending check. Either condition is reported only when a second,
+fresh fetch at least 20 s after the first sees the same state, and the
+message names any run past attempt 1. `--after <now|RFC 3339|15:04|10m>`
+(MCP `after`) adds a stricter barrier for use right after a rerun:
+failures that finished before it count as being rerun. `pyre wait ls`, `pyre wait
+cancel <wait>`; `--block` waits in the foreground (exit 0 met, 5 timeout,
+1 error).
+
 ### Crash resume
 
 A graceful pyred restart or upgrade leaves every run alive (runs live in
@@ -629,7 +777,9 @@ observed)"), and then resumes the session by itself
 - the run's last recorded state was `running`, `waiting_input`,
   `waiting_on_background` or `waiting_approval`;
 - its harness resumes natively and Codex recovery does not already handle it
-  (Claude, agy; not Codex, shells or headless `pyre run` runs);
+  (Claude, agy; not Codex, shells or headless `pyre run` runs), or it is a
+  monitor with a recorded command, which is relaunched instead (see
+  "Restarting a node");
 - no stop was requested for it (pyred records `pyre.stop_requested` before
   it asks the adapter to stop and removes it again when the stop fails, so a
   crash between a stop and the observed exit does not bring it back), and the
@@ -669,16 +819,56 @@ ID `msg_resumed-<session>-<run>`, the same scheme `pyre node resume` uses;
 held in the node outbox while the hub is unreachable):
 
 > [from Pyre] Pyre restarted after a crash: your previous process died at
-> about <time PT> and Pyre resumed you at <time PT>. Anything you had running
+> about <time PT> and Pyre resumed you at <time PT>. Tool calls that were in
+> flight did not finish and nothing was replayed. Anything you had running
 > in the background (watchers, Monitors, dev servers, tunnels, shells) is
 > gone: check your state (git status, PRs, files) and restart what you need.
 > If you were started by another session, check in with it before
 > continuing. No reply needed.
 
+After a machine restart the note opens "<machine> restarted (it booted at
+<time PT>): your previous process died at about <time PT> with it and Pyre
+resumed you at <time PT>".
+
 The death time is the later of the run's last recorded observation and
 pyred's own alive stamp (written every 30 s), so it is when pyred last saw
-the machine healthy, not an exact time of death. A parent still gets the
-child's ordinary `ended` report for the dead run.
+the machine healthy, not an exact time of death (after a reboot, no later
+than the boot).
+
+#### Interrupted reports to the parent
+
+pyred tells a machine restart from a process that died on its own by
+comparing the machine's boot time (Linux `/proc/stat` btime, macOS
+`kern.boottime`, Windows uptime) with the run's start: booted after the run
+started (and after pyred's last alive stamp) means "machine restarted" (the
+dead run's state reason gains ": the machine restarted"), otherwise "process
+gone" (a crash, an OOM kill, a
+killed tmux server). It records on the dead run, in its adapter data, the
+cause (`pyre.interrupted`), the boot time, the death time and, once crash
+resume has decided, what it did: `pyre.interrupted_outcome` `resumed` (with
+`pyre.interrupted_resumed_as`, the new run) or `left_exited` (with
+`pyre.interrupted_detail`, why: a stop was requested, archived, the resume
+failed, the hub was unreachable ...).
+
+A child that reports to its parent then sends the parent one `interrupted`
+report instead of the ordinary `ended` report: the machine, the cause and
+times, what Pyre did, and that in-flight tool calls and background jobs were
+lost, with the child's last message. It is never batched behind a busy
+parent (a lead mid-turn hears at once). It waits for pyred's decision; if
+none arrives within 2 minutes it goes out with the hub's own view (a run
+continuing the dead one is its resume). A plain pyred restart, where the
+runs survive, sends nothing.
+
+A run whose adapter brought it back although the machine booted after it
+started (Codex reloads its thread, so Codex runs come back in place) did not
+survive either: pyred marks it restarted in place, once per boot, the
+parent gets the same report ("restarted it in place") and the session the
+note.
+
+While a node is disconnected the hub shows its live runs as `unknown`
+("node disconnected; last observed <state>", stale) in `get_session`,
+session lists and the MCP `list_sessions` line, never as their stored
+state; the stored state is unchanged.
 
 ## Cloud nodes (GCP over Tailscale)
 
@@ -1171,7 +1361,7 @@ pyre accounts remove-token personal
 How it works:
 
 - **Storage.** The hub keeps the only copy, encrypted at rest with an age X25519 key in `<hub data>/secrets/account-tokens.key` (0600). No read API returns it. Hub backups hold only the ciphertext, not the key, so after a restore on another machine you run `add-token` again (or copy the key file yourself).
-- **Delivery.** A node fetches the token over its authenticated TLS link (`accounts.token.fetch`, allowed only for node credentials and only for the account's allowed nodes). It fetches when a run is bound to the account or its usage is probed, and keeps the token in memory only, refetching after 10 minutes. During a hub outage it reuses the in-memory copy for up to 12 hours.
+- **Delivery.** A node fetches the token over its authenticated TLS link (`accounts.token.fetch`, allowed only for node credentials and only for the account's allowed nodes). It fetches when a run is bound to the account or its usage is probed, and keeps the token in memory only, refetching after 10 minutes. A launch waits at most 1 s for those refetches (all at once), then uses the in-memory copy while they finish in the background. During a hub outage it reuses the in-memory copy for up to 12 hours.
 - **Launch.** The run gets the token only through its private environment file (I18), as `CLAUDE_CODE_OAUTH_TOKEN`, with its own isolated profile. That profile is composed as usual (I22) and holds no credential file. `ANTHROPIC_API_KEY` and the other login variables are removed. The token is never in a start command, `run.json`, the node DB, the journal, events or delivery records.
 - **Concurrency.** Runs on several nodes may use the token at the same time, so no lease is needed. The account is marked per-machine independent.
 - **Usage.** Usage comes from one minimal Messages request: Haiku 4.5, `max_tokens` 1, about 8 input tokens and 1 output token per probe. Its `anthropic-ratelimit-unified-*` headers carry 5-hour and weekly utilization, reset and status. The token has inference scope only, so `/api/oauth/usage` answers 403. A node probes at most every 10 minutes per account while the account runs there. It also probes at selection when the reading is older than 10 minutes, and on `pyre accounts --refresh` (at most once a minute). An idle account shows its last reading as "ready · checked on use".
@@ -1182,13 +1372,17 @@ How it works:
   - Otherwise it takes the account with the most headroom that no other machine is using. Only when every eligible account with room is in use elsewhere does it share: fewest other machines first, then headroom.
   - When all accounts are near a limit, the most headroom wins.
   - *Most headroom* means the lowest binding window: the higher of the 5-hour and weekly use, then the lower weekly use, then the lower 5-hour use. An account at 97% weekly never wins because its 5-hour window is empty.
-  - The node reads other machines' active runs from the hub (`accounts.list`) before each automatic choice: 2 s timeout, reused for 5 s. If the hub is unreachable, there is no spread for 30 s: only home stickiness and headroom, and the reason says "fleet view unavailable".
+  - The node reads other machines' active runs from the hub (`accounts.list`) before each automatic choice, reused for 5 s. The read runs in the background (up to 20 s); a launch uses the last good view (up to 10 minutes old) at once, and waits at most 2 s only when it has none. If the hub is unreachable or slow and no good view exists, there is no spread (a failed read is reused for 30 s): only home stickiness and headroom, and the reason says "fleet view unavailable".
   - Two machines choosing at the same moment can land on the same account; nothing is reserved. Their next runs rebalance: the machine whose run started first keeps the account, and the other moves to a free one. Running sessions are never moved.
   - The assignment reason says why, e.g. "home account for mac; not used on other machines (5h 3% used, weekly 20%)". `pyre accounts` and the TUI show which machine holds an account ("in use by <session> on mac").
-- **Moves between turns.** Every 2 minutes a node moves up to 3 sessions that are idle at the prompt off an account at 85% weekly or 90% 5-hour, so they do not hit the limit mid-step. The move is a native resume on the best eligible account below the near-limit thresholds, with no prompt: the session stays idle and its next message runs on the new account. Only safe moves happen: the run has read idle for at least a minute and no message for it is queued or was delivered in the last minute; the starter did not pin the account strictly; the harness can resume across accounts over the shared transcript store (Claude) and the successor may only be a native resume (never a handoff); at most one move per session per 30 minutes. If the new run fails to start, the session resumes on its original account and is not moved again for an hour; if that fails too, the move is reported as needing you. Each move runs under a 3-minute deadline and never blocks the limit fallback. Proactive moves do not count toward the switch circuit breaker. A stop that is not confirmed is checked again: an ended run resumes on its original account, a run that may still stop is reported as needing you, and claims a restarted pyred left behind are settled the same way at startup. A limit that arrives during a move is handled when the move lets go of the run. Runs that were active when a node upgraded to this version count as strictly pinned and are never moved. Rolling pyred back past this version needs a restore of the node database from before the upgrade: older binaries refuse the newer accounts schema (migration v4). The audit log shows "account switched" with a reason starting "proactive move between turns".
+- **Moves between turns.** Every 2 minutes a node moves up to 3 sessions that are idle at the prompt off an account at 85% weekly or 90% 5-hour, so they do not hit the limit mid-step. The move is a native resume on the best eligible account below the near-limit thresholds, with no prompt: the session stays idle and its next message runs on the new account. Only safe moves happen: the run has read idle for at least a minute and no message for it is queued or was delivered in the last minute; the starter did not pin the account strictly; the harness can resume across accounts over the shared transcript store (Claude) and the successor may only be a native resume (never a handoff); at most one move per session per 30 minutes; the run can be relaunched (its working directory still exists and the target account's profile directory is there; otherwise the move is skipped, logged once per run, and the session keeps running on its account). If the new run fails to start, the session resumes on its original account and is not moved again for an hour; if that fails too, the move is reported as needing you. Each move runs under a 3-minute deadline and never blocks the limit fallback. Proactive moves do not count toward the switch circuit breaker. A stop that is not confirmed is checked again: an ended run resumes on its original account, a run that may still stop is reported as needing you, and claims a restarted pyred left behind are settled the same way at startup. A limit that arrives during a move is handled when the move lets go of the run. Runs that were active when a node upgraded to this version count as strictly pinned and are never moved. Rolling pyred back past this version needs a restore of the node database from before the upgrade: older binaries refuse the newer accounts schema (migration v4). The audit log shows "account switched" with a reason starting "proactive move between turns".
+- **Background tasks hold a move (decision I67).** A session whose harness has live background tasks (Claude: shells started with `run_in_background`, Monitor tasks, background subagents, as its last turn's Stop hook listed them; Codex: exec process groups with live processes; Pyre's own message monitor does not count) is not moved: stopping it would end them, and nothing would wake the session when its job finishes. It stays on its account and is moved on a later sweep once they are gone. Claude's exit dialog is the last check: if it lists a task besides Pyre's monitor, Pyre answers Escape, nothing is stopped, and the session is not tried again for an hour. Audit: `node.move_held` ("kept '…' on its account: it has live background tasks that an account switch would stop"), once per run, with the tasks. A switch at a real limit still goes ahead; its audit reason and the successor's first prompt say "background tasks were stopped by the account switch (…); re-check your jobs", and the plan lists them (`FallbackPlan.stopped_tasks`).
+- **What the parent is told.** pyred marks a run it stops for a switch (`Run.adapter_data` `pyre.account_switch`: `proactive` or `limit`) before the stop. The child report of its end waits up to 2 minutes for the node's plan and then says "<title> restarted on account "X" (account switch)", that it is not finished and is not archived, and what was lost (background tasks the switch stopped, a cut-off step) or that nothing was; a switch that did not complete says so with the plan's reason. It never says the child will be archived (`ArchiveFinishedChildren` skips runs with a plan).
+- **Spend limits and repeated limits (decision I69).** Claude's spend and credit messages ("You've hit your individual spend limit", "org's monthly spend limit", "channel's monthly spend limit", "individual usage limit", "team's shared budget", "You're out of usage credits", "Your org is out of usage", …) are usage limits of that account until the reset they name ("resets 1am (UTC)"): the account is cooled down until then and the session switches and continues as for any limit. A limit soon after an automatic switch normally pauses switching for the session (a replayed message would loop), except when the account it was moved to reported its own limit: a usage or rate limit with a reset ahead that differs from every reset the session already left behind, on an account it has not left in the window, at most 3 switches per session per 30 minutes. Ranking puts an account whose extra usage is spent (100%) after every account without a spent window, even with more plan headroom: such a seat stops at its spend limit as soon as its plan windows fill. While a run's account is at its limit (it reported a limit naming a reset and has not finished a turn since), Pyre holds its messages until the reset or a switch. The parent gets one report per run: "<title> stopped on "X"'s spend limit; automatic account switching is paused", or, when no account has room, "… no other account has room; resumable after <time>" (Pyre does not restart it by itself); further failed turns of the same run (its own Monitor tasks wake it) are not reported, and the idle report of a failed turn waits up to 45 s for the node's plan.
+- **Automatic resume after a limit (decision I70).** A session that stopped on a usage or spend limit while no other account had room, or whose limit paused account switching, is resumed by Pyre itself: at the limited account's reset (plus a minute), or earlier when another account of the provider is seen to regain room on that machine. A stopped run continues on the best account with room, like an account switch, with the usual "Continue where you left off" prompt; a run still waiting on its own account gets that prompt once the account has room again. It never touches a session that was archived or is being archived, one you typed into, attached to or messaged since the stop, one another session messaged since, or one whose current run changed (someone resumed it). Resumes are spaced 10 seconds apart, leads first. A resume that hits the limit again within 10 minutes is retried after 10, 20, 40 and 80 minutes, then left to you. The parent's report says "resumes automatically after <time>" and later gets one "<title> resumed on account "X"" line (or one saying Pyre stopped trying). Audit: `session.limit_resumed`. The timer lives in the hub (`limit_resumes`), so hub and pyred restarts keep it; the nightly sweep leaves such sessions alone. Turn it off with `pyre-hub serve --limit-auto-resume=false`. Needs an upgraded pyred on the session's machine (it advertises `session.limit_resume`); sessions on older nodes read "resumable after" as before.
 - **Reserve accounts.** `pyre accounts tier <account> reserve` (by ID, label, rota name or prefix, like `rename`; `--provider` when a label names accounts of several providers; `normal` undoes it) keeps an account for when the others run out. Automatic selection uses a reserve account only when every normal account of that provider is at its limit, unavailable, or near its limit: 5-hour or weekly window at 80% (what `pyre accounts` shows as "near limit"). Then the usual ranking decides, and the assignment reason starts "reserve account: no normal … account has room". `--account` and Prefer lists still pick a reserve account. Placement across machines prefers one where a normal account has room. If every normal account fails checkout for a launch, reserve accounts compete for the rest of it. Idle sessions that selection or a limit fallback put on a reserve account move back to a normal account between turns once one has room again (the rules of the moves above, at most one per sweep), never sessions started with that account named, never strict pins. Sessions already running when a node upgrades count as named only when they were explicit, preferred or strictly pinned, so the others on a newly reserved account drain too. Upgrade every pyred before reserving an account: an older node ignores the tier. `pyre accounts` shows "reserve" in NOTES; the TUI's Accounts view tags the row. The change is audited ("moved account … to the reserve tier"). Nodes read the tier from the hub within seconds; a node older than this version ignores it. Rolling pyred back past this version needs the node database from before the upgrade (migration v5).
-- **Explicit accounts.** `--account X` (MCP `account`) uses X. When X cannot take the run (at its limit, needs re-auth, Codex home busy, checkout refused), the launch uses the best eligible account of the same provider instead, and the assignment reason starts `account "X" is unavailable (…)`. `--strict-account` (MCP `strict_account`) keeps X and fails as before. The TUI's account pick and fallback successors are strict.
-- **Codex with no free account.** `pyre start --harness codex` asks the node (`account.select`, a dry run) before creating the session. With no free OpenAI account and no `--node`, it first tries the other connected Codex nodes: without `--cwd` the launch moves to the first with a free account; with `--cwd` the error names them. Otherwise it fails at once with the reason and the fix, and no session is created. The dry run and the launch share the own-login fallback, so the check never refuses what the launch would take. `--fallback-harness claude` (MCP `fallback_harness`) starts a Claude session instead, titled "Codex unavailable, Claude review: …", tagged `codex-unavailable`, with a first-prompt note. Use it for reviews and second opinions. A node that cannot answer the dry run is not blocked.
+- **Explicit accounts.** `--account X` (MCP `account`) uses X. When X cannot take the run (at its limit, needs re-auth, Codex home busy, checkout refused), the launch uses the best eligible account of the same provider instead, and the assignment reason starts `account "X" is unavailable (…)`. This holds when X is the node's own login too: at its limit on the usage cards, or refused here since it was last signed in, it is skipped the same way (decision I76), and a non-strict run on it that later hits a limit or a refused login moves to another account like any other. `--strict-account` (MCP `strict_account`) keeps X and fails as before. The TUI's account pick and fallback successors are strict.
+- **Codex with no free account.** `pyre start --harness codex` asks the node (`account.select`, a dry run) before creating the session. With no free OpenAI account and no `--node`, it first tries the other connected Codex nodes: without `--cwd` the launch moves to the first with a free account; with `--cwd` the error names them. Otherwise it fails at once with the reason and the fix, and no session is created. The dry run and the launch share the own-login fallback, so the check never refuses what the launch would take. `--fallback-harness claude` (MCP `fallback_harness`) starts a Claude session instead, titled "Codex unavailable, Claude review: …", tagged `codex-unavailable`, with a first-prompt note. Use it for reviews and second opinions. A dry run that picks the node's own login (no Pyre OpenAI account there) counts as no free account when that login is at its limit on the usage cards (`pyre accounts`), and with `--fallback-harness` a named `--node` in that state starts on Claude instead of being refused; the placement warning says so. A node that cannot answer the dry run is judged by the usage cards alone; `--force` skips the cards. A Codex session that went ahead with `--fallback-harness claude` is tagged `fallback-harness:claude`: when its run later stops on a usage or rate limit and the node finds no other OpenAI account (a waiting plan, or the own login, which is never switched), the hub starts a Claude session in its place (same parent, node, folder and project; the stand-in title, a note pointing at the Codex transcript, then the original task; the Codex model is dropped) once the run has ended, unless the session got input since the stop. The parent reads "restarts it on Claude" in the Codex session's report and then "restarted on Claude as session …".
 
 Codex access tokens (`--provider openai`, `CODEX_ACCESS_TOKEN`) register and show, but they are not selected for runs yet. Launch and usage in Codex's token mode are unverified.
 
@@ -1286,6 +1480,42 @@ daemon in place without touching the release install above:
 - Runs on a Pyre-managed Claude get `DISABLE_AUTOUPDATER=1`: Claude's native
   updater would otherwise install into and repoint the owner's own Claude
   installation. Runs on the owner's external claude keep its updater.
+
+Automatic Codex updates (on by default on every node): soon after pyred
+starts (2 minutes) and then daily, each node reads the latest stable
+openai/codex GitHub release (`api.github.com/repos/openai/codex/releases/latest`)
+and picks `codex-package-<target>.tar.gz` for its platform (Linux
+`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`, macOS
+`aarch64-apple-darwin` / `x86_64-apple-darwin`, Windows
+`x86_64-pc-windows-msvc` / `aarch64-pc-windows-msvc`): the same layout as
+Codex's own standalone install (`bin/codex` with its helpers), verified
+against the sha256 digest GitHub publishes for the asset. When that release
+is newer than what new runs use (the active managed version, else the codex
+on PATH), it is staged, health-checked (`codex --version`, `codex app-server
+--help`), activated and the older managed versions pruned (one rollback
+target and every version a live run uses are kept). Running sessions keep
+their version.
+
+- Never a downgrade; a version that failed its health check, or that the
+  owner rolled back from (`pyre update rollback`), is not retried: the next
+  release is.
+- A failed stage or activation leaves the active version alone and files one
+  machine issue per version per node (the node's own credential; kept and
+  re-sent at the next check until the hub takes it). A failed release check
+  (offline, GitHub rate limit) is only recorded.
+- `pyre update ls --node N` ends with the updater's line: the version new
+  runs use, the latest release, when it was checked and the outcome.
+  `pyre update auto [--node N] [--now]` shows it for every node (or one), and
+  `--now` runs the check at once and waits for it.
+- `pyre nodes` reports the codex version and executable new runs launch
+  (the managed one once activated), not only the one on PATH.
+- The user's own `codex` in a shell is not changed: it belongs to the
+  installer that put it there (npm, nvm, Codex's standalone installer under
+  `~/.codex/packages`, which updates itself).
+- State: `<state>/tools/codex/auto.json`. Off on `--dev-mock` test nodes and
+  with `PYRE_AUTO_UPDATE=0` in pyred's environment.
+- Claude Code updates itself (its native updater on the owner's install), so
+  there is no automatic Claude updater.
 
 Hub schema and rollback: an older hub refuses a database whose migration
 namespace is newer than it knows. After the release that adds hub migration
@@ -1706,6 +1936,98 @@ while pyred itself is capped. On server (2026-10-04) pyred.service held 12 MiB
 (`memory.current`) with two shells and one Claude run; the runs slice held
 255–320 MiB.
 
+### Memory protection
+
+One runaway process must not stall the whole node (decision I66; the
+incident: a 23 GB `python3 -I measure.py` from one Claude session filled the
+swap of a 30 GB node and stalled every session on it). Two layers:
+
+- **Per-run scopes (Linux).** Every pane Pyre starts (Claude, agy and shell
+  runs, a Codex TUI, each Codex app-server) moves itself, before it execs the
+  harness, into its own transient scope `pyre-run-<session>-<suffix>.scope` in
+  `pyre-runs.slice` with `MemoryMax` (`--run-memory-max`, default 65% of RAM),
+  `MemorySwapMax` (`--run-swap-max`, default 25% of swap), `OOMPolicy=continue`
+  (systemd 253 and later) and no `MemoryHigh` unless `--run-memory-high` sets
+  one. A run that reaches its cap is OOM-killed inside its scope: the kernel
+  kills the largest process there (normally the runaway tool; the harness
+  itself only when it is the largest), and the rest of the run keeps running (systemd's default for scopes, `OOMPolicy=stop`,
+  would stop the whole scope; checked on server). A Codex app-server serves all
+  threads of its CODEX_HOME, so their commands share one cap. Scopes need what
+  the run server's own scope needs (pyred as a systemd user service, or
+  `PYRE_SYSTEMD_SCOPE=on`) plus `busctl`, the user manager on the user bus
+  and the memory controller delegated to it; without them runs start unscoped
+  (fail open). Every launch logs its placement to
+  `<state>/tmux/run-scopes.log` (`<session> scope pyre-run-… MemoryMax=…` or
+  `<session> unscoped: <why>`); pyred logs the decision at start ("per-run
+  memory scopes on/off"). Runs started before the upgrade keep their
+  placement until they restart. Inspect with `systemctl --user list-units
+  'pyre-run-*'`, `systemd-cgtop --user`, or `cat
+  /sys/fs/cgroup/<cgroup of the pane pid>/memory.events` (`oom_kill`).
+  Detached jobs leave the run's scope by design: `setsid -f` stays in it (same
+  cgroup, other session), `systemd-run --user --unit` and `--scope` move the
+  job to a unit of its own, so it is capped only by what it sets itself (the
+  agent guide asks memory-heavy jobs to pass `-p MemoryMax=`).
+- **The memory guard (Linux and macOS; `--memory-guard off` turns it off).**
+  pyred reads memory every 2 s. When available memory is below 5% of RAM
+  (`--memory-guard-available`) and more than 80% of swap is used
+  (`--memory-guard-swap`; without swap the first condition alone; on macOS
+  the kernel's pressure level must be critical instead, since its swap grows
+  on demand), it stops the process holding the most memory (RSS + swap) among
+  the descendants of Pyre's runs: the Pyre tmux server's tree and each live
+  run's own process. Never a pane process (the harness), never a process
+  named claude, codex*, agy, tmux, pyre or pyred, never pyred, never anything
+  outside Pyre's runs (the owner's own processes, detached jobs reparented
+  away from the run), and only a process holding at least max(1 GiB, 5% of
+  RAM). A live run's recorded process counts as a root only while it is a
+  pane of the Pyre tmux server or names that run in its own environment
+  (`PYRE_RUN_ID`), so a stale handle PID reused by another process is never a
+  root. Windows a human opened inside a Pyre tmux session are part of that
+  session and so are candidates too. SIGTERM first (on Linux through a pidfd
+  after re-checking the start time, so a reused PID is never hit; macOS
+  re-checks the start time with `ps` and refuses to signal when it cannot
+  read it), SIGKILL after 10 s if it is still alive and still holds a quarter
+  of its memory. A memory figure that could not be read (no MemAvailable,
+  `vm_stat` failing) never triggers it. One process at a time, 30 s apart, at most 10
+  an hour. Each is logged (pyred.log "memory guard …"), audited
+  `node.memory_guard_kill` (pid, command with secrets redacted, RSS, swap,
+  outcome, node memory) and noted to the session that started it, which is
+  told how to cap the job. When the pressure comes from outside Pyre's runs it
+  logs "no process of a Pyre run holds …" once a minute and does nothing.
+- `pyre nodes <node>` shows both on its `memory cap:` line (the scope part is
+  the decision pyred made at its last launch or start, never probed by the
+  status report itself), e.g. `per-run
+  scopes MemoryMax=19.5G MemorySwapMax=2.0G OOMPolicy=continue; guard on
+  (available < 5% and swap > 80% used)`, and each run's RSS on its `run
+  usage:` line.
+- Not covered: Windows (neither layer); a cap per Codex command (Codex spawns
+  them inside the app-server's scope); `oom_score_adj` is left alone (an
+  unprivileged process can only raise it, which would make a large harness a
+  likelier kernel victim than the owner's desktop).
+
+### Polling traffic
+
+Steady polling between clients, nodes and the hub is kept small, which
+matters for nodes behind a slow relay (measured from the server hub log on
+2026-10-23 and `PYRE_MEASURE=1 go test ./integrations/hive -run
+TestMeasureNotesTraffic`):
+
+- Hive note bridge (every node): `notes.list` filtered to notes not yet
+  indexed, with idle backoff. Before: about 600 calls and 90 MB an hour per
+  node (every note, twice a minute). After: about 7 calls an hour, almost all
+  empty pages, plus one full cycle per 6 h.
+- TUI: event-driven re-lists of accounts, nodes and the full session list
+  are at most one per 15 s (`ReloadGap`); sessions named by an event are
+  patched with `sessions.get_many` at once.
+- `pyre web`: a session event patches that session (`sessions.get_many`)
+  instead of invalidating the whole list; with the event stream up the full
+  session list is re-read every 5 min and asks every 10 min.
+- Nodes reuse the hub's account list for own-login matching for 30 s.
+- Large answers are gzipped and unchanged polled lists come back as 304
+  (see contracts.md, "Conditional list reads and compression").
+
+The hub access log's `bytes` is the wire size; a gzipped answer also logs
+`raw_bytes`, and a 304 shows `status=304 bytes=0`.
+
 ### Background work limits
 
 Pyre's own background work is bounded and yields to interactive calls (CLI
@@ -1719,7 +2041,7 @@ reports current queue depths (`diagnostics.queues`) and the limits
 | --- | --- | --- |
 | Hive subprocesses for capture and the note bridge | one shared slot (`--hive-background-slots 1`), nice +10 | wait for the slot; interactive memory calls never take one |
 | Hive transcript capture queue | 32 transcripts (`--hive-capture-queue`), coalesced per transcript, 1 s between captures | dropped; Hive's sweep or the next capture picks the transcript up |
-| Hive note bridge | 20 notes and 10 pages per pass, passes at least 2 s apart, backoff to 5 min | notes stay `pending` on the hub |
+| Hive note bridge | 20 notes and 10 pages per pass, passes at least 2 s apart, backoff to 5 min; idle passes every 30 s doubling to 10 min (a `note.created` event starts one at once); reads only notes not yet indexed (`sync_states`), all notes once per 6 h | notes stay `pending` on the hub |
 | Node read cache writes | 256 values (`--read-cache-queue`), one writer | not cached; the read itself is unaffected |
 | Local message outbox (hub unreachable) | 1000 messages, 100 per flush, serial | `capacity_exhausted` to the sender (retryable); never dropped |
 | Hub-link report outbox | 100 000 reports, 256 in flight | `capacity_exhausted`; never dropped |
@@ -1741,7 +2063,7 @@ synced to a machine, logins added on a machine, accounts added/folded/renamed/di
 started (by owner or by session X), stopped, interrupted, resumed/handoff, renamed, auto-titled,
 archived, input taken over; machines enrolled/revoked/connected/disconnected, pyred and hub upgrades,
 failed updates, folder-trust prompts, Claude first-run screens and Claude exit dialogs a node
-answered by itself.
+answered by itself, processes the memory guard stopped (`node.memory_guard_kill`).
 Entries are written in the same transaction as the change (hub mutations, node reports, and an
 event-log append hook), hold IDs, names and short reasons only (no secrets, message bodies or
 transcripts) and live in the hub table `audit_log` (namespace `hub_audit`). Retention: 90 days or
@@ -1844,7 +2166,15 @@ operation ID), dropped after 20 attempts or when the triage session is gone.
   (`session_index.jsonl` / `thread_name_updated`), else a short title from
   the first user prompt (first sentence, at most six words, Pyre markers
   removed). It updates after the first turn and again when Claude's title
-  appears. Shells keep the cwd name. Rename with `pyre sessions rename
+  appears. Delivery envelopes are never a name: Claude Code's "The
+  pyre-session plugin sent a message:" header, `[pyre-msg:…]` headers and
+  its "This is how Claude Code surfaces…" note are stripped, and a prompt
+  that is Pyre's own text (`[pyre auto-report]`, a handoff, a nudge) is
+  skipped; the hub refuses an envelope title, and only the session's first
+  run may name it from a prompt (a resume or account switch-over keeps the
+  name; Claude's own title may still improve it). `pyre sessions
+  repair-titles [--apply]` (hidden, one-off) renamed the sessions older
+  nodes had titled with an envelope. Shells keep the cwd name. Rename with `pyre sessions rename
   <session> <title...>`, `R` / `:rename <title>` / clicking the pane title
   in the TUI, or the session overflow menu on Android; a person's rename
   always wins and stops auto-naming. Agents may name their own session with
@@ -2379,6 +2709,7 @@ On a Mac, pyred runs from `~/.local/share/pyre/Pyre.app`. It is a background-onl
 
 - **System Settings → Privacy & Security → Full Disk Access**: click **+**, press ⌘⇧G and paste `~/.local/share/pyre/Pyre.app`. This covers external drives, Documents and Desktop, and other apps' data, which agents' tools (du, git, builds) touch.
 - If you grant permissions through the prompts instead, approve the prompts that name **Pyre**.
+- **Automation** (Apple Events): the first time a session scripts an app with `osascript` (Chrome, Finder, ...), macOS shows a one-time prompt on the Mac's screen, "Pyre wants access to control <app>"; click **OK**. The script waits until someone answers it. Change the answer later under **System Settings → Privacy & Security → Automation → Pyre**. The release signs Pyre.app and its binaries with `packaging/macos/Pyre.entitlements` (`com.apple.security.automation.apple-events`); without that entitlement macOS denies hardened-runtime apps silently, with no prompt.
 
 Upgrades and rollbacks replace the bundle's contents in place and keep the same signed identity, so the grants stay. Entries left over from releases before I31, which show as `pyred` in the permission lists, can be removed.
 
@@ -2418,24 +2749,43 @@ The sentinel (dev.jhh3.pyre.sentinel) also runs Pyre.app's pyred, so it shares P
   the next start. The owner's `Claude Code-credentials` item and other config
   dirs' items are never touched.
 - Every run's `TMPDIR` is its own folder on the node's disk,
-  `<state>/tmp/runs/<run_id>` (0700), instead of `/tmp` (a RAM-backed tmpfs
-  with a per-user quota on server and the office NUCs). Codex threads get it as
-  a per-thread `shell_environment_policy.set.TMPDIR`. Claude's own
+  `~/.ptmp/<id>` (0700; `<id>` is 10 lowercase base32 characters of a hash
+  of the run ID, e.g. `/home/user/.ptmp/42dw4fz5dr`, 27 characters),
+  instead of `/tmp` (a RAM-backed tmpfs with a per-user quota on server and the
+  office NUCs). The path is short so Unix sockets that Chromium (Playwright,
+  puppeteer), tmux, ssh `ControlPath` and gpg-agent create under `$TMPDIR`
+  fit the 108-byte (macOS: 104) limit. A `.run` file in the folder holds the
+  run ID; a name another run holds is skipped for the next hash. When HOME
+  is unknown or so long that `<state>/rt` is shorter, the root is
+  `<state>/rt`; a TMPDIR over 40 characters is logged with its length.
+  Codex threads get it as a per-thread
+  `shell_environment_policy.set.TMPDIR`. Claude's own
   `CLAUDE_CODE_TMPDIR` (`<state>/tmp/claude`) is unchanged. A `TMPDIR` the
   run's environment already sets (an environment profile, launch prep, the
   session's `--env-file`) is kept. `pyred --run-tmp-root DIR` moves the
   folders; `--run-tmp-root none` leaves runs the TMPDIR they inherit. Not
   set on Windows (its TEMP is already on disk) or when the root contains
-  whitespace, as macOS's default state dir does (scripts expand `$TMPDIR`
-  unquoted), so macOS runs keep launchd's `/var/folders` TMPDIR. `pyre run`
-  (headless) runs keep the caller's. pyred removes a run's folder when its
-  session is archived (`session.cleanup`, `node.sweep`) or, in the 10-minute
-  maintenance pass, once the run ended over 24 h ago and no newer run of its
-  session is going (at most 256 folders examined and 32 removed per pass;
-  a folder no run record names goes after 24 h with no file changed). A
+  whitespace (scripts expand `$TMPDIR` unquoted); macOS runs get one under
+  `~/.ptmp` when HOME has no whitespace. Folders rc99–rc103 made,
+  `<state>/tmp/runs/<run_id>`, are cleaned by the same rules. `pyre run`
+  (headless) runs keep the caller's. pyred removes run folders in the
+  maintenance pass (every 10 minutes, and after a run ends, at most once a
+  minute): an archived session's runs lose theirs 1 h after the archive
+  (`session.cleanup` and `node.sweep` only mark them, with a `.archived`
+  file holding the time, so a detached job the session left running keeps
+  its files for that hour); a run that a newer run of its session superseded (a resume,
+  continuation or account switch) loses its folder 1 h after it ended; the
+  session's latest run on the node keeps it until 24 h after it ended (at
+  most 256 folders examined and 32 removed per pass; a folder whose `.run`
+  names a run with no record goes after 24 h with no file changed). Every
+  run, including a resume's, gets a new, empty folder of its own; files an
+  earlier run left are not carried over. A folder under the root without a
+  `.run` file whose name is no run's is not Pyre's and is never touched. A
   folder any of the user's processes still holds (open file, cwd or
-  executable: `/proc/*/{fd,cwd,exe}` on Linux, `lsof` on macOS) is kept;
-  when that cannot be checked, nothing is removed.
+  executable: `/proc/*/{fd,cwd,exe}` on Linux, `lsof` on macOS), such as a
+  detached job's, is kept; when that cannot be checked, nothing is removed.
+  pyred logs each folder removed (`run temp dir removed`, with its run and
+  bytes) and a total per pass (`bytes_freed`, `kept_in_use`).
 
 ## Extra harness arguments and adopting a Claude session
 
@@ -2590,8 +2940,8 @@ pyre run -- codex exec --json -o "$LAST" resume "$THREAD" - <"$FOLLOWUP_FILE"
   or a hook it runs therefore never acts as the calling session, marks its
   turns or writes its hook state; with no session token it uses the
   machine's client login, as when codex runs outside Pyre. Machine-level
-  variables (`PYRE_SOCKET`, `PYRE_NODE_ID`, `PYRE_HUB`, `PYRE_CLI`,
-  `PYRE_TOKEN`) stay.
+  variables (`PYRE_SOCKET`, `PYRE_NODE_ID`, `PYRE_NODE_NAME`, `PYRE_HUB`,
+  `PYRE_CLI`, `PYRE_TOKEN`) stay.
 - The hub records a session (harness `claude` or `codex`, tag `pyre run`,
   `--project` when given, title `pyre run: <folder>` by default) and a headless
   run (adapter `claude-exec` or `codex-exec`). It ends `exited` with the
@@ -2632,9 +2982,34 @@ pyre run -- codex exec --json -o "$LAST" resume "$THREAD" - <"$FOLLOWUP_FILE"
   unavailable: ...` or `pyre run: Pyre declined the run: ...`, naming the login
   used (`CLAUDE_CONFIG_DIR=...` or `~/.claude`). `--fallback fail`
   (`PYRE_RUN_FALLBACK=fail`) exits 75 without running instead. After an outage
-  later calls skip the setup for 60 s. Setup waits at most 10 s
-  (`--setup-timeout`, `PYRE_RUN_SETUP_TIMEOUT`). Measured overhead against an
+  (no pyred, no hub; not a slow claim) later calls that would fall back to a
+  working own login skip the setup for 60 s; a call that cannot fall back
+  always tries Pyre. Setup waits at most 60 s (`--setup-timeout`,
+  `PYRE_RUN_SETUP_TIMEOUT`): a loaded node can take over 30 s to bind an
+  account (decision I87).
+- **No own login.** With no account bound and no own login at all (Codex: no
+  `auth.json` in `CODEX_HOME` or `~/.codex`; Claude on Linux and Windows: no
+  `.credentials.json` and no `CLAUDE_CODE_OAUTH_TOKEN`; macOS's Keychain login
+  is not checked), `pyre run` exits 75 with `no subscription account bound and
+  this machine has no own <harness> login (...); retry` instead of running into
+  the provider's 401. Measured overhead against an
   isolated hub and node on server: p50 22 ms, p95 75 ms per call.
+- **Subscriptions only (decision I86).** A fallback never runs on an own login
+  that bills an API key: Codex `auth.json` in API-key mode (`auth_mode
+  "apikey"`, or an `OPENAI_API_KEY` with no ChatGPT tokens), or Claude with an
+  `apiKeyHelper` (settings or managed settings) or a Console `primaryApiKey`.
+  `pyre run` exits 75 naming the file instead. A fallback child never inherits
+  the harness's API-key variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  the `CLAUDE_CODE_USE_*` provider switches; `OPENAI_API_KEY`,
+  `CODEX_API_KEY`). A session launch on the node's own login (`--ambient`, the
+  auto default, the own-login fallback) is refused the same way.
+- **Codex stdin.** codex exec reads stdin to its end before it starts. When
+  the prompt is an argument (not `-`), a terminal stdin is replaced by
+  `/dev/null`, and a pipe left open with no input for 30 s gives codex an empty
+  stdin (later input is dropped, said on stderr). Input the caller pipes and
+  closes still reaches codex; with the prompt on stdin (`-` or none) stdin is
+  passed whole. While a piped stdin is still open the quiet notice says so
+  instead of promising the stall stop, which counts from the end of stdin.
 - With no Pyre account bound (the node's own login), the caller's
   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is kept; a profile binding sets it. Only
   the harness's own login variables are removed (claude: `CLAUDE_*`,
@@ -2649,6 +3024,17 @@ pyre run -- codex exec --json -o "$LAST" resume "$THREAD" - <"$FOLLOWUP_FILE"
 - Output to a pipe is relayed (and read for the session id); output to a file
   is passed as is, so a background process claude left behind never keeps
   `pyre run` waiting.
+- A `codex exec --json` writing to a pipe or file that prints nothing (not
+  even `thread.started`, which a working codex prints within seconds) for
+  5 minutes never began its thread, so it did no work: `pyre run` stops it
+  and starts it once more with the same stdin, saying so on stderr. When the
+  second one stalls too, `pyre run` stops it and exits 124, so a caller fails
+  fast instead of waiting 20+ minutes. `--codex-stall` /
+  `PYRE_RUN_CODEX_STALL` set the window (`0`: never stop it); for a piped
+  stdin it starts when the caller closes stdin. Seen 2026-11-05 on
+  devbox and office-box2: four guideline pre-checks on the machines' own
+  `~/.codex` login hung 20-45 minutes before `thread.started` while fresh
+  starts minutes later worked (iss_…).
 - The session is archived when the run ends (still searchable, readable and
   resumable); `--keep` leaves it listed.
 - No hub login is needed on the machine. With no client config and no
@@ -2846,3 +3232,33 @@ cross-compiled builds or the unix test suite):
   version whose app-server supports `unix://` on Windows), GUI app launch from
   a run, `npm`/`npx electron`/node-gyp builds from a session.
 - In-product update handoff through the supervisor; resource stats.
+
+## GitHub API budget guard
+
+Every machine uses one gh login for the same account, so one session's tight
+poll loop can spend the account's 5,000/hour REST budget for every agent on
+every machine (Nov 3: 0 left for 20 minutes). pyred guards it
+(`internal/ghguard`, `internal/daemon/ghguard.go`), on by default:
+
+- pyred links `gh` to the pyre CLI in `<state>/ghshim/` (a symlink; on
+  Windows a hard link or copy of `pyre.exe` as `gh.exe`, renewed at each
+  pyred start) and puts that directory first on every run's PATH
+  (`PYRE_GH_SHIM_DIR`). Started as `gh`, pyre execs the real gh found later
+  on PATH.
+- Before each call the shim asks pyred (`POST /v1/local/gh/call` on the local
+  socket, as the session): about 30 calls a minute per session with a burst
+  of 60. Past that a call waits up to 10 s (stderr says why); a call that
+  would wait longer is refused with exit 1 and a message naming the session.
+  Help, version, config and `gh api rate_limit` are free and not counted.
+  pyred unreachable or no session token: the call goes ahead.
+- `gh run watch` and `gh pr checks --watch` get `--interval 60` unless the
+  caller set one.
+- pyred samples `gh api rate_limit` (free) at most once a minute and reports
+  it with the top gh callers of the last hour in `NodeResources.github`:
+  `pyre nodes`, `pyre node show <node>` and get_context show them. When less
+  than 20% of the core or GraphQL budget is left, the shim warns each calling
+  session at most every 5 minutes.
+- `PYRE_GH_GUARD=off` in a run's environment (or the overlay) leaves the shim
+  off its PATH; in a shell it makes the shim a plain pass-through.
+- Not done: ETag/If-None-Match caching of `gh api` GETs (gh has `--cache`
+  for that), per-agent tokens or a GitHub App.

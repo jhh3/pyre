@@ -42,6 +42,7 @@ pyred run --name desktop &             # the node, in the background of this she
 pyre nodes                             # desktop · connected · shell tmux …
 
 pyre new ~/scratch shell --mkdir       # a plain shell session in a new folder
+pyre new ~/scratch shell git status    # the words after "shell" are typed into it and run
 pyre                                   # the TUI; q quits, the session keeps running
 ```
 
@@ -158,7 +159,10 @@ Or press `n` in the TUI and type `myrepo add a --verbose flag`. The launcher lin
 `repo[+repo] [@machine] [claude|codex|agy|shell] first prompt…`; `ctrl+f` starts the session in a fresh git
 worktree on a branch named after the prompt, and several repos (`api+web`) get side-by-side worktrees in one
 folder. `pyre start --node … --cwd …` runs in any directory; without `--node` (and without `--cwd`) Pyre picks the least
-loaded connected machine with the harness and says which. `pyre monitor add --every 10m --cmd '…'` wakes a
+loaded connected machine with the harness and says which. To keep new work off a machine for a while
+(presenting, a benchmark), run `pyre node avoid desktop --until 18:00 --reason "presenting"` (or `--for 2h`;
+`--hard` also refuses `--node`; `pyre node avoid --clear desktop` lifts it early); running sessions stay, and
+`pyre nodes` shows the flag until it expires. `pyre monitor add --every 10m --cmd '…'` wakes a
 session only when a shell check's output changes (session lists show it as "watching N" on that session; Claude
 Code sessions can use Claude's own Monitor tool instead; a Codex session can leave a command running in the
 background and end its turn, and Pyre wakes it when the command finishes). `pyre keys` prints every key.

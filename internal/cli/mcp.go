@@ -67,6 +67,9 @@ type MCPServer struct {
 	Instructions string
 	Tools        []MCPTool
 	Log          io.Writer
+	// Deadline bounds one tool call (default DefaultMCPDeadline; a tool's
+	// own deadline, e.g. start_session's, wins).
+	Deadline time.Duration
 
 	wmu     sync.Mutex
 	out     io.Writer
@@ -166,7 +169,7 @@ func (s *MCPServer) handle(ctx context.Context, wg *sync.WaitGroup, byName map[s
 			s.fail(m.ID, -32602, "unknown tool "+p.Name)
 			return
 		}
-		cctx, cancel := context.WithCancel(ctx)
+		cctx, cancel := context.WithTimeout(ctx, s.deadlineFor(t))
 		key := string(m.ID)
 		s.cmu.Lock()
 		s.cancels[key] = cancel
@@ -181,7 +184,7 @@ func (s *MCPServer) handle(ctx context.Context, wg *sync.WaitGroup, byName map[s
 				cancel()
 			}()
 			res := s.call(cctx, t, p.Arguments)
-			if cctx.Err() != nil && ctx.Err() == nil {
+			if errors.Is(cctx.Err(), context.Canceled) && ctx.Err() == nil {
 				return // cancelled by the client: no response
 			}
 			s.reply(m.ID, res)
@@ -210,12 +213,31 @@ type ToolError struct {
 	Result   any      `json:"result,omitempty"`
 }
 
+// DefaultMCPDeadline bounds a tool call without a deadline of its own. It
+// is above every tool's own longest wait (wait_reply's 300 s, a publish's
+// upload), so it only ends a call whose hub or node stopped answering.
+const DefaultMCPDeadline = 15 * time.Minute
+
+func (s *MCPServer) deadlineFor(t MCPTool) time.Duration {
+	switch {
+	case t.deadline > 0:
+		return t.deadline
+	case s.Deadline > 0:
+		return s.Deadline
+	}
+	return DefaultMCPDeadline
+}
+
 func (s *MCPServer) call(ctx context.Context, t MCPTool, args json.RawMessage) mcpCallResult {
+	args, opID := withOperationID(t, args)
 	ops, err := s.Connect()
 	var out any
 	var cached *c.Freshness
 	if err == nil {
 		out, err = t.run(client.WithFreshnessSink(ctx, func(_ string, f c.Freshness) { cached = &f }), ops, args)
+	}
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = deadlineError(t.Name, s.deadlineFor(t), opID, err)
 	}
 	if err != nil {
 		code := ExitCodeFor(err)
@@ -269,4 +291,55 @@ func (s *MCPServer) call(ctx context.Context, t MCPTool, args json.RawMessage) m
 		res.StructuredContent = json.RawMessage(b)
 	}
 	return res
+}
+
+// withOperationID gives a call of a tool that takes operation_id one when
+// the caller left it out, generated here before the first attempt, so a
+// call that ends without an answer can name the ID whose retry is safe.
+func withOperationID(t MCPTool, args json.RawMessage) (json.RawMessage, string) {
+	if !hasProp(t.InputSchema, "operation_id") {
+		return args, ""
+	}
+	m := map[string]json.RawMessage{}
+	if trimmed := bytes.TrimSpace(args); len(trimmed) > 0 && string(trimmed) != "null" {
+		if json.Unmarshal(trimmed, &m) != nil {
+			return args, "" // the tool reports the malformed arguments
+		}
+	}
+	var id string
+	if raw, ok := m["operation_id"]; ok {
+		_ = json.Unmarshal(raw, &id)
+		if id != "" {
+			return args, id
+		}
+	}
+	id = c.NewID(c.PrefixOperation)
+	m["operation_id"], _ = json.Marshal(id)
+	b, err := json.Marshal(m)
+	if err != nil {
+		return args, ""
+	}
+	return b, id
+}
+
+func hasProp(schema map[string]any, name string) bool {
+	ps, _ := schema["properties"].(map[string]any)
+	_, ok := ps[name]
+	return ok
+}
+
+// deadlineError is the answer of a call that ran out its deadline: the
+// outcome is unknown (the hub or node may still finish the work), and a
+// retry with the same operation_id is safe: it returns what the first call
+// did and never acts twice.
+func deadlineError(tool string, d time.Duration, opID string, cause error) error {
+	msg := fmt.Sprintf("%s did not finish within %s (%s); the outcome is unknown: it may still complete", tool, d, oneLine(cause))
+	if opID == "" {
+		return c.Errorf(c.ErrOutcomeIndeterminate, "%s", msg)
+	}
+	msg += fmt.Sprintf(". Retrying with operation_id %q is safe: it returns the original result once it exists and never acts twice", opID)
+	if tool == "start_session" {
+		msg += " (one session, never a second; a clone or worktree still being made on the node is reused)"
+	}
+	return c.Errorf(c.ErrOutcomeIndeterminate, "%s", msg).WithRef(c.KindOperation, opID)
 }

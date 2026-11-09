@@ -151,9 +151,9 @@ func TestWatchSkipsHandledAndRetries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go Watch(ctx, src, WatchOptions{Out: out, RunDir: dir, MinInterval: 100 * time.Millisecond, Grace: 300 * time.Millisecond, PollWait: time.Second})
-	src.add("msg_p", "a")
 	src.add("msg_r", "b") // paste rejected -> doorbell may ring
 	src.add("msg_acked", "c")
+	src.add("msg_p", "a") // newer than msg_r: an attempt in flight holds only newer mail
 	src.mu.Lock()
 	src.pending["msg_acked"] = false // acked before the grace period ended
 	src.mu.Unlock()
@@ -166,6 +166,37 @@ func TestWatchSkipsHandledAndRetries(t *testing.T) {
 	src.mu.Unlock()
 	if polls < 3 {
 		t.Fatalf("polls %d: errors must be retried", polls)
+	}
+}
+
+// Incident 2026-10-23 (iss_…): mail first seen
+// while a plugin attempt was in flight was dropped for good, so when that
+// attempt was withdrawn unsent nobody announced it, and newer mail (held
+// behind it by the delivery engine) was announced and read first.
+func TestWatchAnnouncesWithdrawnAttemptBeforeNewerMail(t *testing.T) {
+	dir := t.TempDir()
+	journal := filepath.Join(dir, "deliveries.jsonl")
+	_ = os.WriteFile(journal, []byte(`{"message_id":"msg_old","state":"attempting","mode":"plugin"}`+"\n"+`{"message_id":"msg_old","state":"submitted","mode":"plugin"}`+"\n"), 0o600)
+	src := &fakeSource{pending: map[string]bool{}}
+	out := &syncBuf{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Watch(ctx, src, WatchOptions{Out: out, RunDir: dir, MinInterval: 50 * time.Millisecond, Grace: 100 * time.Millisecond, PollWait: time.Second})
+	src.add("msg_old", "ses_synthetic_a")
+	src.add("msg_new", "ses_synthetic_b")
+	time.Sleep(900 * time.Millisecond)
+	if l := out.lines(); len(l) != 0 {
+		t.Fatalf("rang while the older message's attempt was in flight: %q", l)
+	}
+	f, err := os.OpenFile(journal, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"message_id":"msg_old","state":"rejected","detail":"plugin did not take it in time; withdrawn"}` + "\n")
+	f.Close()
+	l := waitLines(t, out, 1, 3*time.Second)
+	if len(l) != 1 || !strings.Contains(l[0], "2 new messages for this session (msg_old from ses_synthetic_a, msg_new from ses_synthetic_b)") {
+		t.Fatalf("lines %q", l)
 	}
 }
 

@@ -27,7 +27,13 @@ Use it instead of an agent that re-checks something every few minutes:
 
 A monitor is a shell session (harness shell, tagged monitor) on the node. It
 keeps running after the session that created it ends, and its screen shows
-every check (pyre read <monitor>). Session lists (pyre sessions, the TUI, the
+every check (pyre read <monitor>). It survives a reboot or crash of its
+machine: pyred relaunches it at start-up with the same command, interval,
+flags and target, and it keeps its --for deadline and last output (state in
+<state dir>/monitors/), so an unchanged output wakes nobody. pyre node
+resume or pyre resume <monitor> relaunch one pyred could not. A monitor
+that ended (--until-change fired, --for ran out, wake budget, target
+archived, pyre monitor rm) stays ended. Session lists (pyre sessions, the TUI, the
 apps, MCP list_sessions) leave monitors out and show them on the session they
 wake ("watching N"); pyre monitor ls or pyre sessions --monitors lists them.
 
@@ -49,13 +55,16 @@ live monitor instead of starting another ("reused": true in --json).
 The command runs with sh -c (PowerShell on Windows) in --cwd (default: this
 directory when the monitor runs on this machine) on --node (default: this
 session's machine, else the target session's). --until-change stops after the
-first reported change; --for stops after a duration (default 7 days).
+first reported change from the baseline (with --initial, the baseline report
+does not count: it keeps watching); --for stops after a duration (default 7 days).
 
 Guards: at most 6 wakes per hour (a noisier check stops the monitor with a
 final notice); while the target session is mid-turn, changes are held and
-only the latest is sent once it is idle; the monitor ends when its target is
-archived; a check that runs past its interval (at most 10m) is killed with
-its whole process tree, and at most 1 MB of its output is kept.`,
+sent once it is idle, quoting the latest output and listing any that came
+between (a value that came and went is reported as "changed and changed
+back"); the monitor ends when its target is archived; a check that runs past
+its interval (at most 10m) is killed with its whole process tree, and at most
+1 MB of its output is kept.`,
 		Args: cobra.NoArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			ops, err := a.connect()
@@ -92,7 +101,7 @@ its whole process tree, and at most 1 MB of its output is kept.`,
 	af.StringVar(&ap.Cwd, "cwd", "", "directory the command runs in on that machine")
 	af.StringVar(&ap.Title, "title", "", "short label (default: the command)")
 	af.DurationVar(&ap.For, "for", 0, "stop after this long (default 7 days)")
-	af.BoolVar(&ap.UntilChange, "until-change", false, "stop after the first reported change")
+	af.BoolVar(&ap.UntilChange, "until-change", false, "stop after the first reported change from the baseline (an --initial report does not count)")
 	af.BoolVar(&ap.Initial, "initial", false, "also report the first result")
 	mon.AddCommand(add)
 
@@ -187,6 +196,15 @@ its whole process tree, and at most 1 MB of its output is kept.`,
 				},
 				Target: func(ctx context.Context) monitorTargetState { return monitorTargetOf(ctx, ops.API, to) },
 			}
+			if self := ops.Self.SessionID; self != "" {
+				path := monitorStatePath(DefaultStateDir(a.Getenv), self)
+				m.Load = func() (monitorState, bool) { return loadMonitorState(path) }
+				m.Save = func(st monitorState) {
+					if err := saveMonitorState(path, st); err != nil {
+						fmt.Fprintf(a.Stdout, "warning: monitor state not saved (a relaunch after a restart starts over): %v\n", err)
+					}
+				}
+			}
 			fmt.Fprintf(a.Stdout, "monitor %q: every %s, wakes %s on change\n$ %s\n", m.Label, every, to, m.Cmd)
 			return m.run(cmd.Context())
 		}),
@@ -197,7 +215,7 @@ its whole process tree, and at most 1 MB of its output is kept.`,
 	rf.StringVar(&cmdB64, "cmd-b64", "", "command, base64url")
 	rf.StringVar(&labelB64, "label-b64", "", "label, base64url")
 	rf.DurationVar(&dur, "for", 0, "stop after this long")
-	rf.BoolVar(&untilChange, "until-change", false, "stop after the first reported change")
+	rf.BoolVar(&untilChange, "until-change", false, "stop after the first reported change from the baseline (an --initial report does not count)")
 	rf.BoolVar(&initial, "initial", false, "also report the first result")
 	mon.AddCommand(runCmd)
 	root.AddCommand(mon)

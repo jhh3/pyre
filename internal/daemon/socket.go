@@ -12,6 +12,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/fileperm"
+	"github.com/jhh3/pyre/internal/ghguard"
 	"github.com/jhh3/pyre/internal/httpapi"
 )
 
@@ -107,7 +108,8 @@ func (d *Daemon) LocalHandler() http.Handler {
 
 // localExtra are the local-socket-only endpoints.
 func (d *Daemon) localExtra() map[string]http.Handler {
-	m := map[string]http.Handler{"GET " + PathLocalStatus: d.localStatusHandler()}
+	m := map[string]http.Handler{"GET " + PathLocalStatus: d.localStatusHandler(),
+		"POST " + ghguard.PathCall: http.HandlerFunc(d.serveGHCall)} // ghguard.go
 	for k, v := range d.execHandlers() {
 		m[k] = v
 	}

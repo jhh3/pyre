@@ -360,6 +360,27 @@ type MessageReadAPI interface {
 	MarkMessagesRead(ctx context.Context, req MarkMessagesReadRequest) (MarkMessagesReadResponse, error)
 }
 
+// OpReleaseChildReports (additive, optional): the calling session is about
+// to read its own inbox. Reports from the sessions it started that the hub
+// holds because it is mid-turn ("batched: the parent is mid-turn") are sent
+// now, so the read lists them; reports for a parent that does not look
+// stay batched until its turn ends. Callers type-assert
+// ChildReportReleaseAPI; a hub without it answers 404 and nothing changes.
+const OpReleaseChildReports = "child_reports.release"
+
+type ReleaseChildReportsRequest struct{}
+
+type ReleaseChildReportsResponse struct {
+	// Released counts the held reports sent (a digest of several counts each).
+	Released int `json:"released"`
+}
+
+// ChildReportReleaseAPI is implemented by hubs (and the client and the
+// node-local proxy) that offer OpReleaseChildReports.
+type ChildReportReleaseAPI interface {
+	ReleaseChildReports(ctx context.Context, req ReleaseChildReportsRequest) (ReleaseChildReportsResponse, error)
+}
+
 type AckMessageRequest struct {
 	Mutation
 	MessageID string `json:"message_id"`
@@ -373,6 +394,11 @@ type ReissueMessageRequest struct {
 	MessageID           string       `json:"message_id"`
 	AcceptDuplicateRisk bool         `json:"accept_duplicate_risk"`
 	Body                *MessageBody `json:"body,omitempty"` // default original body
+	// Mode overrides the original's mode (default: the original's). The
+	// client sets queue for a steer whose recipient's live run takes queued
+	// mail but not steer (decision I65); the mode is part of the content
+	// digest, so it is chosen before the new envelope is created.
+	Mode MessageMode `json:"mode,omitempty"`
 }
 
 // ResolveDeliveryRequest records a human/coordinator decision about an

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -21,18 +22,29 @@ import (
 // turn/completed at 7.3 s, the item/completed with exitCode and
 // aggregatedOutput at 44.9 s, the thread idle throughout.
 //
+// The same holds for a yielded command that exits while its own turn still
+// runs: the model learns the exit only by polling the process again
+// (write_stdin), and Codex emits nothing for a poll that finds it exited
+// (iss_…: the exit came 26 s before the turn
+// ended, the model never polled it and ended the turn on `pyre waiting-on`).
+// Such a completion is held on the thread and judged once its turn ended:
+// the rollout tells whether the model got the exit (exitsSeen); one it did
+// not get is reported like a completion after the turn.
+//
 // Pyre provides the wake. A command that finishes after its own turn ended
-// is queued on the thread; once the thread is idle (no active turn, no
-// pending approval, no usage limit, no capacity continue due) and no
-// further completion arrived for wakeSettle, one turn/start reports every
-// queued completion. A completion during another turn waits for that turn
-// to end (never a steer). The turn is a fresh notice, not a replay: a
-// turn/start Codex refused is retried (wakeAttempts), one whose outcome is
-// unknown is dropped. Not woken: stopped runs; the commands running when
-// Pyre interrupts the thread (an interrupt, also of an idle thread, cleans
-// its background terminals); sessions the daemon says are archived or
-// being archived (Options.WakeAllowed). The queue lives in memory:
-// completions while pyred is down are missed.
+// (or inside it, unseen) is queued on the thread; once the thread is idle
+// (no active turn, no pending approval, no usage limit, no capacity
+// continue due) and no further completion arrived for wakeSettle, one
+// turn/start reports every queued completion. A completion during another
+// turn waits for that turn to end (never a steer). The turn is a fresh
+// notice, not a replay: a turn/start Codex refused is retried
+// (wakeAttempts), one whose outcome is unknown is dropped. Not woken:
+// stopped runs; the commands running when Pyre interrupts the thread (an
+// interrupt, also of an idle thread, cleans its background terminals), and
+// the in-turn completions of an interrupted turn; sessions the daemon says
+// are archived or being archived (Options.WakeAllowed). The queue lives in
+// memory; a recovered run backfills what it missed from the rollout
+// (bgrecover.go). A dead app-server is reported the same way (serverlost.go).
 
 const (
 	// wakeIDPrefix starts the clientUserMessageId of a wake turn (also how
@@ -52,10 +64,17 @@ const (
 	// thread's background terminals (interrupt) are the processes it killed.
 	wakeMuteAfterClean = 5 * time.Second
 	// wakeSeenMax bounds the item ids remembered against duplicates;
-	// wakeQueueMax the completions held for a thread that stays busy
-	// (oldest dropped).
+	// wakeQueueMax the completions queued, and the in-turn exits held, for
+	// one thread (capWakes).
 	wakeSeenMax  = 512
 	wakeQueueMax = 32
+	// wakeUnknownMinRun: an in-turn completion the rollout says nothing
+	// about wakes only when it ran at least this long (exec_command's
+	// default yield), i.e. when it most likely went to the background.
+	wakeUnknownMinRun = 10 * time.Second
+	// execStartup is the commandExecution source of a command the model
+	// started with exec_command (the only kind that yields to the model).
+	execStartup = "unifiedExecStartup"
 )
 
 // wakeSettle is how long the queue must be quiet before the wake turn
@@ -69,16 +88,38 @@ func (a *Adapter) wakeDelay() time.Duration {
 	return wakeSettle
 }
 
-// bgDone is one background command that finished after its turn ended.
+// bgDone is one background command that finished after its turn ended, or
+// inside it (InTurn: reported only when the rollout shows the model did not
+// get the exit).
 type bgDone struct {
 	ItemID, TurnID string
+	ProcessID      string // exec_command's process (the model's session_id); else ""
 	Command, Cwd   string
 	Status         string
 	ExitCode       *int
 	DurationMs     *int64
 	Output         string
 	At             time.Time
+	InTurn         bool
 	attempts       int
+}
+
+// commandText is the command the model ran, without the `zsh -lc '…'`
+// wrapper when Codex parsed it.
+func commandText(it item) string {
+	if len(it.CommandActions) == 1 && strings.TrimSpace(it.CommandActions[0].Command) != "" {
+		return it.CommandActions[0].Command
+	}
+	return it.Command
+}
+
+func newBgDone(it item, turnID string, at time.Time) bgDone {
+	w := bgDone{ItemID: it.ID, TurnID: turnID, Command: commandText(it), Cwd: it.Cwd, Status: it.Status,
+		ExitCode: it.ExitCode, DurationMs: it.DurationMs, Output: lastBytes(it.AggregatedOutput, 4*wakeTailBytes), At: at}
+	if it.Source == execStartup {
+		w.ProcessID = it.ProcessID
+	}
+	return w
 }
 
 // noteCommandStart tracks the commands running on the thread (so an
@@ -88,15 +129,16 @@ func (ts *threadState) noteCommandStart(it item) {
 		return
 	}
 	if ts.runningCmds == nil || len(ts.runningCmds) >= wakeSeenMax {
-		ts.runningCmds = map[string]bool{}
+		ts.runningCmds = map[string]string{}
 	}
-	ts.runningCmds[it.ID] = true
+	ts.runningCmds[it.ID] = commandText(it)
 }
 
 // muteRunning drops the queue and ignores the exits of the commands
 // running now (the owner interrupted the work). Called with ts.mu held.
 func (ts *threadState) muteRunning() {
-	ts.wakes = nil
+	ts.wakes, ts.inTurn, ts.lost = nil, nil, nil
+	ts.agentWakes, ts.agentHeld = nil, nil
 	if ts.wakeIgnore == nil || len(ts.wakeIgnore)+len(ts.runningCmds) > wakeSeenMax {
 		ts.wakeIgnore = map[string]bool{}
 	}
@@ -106,12 +148,14 @@ func (ts *threadState) muteRunning() {
 }
 
 // noteCommandDone queues a finished commandExecution when the turn that
-// started it is no longer running. Called with ts.mu held.
+// started it is no longer running, and holds an exec_command one that
+// finished inside its own turn for settleTurnWakes. Called with ts.mu held.
 func (ts *threadState) noteCommandDone(it item, turnID string, at time.Time) bool {
 	if it.Type != "commandExecution" || it.ID == "" {
 		return false
 	}
 	delete(ts.runningCmds, it.ID)
+	ts.noteLiveDone(it.ID)
 	if ts.wakeIgnore[it.ID] {
 		delete(ts.wakeIgnore, it.ID)
 		return false
@@ -122,48 +166,131 @@ func (ts *threadState) noteCommandDone(it item, turnID string, at time.Time) boo
 	if it.Status == "declined" || it.Status == "inProgress" {
 		return false
 	}
-	if ts.status.Type == "active" && (turnID == "" || turnID == ts.activeTurn) {
-		return false // the turn that started it is still running: it sees the exit itself
-	}
 	if ts.wakeSeen[it.ID] {
 		return false
 	}
-	if ts.wakeSeen == nil || len(ts.wakeSeen) >= wakeSeenMax {
-		ts.wakeSeen = map[string]bool{}
+	if ts.status.Type == "active" && (turnID == "" || turnID == ts.activeTurn) {
+		// The turn that started it is still running. It sees the exit when
+		// exec_command returned it or when the model polls the process
+		// again; whether it did is judged once the turn has ended.
+		if w := newBgDone(it, turnID, at); w.ProcessID != "" && turnID != "" {
+			w.InTurn = true
+			ts.inTurn = capWakes(append(ts.inTurn, w))
+		}
+		return false
 	}
-	ts.wakeSeen[it.ID] = true
-	cmd := it.Command
-	if len(it.CommandActions) == 1 && strings.TrimSpace(it.CommandActions[0].Command) != "" {
-		cmd = it.CommandActions[0].Command // without the `zsh -lc '…'` wrapper
-	}
-	ts.wakes = append(ts.wakes, bgDone{ItemID: it.ID, TurnID: turnID, Command: cmd, Cwd: it.Cwd, Status: it.Status,
-		ExitCode: it.ExitCode, DurationMs: it.DurationMs, Output: lastBytes(it.AggregatedOutput, 4*wakeTailBytes), At: at})
-	if n := len(ts.wakes); n > wakeQueueMax {
-		ts.wakes = append([]bgDone(nil), ts.wakes[n-wakeQueueMax:]...)
-	}
+	ts.markSeen(it.ID)
+	ts.wakes = append(ts.wakes, newBgDone(it, turnID, at))
+	ts.trimWakes()
 	return true
 }
 
-// dropTurnWakes forgets completions of a turn that has just ended: they
-// were queued while that turn's id was unknown (after a pyred restart) and
-// belonged to it after all. Called with ts.mu held.
-func (ts *threadState) dropTurnWakes(turnID string) {
-	if turnID == "" || len(ts.wakes) == 0 {
+func (ts *threadState) markSeen(id string) {
+	if ts.wakeSeen == nil || len(ts.wakeSeen) >= wakeSeenMax {
+		ts.wakeSeen = map[string]bool{}
+	}
+	ts.wakeSeen[id] = true
+}
+
+func (ts *threadState) trimWakes() {
+	ts.wakes = capWakes(ts.wakes)
+}
+
+// capWakes bounds ws to wakeQueueMax. It drops the InTurn candidate that
+// ran shortest first (one exec_command most likely returned the exit of:
+// a yielded command ran at least its yield), then the oldest. A long turn
+// runs dozens of commands that returned their exit before a yielded one
+// exits; dropping the oldest lost that one (iss_…).
+func capWakes(ws []bgDone) []bgDone {
+	for len(ws) > wakeQueueMax {
+		drop := 0
+		for i, w := range ws {
+			if w.InTurn && (!ws[drop].InTurn || ranMs(w) < ranMs(ws[drop])) {
+				drop = i
+			}
+		}
+		ws = append(ws[:drop:drop], ws[drop+1:]...)
+	}
+	return ws
+}
+
+// ranMs is how long the command ran (-1: unknown).
+func ranMs(w bgDone) int64 {
+	if w.DurationMs == nil {
+		return -1
+	}
+	return *w.DurationMs
+}
+
+// settleTurnWakes runs when a turn ends. The exec_command completions held
+// while it ran, and those queued while its id was unknown (after a pyred
+// restart), become InTurn candidates, reported unless the rollout shows the
+// model got the exit (Adapter.unseenExits). The turn's other completions are
+// dropped (it saw them), as are all of an interrupted turn's (the owner
+// stopped the work). Called with ts.mu held.
+func (ts *threadState) settleTurnWakes(turnID, status string) {
+	held := ts.inTurn
+	ts.inTurn = nil
+	if turnID == "" {
 		return
 	}
+	keep := status != "interrupted"
 	kept := ts.wakes[:0]
 	for _, w := range ts.wakes {
 		if w.TurnID != turnID {
 			kept = append(kept, w)
+		} else if keep && w.ProcessID != "" {
+			w.InTurn = true
+			kept = append(kept, w)
 		}
 	}
 	ts.wakes = kept
+	for _, w := range held {
+		if keep && w.TurnID == turnID && !ts.wakeSeen[w.ItemID] {
+			ts.markSeen(w.ItemID)
+			w.InTurn = true
+			ts.wakes = append(ts.wakes, w)
+		}
+	}
+	ts.trimWakes()
+}
+
+// unseenExits drops the batch's InTurn completions whose exit the model got
+// (rollout evidence, exitsSeen); one the rollout says nothing about is kept
+// only when it ran at least wakeUnknownMinRun.
+func (a *Adapter) unseenExits(rr *runRef, batch []bgDone) []bgDone {
+	var cands []execRef
+	for _, w := range batch {
+		if w.InTurn {
+			cands = append(cands, execRef{ItemID: w.ItemID, ProcessID: w.ProcessID})
+		}
+	}
+	if len(cands) == 0 {
+		return batch
+	}
+	var seen map[string]bool
+	if path := rolloutPath(rr.stateDir, rr.meta); path != "" {
+		seen = exitsSeen(path, cands)
+	}
+	kept := batch[:0]
+	for _, w := range batch {
+		if w.InTurn {
+			if s, ok := seen[w.ItemID]; ok && s {
+				continue
+			} else if !ok && (w.DurationMs == nil || time.Duration(*w.DurationMs)*time.Millisecond < wakeUnknownMinRun) {
+				continue
+			}
+		}
+		kept = append(kept, w)
+	}
+	return kept
 }
 
 // clearWakes drops the queue; with mute, completions are ignored until
 // wakeMute (Pyre is killing the thread's background terminals).
 func (ts *threadState) clearWakes(mute time.Time) {
-	ts.wakes = nil
+	ts.wakes, ts.inTurn, ts.lost = nil, nil, nil
+	ts.agentWakes, ts.agentHeld = nil, nil
 	if mute.After(ts.wakeMute) {
 		ts.wakeMute = mute
 	}
@@ -184,11 +311,29 @@ func (ts *threadState) wakeable() bool {
 	return true
 }
 
+// wakeDue: something is queued for a wake turn. Called with ts.mu held.
+func (ts *threadState) wakeDue() bool {
+	return len(ts.wakes) > 0 || len(ts.agentWakes) > 0 || ts.lost != nil
+}
+
+// lastQueued is when the newest queued completion arrived (zero: none).
+// Called with ts.mu held.
+func (ts *threadState) lastQueued() time.Time {
+	var t time.Time
+	if n := len(ts.wakes); n > 0 {
+		t = ts.wakes[n-1].At
+	}
+	if n := len(ts.agentWakes); n > 0 && ts.agentWakes[n-1].At.After(t) {
+		t = ts.agentWakes[n-1].At
+	}
+	return t
+}
+
 // armWake schedules a wake attempt after wakeSettle (once; a later
 // completion inside the window joins the same notice). Called with ts.mu
 // held; turn completion and Observe re-arm a queue that had to wait.
 func (a *Adapter) armWake(ts *threadState) {
-	if ts.wakeArmed || len(ts.wakes) == 0 || !ts.wakeable() {
+	if ts.wakeArmed || !ts.wakeDue() || !ts.wakeable() {
 		return
 	}
 	ts.wakeArmed = true
@@ -200,8 +345,10 @@ func (a *Adapter) armWake(ts *threadState) {
 func (a *Adapter) wake(ts *threadState) {
 	ts.mu.Lock()
 	ts.wakeArmed = false
-	quiet := len(ts.wakes) > 0 && time.Since(ts.wakes[len(ts.wakes)-1].At) >= a.wakeDelay()
-	if !quiet && len(ts.wakes) > 0 {
+	due := ts.wakeDue()
+	last := ts.lastQueued()
+	quiet := due && (last.IsZero() || time.Since(last) >= a.wakeDelay())
+	if !quiet && due {
 		a.armWake(ts) // a completion arrived inside the window: wait for quiet
 	}
 	ts.mu.Unlock()
@@ -247,16 +394,20 @@ func (a *Adapter) wake(ts *threadState) {
 		ts.mu.Unlock()
 		return
 	}
-	if !ts.wakeable() || len(ts.wakes) == 0 {
+	if !ts.wakeable() || !ts.wakeDue() {
 		ts.mu.Unlock()
 		return // a turn started meanwhile; its completion re-arms
 	}
-	batch := ts.wakes
-	ts.wakes = nil
+	batch, agents, lost := ts.wakes, ts.agentWakes, ts.lost
+	ts.wakes, ts.agentWakes, ts.lost = nil, nil, nil
 	ts.mu.Unlock()
+	batch = a.unseenExits(rr, batch)
+	if agents = a.unseenAgents(rr, agents); len(batch) == 0 && len(agents) == 0 && lost == nil {
+		return // the model got every in-turn exit and report
+	}
 	id := fmt.Sprintf("%s%d", wakeIDPrefix, time.Now().UnixNano())
 	var tr turnStartResponse
-	err = c.call(ctx, "turn/start", turnStartParams{ThreadID: rr.meta.ThreadID, Input: []userInput{{Type: "text", Text: wakeNotice(batch)}}, ClientUserMessageID: id}, &tr)
+	err = c.call(ctx, "turn/start", turnStartParams{ThreadID: rr.meta.ThreadID, Input: []userInput{{Type: "text", Text: wakeText(lost, batch, agents)}}, ClientUserMessageID: id}, &tr)
 	if err != nil {
 		var re *rpcError
 		if !errors.As(err, &re) {
@@ -270,6 +421,19 @@ func (a *Adapter) wake(ts *threadState) {
 			}
 		}
 		ts.wakes = append(retry, ts.wakes...)
+		var retryAgents []agentDone
+		for _, d := range agents {
+			if d.attempts++; d.attempts < wakeAttempts {
+				d.InTurn = false // judged once; still queued in Codex
+				retryAgents = append(retryAgents, d)
+			}
+		}
+		ts.agentWakes = append(retryAgents, ts.agentWakes...)
+		if lost != nil && ts.lost == nil {
+			if lost.attempts++; lost.attempts < wakeAttempts {
+				ts.lost = lost
+			}
+		}
 		a.armWake(ts)
 		ts.mu.Unlock()
 		return
@@ -279,7 +443,7 @@ func (a *Adapter) wake(ts *threadState) {
 	a.awaitTurnVisible(rr, id)
 	if a.o.OnAutomation != nil {
 		go a.o.OnAutomation(contracts.NodeAutomation{RunID: rr.meta.RunID, SessionID: rr.meta.SessionID, Harness: contracts.HarnessCodex,
-			Action: contracts.AutomationBackgroundWake, Detail: wakeDetail(batch)})
+			Action: contracts.AutomationBackgroundWake, Detail: wakeDetail(lost, batch, agents)})
 	}
 }
 
@@ -335,7 +499,7 @@ func wakeNotice(batch []bgDone) string {
 			describeDone(&b, w, per)
 		}
 	}
-	b.WriteString("\nPyre started this turn because the command finished after your turn ended. Act on the result if it matters to your task; otherwise reply in one line and end the turn.")
+	b.WriteString("\nPyre started this turn because no turn of yours saw the command finish. Act on the result if it matters to your task; otherwise reply in one line and end the turn.")
 	return b.String()
 }
 
@@ -356,6 +520,9 @@ func describeDone(b *strings.Builder, w bgDone, tail int) {
 		b.WriteString(", ran " + (time.Duration(*w.DurationMs) * time.Millisecond).Round(time.Second).String())
 	}
 	b.WriteString("). ")
+	if w.ExitCode != nil && *w.ExitCode == exitSIGTERM {
+		b.WriteString(sigtermNote())
+	}
 	out := strings.TrimRight(w.Output, " \t\r\n")
 	if out == "" {
 		b.WriteString("No output.")
@@ -363,6 +530,28 @@ func describeDone(b *strings.Builder, w bgDone, tail int) {
 	}
 	b.WriteString("Last output:\n")
 	b.WriteString(tailBytes(out, tail))
+}
+
+// exitSIGTERM is a shell's exit status for a command ended by SIGTERM.
+const exitSIGTERM = 128 + 15
+
+// parentDeathSIGTERM: Codex gives pipe-mode exec children
+// PR_SET_PDEATHSIG(SIGTERM) (codex-rs utils/pty spawn_helper), and Linux
+// sends it when the app-server *thread* that spawned the command exits.
+// Tokio's runtime threads come and go (a worker that ran block_in_place,
+// as Codex's image caches do, idles out 10 s later), so a long command's
+// top process can get SIGTERM at any time while its children, which do not
+// inherit the setting, keep running (decision I61).
+var parentDeathSIGTERM = runtime.GOOS == "linux"
+
+// sigtermNote explains an exit 143 in a wake. Pyre never sends a background
+// command SIGTERM: the commands its interrupts and cleans end never wake the
+// agent, and Codex's own clean and prune use SIGKILL.
+func sigtermNote() string {
+	if parentDeathSIGTERM {
+		return "Exit 143 is SIGTERM, not sent by Pyre: Codex sends it to a command's top process when the app-server thread that started it exits, and the command's children may still be running. Check them and the job's outputs before treating it as failed. "
+	}
+	return "Exit 143 is SIGTERM, not sent by Pyre; the command's children may still be running. "
 }
 
 // tailBytes keeps the last n bytes of s (whole runes, from a line start
@@ -391,10 +580,16 @@ func lastBytes(s string, n int) string {
 }
 
 // wakeDetail is the audit line: commands only (redacted), never output.
-func wakeDetail(batch []bgDone) string {
-	cmds := make([]string, 0, len(batch))
+func wakeDetail(lost *serverLoss, batch []bgDone, agents []agentDone) string {
+	cmds := make([]string, 0, len(batch)+len(agents)+1)
+	if lost != nil {
+		cmds = append(cmds, "app-server lost")
+	}
 	for _, w := range batch {
 		cmds = append(cmds, oneLine(w.Command, 60))
+	}
+	for _, d := range agents {
+		cmds = append(cmds, "agent "+oneLine(agentName(d), 60))
 	}
 	return redact(oneLine(strings.Join(cmds, "; "), 160))
 }

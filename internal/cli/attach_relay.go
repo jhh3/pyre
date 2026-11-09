@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
+	"github.com/jhh3/pyre/internal/client"
 	c "github.com/jhh3/pyre/internal/contracts"
 )
 
@@ -143,6 +144,8 @@ func (a *App) renewLease(ctx context.Context, ops *Ops, runID string, lease *c.I
 	if lease == nil {
 		return func() {}
 	}
+	// The attached terminal owns the screen: no stderr retry notices.
+	ctx = client.WithNotices(ctx, nil)
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)

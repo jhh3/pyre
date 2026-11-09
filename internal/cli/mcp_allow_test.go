@@ -29,7 +29,7 @@ func TestPreapprovedPyreToolsAreMessagingOnly(t *testing.T) {
 		"mcp__pyre__set_session_icon": true, // W-archive2: a session's emoji (like rename)
 		"mcp__pyre__reparent_session": true, // W-reparent: hub-enforced permissions
 		// W-asks: owner questions (hub-enforced: children redirected, own asks only)
-		"mcp__pyre__ask_owner": true, "mcp__pyre__find_asks": true, "mcp__pyre__withdraw_ask": true,
+		"mcp__pyre__ask_owner": true, "mcp__pyre__find_asks": true, "mcp__pyre__answer_ask": true, "mcp__pyre__withdraw_ask": true,
 		// W-grants: proposals only file an owner ask; list own project/tree; revoke narrows
 		"mcp__pyre__propose_grant": true, "mcp__pyre__propose_fact": true, "mcp__pyre__list_grants": true, "mcp__pyre__revoke_grant": true,
 		// W-web-inbox: the lead's project page (hub-enforced)
@@ -37,7 +37,9 @@ func TestPreapprovedPyreToolsAreMessagingOnly(t *testing.T) {
 		// setup review: own-turn waiting marker (self only)
 		"mcp__pyre__waiting_on": true,
 		// issues: reporting never prompts; updates are hub-limited to owner/triage
-		"mcp__pyre__report_issue": true, "mcp__pyre__list_issues": true, "mcp__pyre__get_issue": true, "mcp__pyre__update_issue": true}
+		"mcp__pyre__report_issue": true, "mcp__pyre__list_issues": true, "mcp__pyre__get_issue": true, "mcp__pyre__update_issue": true,
+		// node avoid flags: affect only new placement, lift by themselves; hub keeps the owner's
+		"mcp__pyre__avoid_node": true}
 	got := map[string]bool{}
 	for _, name := range claude.PyreMessagingAllowedTools {
 		got[name] = true

@@ -539,3 +539,73 @@ func (f *tailFile) forward(fh *os.File, start int64, limit int, tail bool) ([]co
 		}
 	}
 }
+
+// fullText returns the uncut text (fullTranscriptEntry) of the shown
+// entries numbered seqs, reading forward from the mark before the oldest
+// of them (sessions.read full); a seq that names no shown entry is left
+// out.
+func (c *tailCache) fullText(path string, seqs []int64) (map[int64]string, error) {
+	f := c.file(path)
+	f.mu.Lock()
+	out, err := f.fullText(c, path, seqs)
+	size, valid := f.size, f.valid
+	f.mu.Unlock()
+	c.account(path, f, size, valid)
+	return out, err
+}
+
+func (f *tailFile) fullText(c *tailCache, path string, seqs []int64) (map[int64]string, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		f.reset()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer fh.Close()
+	if err := f.update(c, fh); err != nil {
+		f.reset()
+		return nil, err
+	}
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	want := make(map[int64]bool, len(seqs))
+	lo, hi := seqs[0], seqs[0]
+	for _, s := range seqs {
+		want[s] = true
+		lo, hi = min(lo, s), max(hi, s)
+	}
+	i := sort.Search(len(f.marks), func(i int) bool { return f.marks[i].seq >= lo }) - 1
+	m := f.marks[max(i, 0)]
+	if _, err := fh.Seek(m.off, io.SeekStart); err != nil {
+		return nil, err
+	}
+	r := bufio.NewReaderSize(io.LimitReader(fh, f.off-m.off), 64<<10)
+	seq := m.seq
+	out := make(map[int64]string, len(seqs))
+	for seq < hi {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			var rec transcriptRecord
+			if json.Unmarshal(line[:len(line)-1], &rec) != nil {
+				continue
+			}
+			seq++
+			if want[seq] {
+				if e, ok := fullTranscriptEntry("", rec, seq); ok {
+					out[seq] = e.Text
+				}
+			}
+			continue
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}

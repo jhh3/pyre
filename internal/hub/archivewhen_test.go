@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -45,6 +46,12 @@ func TestSelfArchiveWhenDone(t *testing.T) {
 	f.processArchives()
 	if stops() != 1 {
 		t.Fatalf("want one stop after the turn ended, got %d", stops())
+	}
+	// Pyre's own stop: the node spares live work the agent preserved (I62).
+	stop := x.ch.sentKinds(nodeMac, contracts.CmdStop)[0]
+	var rc contracts.RunCommand
+	if err := json.Unmarshal(stop.Payload, &rc); err != nil || !rc.Automatic || stop.Actor.Kind != contracts.PrincipalSystem {
+		t.Fatalf("archive-when-done stop not marked automatic: %+v %s %v", stop.Actor, stop.Payload, err)
 	}
 	f.processArchives()
 	if stops() != 1 {

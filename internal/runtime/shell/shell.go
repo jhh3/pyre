@@ -1,7 +1,10 @@
 // Package shell is the runtime adapter for plain shell sessions inside the
 // node's isolated tmux server. A shell has no acceptance signal, busy state or
 // turn concept, so agent actions (deliver, steer, answer, interrupt, resume)
-// are unsupported: Pyre never types into a shell prompt. Humans attach to the
+// are unsupported: Pyre never types a message into a shell prompt. The one
+// exception is the session's initial prompt (pyre start --harness shell
+// --prompt CMD): it is the launcher's own command, typed once the shell is
+// ready, as if the user had typed it and pressed Enter. Humans attach to the
 // native terminal (raw typing there is governed by the input lease).
 package shell
 
@@ -42,7 +45,10 @@ type Options struct {
 	// Shell is used when ResolvedLaunch.Executable is empty (default $SHELL,
 	// then /bin/bash) and is started as a login shell.
 	Shell string
-	Now   func() time.Time
+	// ReadyTimeout bounds the wait for a shell to be ready for its initial
+	// prompt (default 30s).
+	ReadyTimeout time.Duration
+	Now          func() time.Time
 }
 
 // Adapter implements contracts.RuntimeAdapter for plain shells.
@@ -66,6 +72,9 @@ func New(o Options) (*Adapter, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.ReadyTimeout <= 0 {
+		o.ReadyTimeout = 30 * time.Second
+	}
 	if o.Shell == "" {
 		o.Shell = os.Getenv("SHELL")
 	}
@@ -86,6 +95,7 @@ func Capabilities() []string {
 	return []string{
 		contracts.CapAttachNative, contracts.CapAttachReadOnly,
 		contracts.CapStop, contracts.CapScreen, contracts.CapLaunchEnvFile,
+		contracts.CapShellInitialPrompt,
 	}
 }
 
@@ -132,6 +142,12 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	}
 	if err := a.srv.NewSession(ctx, tmux.SessionSpec{Name: l.RunID, Cwd: l.Cwd, Env: l.Env, Unset: l.Unset, Argv: argv}); err != nil {
 		return contracts.RunHandle{}, contracts.Errorf(contracts.ErrUnavailable, "start shell: %v", err)
+	}
+	if cmd := initialCommand(l.InitialPrompt); cmd != "" {
+		if err := a.typeInitial(ctx, l.RunID, argv[0], cmd); err != nil {
+			_ = a.srv.KillSession(context.Background(), l.RunID)
+			return contracts.RunHandle{}, err
+		}
 	}
 	h := contracts.RunHandle{
 		RunID: l.RunID, SessionID: l.SessionID, Adapter: AdapterName, Harness: contracts.HarnessShell,
@@ -264,7 +280,98 @@ func lastLine(screen string) string {
 var loginShells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true}
 
 func unsupported(what string) error {
-	return contracts.Errorf(contracts.ErrUnsupported, "shell sessions do not support %s (Pyre never types into a shell prompt; attach instead)", what)
+	return contracts.Errorf(contracts.ErrUnsupported, "shell sessions do not support %s (Pyre types only the initial prompt into a shell; attach instead)", what)
+}
+
+// lineEditors are shells that always read an interactive command line in
+// non-canonical mode (readline, ZLE, fish's reader), so that mode alone
+// says they are ready.
+var lineEditors = map[string]bool{"bash": true, "zsh": true, "fish": true}
+
+// shellQuiet is how long the screen of a shell whose terminal mode says
+// nothing (no line editor, as dash; or no tty to inspect) must stay
+// unchanged, with something on it, before the shell counts as ready.
+const shellQuiet = 1500 * time.Millisecond
+
+// initialCommand is the text typed for an initial prompt: trailing line
+// breaks are dropped (Enter is sent once); whitespace alone is nothing.
+func initialCommand(p string) string {
+	p = strings.TrimRight(p, "\r\n")
+	if strings.TrimSpace(p) == "" {
+		return ""
+	}
+	return p
+}
+
+// typeInitial types cmd into the shell of session name, then Enter, once
+// the shell has read its rc files and waits for input. Ready means the
+// terminal is in non-canonical mode (a line editor: readline, ZLE, fish,
+// whichever shell the rc files exec'd); for bash, zsh and fish on a
+// terminal Pyre can inspect, only that. Where the mode cannot be seen or the
+// shell has no line editor (sh, dash), ready is the shell in the foreground
+// (on tmux, which names the foreground program) with something on its
+// screen, unchanged for shellQuiet; typed early, the text waits in the
+// terminal's input queue until the shell reads it. The text goes through a
+// paste buffer (tmux load-buffer reads it from stdin), never a command line,
+// so its length is not limited; quotes, "$", and line breaks arrive as
+// typed, and a shell that asked for bracketed paste gets a multi-line
+// command as one edit. A shell that exits or never becomes
+// ready within ReadyTimeout fails the launch: the command is never typed
+// into an rc file's own program.
+func (a *Adapter) typeInitial(ctx context.Context, name, shellPath, cmd string) error {
+	ctx, cancel := context.WithTimeout(ctx, a.o.ReadyTimeout)
+	defer cancel()
+	want := commandName(shellPath)
+	var last string
+	var since time.Time
+	for {
+		p, err := a.srv.Pane(ctx, name)
+		switch {
+		case ctx.Err() != nil:
+			return contracts.Errorf(contracts.ErrUnavailable, "the shell was not ready for its initial prompt within %s (an rc file still running or waiting for input?); the prompt was not typed", a.o.ReadyTimeout)
+		case err != nil:
+			return contracts.Errorf(contracts.ErrUnavailable, "shell: %v; the initial prompt was not typed", err)
+		case p.Dead:
+			return contracts.Errorf(contracts.ErrUnavailable, "the shell exited before its initial prompt could be typed")
+		}
+		raw, known := lineEditing(p.TTY)
+		if raw {
+			break
+		}
+		now := time.Now()
+		if known && lineEditors[want] {
+			// Its line editor is the only sign: while a login shell reads
+			// its rc files, its children often share its process group,
+			// so tmux names the shell as the foreground program.
+		} else if a.srv.Kind() != hostsel.KindTmux || commandName(p.CurrentCommand) == want {
+			screen, err := a.srv.CapturePane(ctx, name, tmux.CaptureOptions{})
+			if err == nil && screen != last {
+				last, since = screen, now
+			} else if err == nil && strings.TrimSpace(screen) != "" && now.Sub(since) >= shellQuiet {
+				break
+			}
+		} else {
+			last, since = "", now
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if err := a.srv.Paste(ctx, name, "pyre-init-"+name, []byte(cmd)); err != nil {
+		return contracts.Errorf(contracts.ErrUnavailable, "type the initial prompt: %v", err)
+	}
+	if err := a.srv.SendKeys(ctx, name, sessionhost.KeyEnter); err != nil {
+		return contracts.Errorf(contracts.ErrUnavailable, "type the initial prompt: %v", err)
+	}
+	return nil
+}
+
+// commandName is a program path or tmux command name reduced to its base
+// name: "/bin/bash", "-zsh" and "pwsh.exe" become bash, zsh and pwsh.
+func commandName(p string) string {
+	p = strings.TrimPrefix(filepath.Base(strings.ReplaceAll(p, `\`, "/")), "-")
+	return strings.TrimSuffix(strings.ToLower(p), ".exe")
 }
 
 func (a *Adapter) Deliver(context.Context, contracts.RunHandle, contracts.DeliveryInput) (contracts.DeliveryResult, error) {

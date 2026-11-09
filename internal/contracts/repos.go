@@ -168,6 +168,7 @@ type CreatedWorktree struct {
 	Repo   string `json:"repo"` // main checkout
 	Path   string `json:"path"`
 	Branch string `json:"branch"`
+	Head   string `json:"head,omitempty"` // commit it starts at (older pyred: empty)
 }
 
 type WorktreeCreateResult struct {
@@ -218,6 +219,13 @@ type WorktreeRemoval struct {
 	// Branch handling: deleted | kept_unmerged | kept (detached/none) | ""
 	BranchOutcome string `json:"branch_outcome,omitempty"`
 	Detail        string `json:"detail,omitempty"`
+	// Automatic cleanup also records, for a removed worktree, its main
+	// checkout (Repo), the full commit it had checked out (Head) and the
+	// session whose marker it carried (SessionID), so a resume of that
+	// session can add it back.
+	Repo      string `json:"repo,omitempty"`
+	Head      string `json:"head,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type WorktreeRemoveResult struct {
@@ -235,8 +243,27 @@ type SessionCleanup struct {
 	Worktrees []WorktreeRemoval `json:"worktrees,omitempty"`
 	// ProcessesStopped counts leftover processes of the session (background
 	// shells, watchers) that were still running and were stopped.
-	ProcessesStopped int    `json:"processes_stopped,omitempty"`
-	Error            string `json:"error,omitempty"`
+	ProcessesStopped int `json:"processes_stopped,omitempty"`
+	// LeftRunning lists processes the session started that are still
+	// running after the cleanup and that it does not stop (a detached job:
+	// Linux, by PYRE_SESSION_ID in their environment or one of the
+	// session's run scopes as their cgroup, started before its run was
+	// stopped; empty elsewhere). They lose the
+	// session's Pyre access with the archive. At most LeftRunningMax are
+	// listed; LeftRunningCount is how many there are.
+	LeftRunning      []LeftProcess `json:"left_running,omitempty"`
+	LeftRunningCount int           `json:"left_running_count,omitempty"`
+	Error            string        `json:"error,omitempty"`
+}
+
+// LeftRunningMax bounds SessionCleanup.LeftRunning.
+const LeftRunningMax = 8
+
+// LeftProcess is one process a session left running (Command: its command
+// line, redacted and clipped).
+type LeftProcess struct {
+	PID     int    `json:"pid"`
+	Command string `json:"command,omitempty"`
 }
 
 type SessionCleanupResult struct {

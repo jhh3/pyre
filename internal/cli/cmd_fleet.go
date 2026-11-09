@@ -15,6 +15,7 @@ import (
 
 	c "github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/enrollment"
+	"github.com/jhh3/pyre/internal/ghguard"
 	"github.com/jhh3/pyre/internal/sysstats"
 )
 
@@ -33,7 +34,7 @@ func (a *App) addFleetCommands(root *cobra.Command) {
 		if err != nil {
 			return err
 		}
-		return a.emit(page, func(w io.Writer) { printNodes(w, page.Items, page.SnapshotAt) })
+		return a.emit(markSelf(page, ops.Self.NodeID), func(w io.Writer) { printNodes(w, page.Items, page.SnapshotAt, ops.Self.NodeID) })
 	}
 	nodes := &cobra.Command{
 		Use:     "nodes [ls|show <node>]",
@@ -51,6 +52,7 @@ func (a *App) addFleetCommands(root *cobra.Command) {
 	nodes.AddCommand(nodesLsCmd)
 	a.addCloudNodeCommands(nodes) // W-gcp
 	a.addDrainCommands(nodes)     // node drain / node resume
+	a.addAvoidCommands(nodes)     // node avoid
 	nodes.AddCommand(&cobra.Command{
 		Use:   "show <node>",
 		Short: "Show one node (ID, name, ssh alias or hostname)",
@@ -64,7 +66,7 @@ func (a *App) addFleetCommands(root *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			return a.emit(n, func(w io.Writer) { printNode(w, n) })
+			return a.emit(listedNode{Node: n, Self: isSelfNode(n, ops.Self.NodeID)}, func(w io.Writer) { printNode(w, n, ops.Self.NodeID) })
 		}),
 	})
 	nodes.AddCommand(&cobra.Command{
@@ -413,7 +415,31 @@ func harnessText(hs []c.HarnessInfo) string {
 	return orDash(strings.Join(parts, ", "))
 }
 
-func printNodes(w io.Writer, ns []c.Node, ref time.Time) {
+// listedNode is a node as `pyre nodes` prints it in JSON: the node, with
+// "self": true on the caller's own machine.
+type listedNode struct {
+	c.Node
+	Self bool `json:"self,omitempty"`
+}
+
+// isSelfNode reports whether n is the caller's machine (self: its
+// $PYRE_NODE_ID, or the local pyred's node outside a session).
+func isSelfNode(n c.Node, self string) bool { return self != "" && n.NodeID == self }
+
+// markSelf is the node page with the caller's machine marked.
+func markSelf(page c.Page[c.Node], self string) c.Page[listedNode] {
+	out := c.Page[listedNode]{Items: make([]listedNode, len(page.Items)), NextCursor: page.NextCursor, SnapshotAt: page.SnapshotAt}
+	for i, n := range page.Items {
+		out.Items[i] = listedNode{Node: n, Self: isSelfNode(n, self)}
+	}
+	return out
+}
+
+// selfMark follows the caller's own machine's name in text output. A
+// machine's Pyre name, OS hostname and Tailscale name can differ.
+const selfMark = " (this machine)"
+
+func printNodes(w io.Writer, ns []c.Node, ref time.Time, self string) {
 	sort.SliceStable(ns, func(i, j int) bool { return ns[i].Name < ns[j].Name })
 	var rows [][]string
 	for _, n := range ns {
@@ -422,13 +448,26 @@ func printNodes(w io.Writer, ns []c.Node, ref time.Time) {
 			runs += fmt.Sprintf("/%d", n.Resources.MaxRuns)
 		}
 		cpu, mem, swap, disk := machineCells(n.Resources)
-		rows = append(rows, []string{n.Name, n.NodeID, n.Platform + "/" + n.Arch, connText(n, ref), harnessText(n.Harnesses), runs, cpu, mem, swap, disk})
+		name := n.Name
+		if isSelfNode(n, self) {
+			name += selfMark
+		}
+		rows = append(rows, []string{name, n.NodeID, orDash(n.Hostname), n.Platform + "/" + n.Arch, connText(n, ref), harnessText(n.Harnesses), runs, cpu, mem, swap, disk})
 	}
-	table(w, "NAME\tID\tPLATFORM\tCONNECTION\tHARNESSES\tRUNS\tCPU\tMEM\tSWAP\tDISK FREE", rows)
+	table(w, "NAME\tID\tHOSTNAME\tPLATFORM\tCONNECTION\tHARNESSES\tRUNS\tCPU\tMEM\tSWAP\tDISK FREE", rows)
 	for _, n := range ns {
 		if ws := sysstats.Warnings(n.Resources); len(ws) > 0 {
 			fmt.Fprintf(w, "! %s: %s\n", n.Name, strings.Join(ws, "; "))
 		}
+	}
+	for _, n := range ns {
+		if have, _ := toolsText(n.Resources.Tools); have != "" {
+			fmt.Fprintf(w, "tools %s: %s\n", n.Name, have)
+		}
+	}
+	printAvoids(w, ns, avoidRef(ref)) // node_avoid.go
+	for _, l := range ghguard.FleetLines(ns, 5) {
+		fmt.Fprintln(w, l)
 	}
 }
 
@@ -477,12 +516,22 @@ func lowestDisk(ds []c.DiskUsage) (c.DiskUsage, bool) {
 	return best, ok
 }
 
-func printNode(w io.Writer, n c.Node) {
-	fmt.Fprintf(w, "%s  %s\n", n.Name, n.NodeID)
+func printNode(w io.Writer, n c.Node, self string) {
+	name := n.Name
+	if isSelfNode(n, self) {
+		name += selfMark
+	}
+	fmt.Fprintf(w, "%s  %s\n", name, n.NodeID)
 	fmt.Fprintf(w, "  platform:    %s/%s  hostname %s  ssh %s\n", n.Platform, n.Arch, orDash(n.Hostname), orDash(n.SSHAlias))
 	fmt.Fprintf(w, "  connection:  %s\n", connText(n, time.Time{}))
 	if n.Connection.State != c.ConnConnected {
 		fmt.Fprintln(w, "               (offline does not mean idle: runs may still be executing)")
+	}
+	now := time.Now()
+	for _, a := range n.Avoid {
+		if a.Active(now) {
+			fmt.Fprintf(w, "  avoid:       %s\n", avoidLine(a, now))
+		}
 	}
 	fmt.Fprintf(w, "  harnesses:   %s\n", harnessText(n.Harnesses))
 	for _, h := range n.Harnesses {
@@ -508,6 +557,24 @@ func printNode(w io.Writer, n c.Node) {
 	for _, d := range r.Disks {
 		fmt.Fprintf(w, "  disk:        %s (%s) %s free of %s\n", d.Path, strings.Join(d.Roles, "+"), sysstats.HumanMB(float64(d.FreeMB)), sysstats.HumanMB(float64(d.TotalMB)))
 	}
+	if r.MemoryProtection != "" {
+		fmt.Fprintf(w, "  memory cap:  %s\n", r.MemoryProtection)
+	}
+	if have, missing := toolsText(r.Tools); have != "" || missing != "" {
+		fmt.Fprintf(w, "  tools:       %s\n", orDash(have))
+		if missing != "" {
+			fmt.Fprintf(w, "  no tools:    %s\n", missing)
+		}
+	}
+	if g := r.GitHub; g != nil {
+		if !g.ObservedAt.IsZero() {
+			fmt.Fprintf(w, "  github api:  %s (sampled %s)\n", ghguard.BudgetText(*g), ghguard.Clock(g.ObservedAt))
+		}
+		fmt.Fprintf(w, "  gh calls:    %d in the last hour\n", g.CallsLastHour)
+		for _, c := range g.TopSessions {
+			fmt.Fprintf(w, "               %s %d (%d delayed, %d refused)\n", c.SessionID, c.Calls, c.Throttled, c.Refused)
+		}
+	}
 	for _, u := range r.Runs {
 		fmt.Fprintf(w, "  run usage:   %s %s\n", u.RunID, sysstats.Detail(u))
 	}
@@ -525,4 +592,18 @@ func printNode(w io.Writer, n c.Node) {
 		fmt.Fprintf(w, "  capabilities: %s\n", strings.Join(n.Capabilities, ", "))
 	}
 	fmt.Fprintf(w, "  enrolled:    %s\n", stamp(n.EnrolledAt))
+}
+
+// toolsText lists a node's tool facts (pyre start --needs): the tools it
+// has and the probed ones it lacks, each sorted and space-separated.
+func toolsText(tools map[string]bool) (have, missing string) {
+	var h, m []string
+	for _, t := range sortedKeys(tools) {
+		if tools[t] {
+			h = append(h, t)
+		} else {
+			m = append(m, t)
+		}
+	}
+	return strings.Join(h, " "), strings.Join(m, " ")
 }

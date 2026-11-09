@@ -43,6 +43,10 @@ CREATE VIRTUAL TABLE search_fts USING fts5(
 	at UNINDEXED,
 	tokenize = 'porter unicode61'
 );
+`}, {Namespace: "search", Version: 2, Name: "alias_paths", SQL: `
+ALTER TABLE search_files ADD COLUMN alias_of TEXT NOT NULL DEFAULT '';
+`}, {Namespace: "search", Version: 3, Name: "no_self_alias", SQL: `
+UPDATE search_files SET alias_of='' WHERE alias_of=path;
 `}}
 
 // Source is one transcript file of a run.
@@ -116,13 +120,27 @@ type Stats struct {
 	Partial bool
 }
 
+// Pacer paces background indexing. Wait is called after each chunk with
+// the bytes it read; it blocks while the node is busy or indexing is ahead
+// of its rate, and returns ctx's error when ctx ends first.
+type Pacer interface {
+	Wait(ctx context.Context, read int64) error
+}
+
 // Update brings every source up to date, reading at most ChunkBytes per
 // file per round, until done or ctx expires. Files that shrank or were
 // replaced are re-indexed from the start.
 func (ix *Index) Update(ctx context.Context, sources []Source) (Stats, error) {
+	return ix.UpdatePaced(ctx, sources, nil)
+}
+
+// UpdatePaced is Update with every chunk paced by p (nil: unpaced). Progress
+// is committed per chunk, so a pass that ends early resumes where it
+// stopped.
+func (ix *Index) UpdatePaced(ctx context.Context, sources []Source, p Pacer) (Stats, error) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	return ix.update(ctx, sources)
+	return ix.update(ctx, sources, p)
 }
 
 // TryUpdate is Update unless another pass is running (busy=true: nothing
@@ -132,13 +150,20 @@ func (ix *Index) TryUpdate(ctx context.Context, sources []Source) (st Stats, bus
 		return Stats{Files: len(sources)}, true, nil
 	}
 	defer ix.mu.Unlock()
-	st, err = ix.update(ctx, sources)
+	st, err = ix.update(ctx, sources, nil)
 	return st, false, err
 }
 
-func (ix *Index) update(ctx context.Context, sources []Source) (Stats, error) {
+func (ix *Index) update(ctx context.Context, sources []Source, p Pacer) (Stats, error) {
 	st := Stats{Files: len(sources)}
-	todo := sources
+	todo, err := ix.skipAliases(ctx, uniquePaths(sources))
+	if err != nil {
+		if ctx.Err() != nil { // out of time before indexing anything
+			st.Partial, st.Pending = true, len(sources)
+			return st, nil
+		}
+		return st, err
+	}
 	for len(todo) > 0 {
 		var more []Source
 		for _, s := range todo {
@@ -147,8 +172,11 @@ func (ix *Index) update(ctx context.Context, sources []Source) (Stats, error) {
 				st.Pending += len(todo)
 				return st, nil
 			}
-			n, left, err := ix.updateFile(ctx, s)
+			n, read, left, err := ix.updateFile(ctx, s)
 			st.Indexed += n
+			if err == nil && p != nil && read > 0 {
+				_ = p.Wait(ctx, read) // fails only when ctx ends, which the loop checks
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					st.Partial = true
@@ -171,6 +199,26 @@ func (ix *Index) update(ctx context.Context, sources []Source) (Stats, error) {
 	return st, nil
 }
 
+// uniquePaths drops sources whose path an earlier or later source names
+// too, keeping the latest run's (run IDs sort by creation time). Runs of a
+// session resumed on the same account name the same file; indexing it once
+// per run would also make it an alias of itself (alias.go).
+func uniquePaths(sources []Source) []Source {
+	at := make(map[string]int, len(sources))
+	out := make([]Source, 0, len(sources))
+	for _, s := range sources {
+		if i, ok := at[s.Path]; ok && s.Path != "" {
+			if s.RunID > out[i].RunID {
+				out[i] = s
+			}
+			continue
+		}
+		at[s.Path] = len(out)
+		out = append(out, s)
+	}
+	return out
+}
+
 type fileRow struct {
 	offset, seq, size int64
 	title             string
@@ -187,43 +235,43 @@ func (ix *Index) row(ctx context.Context, path string) (fileRow, error) {
 	return r, err
 }
 
-// updateFile indexes up to ChunkBytes of new complete lines; left reports
-// unread bytes remaining.
-func (ix *Index) updateFile(ctx context.Context, s Source) (int, bool, error) {
+// updateFile indexes up to ChunkBytes of new complete lines; read is the
+// bytes read and left reports unread bytes remaining.
+func (ix *Index) updateFile(ctx context.Context, s Source) (n int, read int64, left bool, err error) {
 	if s.Path == "" {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
 	fi, err := os.Stat(s.Path)
 	if err != nil {
-		return 0, false, nil // not written yet, or gone: keep what is indexed
+		return 0, 0, false, nil // not written yet, or gone: keep what is indexed
 	}
 	r, err := ix.row(ctx, s.Path)
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	reset := r.found && fi.Size() < r.offset
 	if r.found && !reset && fi.Size() == r.offset {
 		if r.title != s.Title && s.Title != "" {
 			_, err := ix.db.ExecContext(ctx, `UPDATE search_files SET title=? WHERE path=?`, s.Title, s.Path)
-			return 0, false, err
+			return 0, 0, false, err
 		}
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
 	if reset {
 		r.offset, r.seq = 0, 0
 	}
 	f, err := os.Open(s.Path)
 	if err != nil {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
 	defer f.Close()
 	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	p := newParser(s.Format, r.seq)
 	var entries []Entry
 	br := bufio.NewReaderSize(f, 256<<10)
-	read, chunked := int64(0), false
+	chunked := false
 	for {
 		if read >= ix.lim.ChunkBytes {
 			chunked = true
@@ -268,7 +316,7 @@ func (ix *Index) updateFile(ctx context.Context, s Source) (int, bool, error) {
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO search_files(path, run_id, session_id, harness, title, format, offset, seq, size, entries, updated_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?)
-			ON CONFLICT(path) DO UPDATE SET run_id=excluded.run_id, session_id=excluded.session_id, harness=excluded.harness,
+			ON CONFLICT(path) DO UPDATE SET run_id=excluded.run_id, session_id=excluded.session_id, harness=excluded.harness, alias_of='',
 				title=CASE WHEN excluded.title='' THEN search_files.title ELSE excluded.title END, format=excluded.format,
 				offset=excluded.offset, seq=excluded.seq, size=excluded.size,
 				entries=CASE WHEN ? THEN excluded.entries ELSE search_files.entries + excluded.entries END, updated_at=excluded.updated_at`,
@@ -276,9 +324,9 @@ func (ix *Index) updateFile(ctx context.Context, s Source) (int, bool, error) {
 		return err
 	})
 	if err != nil {
-		return 0, false, err
+		return 0, read, false, err
 	}
-	return len(entries), chunked && off < fi.Size(), nil
+	return len(entries), read, chunked && off < fi.Size(), nil
 }
 
 // Query is a node-local search.

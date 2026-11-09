@@ -288,6 +288,13 @@ func RunHook(ctx context.Context, eventName string, stdin io.Reader, stateDir st
 	if ev == "UserPromptSubmit" {
 		rec.Markers = findMarkers(str(p, "prompt"))
 	}
+	if ev == "PreToolUse" {
+		rec.Security = securityCheck(stateDir, rec, p)
+		if out := killCheck(&rec, p); out != nil { // killguard.go
+			_ = appendJSONL(filepath.Join(stateDir, fileEvents), rec)
+			return out, 0
+		}
+	}
 	if ev == "PostToolUse" {
 		// Doorbell evidence: message ids returned by the pyre inbox tools or
 		// acked, from the untruncated payload (stored payloads are bounded).

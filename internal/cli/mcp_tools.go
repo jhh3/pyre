@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"reflect"
+	"slices"
+	"strings"
+	"time"
 
 	c "github.com/jhh3/pyre/internal/contracts"
 )
@@ -40,6 +44,20 @@ type MCPTool struct {
 	// note optionally returns a short line sent as an extra text block
 	// after a successful result (e.g. send_message's delivery status).
 	note func(result any) string
+	// deadline bounds one call (0: MCPServer's default).
+	deadline time.Duration
+}
+
+// StartSessionDeadline bounds one start_session call: a launch in a repo
+// the machine lacks clones it first, and a fresh worktree fetches origin,
+// which can take minutes; past this the call ends indeterminate and names
+// the operation_id whose retry returns the same session.
+const StartSessionDeadline = 5 * time.Minute
+
+// withDeadline bounds each call of t by d instead of the server default.
+func withDeadline(t MCPTool, d time.Duration) MCPTool {
+	t.deadline = d
+	return t
 }
 
 // withNote attaches a result note to a tool.
@@ -87,7 +105,7 @@ func tool[P, R any](name, title, desc string, in map[string]any, ann *ToolAnnota
 			dec := json.NewDecoder(bytes.NewReader(args))
 			dec.DisallowUnknownFields()
 			if err := dec.Decode(&p); err != nil {
-				return nil, usagef("invalid arguments for %s: %v", name, err)
+				return nil, usagef("invalid arguments for %s: %v%s", name, err, schemaFields(in))
 			}
 		}
 		r, err := fn(ctx, ops, p)
@@ -100,6 +118,25 @@ func tool[P, R any](name, title, desc string, in map[string]any, ann *ToolAnnota
 		return r, nil
 	}
 	return t
+}
+
+// schemaFields names the arguments an input schema takes, required ones
+// marked, for a decode error: an agent that guessed a field name (details,
+// summary, evidence for report_issue's body) sees the right ones at once
+// instead of guessing again.
+func schemaFields(in map[string]any) string {
+	p, _ := in["properties"].(map[string]any)
+	if len(p) == 0 {
+		return ""
+	}
+	req, _ := in["required"].([]string)
+	names := slices.Sorted(maps.Keys(p))
+	for i, n := range names {
+		if slices.Contains(req, n) {
+			names[i] = n + " (required)"
+		}
+	}
+	return "; it takes " + strings.Join(names, ", ")
 }
 
 type props map[string]any
@@ -163,23 +200,27 @@ func MCPTools() []MCPTool {
 			}) (c.SessionView, error) {
 				return o.ResolveSession(ctx, p.Session)
 			}), renderSession),
-		tool("start_session", "Start session", "Start a peer session on a machine (no project needed). Waits up to 20 s; a failed launch is an error. It messages you automatically when it finishes a turn (with its last message), needs input, or exits; no need to ask it to.",
+		withDeadline(tool("start_session", "Start session", "Start a peer session on a machine. Usually seconds; cloning or fetching a repo can take minutes (5 at most, then retry with the same operation_id). A failed launch is an error. It reports back when it finishes a turn, needs input or exits.",
 			obj(props{"node": str("node ID (node_...) or name; default: the least loaded connected node with the harness (with project+repo: among nodes holding that checkout; with cwd: this session's node); the result's placement says which and why"), "harness": str("claude, codex, agy or shell (agy: Google Antigravity, on machines that have it)"), "cwd": str("absolute working directory on the node"),
-				"project": project, "worktree": str("branch for an isolated git worktree"), "repo": str("with project: project repo ID (its recorded checkout, or the worktree source); without project: a repository name from the repo index, fuzzy-matched (the machine defaults to where it exists, the harness to claude, the directory to its main checkout)"),
-				"repos": strs("several repository names from the repo index: fresh worktrees of each on one branch in ~/pyre-work/<slug>/"), "fresh": boo("start in a new worktree and branch of repo instead of its main checkout"),
-				"branch":           str("branch for the fresh worktree (default pyre/<slug of the prompt or title>)"),
+				"project": project, "worktree": str("branch for an isolated git worktree"), "repo": str("with project: project repo ID (its recorded checkout, shared by default; with fresh, branch or worktree only the source of a new worktree); without project: a repository name from the repo index, fuzzy-matched (the machine defaults to where it exists, the harness to claude, the directory to its main checkout)"),
+				"repos": strs("several repository names from the repo index: fresh worktrees of each on one branch in ~/pyre-work/<slug>/"), "fresh": boo("start in a new worktree and branch of repo instead of its main checkout (with project: instead of the project's recorded checkout, even a shared one), at <node's worktree root>/<repo>/<branch, or the title's slug without branch> (root: pyred --worktree-root, default ~/worktrees). Account checks run before any clone or worktree; a launch that fails after creating the worktree names it (path, branch, commit) in the error, and a retry with the same operation_id reuses it"),
+				"branch":           str("branch for the fresh worktree (implies fresh), created with exactly this name from origin's freshly fetched default branch; one that already exists (locally, in a worktree or on origin) fails the launch. Default pyre/<slug of the title or prompt>, deduplicated. With project too: fresh or branch always win over the project's shared checkout; without either the session runs in that shared checkout"),
 				"account":          str("explicit account: ID, label or rota name, or a unique prefix; at its limit the best eligible account is used instead (with a note) unless strict_account"),
 				"strict_account":   boo("keep account even when it is at its limit or ineligible (the launch fails)"),
-				"fallback_harness": str("claude: when no Codex (OpenAI) account is free, run on Claude instead; use for reviews and second opinions. Default: a Codex launch with no free account fails at once with the reason"),
-				"ambient":          boo("use the node's existing login"), "prompt": str("initial prompt"),
+				"fallback_harness": str("claude: when no Codex (OpenAI) account has room (its own login at its limit counts), run on Claude instead (on the named node when node is given; the result's placement says so), and if the Codex run later stops on a usage limit with no other account, Pyre restarts the task on Claude in a new session; use for reviews and second opinions. Default: a Codex launch with no free account fails at once with the reason"),
+				"ambient":          boo("use the node's existing login"), "prompt": str("initial prompt; for harness shell, a command typed into the shell once its rc files have run, then Enter (not together with harness_args)"),
 				"permissions": str("ask (approval prompts) or bypass (no approval prompts, no sandbox); default: the node's setting"),
 				"model":       str("model (default: the harness's own); claude takes opus/sonnet/haiku/fable or a full name; choices per machine: list_models"),
 				"effort":      str("reasoning effort: low, medium, high, xhigh or max (codex also ultra); default: the harness's own"),
 				"title":       str("session title"), "include_context": boo("include the bounded project brief"), "tags": strs("tags"),
 				"report_to_parent": boo("report back to the starting session automatically (default true when a session starts it; false turns it off)"),
+				"no_lead":          boo("a bounded worker (e.g. an hourly check started in a project from outside it): it never leads the project, so it is never asked to keep the project page and may not write it"),
 				"harness_args":     strs("extra harness flags from an allowlist, e.g. claude --append-system-prompt-file=F, --plugin-dir=D, --dangerously-load-development-channels=plugin:N@M; kept across resumes; Pyre-controlled flags are refused"),
 				"native_resume":    str("claude: continue this existing conversation (session id) started outside Pyre; stop its process first"),
 				"env_file":         str("absolute path on the node to KEY=VALUE lines added to the harness environment at every launch (a private file: chmod 600; Pyre and login keys refused unless empty); only the path is recorded"),
+				"ignore_avoid":     boo("start on a node with a hard avoid flag anyway (list_nodes shows flags; a flag the owner set yields only to the owner). Default: placement skips avoided nodes and a hard flag refuses"),
+				"force":            boo("start on a node where every account for the harness (its own login included) is at its 5-hour or weekly limit anyway (its turns fail until a reset). Default: placement skips such nodes and a named node is refused, naming the resets and the nodes with room"),
+				"needs":            strs("what the task cannot run without: command-line tools (doppler, gcloud, docker, psql, ...) or paths on the machine (absolute or ~/...). Placement uses only machines that have every one (list_nodes shows each machine's tools); a named node without one is refused, naming the machines that qualify; when none qualifies the start fails"),
 				"operation_id":     opIDProp}, "harness"),
 			hints("Start session", additive, false),
 			func(ctx context.Context, o *Ops, p StartParams) (StartResult, error) {
@@ -193,13 +234,15 @@ func MCPTools() []MCPTool {
 					out.Placement = &pl
 				}
 				return out, err
-			}),
-		compactly(tool("read_session", "Read transcript", "Read a session's bounded, redacted transcript. Use next_cursor to continue.",
+			}), StartSessionDeadline),
+		compactly(tool("read_session", "Read transcript", "Read a session's bounded, redacted transcript. Use next_cursor to continue. Entries are cut at ~2000 bytes; full: true returns whole text, e.g. a final report (256 KB per entry, 1 MB per read; full_note names entries kept short).",
 			obj(props{"session": sess, "run": str("run ID (default current)"), "tail": num("latest N entries"),
-				"cursor": str("continue after a previous next_cursor"), "limit": num("max entries")}, "session"),
+				"cursor": str("continue after a previous next_cursor"), "limit": num("max entries"),
+				"seq":  num("only the entry with this seq (from a read or a search hit); not with tail or cursor"),
+				"full": boo("whole entry text instead of the ~2000-byte cut")}, "session"),
 			hints("Read transcript", readOnly, true),
 			func(ctx context.Context, o *Ops, p ReadParams) (c.ReadSessionResponse, error) {
-				if p.Tail == 0 && p.Cursor == "" {
+				if p.Tail == 0 && p.Cursor == "" && p.Seq == 0 {
 					p.Tail = 40
 				}
 				return o.ReadSession(ctx, p)
@@ -218,7 +261,7 @@ func MCPTools() []MCPTool {
 			}),
 		withNote(tool("send_message", "Send message", "Send a durable message to a session, \"owner\", channel:<name> or project; reply_to alone replies to its sender. delivery_status.summary says if it gets through. A report to the owner that asks nothing is an update, not in his inbox.",
 			obj(props{"to": str("session ID/title, \"owner\", channel:<name>, or project:<id>"), "text": str("message text"),
-				"thread": str("thread ID"), "reply_to": str("message ID this replies to"), "steer": boo("explicit immediate steering, where supported"),
+				"thread": str("thread ID"), "reply_to": str("message ID this replies to"), "steer": boo("immediate steering into the current turn; Codex only: to other harnesses it is sent as an ordinary queued message"),
 				"info": boo("store only; never inject into a runtime"), "attach": strs("published IDs: ver_..., rev_..., note_... (not file paths)"),
 				"request_ack": boo("ask the recipient to acknowledge (to the owner: keeps a report in his inbox)"), "project": project, "ttl_seconds": num("retention for undelivered mail"),
 				"message_id": str("stable message ID for retries"), "operation_id": opIDProp}, "text"),
@@ -250,11 +293,12 @@ func MCPTools() []MCPTool {
 			obj(props{"message_id": str("message ID"), "note": str("optional note"), "operation_id": opIDProp}, "message_id"),
 			hints("Acknowledge message", idempotent, true),
 			func(ctx context.Context, o *Ops, p MessageRef) (c.MessageView, error) { return o.Ack(ctx, p) }),
-		tool("reissue_message", "Reissue message", "Re-send uncertain or rejected work as a new message referencing the original. Requires accept_duplicate_risk=true; never use as a blind retry.",
+		withNote(tool("reissue_message", "Reissue message", "Re-send uncertain or rejected work as a new message referencing the original. Requires accept_duplicate_risk=true; never use as a blind retry.",
 			obj(props{"message_id": str("original message ID"), "accept_duplicate_risk": boo("must be true: the recipient may act twice"),
 				"text": str("replacement body (default original)"), "operation_id": opIDProp}, "message_id", "accept_duplicate_risk"),
 			hints("Reissue message", destructive, false),
 			func(ctx context.Context, o *Ops, p ReissueParams) (c.MessageView, error) { return o.Reissue(ctx, p) }),
+			sendNote),
 		tool("resolve_delivery", "Resolve delivery", "Record a decision (accepted or rejected) about an indeterminate delivery after inspecting evidence.",
 			obj(props{"message_id": str("message ID"), "resolution": str("accepted or rejected"), "note": str("evidence inspected"), "operation_id": opIDProp}, "message_id", "resolution"),
 			hints("Resolve delivery", idempotent, true),
@@ -289,10 +333,20 @@ func MCPTools() []MCPTool {
 			func(ctx context.Context, o *Ops, p CreateProjectParams) (c.Project, error) {
 				return o.CreateProject(ctx, p)
 			}),
-		tool("archive_session", "Archive session", "When your work is finished and reported, archive yourself with archive_session (no arguments); a live one archives when its turn ends; sessions under it go with it. Sessions outside your tree go to the owner for approval (approval_ask).",
-			obj(props{"session": str("session ID or exact title (default: yourself)"), "operation_id": opIDProp}),
+		tool("archive_session", "Archive session", "When done and reported, archive yourself with archive_session (no arguments); a live one archives when its turn ends, with sessions under it (still-working ones only with include_children: true). cancel: true cancels a pending archive.",
+			obj(props{"session": str("session ID or exact title (default: yourself; one outside your tree is filed for the owner's approval: approval_ask)"),
+				"include_children": boo("also archive sessions under it that are still working (each when its current turn ends)"),
+				"cancel":           boo("cancel a pending archive of the session and of the sessions its archive cascaded to"),
+				"operation_id":     opIDProp}),
 			hints("Archive session", idempotent, true),
 			func(ctx context.Context, o *Ops, p ArchiveParams) (ArchiveResult, error) {
+				if p.Cancel {
+					sv, err := o.CancelArchive(ctx, p)
+					if err != nil {
+						return ArchiveResult{}, err
+					}
+					return cancelResult(sv), nil
+				}
 				p.WhenDone = true
 				sv, err := o.Archive(ctx, p)
 				if r, ok := approvalResult(sv, err); ok {
@@ -359,10 +413,13 @@ func MCPTools() []MCPTool {
 			obj(props{"title": str("title"), "body": str("body"), "kind": str("note (default), handoff or decision"), "project": project, "operation_id": opIDProp}, "title", "body"),
 			hints("Record note", additive, false),
 			func(ctx context.Context, o *Ops, p NoteParams) (c.Note, error) { return o.CreateNote(ctx, p) }),
+		tool("get_note", "Show note", "Show a note, handoff or decision by ID (note_...): title, kind, project, author, time and full body.",
+			obj(props{"note_id": str("note ID (note_...)")}, "note_id"), hints("Show note", readOnly, true),
+			func(ctx context.Context, o *Ops, p NoteRef) (c.Note, error) { return o.GetNote(ctx, p) }),
 		tool("get_context", "Launch context", "Get the bounded launch context: current project brief plus retrieval pointers.",
 			obj(props{"project": project, "max_bytes": num("size bound")}), hints("Launch context", readOnly, true),
 			func(ctx context.Context, o *Ops, p ContextParams) (c.LaunchContext, error) { return o.Context(ctx, p) }),
-		tool("memory_search", "Search memory", "Search shared memory (transcripts, notes, decisions) with provenance and freshness.",
+		tool("memory_search", "Search memory", "Search shared memory (transcripts, notes, decisions) with provenance and freshness. From a machine without Hive, the hub has a machine with Hive answer (served_by names it).",
 			obj(props{"query": str("search text"), "node": node, "project": project, "limit": num("max hits")}, "query"),
 			hints("Search memory", readOnly, true),
 			func(ctx context.Context, o *Ops, p MemorySearchParams) (c.MemorySearchResult, error) {

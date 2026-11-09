@@ -1,0 +1,35 @@
+# ngrok traffic policy for the Pyre review site (docs/site.md).
+# Used by packaging/systemd/pyre-site-tunnel.service:
+#   ngrok http 127.0.0.1:7393 --url https://pyre-example-review.ngrok.app \
+#     --traffic-policy-file ~/.config/pyre/ngrok/pyre-site-policy.yml
+#
+# 1. Drop any identity headers the client sent: only this policy sets them.
+# 2. Google sign-in (ngrok-managed OAuth app).
+# 3. Deny (403) unless the signed-in email is in one of the allowed domains.
+#    Edit the expression: one endsWith('@<domain>') per domain.
+# 4. Tell pyre site serve who signed in (X-Pyre-Email, X-Pyre-Name).
+# pyre site serve also checks the email against its own --allow-domain /
+# --allow-email list, so keep both in step.
+on_http_request:
+  - actions:
+      - type: remove-headers
+        config:
+          headers:
+            - X-Pyre-Email
+            - X-Pyre-Name
+  - actions:
+      - type: oauth
+        config:
+          provider: google
+  - expressions:
+      - "!(actions.ngrok.oauth.identity.email.endsWith('@example.org') || actions.ngrok.oauth.identity.email.endsWith('@example.net'))"
+    actions:
+      - type: deny
+        config:
+          status_code: 403
+  - actions:
+      - type: add-headers
+        config:
+          headers:
+            X-Pyre-Email: "${actions.ngrok.oauth.identity.email}"
+            X-Pyre-Name: "${actions.ngrok.oauth.identity.name}"

@@ -42,13 +42,13 @@ func isStale(p c.ProjectPage, working int, now time.Time) bool {
 }
 
 // statusCard builds the project view's status card from the page and the
-// project's sessions.
-func statusCard(pg c.ProjectPage, views []c.SessionView, now time.Time) StatusCard {
+// project's sessions (byID: the snapshot's sessions, for isLead).
+func statusCard(pg c.ProjectPage, views []c.SessionView, byID map[string]c.SessionView, now time.Time) StatusCard {
 	sc := StatusCard{Lead: pg.Status, UpdatedAt: leadUpdatedAt(pg), StaleAfterMinutes: int(StatusStaleAfter / time.Minute),
 		Working: []SessionCard{}, NeedsYou: []SessionCard{}, Idle: []SessionCard{}, Stuck: []SessionCard{}}
 	at := map[string]time.Time{}
 	for _, v := range views {
-		card := sessionCard(v)
+		card := sessionCard(v, byID)
 		a := activeAt(v)
 		at[card.ID] = a
 		switch card.State {
@@ -190,8 +190,8 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		case StateIdle:
 			g.live++
 		}
-		if isLead(v) {
-			card := sessionCard(v)
+		if isLead(v, sn.sessions) {
+			card := sessionCard(v, sn.sessions)
 			g.leads = append(g.leads, card)
 			g.at[card.ID] = at
 		}
@@ -320,14 +320,14 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	var views []c.SessionView
 	for _, v := range sn.active {
 		if v.Session.ProjectID != nil && *v.Session.ProjectID == id {
-			card := sessionCard(v)
+			card := sessionCard(v, sn.sessions)
 			at[card.ID] = activeAt(v)
 			sessions = append(sessions, card)
 			views = append(views, v)
 		}
 	}
 	sortCards(sessions, at)
-	status := statusCard(page, views, sn.now)
+	status := statusCard(page, views, sn.sessions, sn.now)
 
 	var open, decided []c.Ask
 	for _, a := range asks {

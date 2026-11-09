@@ -38,7 +38,71 @@ func PluginAlive(stateDir string, now time.Time) bool {
 }
 
 func (a *Adapter) pluginLive(h contracts.RunHandle) bool {
-	return !a.o.DisablePluginDelivery && PluginAlive(h.StateDir, a.o.Now())
+	return !a.o.DisablePluginDelivery && PluginAlive(h.StateDir, a.o.Now()) && !a.pluginStalled(h) && !a.pluginRefused(h)
+}
+
+// pluginRefused: Claude refuses plugin prompts since a Stop until typed
+// input enters (stopRefusal), so mail is pasted until a prompt enters.
+func (a *Adapter) pluginRefused(h contracts.RunHandle) bool {
+	e := a.entry(h)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	a.refresh(h, e)
+	return !e.rs.pluginRefusedAt.IsZero()
+}
+
+// idleForInput: the hooks show no main-agent turn running.
+func idleForInput(s contracts.RunState) bool {
+	return s == contracts.RunWaitingInput || s == contracts.RunWaitingBackground
+}
+
+// pluginStalled is the safety net for a module that heartbeats but never
+// takes mail (incident 2026-10-23: its busy flag stuck after a side agent's
+// turn, so an idle session's mail was withdrawn unsent for 15 minutes and
+// newer mail overtook it through the doorbell). Once plugin attempts have
+// been withdrawn unclaimed while the session sat idle for PluginStallAfter,
+// the run falls back to paste (its own gates still apply). A main turn
+// ending, or a claim, gives the module another chance.
+func (a *Adapter) pluginStalled(h contracts.RunHandle) bool {
+	e := a.entry(h)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pluginMiss.IsZero() {
+		return false
+	}
+	a.refresh(h, e)
+	if e.rs.lastTurnDurationAt.After(e.pluginMiss) || pluginClaimedSince(e.rs, e.pluginMiss) {
+		e.pluginMiss = time.Time{}
+		return false
+	}
+	return a.o.Now().Sub(e.pluginMiss) >= a.o.PluginStallAfter
+}
+
+func pluginClaimedSince(rs *runState, t time.Time) bool {
+	for _, at := range rs.pluginClaimed {
+		if !at.Before(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// notePluginMiss records an attempt (started at) that the module left
+// unclaimed while the session was idle throughout.
+func (a *Adapter) notePluginMiss(h contracts.RunHandle, at time.Time) {
+	e := a.entry(h)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pluginMiss.IsZero() || e.rs.lastTurnDurationAt.After(e.pluginMiss) || pluginClaimedSince(e.rs, e.pluginMiss) {
+		e.pluginMiss = at
+	}
+}
+
+func (a *Adapter) clearPluginMiss(h contracts.RunHandle) {
+	e := a.entry(h)
+	e.mu.Lock()
+	e.pluginMiss = time.Time{}
+	e.mu.Unlock()
 }
 
 // resetPluginSpool clears a previous launch's module heartbeat and
@@ -121,6 +185,8 @@ func (a *Adapter) deliverPlugin(ctx context.Context, h contracts.RunHandle, in c
 func (a *Adapter) awaitPlugin(ctx context.Context, h contracts.RunHandle, in contracts.DeliveryInput, path string) (contracts.DeliveryResult, error) {
 	end := time.Now().Add(a.o.DeliverTimeout)
 	claimed := strings.TrimSuffix(path, ".msg") + ".claimed"
+	began := a.o.Now()
+	idleAtStart := func() bool { s, _, _ := a.derived(h); return idleForInput(s) }()
 	var other time.Time // when non-plugin evidence (prompt hook, transcript) was first seen
 	for {
 		if ev, ok := a.evidenceFor(h, in.MessageID); ok {
@@ -134,11 +200,22 @@ func (a *Adapter) awaitPlugin(ctx context.Context, h contracts.RunHandle, in con
 				continue
 			}
 			_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jAccepted, Evidence: string(ev.Kind), Ref: ev.Ref})
+			a.clearPluginMiss(h)
 			return accepted(ev, "submitted by the pyre-session plugin between turns ($.prompt.submit)"), nil
 		}
 		if f, ok := a.pluginFailure(h, in.MessageID); ok {
 			if f.Event == claudeplugin.EvPluginDropped {
 				_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jRejected, Detail: "plugin prompt dropped: " + f.Reason})
+				if stopRefusal(f.Reason) && ctx.Err() == nil {
+					// Claude holds plugin input since a Stop until someone
+					// types: paste it now (the paste gates still apply), which
+					// also lifts the refusal for later plugin deliveries.
+					r, err := a.deliverPaste(ctx, h, in)
+					if err == nil {
+						r.Detail = "Claude refused the plugin's prompt since the session was stopped; paste fallback: " + r.Detail
+					}
+					return r, err
+				}
 				return rejected("a Claude prompt hook dropped the plugin's prompt (not entered; safe to retry): " + f.Reason), nil
 			}
 			_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jIndeterminate, Detail: "plugin submit failed: " + f.Reason})
@@ -151,6 +228,12 @@ func (a *Adapter) awaitPlugin(ctx context.Context, h contracts.RunHandle, in con
 	}
 	if os.Rename(path, strings.TrimSuffix(path, ".msg")+".withdrawn") == nil {
 		_ = a.journal(h, journalRec{MessageID: in.MessageID, AttemptID: in.AttemptID, State: jRejected, Detail: "plugin did not take it in time; withdrawn"})
+		if s, _, _ := a.derived(h); idleAtStart && idleForInput(s) {
+			// The session sat idle and the module still did not take it:
+			// count toward the stall fallback (pluginStalled).
+			a.notePluginMiss(h, began)
+			return queued("the session's plugin did not take the message although the session was idle; withdrawn unsent (not delivered); retried, and pasted instead if the plugin stays stalled for " + a.o.PluginStallAfter.String()), nil
+		}
 		return queued("the session's plugin did not take the message before the attempt ended (a turn was running); withdrawn unsent, delivered between turns later"), nil
 	}
 	if _, err := os.Stat(claimed); err == nil {

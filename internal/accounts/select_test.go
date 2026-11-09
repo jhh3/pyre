@@ -491,3 +491,32 @@ func TestDefaultAccountPolicy(t *testing.T) {
 		t.Fatal("ValidDefaultAccount")
 	}
 }
+
+// A launch on the node's own login (ambient, explicit or by default) is
+// refused when that login bills an API key: Codex auth.json in API-key
+// mode, Claude's apiKeyHelper or a Console key. Nothing secret is echoed.
+func TestAmbientRefusesAPIKeyLogin(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	amb := contracts.AccountPolicy{Mode: contracts.AccountAmbient}
+	_ = os.MkdirAll(e.svc.cfg.UserCodexDir, 0o700)
+	auth := filepath.Join(e.svc.cfg.UserCodexDir, "auth.json")
+	_ = os.WriteFile(auth, []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-not-a-key"}`), 0o600)
+	_, _, _, err := e.svc.Resolve(ctx, contracts.HarnessCodex, amb, "run_1")
+	if err == nil || !strings.Contains(err.Error(), "API-key login") || strings.Contains(err.Error(), "synthetic-not-a-key") {
+		t.Fatalf("codex api-key ambient: %v", err)
+	}
+	// A node with no Codex account defaults to its own login: refused too.
+	if _, _, _, err := e.svc.Resolve(ctx, contracts.HarnessCodex, eligible, "run_2"); err == nil || !strings.Contains(err.Error(), "API-key login") {
+		t.Fatalf("codex default ambient: %v", err)
+	}
+	_ = os.WriteFile(auth, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"synthetic","refresh_token":"synthetic"}}`), 0o600)
+	if _, _, _, err := e.svc.Resolve(ctx, contracts.HarnessCodex, amb, "run_3"); err != nil {
+		t.Fatalf("codex chatgpt ambient: %v", err)
+	}
+	_ = os.MkdirAll(e.svc.cfg.UserClaudeDir, 0o700)
+	_ = os.WriteFile(filepath.Join(e.svc.cfg.UserClaudeDir, "settings.json"), []byte(`{"apiKeyHelper":"/synthetic/helper"}`), 0o600)
+	if _, _, _, err := e.svc.Resolve(ctx, contracts.HarnessClaude, amb, "run_4"); err == nil || !strings.Contains(err.Error(), "apiKeyHelper") {
+		t.Fatalf("claude api-key ambient: %v", err)
+	}
+}

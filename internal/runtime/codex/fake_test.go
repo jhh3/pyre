@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -75,7 +76,13 @@ type fThread struct {
 	active   *fTurn
 	subs     map[*fConn]bool
 	unloaded bool            // thread/archive unloaded it (the real app-server keeps threads loaded otherwise)
+	config   map[string]any  // the per-thread config the loaded thread runs commands with
 	bg       map[string]*fBg // background commands (FAKE_BG_MS) still running, by item id
+	// held: the process groups of FAKE_KEEP exec sessions the thread holds,
+	// exited ones included (codex kills them all on clean and unload).
+	held map[string]int
+	// finals: local agents' reports queued for the next turn (FAKE_AGENT).
+	finals []string
 }
 
 type fakeServer struct {
@@ -115,7 +122,8 @@ func (s *fakeServer) setStatus(t *fThread, st map[string]any) {
 func (s *fakeServer) threadJSON(t *fThread, withTurns bool) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := map[string]any{"id": t.id, "status": t.status, "cwd": "/fake"}
+	m := map[string]any{"id": t.id, "status": t.status, "cwd": "/fake", "fakeSubscribers": len(t.subs),
+		"fakeRunId": t.config["shell_environment_policy.set.PYRE_RUN_ID"]} // what the thread's commands see
 	if t.parent != "" {
 		m["parentThreadId"] = t.parent
 	}
@@ -262,13 +270,91 @@ var fSleepRe = regexp.MustCompile(`FAKE_SLEEP_MS=(\d+)`)
 
 // FAKE_BG_MS=<ms>:<name> starts a background command (codex 0.163 unified
 // exec) in the turn: item/started now, item/completed for it, carrying the
-// turn that started it, after <ms> even when that turn has ended.
+// turn that started it, after <ms> even when that turn has ended. The
+// rollout records it like codex: exec_command yielding its session id, and
+// the item_completed event at the exit.
 var fBgRe = regexp.MustCompile(`FAKE_BG_MS=(\d+):([a-z0-9]+)`)
+
+// FAKE_POLL=<name>: at the end of the turn (after FAKE_SLEEP_MS) the model
+// polls background command <name> with write_stdin (rollout only, as codex
+// emits nothing for a poll that finds the process exited).
+var fPollRe = regexp.MustCompile(`FAKE_POLL=([a-z0-9]+)`)
+
+// FAKE_EXECS=<n>: before any FAKE_BG_MS command, the model runs n quick
+// exec_command calls that return their exit (no yield), like the dozens
+// of cat/sed/rg calls of a long codex turn.
+var fExecsRe = regexp.MustCompile(`FAKE_EXECS=(\d+)`)
+
+// quickExecs runs FAKE_EXECS's commands in turn tr.
+func (s *fakeServer) quickExecs(t *fThread, tr *fTurn, text string) {
+	m := fExecsRe.FindStringSubmatch(text)
+	if m == nil {
+		return
+	}
+	n, _ := strconv.Atoi(m[1])
+	for i := 0; i < n; i++ {
+		id, name, pid := fmt.Sprintf("exec-q-%d", i), fmt.Sprintf("q-%d", i), strconv.Itoa(30000+i)
+		it := map[string]any{"type": "commandExecution", "id": id, "command": "/bin/zsh -lc '" + name + "'",
+			"commandActions": []any{map[string]any{"type": "unknown", "command": name}}, "cwd": "/fake/work",
+			"status": "inProgress", "source": "unifiedExecStartup", "processId": pid}
+		s.broadcast(t, "item/started", map[string]any{"item": it, "threadId": t.id, "turnId": tr.ID})
+		s.rolloutTool(t, "call-"+id, `{"cmd":"`+name+`"}`, "Process exited with code 0\nOutput:\nok\n")
+		now := time.Now()
+		s.rollout(t, map[string]any{"type": "event_msg", "payload": map[string]any{"type": "item_completed", "thread_id": t.id, "turn_id": tr.ID,
+			"item": map[string]any{"type": "CommandExecution", "id": id, "process_id": pid, "status": "completed", "exit_code": 0,
+				"command": []string{"/bin/zsh", "-lc", name}, "cwd": "file:///fake/work", "source": "unified_exec_startup",
+				"aggregated_output": "ok\n", "duration": map[string]any{"secs": 0, "nanos": 20000000}},
+			"started_at_ms": now.UnixMilli(), "completed_at_ms": now.UnixMilli()}})
+		done := map[string]any{}
+		for k, v := range it {
+			done[k] = v
+		}
+		done["status"], done["exitCode"], done["aggregatedOutput"], done["durationMs"] = "completed", 0, "ok\n", 20
+		s.broadcast(t, "item/completed", map[string]any{"item": done, "threadId": t.id, "turnId": tr.ID})
+	}
+}
 
 type fBg struct {
 	timer *time.Timer
 	turn  string
 	item  map[string]any
+	start time.Time
+	pgid  int // FAKE_KEEP: the real command's process group
+}
+
+// fBgPid is background command name's process (session) id.
+func fBgPid(name string) string {
+	n := 0
+	for _, c := range name {
+		n = n*31 + int(c)
+	}
+	return strconv.Itoa(40000 + n%9000)
+}
+
+var fRolloutMu sync.Mutex
+
+// rollout appends one line to the thread's rollout under CODEX_HOME.
+func (s *fakeServer) rollout(t *fThread, line map[string]any) {
+	fRolloutMu.Lock()
+	defer fRolloutMu.Unlock()
+	day := time.Now()
+	dir := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", day.Format("2006"), day.Format("01"), day.Format("02"))
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "rollout-2026-10-23T00-00-00-"+t.id+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	line["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+	b, _ := json.Marshal(line)
+	_, _ = f.Write(append(b, '\n'))
+}
+
+func (s *fakeServer) rolloutTool(t *fThread, callID, args string, out string) {
+	s.rollout(t, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call", "name": "exec_command", "call_id": callID, "arguments": args}})
+	s.rollout(t, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call_output", "call_id": callID, "output": out}})
 }
 
 func (s *fakeServer) startBg(t *fThread, tr *fTurn, text string) {
@@ -277,13 +363,14 @@ func (s *fakeServer) startBg(t *fThread, tr *fTurn, text string) {
 		name, id := m[2], "exec-bg-"+m[2]
 		it := map[string]any{"type": "commandExecution", "id": id, "command": "/bin/zsh -lc 'bg-" + name + "'",
 			"commandActions": []any{map[string]any{"type": "unknown", "command": "bg-" + name}}, "cwd": "/fake/work",
-			"status": "inProgress", "source": "unifiedExecStartup"}
+			"status": "inProgress", "source": "unifiedExecStartup", "processId": fBgPid(name)}
 		s.broadcast(t, "item/started", map[string]any{"item": it, "threadId": t.id, "turnId": tr.ID})
+		s.rolloutTool(t, "call-"+id, `{"cmd":"bg-`+name+`","yield_time_ms":1000}`, "Process running with session ID "+fBgPid(name)+"\nOutput:\n")
 		s.mu.Lock()
 		if t.bg == nil {
 			t.bg = map[string]*fBg{}
 		}
-		t.bg[id] = &fBg{turn: tr.ID, item: it, timer: time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+		t.bg[id] = &fBg{turn: tr.ID, item: it, start: time.Now(), timer: time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
 			s.endBg(t, id, 0, "completed", "bg "+name+" done\n")
 		})}
 		s.mu.Unlock()
@@ -304,7 +391,70 @@ func (s *fakeServer) endBg(t *fThread, id string, exit int, status, out string) 
 		done[k] = v
 	}
 	done["status"], done["exitCode"], done["aggregatedOutput"], done["durationMs"] = status, exit, out, 1234
+	now := time.Now()
+	s.rollout(t, map[string]any{"type": "event_msg", "payload": map[string]any{"type": "item_completed", "thread_id": t.id, "turn_id": b.turn,
+		"item": map[string]any{"type": "CommandExecution", "id": id, "process_id": done["processId"], "status": status, "exit_code": exit,
+			"command": []string{"/bin/zsh", "-lc", "bg-" + strings.TrimPrefix(id, "exec-bg-")}, "cwd": "file:///fake/work", "source": "unified_exec_startup",
+			"aggregated_output": out, "duration": map[string]any{"secs": 1, "nanos": 234000000}},
+		"started_at_ms": b.start.UnixMilli(), "completed_at_ms": now.UnixMilli()}})
 	s.broadcast(t, "item/completed", map[string]any{"item": done, "threadId": t.id, "turnId": b.turn})
+}
+
+// FAKE_KEEP=<ms>:<name> starts a real background command (codex 0.163
+// unified exec, pipe mode, its own process group) whose top shell leaves a
+// child (`sleep 600`, pid in $CODEX_HOME/keep-<name>.child) in its group
+// and exits after <ms>. The thread holds the exec session after the exit,
+// so its clean and unload kill the group (killpg SIGKILL), as Codex does.
+// thread/backgroundTerminals/list shows it, with its osPid, while the top
+// shell runs.
+var fKeepRe = regexp.MustCompile(`FAKE_KEEP=(\d+):([a-z0-9]+)`)
+
+func (s *fakeServer) startKeep(t *fThread, tr *fTurn, text string) {
+	for _, m := range fKeepRe.FindAllStringSubmatch(text, -1) {
+		ms, _ := strconv.Atoi(m[1])
+		name, id := m[2], "exec-keep-"+m[2]
+		childFile := filepath.Join(os.Getenv("CODEX_HOME"), "keep-"+name+".child")
+		cmd := exec.Command("/bin/sh", "-c", fmt.Sprintf(`sleep 600 & echo $! > %q; sleep %.3f`, childFile, float64(ms)/1000))
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			continue
+		}
+		pgid := cmd.Process.Pid
+		it := map[string]any{"type": "commandExecution", "id": id, "command": "/bin/zsh -lc 'keep-" + name + "'",
+			"commandActions": []any{map[string]any{"type": "unknown", "command": "keep-" + name}}, "cwd": "/fake/work",
+			"status": "inProgress", "source": "unifiedExecStartup", "processId": fBgPid(name)}
+		s.mu.Lock()
+		if t.bg == nil {
+			t.bg = map[string]*fBg{}
+		}
+		if t.held == nil {
+			t.held = map[string]int{}
+		}
+		t.held[id] = pgid
+		t.bg[id] = &fBg{turn: tr.ID, item: it, start: time.Now(), timer: time.AfterFunc(24*time.Hour, func() {}), pgid: pgid}
+		s.mu.Unlock()
+		s.broadcast(t, "item/started", map[string]any{"item": it, "threadId": t.id, "turnId": tr.ID})
+		s.rolloutTool(t, "call-"+id, `{"cmd":"keep-`+name+`","yield_time_ms":250}`, "Process running with session ID "+fBgPid(name)+"\nOutput:\n")
+		go func() {
+			_ = cmd.Wait()
+			s.endBg(t, id, 0, "completed", "keep "+name+" done\n")
+		}()
+	}
+}
+
+// killHeld kills the process groups of the exec sessions t holds (codex's
+// terminate_all_processes / clean), exited ones included.
+func (s *fakeServer) killHeld(t *fThread) {
+	if t == nil {
+		return
+	}
+	s.mu.Lock()
+	held := t.held
+	t.held = nil
+	s.mu.Unlock()
+	for _, pg := range held {
+		_ = syscall.Kill(-pg, syscall.SIGKILL)
+	}
 }
 
 func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
@@ -331,19 +481,39 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 			s.mu.Unlock()
 		}
 		s.reply(fc, m.ID, map[string]any{})
+	case "hooks/list": // the hooks in $CODEX_HOME/fake-hooks.json (absent: an older Codex without the method)
+		b, err := os.ReadFile(filepath.Join(os.Getenv("CODEX_HOME"), "fake-hooks.json"))
+		if err != nil {
+			s.fail(fc, m.ID, "method not found: hooks/list")
+			return
+		}
+		s.reply(fc, m.ID, map[string]any{"data": []any{map[string]any{"cwd": "/fake", "hooks": json.RawMessage(b), "errors": []any{}, "warnings": []any{}}}})
 	case "config/value/write":
 		logConfig(m.Method, map[string]any{"config": p})
 		s.reply(fc, m.ID, map[string]any{"status": "ok", "version": "v1", "filePath": filepath.Join(os.Getenv("CODEX_HOME"), "config.toml")})
 	case "thread/start":
 		logConfig(m.Method, p)
 		s.mu.Lock()
-		t = &fThread{id: s.id("thr"), status: map[string]any{"type": "idle"}, subs: map[*fConn]bool{fc: true}, owner: fc}
+		cfg, _ := p["config"].(map[string]any)
+		t = &fThread{id: s.id("thr"), status: map[string]any{"type": "idle"}, subs: map[*fConn]bool{fc: true}, owner: fc, config: cfg}
 		s.threads[t.id] = t
 		s.mu.Unlock()
+		// The thread's record on disk, so a restarted fake resumes it.
+		_ = os.MkdirAll(filepath.Join(os.Getenv("CODEX_HOME"), "fake-threads"), 0o700)
+		_ = os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "fake-threads", t.id), nil, 0o600)
 		s.reply(fc, m.ID, map[string]any{"thread": s.threadJSON(t, false), "approvalPolicy": p["approvalPolicy"], "sandbox": p["sandbox"]})
 		s.broadcast(t, "thread/started", map[string]any{"thread": s.threadJSON(t, false)})
 	case "thread/resume":
 		logConfig(m.Method, p)
+		if _, err := os.Stat(filepath.Join(os.Getenv("CODEX_HOME"), "fake-threads", tid)); t == nil && tid != "" && err == nil {
+			// Started on an app-server that died: cold-load it, idle.
+			s.mu.Lock()
+			if t = s.threads[tid]; t == nil {
+				t = &fThread{id: tid, mat: true, status: map[string]any{"type": "idle"}, subs: map[*fConn]bool{}}
+				s.threads[tid] = t
+			}
+			s.mu.Unlock()
+		}
 		if t == nil {
 			s.fail(fc, m.ID, "no rollout found for thread id "+tid)
 			return
@@ -355,10 +525,39 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 			s.fail(fc, m.ID, "no rollout found for thread id "+tid)
 			return
 		}
+		// codex 0.163 resume_running_thread: overrides (any config) on a
+		// loaded, idle thread nobody subscribes to shut it down and
+		// cold-resume it with them, killing its background commands (exit
+		// -1). A loaded thread with a subscriber (the caller's own
+		// connection included) attaches and keeps its config. An unloaded
+		// thread cold-loads with the resume's config.
 		s.mu.Lock()
+		cfg, _ := p["config"].(map[string]any)
+		var kill []string
+		rebuilt := false
+		if t.unloaded {
+			t.config = cfg
+		} else if cfg != nil && len(t.subs) == 0 && t.active == nil {
+			t.config = cfg
+			rebuilt = true
+			for id, b := range t.bg {
+				b.timer.Stop()
+				kill = append(kill, id)
+			}
+			if f, err := os.OpenFile(filepath.Join(os.Getenv("CODEX_HOME"), "fake-rebuilds.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+				fmt.Fprintf(f, "%s killed=%d\n", t.id, len(kill))
+				f.Close()
+			}
+		}
 		t.subs[fc] = true
 		t.unloaded = false
 		s.mu.Unlock()
+		if rebuilt {
+			s.killHeld(t) // the rebuild shuts the thread down
+		}
+		for _, id := range kill {
+			s.endBg(t, id, -1, "failed", "")
+		}
 		s.reply(fc, m.ID, map[string]any{"thread": s.threadJSON(t, false)})
 	case "thread/unsubscribe":
 		if t != nil {
@@ -451,6 +650,7 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 		t.turns = append(t.turns, tr)
 		t.active = tr
 		s.mu.Unlock()
+		s.rollout(t, map[string]any{"type": "event_msg", "payload": map[string]any{"type": "task_started", "turn_id": tr.ID}})
 		s.reply(fc, m.ID, map[string]any{"turn": map[string]any{"id": tr.ID, "status": "inProgress"}})
 		s.setStatus(t, map[string]any{"type": "active", "activeFlags": []string{}})
 		s.broadcast(t, "turn/started", map[string]any{"threadId": t.id, "turn": map[string]any{"id": tr.ID, "status": "inProgress"}})
@@ -473,8 +673,27 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 		case tr.intr <- struct{}{}:
 		default:
 		}
+	case "thread/backgroundTerminals/list":
+		var data []map[string]any
+		if t != nil {
+			s.mu.Lock()
+			for id, b := range t.bg {
+				e := map[string]any{"itemId": id, "processId": b.item["processId"], "command": b.item["command"], "cwd": "/fake/work", "osPid": nil}
+				if b.pgid > 0 {
+					e["osPid"] = b.pgid
+				}
+				data = append(data, e)
+			}
+			s.mu.Unlock()
+		}
+		s.reply(fc, m.ID, map[string]any{"data": data, "nextCursor": nil})
 	case "thread/backgroundTerminals/clean":
 		// Kills the thread's background commands: each reports its exit.
+		if f, err := os.OpenFile(filepath.Join(os.Getenv("CODEX_HOME"), "fake-cleans.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			fmt.Fprintln(f, tid)
+			f.Close()
+		}
+		s.killHeld(t)
 		var kill []string
 		if t != nil {
 			s.mu.Lock()
@@ -510,8 +729,10 @@ func (s *fakeServer) handle(fc *fConn, m rpcMessage) {
 	case "thread/archive", "thread/unarchive":
 		logConfig(m.Method, map[string]any{"config": map[string]any{"threadId": tid}})
 		if t != nil && m.Method == "thread/archive" {
+			s.killHeld(t) // the thread's shutdown terminates its processes
 			s.mu.Lock()
 			t.unloaded = true
+			t.subs = map[*fConn]bool{} // the thread is shut down
 			s.mu.Unlock()
 		}
 		s.reply(fc, m.ID, map[string]any{})
@@ -534,12 +755,71 @@ func (s *fakeServer) finish(t *fThread, tr *fTurn, status string, errObj any) {
 	tr.Error = errObj
 	t.active = nil
 	s.mu.Unlock()
+	if status == "interrupted" {
+		s.rollout(t, map[string]any{"type": "event_msg", "payload": map[string]any{"type": "turn_aborted", "turn_id": tr.ID, "reason": "interrupted"}})
+	} else {
+		s.rollout(t, map[string]any{"type": "event_msg", "payload": map[string]any{"type": "task_complete", "turn_id": tr.ID}})
+	}
 	s.setStatus(t, map[string]any{"type": "idle"})
 	s.broadcast(t, "turn/completed", map[string]any{"threadId": t.id, "turn": map[string]any{"id": tr.ID, "status": status, "error": errObj}})
 }
 
+// FAKE_AGENT=<ms>:<name> spawns a local collaboration agent that finishes
+// after <ms>, as codex 0.163 reports it: item/completed subAgentActivity
+// (kind completed) on the root, with the spawning turn's id. Its report
+// (the rollout's FINAL_ANSWER agent_message) reaches the model in the turn
+// running then, else at the next turn's start. FAKE_AGENTU: finishing in
+// a running turn, its report misses that turn (the turn's last model call
+// was already made).
+var fAgentRe = regexp.MustCompile(`FAKE_AGENT(U?)=(\d+):([a-z0-9_]+)`)
+
+func (s *fakeServer) startAgents(t *fThread, tr *fTurn, text string) {
+	for _, m := range fAgentRe.FindAllStringSubmatch(text, -1) {
+		ms, _ := strconv.Atoi(m[2])
+		late, path := m[1] == "U", "/root/"+m[3]
+		child := s.idLocked("thr")
+		s.addItem(t, tr, map[string]any{"type": "subAgentActivity", "id": "call-spawn-" + m[3], "kind": "started", "agentThreadId": child, "agentPath": path})
+		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+			s.mu.Lock()
+			active := t.active != nil && !late
+			if !active {
+				t.finals = append(t.finals, path)
+			}
+			s.mu.Unlock()
+			if active {
+				s.rolloutFinal(t, path)
+			}
+			it := map[string]any{"type": "subAgentActivity", "id": "subagent-completed-" + s.idLocked("turn"), "kind": "completed", "agentThreadId": child, "agentPath": path}
+			p := map[string]any{"item": it, "threadId": t.id, "turnId": tr.ID}
+			s.broadcast(t, "item/started", p)
+			s.broadcast(t, "item/completed", p)
+		})
+	}
+}
+
+func (s *fakeServer) idLocked(prefix string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.id(prefix)
+}
+
+func (s *fakeServer) rolloutFinal(t *fThread, path string) {
+	s.rollout(t, map[string]any{"type": "response_item", "payload": map[string]any{"type": "agent_message", "author": path, "recipient": "/root",
+		"content": []any{map[string]any{"type": "input_text", "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: " + path + "\nPayload:\ndone"}}}})
+}
+
 func (s *fakeServer) runTurn(t *fThread, tr *fTurn, text string) {
+	s.mu.Lock()
+	finals := t.finals
+	t.finals = nil
+	s.mu.Unlock()
+	for _, p := range finals {
+		s.rolloutFinal(t, p)
+	}
+	s.quickExecs(t, tr, text)
 	s.startBg(t, tr, text)
+	s.startAgents(t, tr, text)
+	s.startKeep(t, tr, text)
 	if m := fSleepRe.FindStringSubmatch(text); m != nil {
 		n, _ := strconv.Atoi(m[1])
 		s.addItem(t, tr, map[string]any{"type": "commandExecution", "id": "exec-1", "command": "sleep", "status": "inProgress"})
@@ -596,13 +876,28 @@ func (s *fakeServer) runTurn(t *fThread, tr *fTurn, text string) {
 		s.broadcast(child, "thread/started", map[string]any{"thread": s.threadJSON(child, false)})
 		s.addItem(t, tr, map[string]any{"type": "subAgentActivity", "id": "call-sa", "kind": "started", "agentThreadId": child.id, "agentPath": "worker"})
 		s.broadcast(child, "turn/completed", map[string]any{"threadId": child.id, "turn": map[string]any{"id": "turn-child", "status": "completed"}})
+		s.rolloutFinal(t, "worker") // its report reaches this turn
 		s.addItem(t, tr, map[string]any{"type": "subAgentActivity", "id": "sa-done", "kind": "completed", "agentThreadId": child.id, "agentPath": "worker"})
+	}
+	if strings.Contains(text, "FAKE_CAPACITY") {
+		// server, codex 0.166 (iss_…): a commentary
+		// message mid-work, then the turn fails at model capacity.
+		s.addItem(t, tr, map[string]any{"type": "agentMessage", "id": "msg-c-" + tr.ID, "phase": "commentary", "text": "I'm now testing the probe with a real MP4."})
+		s.finish(t, tr, "failed", map[string]any{"message": "Selected model is at capacity. Please try a different model.", "codexErrorInfo": "serverOverloaded"})
+		return
 	}
 	if strings.Contains(text, "FAKE_LIMIT") {
 		s.finish(t, tr, "failed", map[string]any{"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"})
 		return
 	}
-	s.addItem(t, tr, map[string]any{"type": "agentMessage", "id": "msg-" + tr.ID, "text": "ok"})
+	for _, m := range fPollRe.FindAllStringSubmatch(text, -1) {
+		s.rolloutTool(t, "call-poll-"+m[1], `{"session_id":`+fBgPid(m[1])+`,"chars":""}`, "Process exited with code 0\nOutput:\n")
+	}
+	reply := "ok"
+	if _, rest, ok := strings.Cut(text, "FAKE_ECHO\n"); ok { // FAKE_ECHO: the answer is the rest of the prompt
+		reply = rest
+	}
+	s.addItem(t, tr, map[string]any{"type": "agentMessage", "id": "msg-" + tr.ID, "text": reply})
 	s.finish(t, tr, "completed", nil)
 }
 
@@ -621,6 +916,9 @@ func fakeTUIMain(args []string) int {
 				sock = strings.TrimPrefix(args[i+1], "unix://")
 			}
 		}
+	}
+	if os.Getenv("PYRE_FAKE_HOOK_REVIEW") == "1" {
+		fakeHookReview()
 	}
 	sc := bufio.NewScanner(os.Stdin)
 	if os.Getenv("PYRE_FAKE_TRUST_PROMPT") == "1" {
@@ -650,4 +948,47 @@ func fakeTUIMain(args []string) int {
 	for sc.Scan() {
 	}
 	return 0
+}
+
+// fakeHookReview draws Codex 0.166's "Hooks need review" screen (layout of
+// testdata/codex-0.166-hooks-review.txt) in raw mode: Up/Down move the
+// selection, Enter answers it with the selected row.
+func fakeHookReview() {
+	tty := func(args ...string) {
+		c := exec.Command("stty", args...)
+		c.Stdin = os.Stdin
+		_ = c.Run()
+	}
+	tty("raw", "-echo")
+	defer tty("sane")
+	rows := []string{"Review hooks", "Trust all and continue", "Continue without trusting (hooks won't run)"}
+	sel := 0
+	draw := func() {
+		fmt.Print("\033[2J\033[H  Hooks need review\r\n  1 hook is new or changed.\r\n  Hooks can run outside the sandbox after you trust them.\r\n\r\n")
+		for i, r := range rows {
+			m := "  "
+			if i == sel {
+				m = "› "
+			}
+			fmt.Printf("%s%d. %s\r\n", m, i+1, r)
+		}
+		fmt.Print("\r\n  enter confirm · esc skip\r\n")
+	}
+	draw()
+	buf := make([]byte, 16)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return
+		}
+		in := strings.NewReplacer("\x1bOA", "\x1b[A", "\x1bOB", "\x1b[B").Replace(string(buf[:n]))
+		sel = max(0, sel-strings.Count(in, "\x1b[A"))
+		sel = min(len(rows)-1, sel+strings.Count(in, "\x1b[B"))
+		if strings.ContainsAny(in, "\r\n") {
+			fmt.Print("\033[2J\033[H")
+			fmt.Printf("FAKE HOOKS ANSWERED: %s\r\n", rows[sel])
+			return
+		}
+		draw()
+	}
 }

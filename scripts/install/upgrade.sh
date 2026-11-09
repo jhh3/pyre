@@ -189,10 +189,18 @@ node_cred_file() {
 }
 
 # hub_hello BIN: `pyre hello --json` through the client config, else through
-# the node credential (token passed in the child's environment only).
+# the node credential (token passed in the child's environment only). An
+# answer from a local pyred whose hub is down (hub_version pyred-local/...,
+# through PYRE_SOCKET or this machine's pyred socket) says nothing about the
+# hub and is not taken.
 hub_hello() {
   local pyre=$1/pyre out cred
-  if out=$("$pyre" hello --json 2>/dev/null); then echo "$out"; return 0; fi
+  if out=$("$pyre" hello --json 2>/dev/null); then
+    case $(printf '%s' "$out" | json_str hub_version) in
+      pyred-local/*) ;;
+      *) echo "$out"; return 0 ;;
+    esac
+  fi
   cred=$(node_cred_file)
   [ -n "$cred" ] || return 1
   PYRE_HUB=$(json_str hub_url <"$cred") PYRE_HUB_PIN=$(json_str hub_cert_sha256 <"$cred") \

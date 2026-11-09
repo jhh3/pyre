@@ -83,16 +83,20 @@ func (h *Hub) routeStored(ctx context.Context, tx *sql.Tx, v contracts.MessageVi
 func (h *Hub) routeToRunTx(ctx context.Context, tx *sql.Tx, v contracts.MessageView, run *contracts.Run) error {
 	id := v.Envelope.MessageID
 	if v.Envelope.Mode == contracts.ModeSteer {
-		switch {
-		case run == nil || run.State.Terminal():
+		// A steer that cannot be immediate is rejected, never queued: no
+		// live run, or its node is disconnected. Clients send a steer to a
+		// live run without input.steer as queued mail instead (pyre send,
+		// MCP send_message); an older client's steer is rejected here.
+		if run == nil || run.State.Terminal() {
 			_, err := h.msgs.SetRuntimeTx(ctx, tx, id, contracts.DeliveryRejected, "rejected: recipient has no live run to steer")
-			return err
-		case !contracts.HasCap(run.Capabilities, contracts.CapInputSteer):
-			_, err := h.msgs.SetRuntimeTx(ctx, tx, id, contracts.DeliveryRejected, "unsupported: adapter does not advertise input.steer")
 			return err
 		}
 		if connected, _ := h.nodeConnected(ctx, tx, run.NodeID); !connected {
 			_, err := h.msgs.SetRuntimeTx(ctx, tx, id, contracts.DeliveryRejected, "rejected: recipient node is disconnected; steering is immediate-only")
+			return err
+		}
+		if !contracts.HasCap(run.Capabilities, contracts.CapInputSteer) {
+			_, err := h.msgs.SetRuntimeTx(ctx, tx, id, contracts.DeliveryRejected, "unsupported: adapter does not advertise input.steer")
 			return err
 		}
 	} else {

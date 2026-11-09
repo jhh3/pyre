@@ -4,11 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/memguard"
 	"github.com/jhh3/pyre/internal/messaging/delivery"
+	"github.com/jhh3/pyre/internal/supervisor"
+	"github.com/jhh3/pyre/internal/sysstats"
 )
 
 // Reporter is the node's hub link: durable reports enqueued inside the
@@ -34,6 +38,30 @@ type AccountResolver interface {
 // fallback when a run reports a usage limit or unusable login.
 type LimitHandler interface {
 	OnLimit(ctx context.Context, run contracts.Run, ev contracts.LimitEvent) (*contracts.FallbackPlan, error)
+}
+
+// LimitResumer is optionally implemented by an AccountResolver to continue
+// sessions that stopped on an account limit once an account has room
+// (session.limit_resume, decision I70). A node whose resolver implements
+// it advertises contracts.NodeCapLimitResume.
+type LimitResumer interface {
+	// ResumeAfterLimit starts a continuation of the ended run runID, whose
+	// limit left no account free, on the best eligible account now.
+	ResumeAfterLimit(ctx context.Context, sessionID, runID string) (contracts.LimitResumeResult, error)
+	// LimitRoom says whether the live run runID, whose limit paused
+	// automatic switching, may be told to continue on its own account now.
+	LimitRoom(ctx context.Context, runID string) (LimitRoom, error)
+}
+
+// LimitRoom answers LimitResumer.LimitRoom: OK (Prompt is the continue
+// prompt to send), not yet (ResetAt when known), or Refused (never; Why).
+type LimitRoom struct {
+	OK        bool
+	Refused   bool
+	AccountID string
+	ResetAt   *time.Time
+	Why       string
+	Prompt    string
 }
 
 // AmbientAccounts is the default resolver: runs use the node's existing
@@ -185,10 +213,18 @@ type Config struct {
 	OwnLogin func(contracts.Harness) *contracts.HarnessLogin
 	// OwnUsage is the own login's usage as the harness reports it, for a
 	// harness Pyre does not manage logins of (agy; HarnessInfo.Usage).
-	OwnUsage     func(contracts.Harness) *contracts.HarnessUsage
+	OwnUsage func(contracts.Harness) *contracts.HarnessUsage
+	// OwnLimit is the limit that harness's own login is at until its reset
+	// (HarnessInfo.Limit, decision I72); nil = not reported.
+	OwnLimit     func(context.Context, contracts.Harness) *contracts.LimitEvent
 	Environments EnvResolver // nil: env profiles unsupported
-	AgentGuide   GuideFunc
-	LaunchPrep   LaunchPrepFunc // optional integration launch hook
+	// HarnessPin returns the executable and version new runs of a harness
+	// launch when they differ from the adapter's own probe (a Pyre-managed
+	// version, `pyre update activate`), so the inventory reports what runs
+	// actually use. nil or ok=false: the probe stands.
+	HarnessPin func(ctx context.Context, h contracts.Harness) (exe, version string, ok bool)
+	AgentGuide GuideFunc
+	LaunchPrep LaunchPrepFunc // optional integration launch hook
 	// OnRunEnded, when set, is called once a run reaches a terminal state,
 	// after its end is recorded and BEFORE its account assignment is
 	// released, so an integration can hold the profile (e.g. hand the
@@ -198,7 +234,11 @@ type Config struct {
 	// Integrations reports personal-tool status (hive/outfit/rota) for
 	// the inventory action; it overrides the built-in PATH probe.
 	Integrations func(ctx context.Context) map[string]contracts.IntegrationStatus
-	Periodic     []PeriodicReport
+	// MemoryAvailable reports whether this node's memory.search is served
+	// (Hive's CLI or index); true advertises contracts.NodeCapMemoryHive
+	// at hello. nil = not advertised.
+	MemoryAvailable func(ctx context.Context) bool
+	Periodic        []PeriodicReport
 	// RepoIndex configures repo discovery and session worktree tracking
 	// (repos.go).
 	RepoIndex RepoIndexConfig
@@ -207,11 +247,15 @@ type Config struct {
 	// session folders idle for three days (default StateDir/tmp/claude,
 	// Claude's CLAUDE_CODE_TMPDIR; lifecycle.go).
 	SweepTmpDirs []string
-	// RunTmpRoot holds each run's TMPDIR, <root>/<run_id> (0700; removed
-	// after the run is done; runtmp.go). Default StateDir/tmp/runs; "none"
+	// RunTmpRoot holds each run's TMPDIR, <root>/<10-char id> (0700; a .run
+	// file names the run; removed after the run is done; runtmp.go).
+	// Default UserHome/.ptmp, or StateDir/rt for an unknown or long HOME; "none"
 	// leaves runs the TMPDIR they inherit. A TMPDIR the run's environment
 	// sets (profile, env file) always wins.
 	RunTmpRoot string
+	// UserHome is the user's home directory, for the default RunTmpRoot
+	// (pyred sets it; tests leave it empty so runs stay under StateDir).
+	UserHome string
 
 	// PyreBinDir is prepended to PATH in runs (pyre CLI for agent tools).
 	// Default: the directory of the running executable.
@@ -245,6 +289,10 @@ type Config struct {
 
 	Clock  contracts.Clock
 	Logger *slog.Logger
+	// BootTime reports when this machine booted (default
+	// sysstats.BootTime). A run found gone at start that began before it
+	// was interrupted by a machine restart (crashresume.go).
+	BootTime func() (time.Time, error)
 
 	Poll              PollConfig
 	HeartbeatInterval time.Duration // default 30s (hub marks stale after ~90s)
@@ -253,6 +301,7 @@ type Config struct {
 	// <root>/<repo>/<branch>, instead of <repo>-worktrees/<branch> next to
 	// the source repo (e.g. a larger/faster disk). A worktree already at the
 	// old place keeps being used there. Runs see it as PYRE_WORKTREE_ROOT.
+	// Fresh repo launches (worktree.create) use it too, ~/worktrees when empty.
 	WorktreeRoot string
 	// Permissions is the node's default run permission mode: "ask"
 	// (default) or "bypass" (no approval prompts, no sandbox). A launch may
@@ -278,6 +327,19 @@ type Config struct {
 	// BackgroundQueues, when set, reports integration queue depths and
 	// limits (Hive capture, bridge) in Diagnostics.
 	BackgroundQueues func() (queues, limits map[string]int)
+	// MemoryGuard turns on the low-memory watchdog (memguard, decision
+	// I66): when the node is nearly out of memory and swap it stops the
+	// largest non-harness process of a Pyre run, audits it and notes it to
+	// the session. nil: off (pyred turns it on unless --memory-guard off).
+	MemoryGuard *memguard.Config
+	// GuardSockets are tmux sockets whose server is a guard root even
+	// without a live run on it (the node's Pyre server: Codex threads kept
+	// loaded after a stop still run commands, I62).
+	GuardSockets []string
+	// RunScopes are the per-run scope limits pyred configured for its tmux
+	// panes (runtime/tmux SetRunScopeLimits), described in status; nil:
+	// per-run scopes off.
+	RunScopes *supervisor.RunScopeLimits
 }
 
 func (c *Config) defaults() {
@@ -286,6 +348,16 @@ func (c *Config) defaults() {
 	}
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.DiscardHandler)
+	}
+	if c.BootTime == nil {
+		c.BootTime = sysstats.BootTime
+		if _, real := c.Clock.(contracts.SystemClock); !real {
+			// The boot time is wall-clock: against another clock (tests)
+			// it would misclassify every run.
+			c.BootTime = func() (time.Time, error) {
+				return time.Time{}, errors.New("boot time is not comparable with this clock")
+			}
+		}
 	}
 	if c.Accounts == nil {
 		c.Accounts = AmbientAccounts{}

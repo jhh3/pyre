@@ -261,6 +261,12 @@ func Summarize(e contracts.AuditEntry) string {
 			return "moved " + title + " " + e.Reason + By(e.Actor)
 		}
 		return fmt.Sprintf("moved %s from %s to %s", title, orDash(e.From), orDash(e.To)) + By(e.Actor)
+	case contracts.AuditSessionLimitResumed: // decision I70; To: `on account "X" (native resume)`
+		s := "resumed " + title + " automatically after an account limit"
+		if e.To != "" {
+			s += " " + e.To
+		}
+		return s + because(e.Reason)
 	case contracts.AuditSessionReportedToParent:
 		s := title + " reported to its parent"
 		if e.To != "" {
@@ -303,6 +309,32 @@ func Summarize(e contracts.AuditEntry) string {
 		return "woke " + title + " when its background command finished" + because(e.Reason)
 	case contracts.AuditNodeOnboardingAnswered:
 		return "answered Claude's first-run screen for " + title + because(e.Reason)
+	case contracts.AuditNodeStopDeferred:
+		return "kept " + title + "'s Codex thread loaded after an automatic stop: its background processes still run" + because(e.Reason)
+	case contracts.AuditNodeStopResumed:
+		return "unloaded " + title + "'s Codex thread after a deferred stop" + because(e.Reason)
+	case contracts.AuditNodeMoveHeld:
+		return "kept " + title + " on its account: it has live background tasks that an account switch would stop (proactive move held until they finish)" + because(e.Reason)
+	case contracts.AuditSessionSecretEgress:
+		return "flagged a tool call in " + title + " that may send a credential out (" + orDash(e.To) + " severity; the command ran)" + because(e.Reason)
+	case contracts.AuditNodeMemoryGuardKill:
+		of := title
+		if e.SessionID == "" {
+			of = "a Pyre run"
+		}
+		return "memory guard stopped a process of " + of + " (machine nearly out of memory)" + because(e.Reason)
+	case contracts.AuditNodeAvoided:
+		s := "new placements avoid this machine (" + orDash(e.To) + ") until " + orDash(e.ToNote)
+		if e.FromNote != "" {
+			s += " for project " + e.FromNote
+		}
+		return s + By(e.Actor) + because(e.Reason)
+	case contracts.AuditNodeAvoidCleared:
+		s := "avoid flag cleared"
+		if e.FromNote != "" {
+			s += " for project " + e.FromNote
+		}
+		return s + By(e.Actor)
 	}
 	s := e.Action
 	if e.SessionTitle != "" {

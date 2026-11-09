@@ -50,6 +50,16 @@ func TestNewStartsInMainCheckoutByDefault(t *testing.T) {
 	if !strings.Contains(r.stdout, "in web on synth-linux (shell)") || !strings.Contains(r.stdout, "main checkout /home/demo/src/web") || !strings.Contains(r.stdout, "--fresh") {
 		t.Fatalf("human output: %s", r)
 	}
+	// The words after "shell" are the shell's command (typed and run).
+	r = run(t, e, nil, "--json", "new", "web", "shell", "git", "status")
+	expectCode(t, r, 0)
+	sh := mustJSON[QuickLaunchResult](t, r).Session.Session
+	if sh.Harness != c.HarnessShell {
+		t.Fatalf("shell with words: %+v", sh)
+	}
+	if r = run(t, e, nil, "read", sh.SessionID); !strings.Contains(r.stdout, "git status") {
+		t.Fatalf("shell prompt not sent: %s", r)
+	}
 	// A second session in the same main checkout gets the shared-checkout warning.
 	r = run(t, e, nil, "new", "web", "shell")
 	expectCode(t, r, 0)
@@ -68,8 +78,12 @@ func TestNewMachineChoice(t *testing.T) {
 	if res.Session.NodeName != "synth-linux" || res.Session.Run.Cwd != "/home/demo/src/atlas" {
 		t.Fatalf("@machine: %s %s", res.Session.NodeName, res.Session.Run.Cwd)
 	}
-	// Without @machine, the least loaded machine holding it wins; the run
-	// still starting on synth-linux counts as load there (placement.go).
+	// Without @machine, the least loaded machine holding it wins; runs
+	// still starting on synth-linux count as load there (placement.go).
+	// Its 32 cores and 72 GB free make one starting run cheap, so start a
+	// second one there first.
+	r = run(t, e, nil, "--json", "new", "atlas", "@synth-linux", "shell")
+	expectCode(t, r, 0)
 	r = run(t, e, nil, "--json", "new", "atlas", "shell")
 	expectCode(t, r, 0)
 	if res = mustJSON[QuickLaunchResult](t, r); res.Session.NodeName != "demo-laptop" || res.Placement == nil || !strings.Contains(res.Placement.Reason, "synth-linux: ") || !strings.Contains(res.Placement.Reason, "starting") {
@@ -161,7 +175,7 @@ func TestNewFreshAndMultiRepo(t *testing.T) {
 	r := run(t, e, nil, "--json", "new", "notes", "--fresh", "shell", "Fix the share link redirect")
 	expectCode(t, r, 0)
 	res := mustJSON[QuickLaunchResult](t, r)
-	if res.Worktrees == nil || res.Worktrees.Branch != "pyre/fix-share-link-redirect" || res.Session.Run.Cwd != "/Users/demo/code/notes-app/.worktrees/fix-share-link-redirect" {
+	if res.Worktrees == nil || res.Worktrees.Branch != "pyre/fix-share-link-redirect" || res.Session.Run.Cwd != "/Users/demo/worktrees/notes-app/fix-share-link-redirect" {
 		t.Fatalf("fresh: wt=%+v cwd=%s", res.Worktrees, res.Session.Run.Cwd)
 	}
 	// --branch implies --fresh.
@@ -210,10 +224,18 @@ func TestReposListAndMCPStart(t *testing.T) {
 	ops := &Ops{API: h.b}
 	ctx := c.WithPrincipal(context.Background(), testOwner)
 	resp, err := ops.StartSession(ctx, StartParams{Repo: "notes", Harness: "shell", Fresh: true, Prompt: "tidy imports"})
-	if err != nil || resp.Session.Run == nil || resp.Session.Run.Cwd != "/Users/demo/code/notes-app/.worktrees/tidy-imports" {
+	if err != nil || resp.Session.Run == nil || resp.Session.Run.Cwd != "/Users/demo/worktrees/notes-app/tidy-imports" {
 		t.Fatalf("mcp start: %+v %v", resp.Session.Run, err)
 	}
-	if _, err := ops.StartSession(ctx, StartParams{Repo: "tu", Harness: "shell"}); err == nil || !strings.Contains(err.Error(), "matches several") {
+	if resp.Cwd != "/Users/demo/worktrees/notes-app/tidy-imports" || resp.Branch != "pyre/tidy-imports" {
+		t.Fatalf("mcp start reports cwd=%q branch=%q", resp.Cwd, resp.Branch)
+	}
+	// A named branch wins over the title for the folder, and is reported.
+	resp, err = ops.StartSession(ctx, StartParams{Repo: "notes", Harness: "shell", Fresh: true, Branch: "upstream-ui-survey", Title: "Bounded upstream UI commit triage"})
+	if err != nil || resp.Cwd != "/Users/demo/worktrees/notes-app/upstream-ui-survey" || resp.Branch != "upstream-ui-survey" || resp.Session.Run.Cwd != resp.Cwd {
+		t.Fatalf("mcp start with branch: cwd=%q branch=%q %v", resp.Cwd, resp.Branch, err)
+	}
+	if _, err := ops.StartSession(ctx, StartParams{Repo: "st", Harness: "shell"}); err == nil || !strings.Contains(err.Error(), "matches several") {
 		t.Fatalf("mcp ambiguity: %v", err)
 	}
 }
@@ -230,7 +252,7 @@ func TestArchiveOffersWorktreeCleanup(t *testing.T) {
 	// sessions show lists the session's worktrees.
 	r := run(t, e, nil, "sessions", "show", sid)
 	expectCode(t, r, 0)
-	if !strings.Contains(r.stdout, "worktrees of notes-app") || !strings.Contains(r.stdout, "pyre  /Users/demo/code/notes-app/.worktrees/share-link") {
+	if !strings.Contains(r.stdout, "worktrees of notes-app") || !strings.Contains(r.stdout, "pyre  /Users/demo/worktrees/notes-app/share-link") {
 		t.Fatalf("show: %s", r)
 	}
 	// Not a terminal, no flag: kept, and says how to remove.

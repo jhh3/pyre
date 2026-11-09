@@ -77,8 +77,7 @@ func (s *server) serveUpload(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, contracts.Errorf(contracts.ErrInvalid, "upload chunk interrupted: the request body ended early"))
 			return
 		}
-		noteInternal(r, err)
-		WriteError(w, err)
+		writeOpError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, up)
@@ -109,8 +108,7 @@ func (s *server) serveContent(w http.ResponseWriter, r *http.Request) {
 	}
 	rc, ver, err := s.api.OpenContent(r.Context(), versionID)
 	if err != nil {
-		noteInternal(r, err)
-		WriteError(w, err)
+		writeOpError(w, r, err)
 		return
 	}
 	defer rc.Close()
@@ -145,8 +143,7 @@ func setContentHeaders(h http.Header, ver contracts.ArtifactVersion) {
 func (s *server) serveForwardedRange(w http.ResponseWriter, r *http.Request, cr ContentRanger, versionID string) bool {
 	ver, err := s.api.GetVersion(r.Context(), contracts.GetRequest{ID: versionID})
 	if err != nil {
-		noteInternal(r, err)
-		WriteError(w, err)
+		writeOpError(w, r, err)
 		return true
 	}
 	if ir := r.Header.Get("If-Range"); ir != "" && ir != contentETag(ver) {
@@ -161,8 +158,7 @@ func (s *server) serveForwardedRange(w http.ResponseWriter, r *http.Request, cr 
 		return false
 	}
 	if err != nil {
-		noteInternal(r, err)
-		WriteError(w, err)
+		writeOpError(w, r, err)
 		return true
 	}
 	defer rc.Close()

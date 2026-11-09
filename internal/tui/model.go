@@ -61,6 +61,9 @@ type loadState struct {
 	stale    bool      // invalidated by an event; reload when next needed
 	seq      int       // load generation (matches loadedMsg.seq)
 	rev      int       // bumped whenever val changes (a load landing or an in-place patch)
+	// loadedWall is the wall time of the last successful load (ReloadGap,
+	// throttle.go).
+	loadedWall time.Time
 }
 
 type loadedMsg struct {
@@ -129,6 +132,8 @@ type Model struct {
 	// event handling
 	ev        evState
 	sessPatch sessPatchState // per-session refresh (sessions_patch.go)
+	// throttlePending: a throttleMsg is scheduled (throttle.go).
+	throttlePending bool
 
 	// navigation context
 	curProject  string
@@ -497,6 +502,7 @@ func (m *Model) onLoaded(msg loadedMsg) tea.Cmd {
 			}
 		}
 		st.val, st.have, st.err, st.at, st.stale = val, true, nil, m.now(), false
+		st.loadedWall = time.Now()
 		st.rev++
 	}
 	var cmds []tea.Cmd
@@ -701,6 +707,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.refreshVisible(false), m.scheduleRefresh())
 	case debounceMsg:
 		return m, m.flushEvents()
+	case throttleMsg:
+		return m, m.onThrottle()
 	case sessPatchMsg:
 		return m, m.onSessPatch(msg)
 	case eventsMsg:
@@ -773,6 +781,13 @@ func (m *Model) refreshVisible(force bool) tea.Cmd {
 			// The periodic tick: events keep the list current (per-session
 			// patches), so the full re-list is only a safety net.
 			cmds = append(cmds, m.ensure(k, m.sessionsSafetyNet(), m.baseLoader(k)))
+			continue
+		}
+		if !force && (k == "accounts" || k == "nodes") && m.ev.connected {
+			// Events invalidate these too (spaced by ReloadGap); the tick
+			// re-lists them only when an invalidation is pending or as a
+			// safety net.
+			cmds = append(cmds, m.ensure(k, m.listSafetyNet(), m.baseLoader(k)))
 			continue
 		}
 		cmds = append(cmds, m.reload(k, m.baseLoader(k)))

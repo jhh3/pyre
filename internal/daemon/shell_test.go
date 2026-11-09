@@ -40,7 +40,7 @@ func TestPlainShellSession(t *testing.T) {
 	tm.SendKeys(context.Background(), "pyre", false, "Enter")
 	waitFor(t, "env echo", func() bool {
 		out, _ := tm.Capture(context.Background(), "pyre", 0)
-		return strings.Contains(out, "sid=ses_sh run=run_sh tok=37 tmp="+filepath.Join(dir, "tmp", "runs", "run_sh"))
+		return strings.Contains(out, "sid=ses_sh run=run_sh tok=37 tmp="+filepath.Join(dir, "rt", runTmpName("run_sh", 0)))
 	})
 
 	res := n.do(command(contracts.CmdAttach, contracts.AttachCommand{SessionID: "ses_sh"}))

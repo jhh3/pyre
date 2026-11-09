@@ -129,3 +129,18 @@ func stdoutKind() int {
 	}
 	return outFile
 }
+
+// signalStalled asks a stalled child to end (SIGTERM), or with kill makes
+// it (SIGKILL): its whole process group when it leads one, so codex's
+// native binary goes with its Node launcher.
+func signalStalled(p *os.Process, group, kill bool) {
+	sig := syscall.SIGTERM
+	if kill {
+		sig = syscall.SIGKILL
+	}
+	if group && p.Signal(syscall.Signal(0)) == nil {
+		_ = syscall.Kill(-p.Pid, sig)
+		return
+	}
+	_ = p.Signal(sig)
+}

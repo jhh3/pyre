@@ -337,7 +337,7 @@ func (a *App) addNodeActionCommands(root *cobra.Command) {
 	root.AddCommand(env)
 
 	// ---- update ----
-	update := &cobra.Command{Use: "update", Short: "Tool versions: stage, activate, rollback, list (per node)", Args: cobra.NoArgs}
+	update := &cobra.Command{Use: "update", Short: "Tool versions: stage, activate, rollback, list (per node); codex updates automatically (pyre update auto)", Args: cobra.NoArgs}
 	var upNode string
 	var up c.UpdateParams
 	var upDigest string
@@ -390,9 +390,17 @@ func (a *App) addNodeActionCommands(root *cobra.Command) {
 			if tools == nil {
 				tools = []c.ToolVersion{}
 			}
-			return a.emit(tools, func(w io.Writer) { printTools(w, tools) })
+			// The automatic updater's latest-release check (absent on
+			// nodes that predate it).
+			var auto []c.AutoUpdateStatus
+			_, _ = ops.NodeAction(cmd.Context(), upNode, c.ActionUpdateAutoStatus, c.AutoUpdateParams{Tool: up.Tool}, &auto, "")
+			return a.emit(tools, func(w io.Writer) {
+				printTools(w, tools)
+				printAutoLine(w, auto)
+			})
 		}),
 	})
+	update.AddCommand(a.updateAutoCommand(&upNode, &up.Tool))
 	root.AddCommand(update)
 
 	// ---- migrate ----

@@ -59,6 +59,77 @@ func TestDetectLimitRealClaudeTexts(t *testing.T) {
 	}
 }
 
+// The StopFailure payloads real Claude Code 2.1.304 wrote on office-box2 on
+// 2026-10-24 when Team seats hit their spend limits (message verbatim, ids
+// and paths synthetic). Pyre read them only as "rate_limited" through the
+// error code (iss_…).
+const (
+	realStopFailureIndividualSpend = `{"cwd":"/home/synth/work","error":"rate_limit","hook_event_name":"StopFailure",` +
+		`"last_assistant_message":"You've hit your individual spend limit · ask your admin to raise it at https://claude.ai/admin-settings/usage · your session limit resets 1am (UTC)",` +
+		`"prompt_id":"00000000-0000-4000-8000-000000000003","session_id":"00000000-0000-4000-8000-000000000004"}`
+	realStopFailureOrgSpend = `{"cwd":"/home/synth/work","error":"rate_limit","hook_event_name":"StopFailure",` +
+		`"last_assistant_message":"You've hit your org's monthly spend limit · ask your admin to raise it at https://claude.ai/admin-settings/usage · your session limit resets 2:20am (UTC)",` +
+		`"prompt_id":"00000000-0000-4000-8000-000000000005","session_id":"00000000-0000-4000-8000-000000000006"}`
+)
+
+func TestDetectLimitSpendLimits(t *testing.T) {
+	at := time.Date(2026, 10, 24, 23, 31, 26, 0, time.UTC)
+	for _, c := range []struct {
+		text  string
+		reset time.Time
+	}{
+		{realStopFailureIndividualSpend, time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)},
+		{realStopFailureOrgSpend, time.Date(2026, 10, 25, 2, 20, 0, 0, time.UTC)},
+	} {
+		le := detectLimit(c.text, at)
+		if le == nil || le.Kind != "usage_limit" {
+			t.Fatalf("%q -> %+v, want usage_limit", c.text, le)
+		}
+		if le.ResetAt == nil || !le.ResetAt.Equal(c.reset) {
+			t.Fatalf("reset %v, want %v", le.ResetAt, c.reset)
+		}
+		if !strings.Contains(le.Detail, "spend limit") {
+			t.Fatalf("detail %q", le.Detail)
+		}
+	}
+	// Claude's other limit-message shapes (2.1.304 bundle strings).
+	for _, text := range []string{
+		"You've hit your channel's monthly spend limit · your session limit resets 9pm (UTC)",
+		"You’ve hit your individual usage limit · resets 4am (UTC)",
+		"You've hit your monthly spend limit · your session limit resets 1am (UTC)",
+		"You've hit your team's shared budget. /model to switch models.",
+		"You've reached your Fable limit.",
+		"You're out of usage credits. /model to switch models.",
+		"Your org is out of usage · add funds to continue",
+		"Your group's usage limit is set to $0",
+		"Your usage allocation has been disabled by your admin",
+		"Your credit balance is too low to access the Anthropic API.",
+	} {
+		if le := detectLimit(text, at); le == nil || le.Kind != "usage_limit" {
+			t.Fatalf("%q -> %+v, want usage_limit", text, le)
+		}
+	}
+	// Not limits.
+	for _, text := range []string{
+		"Updating spend limit…",
+		"The spend limit request goes to the gateway",
+		"You set a spend limit of $50 earlier; nothing else changed.",
+	} {
+		if le := detectLimit(text, at); le != nil {
+			t.Fatalf("%q -> %+v, want none", text, le)
+		}
+	}
+}
+
+func TestStopFailureHookReportsSpendLimit(t *testing.T) {
+	rs := newRunState()
+	at := time.Date(2026, 10, 24, 23, 31, 26, 0, time.UTC)
+	rs.applyHook(hookRecord{Event: "StopFailure", At: at, Payload: []byte(realStopFailureIndividualSpend)})
+	if rs.limit == nil || rs.limit.Kind != "usage_limit" || rs.limit.ResetAt == nil || !rs.limit.ResetAt.Equal(time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)) {
+		t.Fatalf("%+v", rs.limit)
+	}
+}
+
 func TestStopFailureHookReportsSessionLimit(t *testing.T) {
 	rs := newRunState()
 	rs.applyHook(hookRecord{Event: "StopFailure", At: time.Now(), Payload: []byte(realStopFailureLimit)})
@@ -104,7 +175,7 @@ func TestFakeCrossAccountResumeSharedStore(t *testing.T) {
 		t.Fatalf("resume spec %v %v", kind, err)
 	}
 	prompt := "[pyre] Continue where you left off (account switched from synth-a to synth-b because of the usage limit)."
-	h2 := f.launchIn("run_xb", profB, nil, ref, prompt)
+	h2 := f.launchIn("run_xb", profB, pluginEnv(), ref, prompt)
 	obs = f.waitObs(f.a, h2, 15*time.Second, func(o contracts.Observation) bool {
 		// The continue prompt runs as the first turn and ends (Stop).
 		return o.State == contracts.RunWaitingInput && o.NativeRef != nil && strings.Contains(o.StateReason, "Stop")

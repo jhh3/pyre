@@ -56,7 +56,16 @@ type BridgeConfig struct {
 	BatchSize    int           // notes written per SyncOnce (default 20)
 	PageSize     int           // ListNotes page size (default 100)
 	MaxScanPages int           // pages scanned per SyncOnce (default 10)
-	Interval     time.Duration // Run loop period (default 30s)
+	Interval     time.Duration // Run loop period while there is work (default 30s)
+	// MaxIdleInterval caps the Run period while passes find nothing to do:
+	// it doubles from Interval after each idle pass (default 10m). A
+	// note.created event (Notify) still starts a pass at once.
+	MaxIdleInterval time.Duration
+	// FullScanEvery is how often a scan cycle lists every hub note instead
+	// of only those not yet indexed (default 6h; the first cycle is full).
+	// The full cycle is a safety net for notes the filter cannot see (an
+	// "indexed" record without a Hive ref).
+	FullScanEvery time.Duration
 	// MinPassGap is the minimum time between the starts of two Run passes
 	// (default 2s): a burst of Notify calls (one per note.created event)
 	// coalesces into one pass instead of back-to-back hub scans. Negative
@@ -97,6 +106,12 @@ type Bridge struct {
 	// reports them. Not persisted: rebuilt by the next scan.
 	unsynced map[string]bool
 	passes   int
+	// Incremental scan (scan): the hub filters by sync_state, so a
+	// steady-state pass reads only notes that still need work.
+	noFilter bool            // the hub refused sync_states (predates it): unfiltered scans only
+	lastFull time.Time       // last completed unfiltered scan cycle (zero: none yet)
+	inFull   bool            // the current scan cycle (cursor) is unfiltered
+	cycle    map[string]bool // notes seen in the current cycle (nil: no cycle under way)
 }
 
 type ledgerEntry struct {
@@ -134,6 +149,15 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 	def(&cfg.MaxLedger, 2000)
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
+	}
+	if cfg.MaxIdleInterval <= 0 {
+		cfg.MaxIdleInterval = 10 * time.Minute
+	}
+	if cfg.MaxIdleInterval < cfg.Interval {
+		cfg.MaxIdleInterval = cfg.Interval
+	}
+	if cfg.FullScanEvery <= 0 {
+		cfg.FullScanEvery = 6 * time.Hour
 	}
 	switch {
 	case cfg.MinPassGap == 0:
@@ -227,43 +251,111 @@ func (b *Bridge) observe(n contracts.Note) {
 	}
 }
 
-// countPending pages hub notes from the start (bounded, without moving the
-// scan cursor) to refresh the pending set while Hive cannot be written.
+// countPending pages the hub's not-yet-indexed notes from the start
+// (bounded, without moving the scan cursor) to refresh the pending set while
+// Hive cannot be written.
 func (b *Bridge) countPending(ctx context.Context) {
 	cursor := ""
+	filtered := b.filtered()
+	seen := map[string]bool{}
 	for page := 0; page < b.cfg.MaxScanPages; page++ {
-		pg, err := b.cfg.Store.ListNotes(ctx, contracts.ListNotesRequest{PageRequest: contracts.PageRequest{Cursor: cursor, Limit: b.cfg.PageSize}})
+		pg, usedFilter, err := b.listNotes(ctx, cursor, filtered)
 		if err != nil {
 			return
 		}
+		filtered = usedFilter
 		for _, n := range pg.Items {
 			b.observe(n)
+			seen[n.NoteID] = true
 		}
 		if cursor = pg.NextCursor; cursor == "" {
+			if filtered {
+				b.forgetUnseen(seen)
+			}
 			return
 		}
 	}
 }
 
-// Run loops until ctx is cancelled: a pass every Interval or on Notify,
-// never two passes closer than MinPassGap.
+// unsyncedStates are the sync states a filtered scan asks for: everything
+// but indexed (the hub counts a note with no state as pending).
+var unsyncedStates = []string{SyncPending, SyncFailed}
+
+func (b *Bridge) filtered() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.noFilter
+}
+
+// listNotes reads one page, filtered to unsynced notes when filtered. A hub
+// that predates the sync_states filter refuses the field (strict request
+// decoding: invalid_argument); the bridge then scans unfiltered for good.
+// usedFilter reports which kind of page came back.
+func (b *Bridge) listNotes(ctx context.Context, cursor string, filtered bool) (pg contracts.Page[contracts.Note], usedFilter bool, err error) {
+	req := contracts.ListNotesRequest{PageRequest: contracts.PageRequest{Cursor: cursor, Limit: b.cfg.PageSize}}
+	if filtered {
+		req.SyncStates = unsyncedStates
+	}
+	pg, err = b.cfg.Store.ListNotes(ctx, req)
+	if err != nil && filtered && cursor == "" && contracts.IsCode(err, contracts.ErrInvalid) {
+		b.mu.Lock()
+		b.noFilter = true
+		b.mu.Unlock()
+		b.cfg.Logf("hub refused the notes sync_states filter (%v); scanning every note", err)
+		req.SyncStates = nil
+		pg, err = b.cfg.Store.ListNotes(ctx, req)
+		return pg, false, err
+	}
+	return pg, filtered, err
+}
+
+// forgetUnseen drops pending marks for notes a complete filtered cycle did
+// not return: they were indexed since (perhaps by another node's bridge).
+func (b *Bridge) forgetUnseen(seen map[string]bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id := range b.unsynced {
+		if !seen[id] {
+			delete(b.unsynced, id)
+		}
+	}
+}
+
+// Run loops until ctx is cancelled: a pass every Interval while there is
+// work, backing off towards MaxIdleInterval while passes find none, and at
+// once on Notify; never two passes closer than MinPassGap.
 func (b *Bridge) Run(ctx context.Context) error {
 	ctx = Background(ctx)
-	t := time.NewTicker(b.cfg.Interval)
+	t := time.NewTimer(b.cfg.Interval)
 	defer t.Stop()
+	idle := 0
 	for {
 		started := time.Now()
-		if _, err := b.SyncOnce(ctx); err != nil && ctx.Err() == nil {
+		rep, err := b.SyncOnce(ctx)
+		if err != nil && ctx.Err() == nil {
 			b.cfg.Logf("hive bridge: %v", err)
 		}
 		b.mu.Lock()
 		b.passes++
 		b.mu.Unlock()
+		if err == nil && rep.Skipped == "" && rep.Candidates == 0 {
+			idle++
+		} else {
+			idle = 0
+		}
+		if !t.Stop() {
+			select {
+			case <-t.C:
+			default:
+			}
+		}
+		t.Reset(b.idleInterval(idle))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
 		case <-b.wake:
+			idle = 0
 		}
 		if wait := b.cfg.MinPassGap - time.Since(started); wait > 0 {
 			gap := time.NewTimer(wait)
@@ -275,6 +367,16 @@ func (b *Bridge) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// idleInterval is the wait after the idle-th consecutive pass with nothing
+// to do: Interval doubled per idle pass, at most MaxIdleInterval.
+func (b *Bridge) idleInterval(idle int) time.Duration {
+	d := b.cfg.Interval
+	for i := 0; i < idle && d < b.cfg.MaxIdleInterval; i++ {
+		d *= 2
+	}
+	return min(d, b.cfg.MaxIdleInterval)
 }
 
 // Passes is the number of Run passes so far (status and tests).
@@ -361,19 +463,52 @@ func (b *Bridge) backoff(now time.Time) time.Time {
 
 // scan pages through hub notes from the persisted cursor and returns notes
 // that still need Hive indexing (plus ledgered notes whose hub record is
-// unconfirmed). ListNotes has no sync-state filter in v1, so the scan is
-// bounded by MaxScanPages per pass and resumes where it stopped.
+// unconfirmed), bounded by MaxScanPages per pass and resuming where it
+// stopped. The hub filters by sync_state, so a steady-state pass reads one
+// short page of the notes not yet indexed instead of every note; the first
+// cycle and one every FullScanEvery read them all.
+//
+// The cursor is the hub's keyset position (a note ID), valid under either
+// filter and across hub restarts. One the hub refuses (a replaced hub
+// database, say) is dropped and the cycle starts over from the newest note.
 func (b *Bridge) scan(ctx context.Context, now time.Time, rep *BridgeReport) ([]contracts.Note, error) {
 	b.mu.Lock()
 	cursor := b.led.Cursor
+	switch {
+	case cursor == "":
+		b.startCycleLocked(now)
+	case b.cycle == nil:
+		// Resuming a cursor persisted by an earlier process: finish that
+		// cycle filtered; the next one from the top is the full one.
+		b.inFull, b.cycle = b.noFilter, map[string]bool{}
+	}
+	filtered := !b.inFull
 	b.mu.Unlock()
 	var out []contracts.Note
 	seen := map[string]bool{}
 	for page := 0; page < b.cfg.MaxScanPages; page++ {
-		pg, err := b.cfg.Store.ListNotes(ctx, contracts.ListNotesRequest{PageRequest: contracts.PageRequest{Cursor: cursor, Limit: b.cfg.PageSize}})
+		pg, usedFilter, err := b.listNotes(ctx, cursor, filtered)
+		if err != nil && cursor != "" && contracts.IsCode(err, contracts.ErrInvalid) {
+			b.cfg.Logf("hub refused the notes scan cursor (%v); starting over", err)
+			b.mu.Lock()
+			b.startCycleLocked(now)
+			filtered = !b.inFull
+			b.mu.Unlock()
+			cursor = ""
+			pg, usedFilter, err = b.listNotes(ctx, cursor, filtered)
+		}
 		if err != nil {
 			return out, fmt.Errorf("list notes: %w", err)
 		}
+		b.mu.Lock()
+		if filtered && !usedFilter {
+			b.inFull = true // the hub refused the filter: this cycle is a full one
+		}
+		for _, n := range pg.Items {
+			b.cycle[n.NoteID] = true
+		}
+		b.mu.Unlock()
+		filtered = usedFilter
 		for _, n := range pg.Items {
 			rep.Scanned++
 			if seen[n.NoteID] {
@@ -386,7 +521,11 @@ func (b *Bridge) scan(ctx context.Context, now time.Time, rep *BridgeReport) ([]
 			}
 		}
 		cursor = pg.NextCursor
-		if cursor == "" || len(out) >= b.cfg.BatchSize {
+		if cursor == "" {
+			b.endCycle(now, filtered)
+			break
+		}
+		if len(out) >= b.cfg.BatchSize {
 			break
 		}
 	}
@@ -394,6 +533,27 @@ func (b *Bridge) scan(ctx context.Context, now time.Time, rep *BridgeReport) ([]
 	b.led.Cursor = cursor
 	b.mu.Unlock()
 	return out, nil
+}
+
+// startCycleLocked begins a scan cycle from the newest note: unfiltered
+// when the full scan is due (or the hub has no filter).
+func (b *Bridge) startCycleLocked(now time.Time) {
+	b.inFull = b.noFilter || b.lastFull.IsZero() || now.Sub(b.lastFull) >= b.cfg.FullScanEvery
+	b.cycle = map[string]bool{}
+}
+
+// endCycle records a completed scan cycle.
+func (b *Bridge) endCycle(now time.Time, filtered bool) {
+	b.mu.Lock()
+	cycle := b.cycle
+	b.cycle = nil
+	if !filtered {
+		b.lastFull = now
+	}
+	b.mu.Unlock()
+	if filtered {
+		b.forgetUnseen(cycle)
+	}
 }
 
 func (b *Bridge) needsWork(n contracts.Note, now time.Time) bool {

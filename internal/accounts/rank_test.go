@@ -81,9 +81,18 @@ func TestSelectPrefersMostHeadroomAndExplains(t *testing.T) {
 	if sel.Reason != "most headroom (5h 12% used, weekly 40%)" {
 		t.Fatalf("reason %q", sel.Reason)
 	}
-	// C with room in both windows wins (extra usage is not a limit).
+	// C with room in both windows but its extra usage spent ranks after B:
+	// a seat out of extra usage stops at its spend limit as soon as its plan
+	// windows fill (iss_…).
 	e.clock.Advance(time.Second)
 	obs("acct_synth-c", win("five_hour", 3), win("seven_day", 30), win("extra_usage", 100))
+	if sel, err := e.svc.Select(ctx, contracts.AccountSelectParams{Provider: contracts.ProviderAnthropic, Policy: eligible}); err != nil || sel.AccountID != "acct_synth-b" {
+		t.Fatalf("want B, got %+v %v", sel, err)
+	}
+	// Its extra usage not spent: C wins on headroom (extra usage is not a
+	// plan limit).
+	e.clock.Advance(time.Second)
+	obs("acct_synth-c", win("five_hour", 3), win("seven_day", 30), win("extra_usage", 40))
 	_, _, asg, err := e.svc.Resolve(ctx, contracts.HarnessClaude, eligible, "run_1")
 	if err != nil || asg.AccountID != "acct_synth-c" {
 		t.Fatalf("want C, got %+v %v", asg, err)

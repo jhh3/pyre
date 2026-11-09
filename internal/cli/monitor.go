@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,9 @@ const (
 	monitorWakeBudget = 6
 	// monitorDefaultFor is the lifetime when --for is not given.
 	monitorDefaultFor = 7 * 24 * time.Hour
+	// monitorMaxBetween is how many intermediate outputs a held change
+	// keeps for its report (the first, then the latest).
+	monitorMaxBetween = 8
 )
 
 func monitorToTag(id string) string { return monitorToPrefix + id }
@@ -236,33 +240,105 @@ type monitorLoop struct {
 	Send           func(ctx context.Context, text string) error
 	Target         func(ctx context.Context) monitorTargetState
 	Self           string // the monitor's own session, for the stop hint
+	// Load and Save (optional) keep the loop's state across a relaunch
+	// (monitorState): a monitor that a reboot or crash killed resumes with
+	// its deadline, its last output and its wake budget.
+	Load func() (monitorState, bool)
+	Save func(monitorState)
+}
+
+// monitorState is what a relaunched monitor needs to continue rather than
+// start over: when it started (the --for deadline), the baseline, the
+// output the target last saw (so the first check after a relaunch is not a
+// spurious "changed"), whether it changed since the baseline, the recent
+// wakes (the hourly budget), and Done once it ended deliberately
+// (--until-change fired, --for ran out, the wake budget, the target gone),
+// so a manual resume of an ended monitor ends again at once.
+type monitorState struct {
+	Start        time.Time   `json:"start"`
+	Baseline     string      `json:"baseline,omitempty"`
+	HaveBaseline bool        `json:"have_baseline,omitempty"`
+	Seen         string      `json:"seen,omitempty"`
+	HaveSeen     bool        `json:"have_seen,omitempty"`
+	Changed      bool        `json:"changed,omitempty"`
+	Wakes        []time.Time `json:"wakes,omitempty"`
+	Done         string      `json:"done,omitempty"`
 }
 
 func (m *monitorLoop) run(ctx context.Context) error {
 	start := m.Now()
-	var last, heldPrev string
-	haveLast, held, heldHave := false, false, false
+	var last, baseline string
+	// changed: some check differed from the baseline, so a delivered report
+	// is a real change (an --initial report of the baseline is not).
+	haveLast, haveBase, held, changed := false, false, false, false
+	var h monitorHeld
 	var wakes []time.Time
 	logf := func(format string, a ...any) {
 		fmt.Fprintf(m.Out, m.Now().Format("15:04:05")+" "+format+"\n", a...)
 	}
+	save := func(done string) {
+		if m.Save == nil {
+			return
+		}
+		st := monitorState{Start: start, Done: done}
+		if done == "" {
+			st.Baseline, st.HaveBaseline, st.Changed, st.Wakes = baseline, haveBase, changed, wakes
+			st.Seen, st.HaveSeen = last, haveLast
+			if held { // the target has not seen the latest output yet
+				st.Seen, st.HaveSeen = h.Prev, h.HavePrev
+			}
+		}
+		m.Save(st)
+	}
+	finish := func(format string, a ...any) error {
+		why := fmt.Sprintf(format, a...)
+		logf("done: %s", why)
+		save(why)
+		return nil
+	}
+	if m.Load != nil {
+		if st, ok := m.Load(); ok {
+			if st.Done != "" {
+				logf("done: this monitor already ended (%s); not restarted", st.Done)
+				return nil
+			}
+			start, baseline, haveBase, changed, wakes = st.Start, st.Baseline, st.HaveBaseline, st.Changed, st.Wakes
+			last, haveLast = st.Seen, st.HaveSeen
+			logf("relaunched: watching since %s; last output %s", start.Local().Format("Jan 2 15:04"), outHash(last))
+			if m.For > 0 && m.Now().Sub(start) >= m.For {
+				return finish("ran for %s", m.For)
+			}
+		}
+	}
+	save("")
 	for {
 		tgt := m.Target(ctx)
 		if tgt.Gone {
-			logf("done: %s is %s", m.To, tgt.Why)
-			return nil
+			return finish("%s is %s", m.To, tgt.Why)
 		}
 		out := m.Check(ctx, m.Cmd)
+		if !haveBase {
+			baseline, haveBase = out, true
+		} else if out != baseline {
+			changed = true
+		}
 		switch {
 		case !haveLast && !m.Initial:
 			logf("baseline (%s): %s", outHash(out), oneLineClip(out, 120))
 		case haveLast && out == last && !held:
 			logf("unchanged")
+		case held && h.HavePrev && out == h.Prev && out == last && len(h.Between) == 0:
+			// Defensive: nothing seen since the last report differs from it.
+			logf("unchanged since the last report; nothing to send")
+			held = false
 		default:
-			if !held {
-				heldPrev, heldHave = last, haveLast
+			switch {
+			case !held:
+				h = monitorHeld{Prev: last, HavePrev: haveLast}
+			case out != last:
+				h.add(last) // an output the target has not seen yet
 			}
-			held = true // coalesced: only the latest output is sent
+			held = true // coalesced: the latest output is quoted, the ones before it listed
 			now := m.Now()
 			recent := wakes[:0]
 			for _, t := range wakes {
@@ -275,21 +351,24 @@ func (m *monitorLoop) run(ctx context.Context) error {
 			case tgt.Busy:
 				logf("changed; %s is busy (%s), held until it is idle", m.To, tgt.Why)
 			case len(wakes) >= monitorWakeBudget:
-				text := m.message(out, heldPrev, heldHave) + fmt.Sprintf("\nThis monitor has stopped: its output changed more than %d times in an hour, too often to be worth a wake each. Use a check whose output changes only when something you act on happens.", monitorWakeBudget)
+				text := m.message(out, h, false) + fmt.Sprintf("\nThis monitor has stopped: its output changed more than %d times in an hour, too often to be worth a wake each. Use a check whose output changes only when something you act on happens.", monitorWakeBudget)
 				if err := m.Send(ctx, text); err != nil {
 					logf("changed; wake budget spent; final notice failed: %v", err)
 				} else {
 					logf("changed; wake budget spent (%d in an hour); stopped with a final notice", monitorWakeBudget)
 				}
+				save(fmt.Sprintf("wake budget spent (%d in an hour)", monitorWakeBudget))
 				return nil
 			default:
-				if err := m.Send(ctx, m.message(out, heldPrev, heldHave)); err != nil {
+				stop := m.UntilChange && changed
+				if err := m.Send(ctx, m.message(out, h, stop)); err != nil {
 					logf("changed; wake failed (retrying next check): %v", err)
 				} else {
 					held = false
 					wakes = append(wakes, now)
 					logf("changed; woke %s: %s", m.To, oneLineClip(out, 120))
-					if m.UntilChange {
+					if stop {
+						save("until-change: reported the change")
 						return nil
 					}
 				}
@@ -297,29 +376,85 @@ func (m *monitorLoop) run(ctx context.Context) error {
 		}
 		last, haveLast = out, true
 		if m.For > 0 && m.Now().Sub(start) >= m.For {
-			logf("done: ran for %s", m.For)
-			return nil
+			return finish("ran for %s", m.For)
 		}
+		save("")
 		if err := m.Sleep(ctx, m.Every); err != nil {
 			return err
 		}
 	}
 }
 
-func (m *monitorLoop) message(out, prev string, havePrev bool) string {
+// monitorHeld is a change not yet reported: the output last reported
+// (Prev) and the distinct outputs seen after it but before the latest
+// (Between), so a report names a value that came and went while the target
+// was busy instead of only the latest one.
+type monitorHeld struct {
+	Prev     string
+	HavePrev bool
+	Between  []string // one-line clipped, oldest first
+	Dropped  int      // intermediates left out of Between
+}
+
+// add records an intermediate output, keeping the first (what triggered
+// the change) and the latest ones.
+func (h *monitorHeld) add(out string) {
+	h.Between = append(h.Between, oneLineClip(out, 120))
+	if len(h.Between) > monitorMaxBetween {
+		h.Between = slices.Delete(h.Between, 1, 2)
+		h.Dropped++
+	}
+}
+
+// between lists the intermediates, marking where some were left out.
+func (h monitorHeld) between() []string {
+	var parts []string
+	for i, v := range h.Between {
+		if i == 1 && h.Dropped > 0 {
+			parts = append(parts, fmt.Sprintf("… (%d more)", h.Dropped))
+		}
+		parts = append(parts, v)
+	}
+	return parts
+}
+
+// sequence renders prev → intermediates → out on one line.
+func (h monitorHeld) sequence(out string) string {
+	var parts []string
+	if h.HavePrev {
+		parts = append(parts, oneLineClip(h.Prev, 120))
+	}
+	parts = append(append(parts, h.between()...), oneLineClip(out, 120))
+	return strings.Join(parts, " → ")
+}
+
+// message renders a report; stopping says this is --until-change's last one.
+func (m *monitorLoop) message(out string, h monitorHeld, stopping bool) string {
 	var b strings.Builder
+	back := h.HavePrev && out == h.Prev // it changed, then changed back
 	what := "output changed"
-	if !havePrev {
+	switch {
+	case !h.HavePrev:
 		what = "first result"
+	case back:
+		what = "output changed and changed back"
 	}
 	fmt.Fprintf(&b, "[monitor %q] %s (every %s: `%s`):\n", m.Label, what, m.Every, oneLineClip(m.Cmd, 200))
+	if back {
+		b.WriteString("changed to " + strings.Join(h.between(), " → ") + " and back to " + oneLineClip(out, 120) + " before this report.\n")
+	}
 	b.WriteString("```\n" + clipBytes(out, monitorMaxOutput) + "\n```\n")
-	if havePrev {
-		b.WriteString("previous: " + oneLineClip(prev, 200) + "\n")
+	if h.HavePrev && !back {
+		b.WriteString("previous: " + oneLineClip(h.Prev, 200) + "\n")
+	}
+	if len(h.Between) > 0 {
+		b.WriteString("sequence: " + h.sequence(out) + "\n")
 	}
 	switch {
-	case m.UntilChange:
+	case stopping:
 		b.WriteString("This monitor has stopped (until-change).")
+	case m.UntilChange:
+		b.WriteString("This monitor keeps watching and stops after the first change from this.")
 	case m.Self != "":
 		b.WriteString("Stop it with `pyre monitor rm " + m.Self + "`.")
 	}

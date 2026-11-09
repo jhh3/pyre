@@ -307,7 +307,7 @@
   {
     "name": "start_session",
     "title": "Start session",
-    "description": "Start a peer session on a machine (no project needed). Waits up to 20 s; a failed launch is an error. It messages you automatically when it finishes a turn (with its last message), needs input, or exits; no need to ask it to.",
+    "description": "Start a peer session on a machine. Usually seconds; cloning or fetching a repo can take minutes (5 at most, then retry with the same operation_id). A failed launch is an error. It reports back when it finishes a turn, needs input or exits.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -320,7 +320,7 @@
           "type": "boolean"
         },
         "branch": {
-          "description": "branch for the fresh worktree (default pyre/\u003cslug of the prompt or title\u003e)",
+          "description": "branch for the fresh worktree (implies fresh), created with exactly this name from origin's freshly fetched default branch; one that already exists (locally, in a worktree or on origin) fails the launch. Default pyre/\u003cslug of the title or prompt\u003e, deduplicated. With project too: fresh or branch always win over the project's shared checkout; without either the session runs in that shared checkout",
           "type": "string"
         },
         "cwd": {
@@ -336,11 +336,15 @@
           "type": "string"
         },
         "fallback_harness": {
-          "description": "claude: when no Codex (OpenAI) account is free, run on Claude instead; use for reviews and second opinions. Default: a Codex launch with no free account fails at once with the reason",
+          "description": "claude: when no Codex (OpenAI) account has room (its own login at its limit counts), run on Claude instead (on the named node when node is given; the result's placement says so), and if the Codex run later stops on a usage limit with no other account, Pyre restarts the task on Claude in a new session; use for reviews and second opinions. Default: a Codex launch with no free account fails at once with the reason",
           "type": "string"
         },
+        "force": {
+          "description": "start on a node where every account for the harness (its own login included) is at its 5-hour or weekly limit anyway (its turns fail until a reset). Default: placement skips such nodes and a named node is refused, naming the resets and the nodes with room",
+          "type": "boolean"
+        },
         "fresh": {
-          "description": "start in a new worktree and branch of repo instead of its main checkout",
+          "description": "start in a new worktree and branch of repo instead of its main checkout (with project: instead of the project's recorded checkout, even a shared one), at \u003cnode's worktree root\u003e/\u003crepo\u003e/\u003cbranch, or the title's slug without branch\u003e (root: pyred --worktree-root, default ~/worktrees). Account checks run before any clone or worktree; a launch that fails after creating the worktree names it (path, branch, commit) in the error, and a retry with the same operation_id reuses it",
           "type": "boolean"
         },
         "harness": {
@@ -354,6 +358,10 @@
           },
           "type": "array"
         },
+        "ignore_avoid": {
+          "description": "start on a node with a hard avoid flag anyway (list_nodes shows flags; a flag the owner set yields only to the owner). Default: placement skips avoided nodes and a hard flag refuses",
+          "type": "boolean"
+        },
         "include_context": {
           "description": "include the bounded project brief",
           "type": "boolean"
@@ -365,6 +373,17 @@
         "native_resume": {
           "description": "claude: continue this existing conversation (session id) started outside Pyre; stop its process first",
           "type": "string"
+        },
+        "needs": {
+          "description": "what the task cannot run without: command-line tools (doppler, gcloud, docker, psql, ...) or paths on the machine (absolute or ~/...). Placement uses only machines that have every one (list_nodes shows each machine's tools); a named node without one is refused, naming the machines that qualify; when none qualifies the start fails",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "no_lead": {
+          "description": "a bounded worker (e.g. an hourly check started in a project from outside it): it never leads the project, so it is never asked to keep the project page and may not write it",
+          "type": "boolean"
         },
         "node": {
           "description": "node ID (node_...) or name; default: the least loaded connected node with the harness (with project+repo: among nodes holding that checkout; with cwd: this session's node); the result's placement says which and why",
@@ -383,11 +402,11 @@
           "type": "string"
         },
         "prompt": {
-          "description": "initial prompt",
+          "description": "initial prompt; for harness shell, a command typed into the shell once its rc files have run, then Enter (not together with harness_args)",
           "type": "string"
         },
         "repo": {
-          "description": "with project: project repo ID (its recorded checkout, or the worktree source); without project: a repository name from the repo index, fuzzy-matched (the machine defaults to where it exists, the harness to claude, the directory to its main checkout)",
+          "description": "with project: project repo ID (its recorded checkout, shared by default; with fresh, branch or worktree only the source of a new worktree); without project: a repository name from the repo index, fuzzy-matched (the machine defaults to where it exists, the harness to claude, the directory to its main checkout)",
           "type": "string"
         },
         "report_to_parent": {
@@ -623,6 +642,9 @@
               "type": "string"
             },
             "reason": {
+              "type": "string"
+            },
+            "warning": {
               "type": "string"
             }
           },
@@ -928,6 +950,13 @@
             "archived": {
               "type": "boolean"
             },
+            "archived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "created_at": {
               "format": "date-time",
               "type": "string"
@@ -974,6 +1003,13 @@
             },
             "title": {
               "type": "string"
+            },
+            "unarchived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -984,7 +1020,8 @@
             "created_by",
             "created_at",
             "lineage",
-            "archived"
+            "archived",
+            "archived_at"
           ],
           "type": "object"
         },
@@ -1027,6 +1064,15 @@
         },
         "SessionView": {
           "properties": {
+            "archive_canceled": {
+              "items": {
+                "$ref": "#/$defs/CascadeSession"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "archive_cascade": {
               "anyOf": [
                 {
@@ -1036,6 +1082,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "archive_pending": {
+              "type": "boolean"
+            },
+            "archive_pending_with": {
+              "type": "string"
             },
             "attention": {
               "type": "integer"
@@ -1126,7 +1178,13 @@
         }
       },
       "properties": {
+        "branch": {
+          "type": "string"
+        },
         "command_id": {
+          "type": "string"
+        },
+        "cwd": {
           "type": "string"
         },
         "placement": {
@@ -1168,7 +1226,7 @@
   {
     "name": "read_session",
     "title": "Read transcript",
-    "description": "Read a session's bounded, redacted transcript. Use next_cursor to continue.",
+    "description": "Read a session's bounded, redacted transcript. Use next_cursor to continue. Entries are cut at ~2000 bytes; full: true returns whole text, e.g. a final report (256 KB per entry, 1 MB per read; full_note names entries kept short).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1184,6 +1242,10 @@
           ],
           "type": "string"
         },
+        "full": {
+          "description": "whole entry text instead of the ~2000-byte cut",
+          "type": "boolean"
+        },
         "limit": {
           "description": "max entries",
           "type": "integer"
@@ -1191,6 +1253,10 @@
         "run": {
           "description": "run ID (default current)",
           "type": "string"
+        },
+        "seq": {
+          "description": "only the entry with this seq (from a read or a search hit); not with tail or cursor",
+          "type": "integer"
         },
         "session": {
           "description": "session ID (ses_...), exact title, or \"self\"",
@@ -1373,7 +1439,7 @@
           "type": "boolean"
         },
         "steer": {
-          "description": "explicit immediate steering, where supported",
+          "description": "immediate steering into the current turn; Codex only: to other harnesses it is sent as an ordinary queued message",
           "type": "boolean"
         },
         "text": {
@@ -3828,16 +3894,24 @@
   {
     "name": "archive_session",
     "title": "Archive session",
-    "description": "When your work is finished and reported, archive yourself with archive_session (no arguments); a live one archives when its turn ends; sessions under it go with it. Sessions outside your tree go to the owner for approval (approval_ask).",
+    "description": "When done and reported, archive yourself with archive_session (no arguments); a live one archives when its turn ends, with sessions under it (still-working ones only with include_children: true). cancel: true cancels a pending archive.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "cancel": {
+          "description": "cancel a pending archive of the session and of the sessions its archive cascaded to",
+          "type": "boolean"
+        },
+        "include_children": {
+          "description": "also archive sessions under it that are still working (each when its current turn ends)",
+          "type": "boolean"
+        },
         "operation_id": {
           "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
           "type": "string"
         },
         "session": {
-          "description": "session ID or exact title (default: yourself)",
+          "description": "session ID or exact title (default: yourself; one outside your tree is filed for the owner's approval: approval_ask)",
           "type": "string"
         }
       },
@@ -3889,6 +3963,15 @@
         },
         "archived": {
           "type": "boolean"
+        },
+        "canceled": {
+          "items": {
+            "$ref": "#/$defs/CascadeSession"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "cascade": {
           "anyOf": [
@@ -4545,6 +4628,13 @@
             "archived": {
               "type": "boolean"
             },
+            "archived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "created_at": {
               "format": "date-time",
               "type": "string"
@@ -4591,6 +4681,13 @@
             },
             "title": {
               "type": "string"
+            },
+            "unarchived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -4601,7 +4698,8 @@
             "created_by",
             "created_at",
             "lineage",
-            "archived"
+            "archived",
+            "archived_at"
           ],
           "type": "object"
         },
@@ -4679,6 +4777,15 @@
         }
       },
       "properties": {
+        "archive_canceled": {
+          "items": {
+            "$ref": "#/$defs/CascadeSession"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "archive_cascade": {
           "anyOf": [
             {
@@ -4688,6 +4795,12 @@
               "type": "null"
             }
           ]
+        },
+        "archive_pending": {
+          "type": "boolean"
+        },
+        "archive_pending_with": {
+          "type": "string"
         },
         "attention": {
           "type": "integer"
@@ -6215,6 +6328,142 @@
     }
   },
   {
+    "name": "get_note",
+    "title": "Show note",
+    "description": "Show a note, handoff or decision by ID (note_...): title, kind, project, author, time and full body.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "note_id": {
+          "description": "note ID (note_...)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "note_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Principal": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "on_behalf_of": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Principal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        },
+        "Provenance": {
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "source_path": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/Principal"
+        },
+        "body": {
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "hive_ref": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "note_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promoted_to": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "sync_state": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "note_id",
+        "kind",
+        "project_id",
+        "title",
+        "body",
+        "author",
+        "created_at",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Show note",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "get_context",
     "title": "Launch context",
     "description": "Get the bounded launch context: current project brief plus retrieval pointers.",
@@ -6271,6 +6520,45 @@
             "id"
           ],
           "type": "object"
+        },
+        "ProjectRole": {
+          "properties": {
+            "co_leads": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "lead": {
+              "type": "boolean"
+            },
+            "lead_session_id": {
+              "type": "string"
+            },
+            "page_owner": {
+              "type": "boolean"
+            },
+            "page_owner_session_id": {
+              "type": "string"
+            },
+            "page_updated_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "lead"
+          ],
+          "type": "object"
         }
       },
       "properties": {
@@ -6299,6 +6587,16 @@
             "null"
           ]
         },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "text": {
           "type": "string"
         },
@@ -6325,7 +6623,7 @@
   {
     "name": "memory_search",
     "title": "Search memory",
-    "description": "Search shared memory (transcripts, notes, decisions) with provenance and freshness.",
+    "description": "Search shared memory (transcripts, notes, decisions) with provenance and freshness. From a machine without Hive, the hub has a machine with Hive answer (served_by names it).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -6417,6 +6715,20 @@
             "authoritative"
           ],
           "type": "object"
+        },
+        "MemoryServedBy": {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "node_id"
+          ],
+          "type": "object"
         }
       },
       "properties": {
@@ -6430,6 +6742,16 @@
           "type": [
             "array",
             "null"
+          ]
+        },
+        "served_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryServedBy"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "truncated": {
@@ -6856,6 +7178,171 @@
     }
   },
   {
+    "name": "avoid_node",
+    "title": "Avoid a machine",
+    "description": "Keep new work off a machine for a while (presenting, a benchmark): placement skips it until the flag lifts (default 2h, max 7 days); hard refuses even a named node. Existing sessions keep running; a session can't weaken the owner's flag.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "clear": {
+          "description": "remove the flag instead (with project: only that project's)",
+          "type": "boolean"
+        },
+        "for": {
+          "description": "how long: 2h, 90m, 1d (default 2h)",
+          "type": "string"
+        },
+        "hard": {
+          "description": "refuse starts there, even with an explicit node, unless ignore_avoid",
+          "type": "boolean"
+        },
+        "node": {
+          "description": "node ID (node_...) or name",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "project": {
+          "description": "project ID (prj_...) or name: only placements for that project",
+          "type": "string"
+        },
+        "reason": {
+          "description": "why, shown to the owner and agents (e.g. presenting)",
+          "type": "string"
+        },
+        "until": {
+          "description": "until a local clock time on this machine (18:00, 6pm; earlier than now means tomorrow) or \"2026-10-24 09:00\" / RFC 3339; not with for",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "NodeAvoid": {
+          "properties": {
+            "expires_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "hard": {
+              "type": "boolean"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "owner_set": {
+              "type": "boolean"
+            },
+            "project_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "set_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "set_by": {
+              "$ref": "#/$defs/Principal"
+            },
+            "updated_by": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Principal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "node_id",
+            "hard",
+            "set_by",
+            "owner_set",
+            "set_at",
+            "expires_at"
+          ],
+          "type": "object"
+        },
+        "Principal": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "on_behalf_of": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Principal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "avoid": {
+          "items": {
+            "$ref": "#/$defs/NodeAvoid"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "cleared": {
+          "type": "integer"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "node_name": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "avoid"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Avoid a machine",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "ask_owner",
     "title": "Ask the owner",
     "description": "Ask the owner to decide (top-level sessions only). find_asks first. Plenty of context (the owner decides from it alone), 2–4 options each with a detail, a default you will take (none if irreversible); keep working. Same topic_key merges.",
@@ -7035,6 +7522,53 @@
     "annotations": {
       "title": "Find asks",
       "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "answer_ask",
+    "title": "Record the owner's answer",
+    "description": "The owner answered your open ask in chat (chat alone never decides it): record the option his words clearly pick, quoting them. If they pick none, leave it open, withdraw_ask, or ask_owner again.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "ask_id": {
+          "description": "your open ask (ask_...)",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "option": {
+          "description": "the option he chose: its id or label",
+          "type": "string"
+        },
+        "quote": {
+          "description": "the owner's words that answer it, verbatim",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ask_id",
+        "option",
+        "quote"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Record the owner's answer",
+      "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
@@ -8010,7 +8544,7 @@
   {
     "name": "waiting_on",
     "title": "Waiting on own job",
-    "description": "Before ending your turn while your own CI, review, workers or watcher are pending: your parent hears you wait (not idle), and again if not woken by expect_minutes. quiet: it hears nothing now; end your turn, don't poll inbox.",
+    "description": "Before ending your turn while your own CI, review, workers or watcher are pending: your parent hears you wait (not idle), and again if not woken by expect_minutes. quiet: it hears only a new last message; end your turn, don't poll inbox.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -8035,7 +8569,7 @@
           "type": "string"
         },
         "quiet": {
-          "description": "don't report this turn's end to your parent; a Monitor, a child's report or a message wakes you (it still hears if you are not woken by expect_minutes, and when your run exits)",
+          "description": "report this turn's end to your parent only if your last message is new (marked still waiting, no reply needed); a Monitor, a child's report or a message wakes you (if nothing wakes you by expect_minutes, Pyre wakes you to check on it and your parent hears; it also hears when your run exits)",
           "type": "boolean"
         },
         "what": {
@@ -8565,6 +9099,13 @@
             "archived": {
               "type": "boolean"
             },
+            "archived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "created_at": {
               "format": "date-time",
               "type": "string"
@@ -8611,6 +9152,13 @@
             },
             "title": {
               "type": "string"
+            },
+            "unarchived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -8621,7 +9169,8 @@
             "created_by",
             "created_at",
             "lineage",
-            "archived"
+            "archived",
+            "archived_at"
           ],
           "type": "object"
         },
@@ -8699,6 +9248,15 @@
         }
       },
       "properties": {
+        "archive_canceled": {
+          "items": {
+            "$ref": "#/$defs/CascadeSession"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "archive_cascade": {
           "anyOf": [
             {
@@ -8708,6 +9266,12 @@
               "type": "null"
             }
           ]
+        },
+        "archive_pending": {
+          "type": "boolean"
+        },
+        "archive_pending_with": {
+          "type": "string"
         },
         "attention": {
           "type": "integer"
@@ -9277,6 +9841,13 @@
             "archived": {
               "type": "boolean"
             },
+            "archived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "created_at": {
               "format": "date-time",
               "type": "string"
@@ -9323,6 +9894,13 @@
             },
             "title": {
               "type": "string"
+            },
+            "unarchived_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -9333,7 +9911,8 @@
             "created_by",
             "created_at",
             "lineage",
-            "archived"
+            "archived",
+            "archived_at"
           ],
           "type": "object"
         },
@@ -9411,6 +9990,15 @@
         }
       },
       "properties": {
+        "archive_canceled": {
+          "items": {
+            "$ref": "#/$defs/CascadeSession"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "archive_cascade": {
           "anyOf": [
             {
@@ -9420,6 +10008,12 @@
               "type": "null"
             }
           ]
+        },
+        "archive_pending": {
+          "type": "boolean"
+        },
+        "archive_pending_with": {
+          "type": "string"
         },
         "attention": {
           "type": "integer"
@@ -9561,6 +10155,106 @@
     },
     "annotations": {
       "title": "Reparent session",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "wait_github",
+    "title": "Wait on GitHub",
+    "description": "Wait on a PR or Actions run without polling: returns at once; you get ONE summarized message (state, failing checks with links, review excerpt) when met, on timeout or a lasting error. Survives restarts.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "description": "checks-done/checks-fail after a rerun: failures that finished before this are being rerun, so wait for their new results (\"now\", RFC 3339, \"15:04\", or \"10m\" ago). Reruns are detected anyway; this is a stricter barrier",
+          "type": "string"
+        },
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "kind": {
+          "description": "gh-pr or gh-run",
+          "type": "string"
+        },
+        "node": {
+          "description": "machine that polls (default: yours)",
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "session": {
+          "description": "session to message (default: you)",
+          "type": "string"
+        },
+        "target": {
+          "description": "PR: https://github.com/o/r/pull/N or o/r#N; run: https://github.com/o/r/actions/runs/ID or \"o/r ID\"",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "give up after this long, e.g. \"2h\" (default 2h)",
+          "type": "string"
+        },
+        "until": {
+          "description": "gh-pr: checks-done | checks-fail | merged | closed | review-from:\u003clogin\u003e | comment[:\u003clogin\u003e] | head-changed; gh-run: done | failed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "until"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Wait on GitHub",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "cancel_wait",
+    "title": "Cancel a GitHub wait",
+    "description": "Stop a wait_github wait and archive it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "description": "text (default): compact lines with the ids you need; json: the full structured result",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "operation_id": {
+          "description": "optional stable ID; repeating a call with the same ID returns the original result instead of acting twice",
+          "type": "string"
+        },
+        "wait_id": {
+          "description": "the wait ID wait_github returned",
+          "type": "string"
+        }
+      },
+      "required": [
+        "wait_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Cancel a GitHub wait",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,

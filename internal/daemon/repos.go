@@ -248,7 +248,7 @@ func (d *Daemon) actionWorktreeCreate(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
-	return repoindex.CreateWith(ctx, p, d.now(), repoindex.CreateOptions{GH: d.ghBinary()})
+	return repoindex.CreateWith(ctx, p, d.now(), repoindex.CreateOptions{GH: d.ghBinary(), Root: expandHome(d.cfg.WorktreeRoot)})
 }
 
 // sessionRun finds the session's latest run on this node.

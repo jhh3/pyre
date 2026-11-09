@@ -109,11 +109,11 @@ func TestStartModelNeedsANodeThatAppliesIt(t *testing.T) {
 		Resources: c.NodeResources{MemTotalMB: 32000, MemAvailMB: 1000, ActiveRuns: 9}}
 	pick := &startCapture{nodes: []c.Node{oldN, newN}}
 	o = &Ops{API: pick}
-	pl, err := o.placeAmong(ctx, pick.nodes, "claude", "", false, false, nil, true)
+	pl, err := o.placeAmong(ctx, pick.nodes, "claude", "", false, false, nil, true, "", false, false, false)
 	if err != nil || pl.NodeID != newN.NodeID {
 		t.Fatalf("placement with a model: %+v %v", pl, err)
 	}
-	if pl, _ := o.placeAmong(ctx, pick.nodes, "claude", "", false, false, nil, false); pl.NodeID != oldN.NodeID {
+	if pl, _ := o.placeAmong(ctx, pick.nodes, "claude", "", false, false, nil, false, "", false, false, false); pl.NodeID != oldN.NodeID {
 		t.Fatalf("placement without a model should prefer the idle node: %+v", pl)
 	}
 }

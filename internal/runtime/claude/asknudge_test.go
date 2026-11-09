@@ -172,3 +172,14 @@ func TestAskNudgeTranscriptFallback(t *testing.T) {
 	hookJSON(t, dir, "UserPromptSubmit", map[string]any{"prompt": "launch"})
 	wantNudge(t, hookJSON(t, dir, "Stop", map[string]any{"transcript_path": tp}))
 }
+
+// A status line naming an already-flagged blocker is not a question
+// (iss_…).
+func TestAskNudgeStatusWaitNoBlock(t *testing.T) {
+	dir := nudgeRun(t, false)
+	hookJSON(t, dir, "UserPromptSubmit", map[string]any{"prompt": "[pyre-msg:msg_s1] status?"})
+	if out := stopHook(t, dir, "Updated the project page (revision 81): Codex fix in flight, Stripe login still waiting on you.", false); out != nil {
+		t.Fatalf("status line blocked: %s", out)
+	}
+	wantNudge(t, stopHook(t, dir, "Both layouts render. Should I ship the dark one?", false))
+}

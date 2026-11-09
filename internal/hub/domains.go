@@ -3,8 +3,10 @@ package hub
 import (
 	"context"
 	"io"
+	"strings"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/ghguard"
 	"github.com/jhh3/pyre/internal/messaging/store"
 )
 
@@ -16,14 +18,24 @@ func (h *Hub) ListNodes(ctx context.Context, req contracts.ListNodesRequest) (co
 	if h.cfg.Fleet == nil {
 		return contracts.Page[contracts.Node]{}, notConfigured("fleet")
 	}
-	return h.cfg.Fleet.ListNodes(ctx, req)
+	page, err := h.cfg.Fleet.ListNodes(ctx, req)
+	if err == nil {
+		h.withAvoids(ctx, page.Items) // node_avoid.go
+	}
+	return page, err
 }
 
 func (h *Hub) GetNode(ctx context.Context, req contracts.GetRequest) (contracts.Node, error) {
 	if h.cfg.Fleet == nil {
 		return contracts.Node{}, notConfigured("fleet")
 	}
-	return h.cfg.Fleet.GetNode(ctx, req)
+	n, err := h.cfg.Fleet.GetNode(ctx, req)
+	if err == nil {
+		one := []contracts.Node{n}
+		h.withAvoids(ctx, one)
+		n = one[0]
+	}
+	return n, err
 }
 
 // CreateEnrollment and RevokeNode are owner-only; a session's request is
@@ -272,7 +284,43 @@ func (h *Hub) GetLaunchContext(ctx context.Context, req contracts.ContextRequest
 	if h.cfg.Notes == nil {
 		return contracts.LaunchContext{}, notConfigured("notes")
 	}
-	return h.cfg.Notes.GetLaunchContext(ctx, req)
+	lc, err := h.cfg.Notes.GetLaunchContext(ctx, req)
+	if err != nil {
+		return lc, err
+	}
+	// Machines to keep new work off (node_avoid.go): read when asked, so a
+	// running session's get_context sees flags set after its launch.
+	pid := req.ProjectID
+	if pid == nil && req.SessionID != "" {
+		if s, err := h.getSession(ctx, h.db, req.SessionID); err == nil {
+			pid = s.ProjectID
+		}
+	}
+	appendText := func(text string) {
+		lc.Text = strings.TrimRight(lc.Text, "\n")
+		if lc.Text != "" {
+			lc.Text += "\n\n"
+		}
+		lc.Text += text
+		lc.Bytes = len(lc.Text)
+	}
+	if text := h.avoidContext(ctx, pid); text != "" {
+		appendText(text)
+	}
+	if text := h.githubContext(ctx); text != "" {
+		appendText(text)
+	}
+	// The caller's live role (projectpage.go): who leads its project now,
+	// not when it launched.
+	if p, err := principal(ctx); err == nil && p.Kind == contracts.PrincipalSession {
+		if role, err := h.sessionRole(ctx, p.ID, req.ProjectID); err == nil {
+			lc.Role = &role
+			if text := roleContext(role); text != "" {
+				appendText(text)
+			}
+		}
+	}
+	return lc, nil
 }
 
 // ---- AttentionAPI (WP17) ----
@@ -401,4 +449,21 @@ func (h *Hub) PromoteNote(ctx context.Context, req contracts.PromoteNoteRequest)
 		return contracts.DocumentWithRevision{}, notConfigured("notes")
 	}
 	return h.cfg.Notes.PromoteNote(ctx, req)
+}
+
+// githubContext is the shared GitHub API budget as nodes last reported it
+// (ghguard.FleetLines), read when asked so it is current.
+func (h *Hub) githubContext(ctx context.Context) string {
+	if h.cfg.Fleet == nil {
+		return ""
+	}
+	page, err := h.cfg.Fleet.ListNodes(ctx, contracts.ListNodesRequest{})
+	if err != nil {
+		return ""
+	}
+	lines := ghguard.FleetLines(page.Items, 3)
+	if len(lines) == 0 {
+		return ""
+	}
+	return "## GitHub API budget\n\n- " + strings.Join(lines, "\n- ")
 }

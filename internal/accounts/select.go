@@ -100,7 +100,14 @@ type candidate struct {
 	headroom float64
 	// room is the ranking key of a fresh candidate (5h used, then weekly
 	// used); zero (unknown, ranks last) for every other class.
-	room   usage.Headroom
+	room usage.Headroom
+	// spent: a window the ranking key leaves out (the extra-usage budget)
+	// is at the exhausted percent. Such an account still serves its plan
+	// windows, but a Team/Enterprise seat whose extra usage is spent stops
+	// at its spend limit ("You've hit your individual spend limit") as soon
+	// as its plan windows fill, so it ranks after every account without a
+	// spent window (iss_…).
+	spent  string
 	reset  *time.Time
 	fresh  contracts.Freshness
 	why    string
@@ -226,6 +233,7 @@ func (s *Service) gather(ctx context.Context, req ResolveRequest) ([]*candidate,
 	for _, id := range req.Exclude {
 		excluded[id] = true
 	}
+	s.prefetchTokens(ctx, accts, req.Harness) // token.go: one bounded wait for all
 	var out []*candidate
 	var notes []string
 	for _, a := range accts {
@@ -344,7 +352,19 @@ func noneEligible(provider contracts.Provider, cands []*candidate, notes []strin
 	return e
 }
 
-// rank orders candidates: preference order, then the local spread level
+// spentWindow names a window outside the ranking key (the extra-usage
+// budget) that is at or above exhausted percent ("" when none is).
+func spentWindow(ws []contracts.UsageWindow, exhausted float64) string {
+	for _, w := range ws {
+		if !usage.IsLimit(w.Name) && w.UsedPercent >= exhausted {
+			return fmt.Sprintf("extra usage at %.0f%%", w.UsedPercent)
+		}
+	}
+	return ""
+}
+
+// rank orders candidates: an account without a spent window (spentWindow)
+// before one with, then preference order, then the local spread level
 // (spread.go: an account with room before one that already carries
 // SpreadRuns runs here, before one whose 5-hour window is at
 // SpreadFivePercent or weekly window at HomeWeeklyPercent; among busy ones
@@ -356,6 +376,9 @@ func noneEligible(provider contracts.Provider, cands []*candidate, notes []strin
 func rank(cs []*candidate) {
 	sort.SliceStable(cs, func(i, j int) bool {
 		a, b := cs[i], cs[j]
+		if (a.spent == "") != (b.spent == "") {
+			return a.spent == ""
+		}
 		if a.pref != b.pref {
 			return a.pref < b.pref
 		}
@@ -423,9 +446,10 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 			return nil, err
 		}
 		c.class, c.headroom, c.reset, c.fresh, c.why = s.classify(obs, cd, now)
-		c.room = usage.Headroom{}
+		c.room, c.spent = usage.Headroom{}, ""
 		if c.class == classFresh {
 			c.room = usage.HeadroomOf(obs.Windows)
+			c.spent = spentWindow(obs.Windows, s.cfg.ExhaustedPercent)
 		}
 		if c.class == classUnknown {
 			if c.verifiable {
@@ -446,6 +470,7 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 				c.why = "last known usage at its limit; " + c.why
 			} else {
 				c.room = lk.Room
+				c.spent = spentWindow(obs.Windows, s.cfg.ExhaustedPercent)
 			}
 		}
 		act, err := s.activeAssignments(ctx, q, c.acct.AccountID)
@@ -547,6 +572,9 @@ func (s *Service) choose(ctx context.Context, q querier, req ResolveRequest, can
 		if n := reserveHomeNote(c, fresh, cands); n != "" && !explicit && !strings.Contains(c.why, n) {
 			c.why = n + "; " + c.why
 		}
+		if c.spent != "" && !explicit {
+			c.why = c.spent + " (every eligible account has a spent window); " + c.why
+		}
 		c.why = reserveNote(c, provider, len(req.Policy.Prefer), explicit) + c.why
 		return c, nil
 	case len(verify) > 0:
@@ -634,7 +662,14 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 	// ambient binds the node's own login. acct is the account that login is
 	// (explicit own-login account); nil looks it up, so the assignment names
 	// the account usage and the audit log attribute the run to.
-	ambient := func(reason string, acct *contracts.Account) (Resolution, error) {
+	ambient := func(reason string, acct *contracts.Account, explicit bool) (Resolution, error) {
+		// Subscriptions only: the node's own login is never used when it
+		// bills an API key (the launch environment's key variables are
+		// removed already: unsetAmbient).
+		if why := s.ownLoginAPIKey(req.Harness); why != "" {
+			return res, contracts.Errorf(contracts.ErrCapacityExhausted, "this node's own %s login is an API-key login, never used (Pyre runs on subscriptions only): %s; %s",
+				req.Harness, why, noted(reason))
+		}
 		if acct == nil {
 			if oa, ok := s.ownLoginAccount(ctx, req.Harness); ok {
 				acct = &oa
@@ -654,11 +689,19 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 		if err := insertAssignment(ctx, s.db, a); err != nil {
 			return res, err
 		}
+		if explicit {
+			// The runtime fallback reads these: a strict pin stays, a
+			// non-strict named own login moves like any other account.
+			_ = markNamed(ctx, s.db, a.AssignmentID)
+			if req.Policy.Strict {
+				_ = markPinned(ctx, s.db, a.AssignmentID)
+			}
+		}
 		s.report(ctx, contracts.ReportAssignment, a.AccountAssignment)
 		return s.resolutionFor(ctx, req.Harness, a)
 	}
 	if req.Policy.Mode == contracts.AccountAmbient {
-		return ambient(ambientReason, nil)
+		return ambient(ambientReason, nil, false)
 	}
 	// fallThrough: an eligible launch whose accounts all turned out to need
 	// re-auth while selecting (a 401 at checkout verification) runs on the
@@ -671,14 +714,39 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 		if derr == nil && why == "" {
 			if oa, reason, ok := s.ownLoginFallback(ctx, req.Harness, req.Exclude); ok {
 				s.log.Info("accounts: no Pyre login eligible; using the node's own login", "run", req.RunID, "account", oa.AccountID)
-				return ambient(reason, &oa)
+				return ambient(reason, &oa, false)
 			}
 		}
 		if derr != nil || why == "" {
 			return res, err
 		}
+		if oa, ok := s.ownLoginAccount(ctx, req.Harness); ok && slices.Contains(req.Exclude, oa.AccountID) {
+			// The own login is the account that could not take the run
+			// (unpin): never fall back onto it.
+			if e := contracts.AsError(err); e != nil && pinNote != "" {
+				cp := *e
+				cp.Message = pinNote + "; " + e.Message
+				return res, &cp
+			}
+			return res, err
+		}
 		s.log.Info("accounts: no usable account; using the node's own login", "run", req.RunID, "why", why)
-		return ambient("credential_kind=ambient: "+why, nil)
+		return ambient("credential_kind=ambient: "+why, nil, false)
+	}
+	// An explicit account that cannot take the run (at its limit, needs
+	// re-auth, lease busy, refused checkout) falls back once to the best
+	// eligible same-provider account unless the policy is strict; the
+	// assignment reason starts with pinNote so the starter sees the swap.
+	// The node's own login is judged the same way (ownLoginBlockedErr).
+	unpin := func(err error) bool {
+		if req.Policy.Mode != contracts.AccountExplicit || req.Policy.Strict || pinNote != "" {
+			return false
+		}
+		pinNote = s.pinFallbackNote(ctx, provider, req.Policy.AccountID, err)
+		req.Exclude = append(req.Exclude, req.Policy.AccountID)
+		req.Policy = contracts.AccountPolicy{Mode: contracts.AccountEligible}
+		s.log.Info("accounts: explicit account unavailable; falling back", "run", req.RunID, "note", pinNote)
+		return true
 	}
 	if req.Policy.Mode == contracts.AccountExplicit {
 		a, err := s.Account(ctx, req.Policy.AccountID)
@@ -697,9 +765,18 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 		if local == nil || !contracts.ManagedLogins(req.Harness) || !s.hasGrant(ctx, a.AccountID, req.Harness) && MatchesOwnLogin(a, s.OwnLogin(req.Harness)) {
 			oa, oerr := s.explicitOwnLogin(ctx, req.Harness, req.Policy.AccountID, local)
 			if oerr != nil {
-				return res, oerr
+				// No login of it here (no Pyre login, and this node's own
+				// login is absent or another identity): a non-strict pin
+				// falls back to the best eligible account like any other
+				// unusable pin; strict (or cross-provider) fails.
+				if !pinFallsBack(oerr) || !unpin(oerr) {
+					return res, oerr
+				}
+			} else if berr := s.ownLoginBlockedErr(ctx, req.Harness, oa); berr == nil {
+				return ambient(fmt.Sprintf("explicit account; credential_kind=ambient: %s is this node's own %s login", accountName(oa), req.Harness), &oa, true)
+			} else if !unpin(berr) {
+				return res, berr // strict: never launch on a login that cannot run it
 			}
-			return ambient(fmt.Sprintf("explicit account; credential_kind=ambient: %s is this node's own %s login", accountName(oa), req.Harness), &oa)
 		}
 	} else if req.Policy.Mode != contracts.AccountEligible {
 		return res, contracts.Errorf(contracts.ErrInvalid, "unknown account policy mode %q", req.Policy.Mode)
@@ -707,21 +784,6 @@ func (s *Service) ResolveFor(ctx context.Context, req ResolveRequest) (Resolutio
 	holder := req.LeaseHolder
 	if holder == "" {
 		holder = s.cfg.CodexLeaseHolder
-	}
-
-	// An explicit account that cannot take the run (at its limit, needs
-	// re-auth, lease busy, refused checkout) falls back once to the best
-	// eligible same-provider account unless the policy is strict; the
-	// assignment reason starts with pinNote so the starter sees the swap.
-	unpin := func(err error) bool {
-		if req.Policy.Mode != contracts.AccountExplicit || req.Policy.Strict || pinNote != "" {
-			return false
-		}
-		pinNote = s.pinFallbackNote(ctx, provider, req.Policy.AccountID, err)
-		req.Exclude = append(req.Exclude, req.Policy.AccountID)
-		req.Policy = contracts.AccountPolicy{Mode: contracts.AccountEligible}
-		s.log.Info("accounts: explicit account unavailable; falling back", "run", req.RunID, "note", pinNote)
-		return true
 	}
 	var lastCheckoutErr error
 	for round := 0; round < 5; round++ {
@@ -1006,6 +1068,7 @@ func (s *Service) Select(ctx context.Context, p contracts.AccountSelectParams) (
 		sel.Freshness = contracts.Freshness{ObservedAt: s.now(), Source: "node:" + s.cfg.NodeID, Stale: true, Reason: "ambient login not observed"}
 		return sel, nil
 	}
+	ownPin, ownExclude := "", []string(nil)
 	if p.Policy.Mode == contracts.AccountExplicit {
 		a, err := s.Account(ctx, p.Policy.AccountID)
 		if contracts.IsCode(err, contracts.ErrNotFound) || err == nil && a.Provider == p.Provider &&
@@ -1015,22 +1078,45 @@ func (s *Service) Select(ctx context.Context, p contracts.AccountSelectParams) (
 				local = &a
 			}
 			oa, oerr := s.explicitOwnLogin(ctx, h, p.Policy.AccountID, local)
+			berr := oerr
 			if oerr != nil {
-				return sel, oerr
+				if !pinFallsBack(oerr) {
+					return sel, oerr
+				}
+			} else if berr = s.ownLoginBlockedErr(ctx, h, oa); berr == nil {
+				sel.AccountID = oa.AccountID
+				sel.Reason = fmt.Sprintf("explicit account; credential_kind=ambient: %s is this node's own %s login", accountName(oa), h)
+				sel.Freshness = contracts.Freshness{ObservedAt: s.now(), Source: "node:" + s.cfg.NodeID, Stale: true, Reason: "ambient login not observed"}
+				return sel, nil
 			}
-			sel.AccountID = oa.AccountID
-			sel.Reason = fmt.Sprintf("explicit account; credential_kind=ambient: %s is this node's own %s login", accountName(oa), h)
-			sel.Freshness = contracts.Freshness{ObservedAt: s.now(), Source: "node:" + s.cfg.NodeID, Stale: true, Reason: "ambient login not observed"}
-			return sel, nil
-		}
-		if err != nil {
-			return sel, err
-		}
-		if a.Provider != p.Provider {
-			return sel, contracts.Errorf(contracts.ErrInvalid, "account %s is %s, not %s (cross-provider use is never allowed)", a.AccountID, a.Provider, p.Provider)
+			if p.Policy.Strict {
+				// Not runnable here: an outcome (not an error) so placement
+				// rejects this node before a run is created.
+				e := contracts.AsError(berr)
+				o, _ := e.Details["outcome"].(string)
+				sel.Outcome = contracts.FallbackOutcome(o)
+				if sel.Outcome == "" {
+					sel.Outcome = contracts.FallbackIntervention
+				}
+				sel.Reason = e.Message
+				sel.Freshness = contracts.Freshness{ObservedAt: s.now(), Source: "node:" + s.cfg.NodeID, Stale: true, Reason: "no eligible account"}
+				return sel, nil
+			}
+			// As ResolveFor: a non-strict pin with no usable login here
+			// (none at all, or an own login that cannot run it) falls back.
+			ownPin = s.pinFallbackNote(ctx, p.Provider, p.Policy.AccountID, berr)
+			ownExclude = []string{p.Policy.AccountID}
+			p.Policy = contracts.AccountPolicy{Mode: contracts.AccountEligible}
+		} else {
+			if err != nil {
+				return sel, err
+			}
+			if a.Provider != p.Provider {
+				return sel, contracts.Errorf(contracts.ErrInvalid, "account %s is %s, not %s (cross-provider use is never allowed)", a.AccountID, a.Provider, p.Provider)
+			}
 		}
 	}
-	req := ResolveRequest{Harness: h, Policy: p.Policy, RunID: "dry-run", observeBeforeReserve: true}
+	req := ResolveRequest{Harness: h, Policy: p.Policy, RunID: "dry-run", Exclude: ownExclude, observeBeforeReserve: true}
 	cands, notes, err := s.gather(ctx, req)
 	if err != nil {
 		return sel, err
@@ -1043,7 +1129,7 @@ func (s *Service) Select(ctx context.Context, p contracts.AccountSelectParams) (
 		s.ObserveDue(ctx, p.Provider)
 		c, err = s.choose(ctx, s.db, req, cands, notes, s.cfg.CodexLeaseHolder)
 	}
-	pinNote := ""
+	pinNote := ownPin
 	if e := contracts.AsError(err); e != nil && e.Details["outcome"] != nil && req.Policy.Mode == contracts.AccountExplicit && !req.Policy.Strict {
 		// As ResolveFor: a non-strict explicit account falls back.
 		pinNote = s.pinFallbackNote(ctx, p.Provider, req.Policy.AccountID, err)
@@ -1094,7 +1180,19 @@ func (s *Service) ownLoginFallback(ctx context.Context, h contracts.Harness, exc
 	if !ok {
 		return contracts.Account{}, "", false
 	}
-	return oa, fmt.Sprintf("credential_kind=ambient: no Pyre login on this node is eligible; %s is this node's own %s login", accountName(oa), h), true
+	return oa, fmt.Sprintf("%s; %s is this node's own %s login", ownLoginFallbackReason, accountName(oa), h), true
+}
+
+// ownLoginFallbackReason starts the assignment reason of ownLoginFallback
+// (ambientMovable reads it).
+const ownLoginFallbackReason = "credential_kind=ambient: no Pyre login on this node is eligible"
+
+// pinFallsBack reports whether an explicit account's "no login of it on
+// this node" refusal (explicitOwnLogin) lets a non-strict pin fall back to
+// the best eligible account: every refusal except an invalid request
+// (cross-provider), which no other account fixes.
+func pinFallsBack(err error) bool {
+	return err != nil && !contracts.IsCode(err, contracts.ErrInvalid)
 }
 
 // pinFallbackNote words why an explicit account was swapped:

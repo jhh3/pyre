@@ -20,7 +20,7 @@ var (
 var segmentKinds = map[string]bool{
 	"slug": true, "integer": true, "sha": true, "hex": true,
 	"linear-identifier": true, "slack-channel": true, "slack-ts": true,
-	"opaque-token": true, "path": true,
+	"opaque-token": true, "path": true, "slack-file": true,
 	"notion-page":         true,
 	"google-calendar-eid": true,
 }
@@ -117,6 +117,22 @@ func Validate(pkg Package) []string {
 		seenModes := map[string]bool{}
 		for _, lookup := range lookups {
 			mode, ok := modeByID[lookup.Mode]
+			if lookup.Download != "" {
+				if !ok {
+					issues = append(issues, fmt.Sprintf("link resolver %s cites unknown mode %s", resolver.ID, lookup.Mode))
+				}
+				if !DownloadKinds[lookup.Download] {
+					issues = append(issues, fmt.Sprintf("link resolver %s cites unknown download kind %s", resolver.ID, lookup.Download))
+				}
+				if lookup.Operation != "" || len(lookup.HeavyReads) > 0 {
+					issues = append(issues, fmt.Sprintf("link resolver %s download lookups take no operation or heavy reads", resolver.ID))
+				}
+				if seenModes[lookup.Mode] {
+					issues = append(issues, fmt.Sprintf("link resolver %s has more than one lookup for mode %s", resolver.ID, lookup.Mode))
+				}
+				seenModes[lookup.Mode] = true
+				continue
+			}
 			if !ok {
 				issues = append(issues, fmt.Sprintf("link resolver %s cites unknown mode %s", resolver.ID, lookup.Mode))
 			} else if operation, ok := findOperation(mode, lookup.Operation); ok && operation.Class != "read" {

@@ -20,9 +20,21 @@ import (
 // waits for input: Claude's Stop hook, Codex's turn completion), stops the
 // run through the ordinary stop command (Claude types /exit, Codex ends
 // the thread, a shell exits) and archives the session once the run has
-// ended. A shell has no turns: it is stopped after a short grace so the
+// ended. The stop is marked automatic (RunCommand.Automatic): nobody asked
+// to stop the work, so live background processes the agent preserved are
+// spared where the adapter can (Codex, decision I62). A shell has no turns: it is stopped after a short grace so the
 // command that asked can return. Archived=false cancels the pending
 // archive. Every step is audited.
+//
+// An account switch does not end the work (decision I67): pyred stops the
+// run and resumes the same session on another account, with the same
+// session credential. A run that ended for a switch
+// (contracts.AdapterDataAccountSwitch) therefore never completes the
+// archive: the pending archive follows the successor run, and the
+// successor of a limit switch is done only after the turn it was told to
+// continue (iss_…: archiving at the switch
+// revoked the session's credential under the resumed run, and every Pyre
+// call it made was refused).
 
 const (
 	// archiveWhenDonePoll bounds how long a pending archive waits for a
@@ -34,6 +46,10 @@ const (
 	// archiveShellGrace lets the shell command that scheduled its own
 	// archive print its answer before the shell is stopped.
 	archiveShellGrace = 2 * time.Second
+	// switchResumeSettle bounds how long the successor of a limit switch
+	// may sit idle with no turn the hub saw before its idle counts as the
+	// end of its turn (its continue prompt normally runs within seconds).
+	switchResumeSettle = 5 * time.Minute
 )
 
 // archiveWhenState is the worker's in-memory bookkeeping. Losing it (a hub
@@ -81,7 +97,26 @@ func (h *Hub) runLive(ctx context.Context, sessionID string) bool {
 	if err != nil {
 		return false
 	}
-	return !r.State.Terminal() && !runNoHandle(r)
+	if r.State.Terminal() {
+		return h.switchInFlight(ctx, r)
+	}
+	return !runNoHandle(r)
+}
+
+// switchInFlight: ended run r was stopped for an account switch whose
+// successor has not been reported yet (pyred reports the fallback plan
+// after the successor starts; at most switchPlanWait after the end). The
+// session still runs: archiving it now would revoke the credential its
+// successor is about to use.
+func (h *Hub) switchInFlight(ctx context.Context, r contracts.Run) bool {
+	if r.AdapterData[contracts.AdapterDataAccountSwitch] == "" || r.EndedAt == nil || h.now().Sub(*r.EndedAt) >= switchPlanWait {
+		return false
+	}
+	var planned int
+	if err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fallback_plans WHERE session_id=? AND from_run_id=?`, r.SessionID, r.RunID).Scan(&planned); err != nil {
+		return false
+	}
+	return planned == 0
 }
 
 // noteArchiveScheduled remembers when a session was scheduled and wakes
@@ -97,8 +132,9 @@ func (h *Hub) noteArchiveScheduled(sessionID string) {
 // noteRunTransition wakes the worker after a commit that ended a turn or
 // a run (called inside the run-state transaction; cheap).
 func (h *Hub) noteRunTransition(prev contracts.RunState, r contracts.Run) {
-	if prev != r.State && (r.State == contracts.RunWaitingInput || r.State.Terminal()) {
+	if prev != r.State && (r.State == contracts.RunWaitingInput || r.State == contracts.RunWaitingBackground || r.State.Terminal()) {
 		h.awd.kick.Store(true)
+		h.lres.kick.Store(true) // a resumed turn may have hit its limit again (limitresume.go)
 	}
 }
 
@@ -165,21 +201,25 @@ func (h *Hub) advanceArchive(ctx context.Context, sessionID string) error {
 		return nil
 	}
 	if s.CurrentRunID == "" {
-		return h.finishArchive(ctx, sessionID, "it has no run")
+		return h.finishArchive(ctx, sessionID, "", "it has no run")
 	}
 	r, err := h.getRun(ctx, h.db, s.CurrentRunID)
 	if err != nil {
 		return err
 	}
 	switch {
+	case r.State.Terminal() && r.AdapterData[contracts.AdapterDataAccountSwitch] != "":
+		// Stopped for an account switch: the successor run (same session,
+		// same credential) carries the work on. Wait for it.
+		return nil
 	case r.State.Terminal():
-		return h.finishArchive(ctx, sessionID, "its run "+string(r.State))
+		return h.finishArchive(ctx, sessionID, r.RunID, "its run "+string(r.State))
 	case runNoHandle(r):
-		return h.finishArchive(ctx, sessionID, "its run has no handle Pyre could stop")
+		return h.finishArchive(ctx, sessionID, r.RunID, "its run has no handle Pyre could stop")
 	case !contracts.HasCap(r.Capabilities, contracts.CapStop):
-		return h.finishArchive(ctx, sessionID, "its run cannot be stopped by Pyre; archived while it may still run")
+		return h.finishArchive(ctx, sessionID, r.RunID, "its run cannot be stopped by Pyre; archived while it may still run")
 	}
-	if !h.turnEnded(s, r) {
+	if !h.turnEnded(ctx, s, r) {
 		return nil
 	}
 	h.awd.mu.Lock()
@@ -194,7 +234,7 @@ func (h *Hub) advanceArchive(ctx context.Context, sessionID string) error {
 	}
 	err = h.tx(ctx, func(tx *sql.Tx) error {
 		sys := contracts.Principal{Kind: contracts.PrincipalSystem, ID: "hub"}
-		if _, err := h.enqueueTx(ctx, tx, r.NodeID, contracts.CmdStop, sys, contracts.RunCommand{SessionID: r.SessionID, RunID: r.RunID, Reason: reason},
+		if _, err := h.enqueueTx(ctx, tx, r.NodeID, contracts.CmdStop, sys, contracts.RunCommand{SessionID: r.SessionID, RunID: r.RunID, Reason: reason, Automatic: true},
 			h.opt.StopTTL, contracts.ObjectRef{Kind: contracts.KindRun, ID: r.RunID}); err != nil {
 			return err
 		}
@@ -211,10 +251,17 @@ func (h *Hub) advanceArchive(ctx context.Context, sessionID string) error {
 }
 
 // turnEnded: the run waits for input (the turn that asked has ended), or
-// a shell (which has no turns) is past its grace.
-func (h *Hub) turnEnded(s contracts.Session, r contracts.Run) bool {
-	if r.State == contracts.RunWaitingInput {
-		return true
+// a shell (which has no turns) is past its grace. A run waiting on
+// background work has ended its turn too (Claude's Stop, Codex's turn
+// completion with a background command or monitor still live): the
+// session asked to be archived, so what "may start a new turn" is
+// stopped with the run rather than holding the archive and the child's
+// final report forever (iss_…: a child that
+// pushed and called archive_session sat in waiting_on_background for
+// 90 minutes; its lead never heard).
+func (h *Hub) turnEnded(ctx context.Context, s contracts.Session, r contracts.Run) bool {
+	if r.State == contracts.RunWaitingInput || r.State == contracts.RunWaitingBackground {
+		return !h.switchTurnPending(ctx, r)
 	}
 	if s.Harness != contracts.HarnessShell || r.State == contracts.RunStarting {
 		return false
@@ -225,14 +272,40 @@ func (h *Hub) turnEnded(s contracts.Session, r contracts.Run) bool {
 	return !ok || h.now().Sub(at) >= archiveShellGrace
 }
 
+// switchTurnPending: r succeeds a run stopped for a limit switch and has
+// not run the turn it was told to continue yet. It is idle at launch until
+// its continue prompt is submitted; stopping it then would end the work
+// the switch carried over. Its idle counts as the end of that turn once
+// the hub saw it running, or switchResumeSettle after its start (a turn
+// shorter than the node's observation interval, or a prompt that never
+// ran).
+func (h *Hub) switchTurnPending(ctx context.Context, r contracts.Run) bool {
+	if r.PreviousRunID == "" || h.now().Sub(r.StartedAt) >= switchResumeSettle {
+		return false
+	}
+	prev, err := h.getRun(ctx, h.db, r.PreviousRunID)
+	if err != nil || prev.AdapterData[contracts.AdapterDataAccountSwitch] != contracts.AccountSwitchLimit {
+		return false
+	}
+	var ran int
+	if err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE session_id=? AND object_id=? AND kind=? AND json_extract(payload, '$.state')=?`,
+		r.SessionID, r.RunID, string(contracts.EvRunObserved), string(contracts.RunRunning)).Scan(&ran); err != nil {
+		return false
+	}
+	return ran == 0
+}
+
 // finishArchive archives a session whose pending archive can complete and
-// revokes its agent tokens.
-func (h *Hub) finishArchive(ctx context.Context, sessionID, why string) error {
+// revokes its agent tokens. runID is the current run the decision was
+// made on ("" for none): when another run became current meanwhile (a
+// successor the node started), nothing is archived and the next pass
+// looks again.
+func (h *Hub) finishArchive(ctx context.Context, sessionID, runID, why string) error {
 	done := false
 	node := ""
 	err := h.tx(ctx, func(tx *sql.Tx) error {
 		s, err := h.getSession(ctx, tx, sessionID)
-		if err != nil || s.Archived || !hasArchiveWhenDone(s) {
+		if err != nil || s.Archived || !hasArchiveWhenDone(s) || s.CurrentRunID != runID {
 			return err
 		}
 		if r, err := h.getRun(ctx, tx, s.CurrentRunID); err == nil {

@@ -3,6 +3,8 @@ package accounts
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +30,11 @@ import (
 //   - the run has read waiting_input for at least IdleBeforeMove across
 //     sweeps, and no message for the session is queued or was delivered in
 //     the last minute (the state lags the harness);
+//   - the harness shows no live background tasks (shells, monitors,
+//     background subagents, Codex exec groups; Pyre's monitor aside): a
+//     stop ends them and nothing would wake the session when its job
+//     finishes. Claude's exit dialog is the last check: one that lists
+//     such tasks is cancelled and nothing is stopped (decision I67);
 //   - the starter did not pin the account strictly (assignment pinned; a
 //     fallback successor's internal strict bind does not count);
 //   - the harness advertises cross-account resume, both profiles share the
@@ -74,6 +81,8 @@ type rebalanceState struct {
 	idleSince map[string]time.Time // run -> first sweep that saw it idle
 	failed    map[string]time.Time // session -> last failed move (also read from recorded plans)
 	deferred  map[string]deferredLimit
+	held      map[string]bool // run -> a held move was reported (holdMove)
+	skipped   map[string]bool // run -> a skipped move was logged (cannotRelaunch)
 }
 
 // deferredLimit is a limit event that arrived while a move held the run.
@@ -169,6 +178,110 @@ func (s *Service) pruneIdle(active map[string]bool) {
 			delete(s.rb.idleSince, run)
 		}
 	}
+	for run := range s.rb.held {
+		if !active[run] {
+			delete(s.rb.held, run)
+		}
+	}
+	for run := range s.rb.skipped {
+		if !active[run] {
+			delete(s.rb.skipped, run)
+		}
+	}
+}
+
+// relaunchBlocker says why a stopped run could not be relaunched on
+// another account ("" when it can): its working directory is gone (a
+// session that removed its launch worktree and works elsewhere now), or
+// the target profile directory is missing. A proactive move is optional,
+// so it never stops a run it cannot bring back (server, 2026-11-07: a move
+// killed a healthy session whose launch worktree had been removed).
+func relaunchBlocker(cwd, profileDir string) string {
+	if cwd != "" {
+		if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
+			return fmt.Sprintf("its working directory %s no longer exists", cwd)
+		}
+	}
+	if profileDir != "" {
+		if _, err := os.Stat(profileDir); err != nil {
+			return fmt.Sprintf("the target account's profile directory %s is missing", profileDir)
+		}
+	}
+	return ""
+}
+
+// skipMove logs (once per run) a move left out because the run could not
+// be relaunched; the session keeps running on its account.
+func (s *Service) skipMove(sessionID, runID, why string) {
+	s.rb.mu.Lock()
+	if s.rb.skipped == nil {
+		s.rb.skipped = map[string]bool{}
+	}
+	seen := s.rb.skipped[runID]
+	s.rb.skipped[runID] = true
+	s.rb.mu.Unlock()
+	if !seen {
+		s.log.Info("accounts: proactive move skipped: the run could not be relaunched; it keeps running on its account", "session", sessionID, "run", runID, "reason", why)
+	}
+}
+
+// holdMove leaves a session on its account because stopping it would end
+// live background tasks (decision I67): the session would never wake when
+// its job finishes. The move is retried on later sweeps, once they are
+// gone. Audited once per run (node.move_held).
+func (s *Service) holdMove(ctx context.Context, sessionID, runID, fromID, toLabel string, tasks []string, how string) {
+	s.rb.mu.Lock()
+	if s.rb.held == nil {
+		s.rb.held = map[string]bool{}
+	}
+	seen := s.rb.held[runID]
+	s.rb.held[runID] = true
+	s.rb.mu.Unlock()
+	if seen {
+		return
+	}
+	detail := redact(fmt.Sprintf("stays on %s instead of moving to %s: %d live background task(s) (%s): %s",
+		acctRef(s.accountLabel(ctx, fromID)), acctRef(toLabel), len(tasks), how, clipTasks(tasks)))
+	s.log.Info("accounts: proactive move held: background tasks running", "session", sessionID, "run", runID, "tasks", len(tasks))
+	s.reportEvent(ctx, contracts.EvNodeAutomation, contracts.ObjectRef{Kind: contracts.KindRun, ID: runID}, sessionID,
+		contracts.NodeAutomation{RunID: runID, SessionID: sessionID, Action: contracts.AutomationMoveHeld, Detail: detail})
+}
+
+// redactTasks redacts background task descriptions (commands may carry
+// credentials) and keeps at most 20; nil stays nil.
+func redactTasks(tasks []string) []string {
+	if len(tasks) == 0 {
+		return nil
+	}
+	if len(tasks) > 20 {
+		tasks = tasks[:20]
+	}
+	return redactAll(tasks)
+}
+
+// clipTasks joins task descriptions, at most four of them.
+func clipTasks(tasks []string) string {
+	if len(tasks) > 4 {
+		return strings.Join(tasks[:4], "; ") + fmt.Sprintf("; and %d more", len(tasks)-4)
+	}
+	return strings.Join(tasks, "; ")
+}
+
+// stoppedTasksNote is the successor prompt's line about background tasks
+// a switch's stop ended ("" when none).
+func stoppedTasksNote(tasks []string) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Background tasks were stopped by the account switch (%s); re-check your jobs and restart any watcher you still need.", clipTasks(tasks))
+}
+
+// stoppedTasksReason is the plan reason's clause for them.
+func stoppedTasksReason(tasks []string) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; background tasks were stopped by the account switch: %s", clipTasks(tasks))
 }
 
 // settleStaleClaims finishes proactive-move claims older than the move
@@ -352,7 +465,7 @@ func (s *Service) claimForMove(ctx context.Context, sessionID, runID, fromID str
 	if last, err := lastProactive(ctx, s.db, sessionID, s.now().Add(-RebalanceCooldown)); err != nil || !last.IsZero() {
 		return RunInfo{}, false
 	}
-	if why, err := s.switchPaused(ctx, sessionID, fromID); err != nil || why != "" {
+	if why, err := s.switchPaused(ctx, sessionID, fromID, contracts.LimitEvent{}); err != nil || why != "" {
 		return RunInfo{}, false
 	}
 	claim := contracts.FallbackPlan{SessionID: sessionID, FromRunID: runID, FromAccountID: fromID, Outcome: outcomePending,
@@ -403,15 +516,33 @@ func (s *Service) moveIdle(ctx context.Context, sessionID, runID, fromID string,
 		return unclaim()
 	}
 	// Re-check right before stopping: a prompt may have arrived.
-	if i2, err := s.cfg.Controller.CurrentRun(ctx, sessionID); err != nil || i2.RunID != runID || i2.State != contracts.RunWaitingInput || i2.RecentInput {
+	i2, err := s.cfg.Controller.CurrentRun(ctx, sessionID)
+	if err != nil || i2.RunID != runID || i2.State != contracts.RunWaitingInput || i2.RecentInput {
 		return unclaim()
 	}
-	q, qerr := s.cfg.Controller.Quiesce(ctx, sessionID, runID)
+	if why := relaunchBlocker(i2.Cwd, c.grant.ProfileDir); why != "" {
+		s.skipMove(sessionID, runID, why)
+		return unclaim()
+	}
+	if bg := s.cfg.Controller.BackgroundWork(ctx, sessionID, runID); len(bg) > 0 {
+		// Stopping would end them, and nothing would wake the session
+		// when its job finishes: stay until they are gone (decision I67).
+		s.holdMove(ctx, sessionID, runID, fromID, acctName(c.acct), bg, "the harness lists them")
+		return unclaim()
+	}
+	q, qerr := s.cfg.Controller.Quiesce(ctx, sessionID, runID, QuiesceOptions{Proactive: true})
+	if len(q.Refused) > 0 {
+		// The harness's exit dialog listed tasks its hooks had not: nothing
+		// was stopped. Not tried again for a while (each try types /exit).
+		s.markMoveFailed(sessionID)
+		s.holdMove(ctx, sessionID, runID, fromID, acctName(c.acct), q.Refused, "the exit dialog listed them; it was cancelled")
+		return unclaim()
+	}
 	// From here the old run may be gone: finish under a context that the
 	// move's deadline cannot cut between stop and restart.
 	ctx = context.WithoutCancel(ctx)
 	fromLabel, toLabel := s.accountLabel(ctx, fromID), acctName(c.acct)
-	plan := contracts.FallbackPlan{SessionID: sessionID, FromRunID: runID, FromAccountID: fromID, UncertainWork: q.TurnInFlight}
+	plan := contracts.FallbackPlan{SessionID: sessionID, FromRunID: runID, FromAccountID: fromID, UncertainWork: q.TurnInFlight, StoppedTasks: redactTasks(q.Stopped)}
 	if qerr != nil || !q.Exited {
 		// Unconfirmed stop: look again. Ended: bring it back on its own
 		// account. Still up after a refused stop: left as is. Still up
@@ -439,9 +570,10 @@ func (s *Service) moveIdle(ctx context.Context, sessionID, runID, fromID string,
 		s.log.Warn("accounts: release after proactive stop", "run", runID, "err", err)
 	}
 	prompt := ""
-	if plan.UncertainWork {
-		// A message raced the stop: say so, never replay it.
-		prompt = continuePrompt(fromLabel, toLabel, "proactive", true)
+	if plan.UncertainWork || len(plan.StoppedTasks) > 0 {
+		// A message raced the stop, or (an adapter without the guard)
+		// background tasks ended: say so, never replay anything.
+		prompt = continuePrompt(fromLabel, toLabel, "proactive", plan.UncertainWork) + stoppedTasksNote(plan.StoppedTasks)
 	}
 	ref := *info.NativeRef
 	cont := Continuation{SessionID: sessionID, PreviousRunID: runID, Harness: h, AccountID: c.acct.AccountID,
@@ -454,6 +586,7 @@ func (s *Service) moveIdle(ctx context.Context, sessionID, runID, fromID string,
 		if drain {
 			plan.Reason = fmt.Sprintf("%s: %s is a reserve account and a normal account has room again; %s %s", ProactivePrefix, acctRef(fromLabel), acctRef(toLabel), c.why)
 		}
+		plan.Reason += stoppedTasksReason(plan.StoppedTasks)
 		if err := carryPinned(ctx, s.db, runID, res.NewRunID); err != nil {
 			s.log.Warn("accounts: carry pin to successor", "run", res.NewRunID, "err", err)
 		}

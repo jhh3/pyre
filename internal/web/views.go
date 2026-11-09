@@ -219,9 +219,20 @@ func (sn *snap) projectRef(p *string) *ProjectRef {
 	return &ProjectRef{ID: *p, Name: name}
 }
 
-// isLead: a top-level session (it reports to nobody) in a project.
-func isLead(v c.SessionView) bool {
-	return v.Session.ProjectID != nil && *v.Session.ProjectID != "" && v.Session.Parent() == "" && !v.Session.Archived
+// isLead: a session that leads its project, the hub's rule
+// (projectpage.go): in a project, with no parent or a parent outside the
+// project (a delegated lead). byID holds the parents (the snapshot looks
+// up those not listed); an unknown parent reads as not leading.
+func isLead(v c.SessionView, byID map[string]c.SessionView) bool {
+	if v.Session.ProjectID == nil || *v.Session.ProjectID == "" || v.Session.Archived {
+		return false
+	}
+	pid := v.Session.Parent()
+	if pid == "" {
+		return true
+	}
+	p, ok := byID[pid]
+	return ok && (p.Session.ProjectID == nil || *p.Session.ProjectID != *v.Session.ProjectID)
 }
 
 func lastActivity(v c.SessionView) *Activity {
@@ -281,9 +292,9 @@ func activeAt(v c.SessionView) time.Time {
 	return t
 }
 
-func sessionCard(v c.SessionView) SessionCard {
+func sessionCard(v c.SessionView, byID map[string]c.SessionView) SessionCard {
 	id := v.Session.SessionID
-	card := SessionCard{ID: id, Title: sessionTitle(v, id), State: sessionState(v), Node: nodeName(v), IsLead: isLead(v), LastActivity: lastActivity(v)}
+	card := SessionCard{ID: id, Title: sessionTitle(v, id), State: sessionState(v), Node: nodeName(v), IsLead: isLead(v, byID), LastActivity: lastActivity(v)}
 	for _, m := range v.Monitors {
 		card.Watching = append(card.Watching, strings.TrimPrefix(m.Title, c.MonitorTitlePrefix))
 	}

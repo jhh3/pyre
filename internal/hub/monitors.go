@@ -22,7 +22,7 @@ func (h *Hub) liveMonitors(ctx context.Context, q queryer, target string) (map[s
 	if target != "" {
 		tagLike = `%"` + contracts.TagMonitorToPrefix + target + `"%`
 	}
-	rows, err := q.QueryContext(ctx, `SELECT s.session_id,s.harness,s.title,s.project_id,s.created_by,s.created_at,s.current_run_id,s.lineage,s.tags,s.archived,s.icon,s.owner_active_at,r.state
+	rows, err := q.QueryContext(ctx, `SELECT s.session_id,s.harness,s.title,s.project_id,s.created_by,s.created_at,s.current_run_id,s.lineage,s.tags,s.archived,s.icon,s.owner_active_at,s.archived_at,s.unarchived_at,r.state
 		FROM sessions s JOIN runs r ON r.run_id = s.current_run_id
 		WHERE s.archived = 0 AND s.harness = ? AND s.tags LIKE ? AND r.state IN (?,?,?,?,?)
 		ORDER BY s.created_at, s.session_id`,

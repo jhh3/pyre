@@ -308,14 +308,25 @@ type issueReport struct {
 	projectID                             *string
 }
 
-// FileIssue implements issues.file: the owner or any session.
+// FileIssue implements issues.file: the owner or any session, and a node
+// daemon for a machine issue about itself (its automatic updater).
 func (h *Hub) FileIssue(ctx context.Context, req contracts.FileIssueRequest) (contracts.FileIssueResponse, error) {
 	var out contracts.FileIssueResponse
 	p, err := principal(ctx)
 	if err != nil {
 		return out, err
 	}
-	if !isOwner(p) && p.Kind != contracts.PrincipalSession {
+	switch {
+	case isOwner(p) || p.Kind == contracts.PrincipalSession:
+	case p.Kind == contracts.PrincipalNode:
+		if contracts.IssueKind(strings.ToLower(strings.TrimSpace(string(req.Kind)))) != contracts.IssueMachine {
+			return out, contracts.Errorf(contracts.ErrForbidden, "a node files only machine issues")
+		}
+		if n := strings.TrimSpace(req.NodeID); n != "" && n != p.ID {
+			return out, contracts.Errorf(contracts.ErrForbidden, "a node files machine issues only about itself")
+		}
+		req.NodeID, req.RunID = p.ID, ""
+	default:
 		return out, contracts.Errorf(contracts.ErrForbidden, "only the owner and sessions file issues")
 	}
 	if err := requireOp(req.Mutation); err != nil {
@@ -367,6 +378,9 @@ func (h *Hub) issueReport(ctx context.Context, p contracts.Principal, req contra
 		return r, contracts.Errorf(contracts.ErrNotFound, "node %s is not a known machine; `pyre nodes` lists them", r.nodeID).WithRef(contracts.KindNode, r.nodeID)
 	}
 	runID := strings.TrimSpace(req.RunID)
+	if p.Kind == contracts.PrincipalNode {
+		r.sessionTitle = "pyred (the node daemon)"
+	}
 	if p.Kind == contracts.PrincipalSession {
 		s, err := h.getSession(ctx, h.db, p.ID)
 		if err != nil {

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -64,7 +66,7 @@ SKILL.md the agent follows).`,
 		Args:  cobra.NoArgs,
 		RunE: a.run(func(cmd *cobra.Command, args []string) error {
 			opts := agentguide.Options{MCP: gMCP, ParentSessionID: a.Getenv(agentguide.EnvParentSessionID),
-				ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT"), RunTmpDir: a.runTmpDir(), Harness: a.guideHarness()}
+				ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", ProjectLead: a.Getenv(agentguide.EnvProjectLead) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT"), RunTmpDir: a.runTmpDir(), Harness: a.guideHarness()}
 			if gProject != "" {
 				ops, err := a.connect()
 				if err != nil {
@@ -108,7 +110,7 @@ Codex:        codex -c 'mcp_servers.pyre.command="pyre"' -c 'mcp_servers.pyre.ar
 			}
 			srv := &MCPServer{Connect: a.connect, Tools: tools, Log: a.Stderr, Instructions: agentguide.Text(agentguide.Options{MCP: true,
 				ParentSessionID: a.Getenv(agentguide.EnvParentSessionID), ReportsToParent: a.Getenv(agentguide.EnvReportToParent) == "1", WorktreeRoot: a.Getenv("PYRE_WORKTREE_ROOT"), RunTmpDir: a.runTmpDir(),
-				Harness: a.guideHarness()})}
+				ProjectLead: a.Getenv(agentguide.EnvProjectLead) == "1", Harness: a.guideHarness()})}
 			return srv.Serve(cmd.Context(), a.Stdin, a.Stdout)
 		}),
 	}
@@ -121,10 +123,18 @@ Codex:        codex -c 'mcp_servers.pyre.command="pyre"' -c 'mcp_servers.pyre.ar
 func (a *App) guideHarness() string { return a.callerHarness() }
 
 // runTmpDir reports whether pyred gave the calling run its own TMPDIR
-// (<state>/tmp/runs/<run_id>).
+// (~/.ptmp/<id> whose .run file names the run, or an older
+// <state>/tmp/runs/<run_id>).
 func (a *App) runTmpDir() bool {
-	run := a.Getenv("PYRE_RUN_ID")
-	return run != "" && filepath.Base(a.Getenv("TMPDIR")) == run
+	run, dir := a.Getenv("PYRE_RUN_ID"), a.Getenv("TMPDIR")
+	if run == "" || dir == "" {
+		return false
+	}
+	if filepath.Base(dir) == run {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join(dir, ".run"))
+	return err == nil && strings.TrimSpace(string(b)) == run
 }
 
 // callerHarness is the calling session's harness: $PYRE_HARNESS, which

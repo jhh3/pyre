@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -18,6 +19,9 @@ type Session struct {
 	Lineage      Lineage   `json:"lineage"`
 	Tags         []string  `json:"tags,omitempty"`
 	Archived     bool      `json:"archived"`
+	// ArchivedAt (additive) is when the session was last archived; nil
+	// while it is not archived. Resuming it clears both.
+	ArchivedAt *time.Time `json:"archived_at"`
 	// Icon (W-archive2, additive) is an optional single emoji shown before
 	// the title (one grapheme, at most two cells). Automatic titling never
 	// changes it.
@@ -28,6 +32,27 @@ type Session struct {
 	// when the owner never did. Sessions acting on the owner's behalf do not
 	// count.
 	OwnerActiveAt *time.Time `json:"owner_active_at,omitempty"`
+	// UnarchivedAt (additive) is when the session was last unarchived,
+	// explicitly or by a resume; nil while it is archived.
+	UnarchivedAt *time.Time `json:"unarchived_at,omitempty"`
+}
+
+// KeptFromAutoArchive reports whether an unarchive holds s out of
+// automatic archiving (finished children, the nightly sweep): it was
+// unarchived after its current run r ended (or it has no run). A run that
+// starts after the unarchive and ends lifts the hold, and so does an
+// explicit archive.
+func (s Session) KeptFromAutoArchive(r *Run) bool {
+	if s.Archived || s.UnarchivedAt == nil {
+		return false
+	}
+	switch {
+	case r == nil:
+		return true
+	case r.EndedAt != nil:
+		return !r.EndedAt.After(*s.UnarchivedAt)
+	}
+	return r.State.Terminal() && r.StartedAt.Before(*s.UnarchivedAt)
 }
 
 // StartedBy reports whether session sessionID started s (it created s, or
@@ -85,6 +110,10 @@ const (
 	RunWaitingBackground RunState = "waiting_on_background"
 )
 
+// RunReasonPromptSubmitted is a running run's StateReason when the
+// harness took a new prompt (Claude's UserPromptSubmit): a turn began.
+const RunReasonPromptSubmitted = "prompt submitted"
+
 // Terminal reports whether the state ends the run.
 func (s RunState) Terminal() bool { return s == RunExited || s == RunFailed }
 
@@ -125,6 +154,48 @@ type Run struct {
 	// adapter cannot tell. Only the latest value is kept.
 	Activity *RunActivity `json:"activity,omitempty"`
 }
+
+// Interrupted runs (Run.AdapterData, set by pyred): a run whose process
+// pyred found gone when it started (it died underneath pyred, as opposed
+// to a plain pyred restart, where runs survive) carries why and what Pyre
+// did about it. The hub reports it to the parent as an "interrupted" child
+// report (hub childreport.go).
+const (
+	// AdapterDataInterrupted is the cause: InterruptMachineRestarted (the
+	// machine booted after the run started) or InterruptProcessGone.
+	AdapterDataInterrupted = "pyre.interrupted"
+	// AdapterDataInterruptedBootAt is the machine's boot time (RFC 3339),
+	// when known.
+	AdapterDataInterruptedBootAt = "pyre.interrupted_boot_at"
+	// AdapterDataInterruptedDiedAt is when the process was last seen alive
+	// (RFC 3339; best estimate).
+	AdapterDataInterruptedDiedAt = "pyre.interrupted_died_at"
+	// AdapterDataInterruptedOutcome is what Pyre did: InterruptResuming
+	// (decision pending), InterruptResumed or InterruptLeftExited.
+	AdapterDataInterruptedOutcome = "pyre.interrupted_outcome"
+	// AdapterDataInterruptedResumedAs is the run that resumed it.
+	AdapterDataInterruptedResumedAs = "pyre.interrupted_resumed_as"
+	// AdapterDataInterruptedDetail says why it was left exited.
+	AdapterDataInterruptedDetail = "pyre.interrupted_detail"
+
+	InterruptMachineRestarted = "machine_restarted"
+	InterruptProcessGone      = "process_gone"
+
+	InterruptResuming   = "resuming"
+	InterruptResumed    = "resumed"
+	InterruptLeftExited = "left_exited"
+)
+
+// AdapterDataAccountSwitch (Run.AdapterData, set by pyred, additive) marks
+// a run stopped for an account switch, set before the stop: "proactive" (a
+// move between turns) or "limit" (the limit fallback). The hub words the
+// child report of its end as a restart, never as a finished run (decision
+// I67); the fallback plan for the run says where it went.
+const (
+	AdapterDataAccountSwitch = "pyre.account_switch"
+	AccountSwitchProactive   = "proactive"
+	AccountSwitchLimit       = "limit"
+)
 
 // RunActivity is a short, nonsecret phrase (at most 40 characters; commands
 // truncated, paths reduced to their base name) and when it began.
@@ -208,6 +279,19 @@ type SessionView struct {
 	// under the archived one: the descendants Pyre archives with it and
 	// those it leaves because the owner is using them.
 	ArchiveCascade *ArchiveCascade `json:"archive_cascade,omitempty"`
+	// ArchivePending (additive) is set in sessions.get, sessions.get_many
+	// and sessions.list views when the session is going to be archived
+	// without anyone acting again: it carries TagArchiveWhenDone (it
+	// archives when its current turn ends), or ArchivePendingWith names the
+	// ancestor whose pending archive it will be archived with (archive
+	// cascade). Cancel with sessions.update cancel_archive on that session
+	// (pyre sessions archive --cancel, MCP archive_session cancel: true).
+	ArchivePending     bool   `json:"archive_pending,omitempty"`
+	ArchivePendingWith string `json:"archive_pending_with,omitempty"`
+	// ArchiveCanceled (additive) is set on the answer to a cancel
+	// (cancel_archive, or archived=false): the sessions whose pending
+	// archive it removed, the session itself first when it had one.
+	ArchiveCanceled []CascadeSession `json:"archive_canceled,omitempty"`
 }
 
 // ArchiveCascade is what archiving a session does to the sessions under it
@@ -297,6 +381,10 @@ type StartSessionRequest struct {
 	// records the choice as the reserved tag TagReportParent or
 	// TagReportNone on the session.
 	ReportToParent *bool `json:"report_to_parent,omitempty"`
+	// IgnoreAvoid (additive) starts on a node with a hard avoid flag
+	// anyway (node_avoid.go): honored for the owner always, for others
+	// only over a flag the owner did not set.
+	IgnoreAvoid bool `json:"ignore_avoid,omitempty"`
 }
 
 // Reserved session tags for automatic reports to the parent session
@@ -316,6 +404,47 @@ const (
 // the hub sets for UpdateSessionRequest.WhenDone: the session is archived
 // once its current turn ends and its run has been stopped.
 const TagArchiveWhenDone = "archive:when-done"
+
+// TagRoleWorker (additive, I63) is the reserved session tag for a bounded
+// worker (`pyre start --no-lead`, MCP start_session no_lead): it never
+// leads its project, even when its parent is outside it, so it is never
+// asked to keep the project page and may not write it. Editing the tags
+// toggles it.
+const TagRoleWorker = "role:worker"
+
+// Harness fallback (MCP start_session fallback_harness, --fallback-harness
+// claude). TagFallbackClaude marks a Codex session that may run on Claude
+// instead: at launch when no OpenAI account has room, and at runtime when
+// its run stops on a usage limit with no other account (the hub then
+// starts a Claude session in its place). TagCodexUnavailable marks the
+// Claude session standing in for it.
+const (
+	TagFallbackClaude   = "fallback-harness:claude"
+	TagCodexUnavailable = "codex-unavailable"
+	// HarnessFallbackTitlePrefix starts the stand-in's title, so the
+	// starter sees the swap.
+	HarnessFallbackTitlePrefix = "Codex unavailable, Claude review"
+)
+
+// HarnessFallbackTitle is the stand-in Claude session's title.
+func HarnessFallbackTitle(title string) string {
+	if title == "" {
+		title = "Codex review"
+	}
+	return HarnessFallbackTitlePrefix + ": " + title
+}
+
+// HarnessFallbackPrompt is the stand-in's first prompt: why it runs on
+// Claude (why reads "no Codex (OpenAI) account was free (...)"), then the
+// task as given.
+func HarnessFallbackPrompt(why, prompt string) string {
+	return fmt.Sprintf("[pyre] %s: %s, so this session runs on Claude instead of Codex. "+
+		"You stand in for the requested Codex review: work independently and say in your report that it is a Claude review.\n\n%s",
+		HarnessFallbackTitlePrefix, why, prompt)
+}
+
+// NoLead reports that s is a bounded worker (TagRoleWorker).
+func (s Session) NoLead() bool { return slices.Contains(s.Tags, TagRoleWorker) }
 
 // Headless-run markers in StartSessionRequest.Args (pyre run, W-pyrerun).
 // ArgPyreExec=<hex SHA-256 of a claim secret> makes the node record the
@@ -352,6 +481,10 @@ type StartSessionResponse struct {
 	// Warnings: launcher notes, e.g. a fresh worktree branched from local
 	// HEAD because its repository has no origin remote (set client-side).
 	Warnings []string `json:"warnings,omitempty"`
+	// Cwd and Branch: where a repository launch actually started (set
+	// client-side; Branch only for a fresh worktree).
+	Cwd    string `json:"cwd,omitempty"`
+	Branch string `json:"branch,omitempty"`
 }
 
 type ListSessionsRequest struct {
@@ -378,6 +511,44 @@ type ReadSessionRequest struct {
 	Cursor    string `json:"cursor,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
 	Tail      bool   `json:"tail,omitempty"` // return the latest entries
+	// Seq reads the one entry with this seq (Cursor, Limit and Tail are
+	// replaced); ErrNotFound when the read does not show such an entry.
+	Seq int64 `json:"seq,omitempty"`
+	// Full returns entries' whole text instead of the per-entry cut (about
+	// 2000 bytes), redacted, at most FullEntryMax bytes per entry and
+	// FullReadMax bytes of expanded text per read (additive, 2026-10-23).
+	Full bool `json:"full,omitempty"`
+}
+
+// Bounds of a full read (ReadSessionRequest.Full).
+const (
+	FullEntryMax = 256 << 10 // text bytes kept per entry
+	FullReadMax  = 1 << 20   // JSON-encoded bytes of expanded text per read
+)
+
+// SeqWindow returns the request that reads entry r.Seq: the first shown
+// entry after r.Seq-1. Unchanged when Seq is not set.
+func (r ReadSessionRequest) SeqWindow() ReadSessionRequest {
+	if r.Seq > 0 {
+		r.Cursor, r.Limit, r.Tail = fmt.Sprintf("%d", r.Seq-1), 1, false
+	}
+	return r
+}
+
+// PickSeq keeps only entry r.Seq of a SeqWindow read; ErrNotFound when it
+// is not there (a record sessions.read does not show, or past the end).
+// Unchanged when Seq is not set.
+func (r ReadSessionRequest) PickSeq(resp ReadSessionResponse) (ReadSessionResponse, error) {
+	if r.Seq <= 0 {
+		return resp, nil
+	}
+	for _, e := range resp.Entries {
+		if e.Seq == r.Seq {
+			resp.Entries = []TranscriptEntry{e}
+			return resp, nil
+		}
+	}
+	return resp, Errorf(ErrNotFound, "no transcript entry with seq %d in this run (take seqs from a read or a search hit)", r.Seq).WithRef(KindSession, r.SessionID)
 }
 
 // TranscriptEntry is one bounded, redacted activity item.
@@ -398,6 +569,16 @@ type ReadSessionResponse struct {
 	Freshness  Freshness         `json:"freshness"`
 	// Screen is an optional current terminal snapshot (plain text) for previews.
 	Screen string `json:"screen,omitempty"`
+	// Full: the node applied a full read (request Full). FullNote says
+	// plainly when a bound or the adapter kept any entry short.
+	Full     bool   `json:"full,omitempty"`
+	FullNote string `json:"full_note,omitempty"`
+	// RunID is the run read; Note says why it is not the one asked for (the
+	// session's latest run failed before it started, so it has no
+	// transcript: the read shows that run's error and the newest run that
+	// did start). Additive, 2026-10-31.
+	RunID string `json:"run_id,omitempty"`
+	Note  string `json:"note,omitempty"`
 }
 
 // AttachMechanism states exactly how a client reaches a run's terminal.
@@ -496,6 +677,20 @@ type UpdateSessionRequest struct {
 	// archives the session. An ended session is archived at once.
 	// Archived=false cancels a pending archive.
 	WhenDone bool `json:"when_done,omitempty"`
+	// IncludeChildren (additive): a session archiving itself while
+	// sessions under it are still working (a live run that is not idle at
+	// its prompt) is refused unless this is set; then they are archived
+	// with it as usual (archive cascade). Idle and ended descendants
+	// cascade either way. Other callers and targets are unaffected.
+	IncludeChildren bool `json:"include_children,omitempty"`
+	// CancelArchive (additive) cancels a pending archive without
+	// unarchiving: it removes TagArchiveWhenDone from the session and from
+	// the descendants the same archive cascaded to (audited "archived with
+	// ancestor <session>"); descendants scheduled by other means keep
+	// theirs. Not combined with Archived. The answer lists what it canceled
+	// (SessionView.ArchiveCanceled). Archived=false cancels the same way and
+	// also unarchives.
+	CancelArchive bool `json:"cancel_archive,omitempty"`
 	// Icon (W-archive2, additive) sets the session's emoji ("" clears).
 	// Any principal may set any session's icon, like a rename.
 	Icon *string `json:"icon,omitempty"`

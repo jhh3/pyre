@@ -29,8 +29,9 @@ import (
 //     own descendants follow when its archive completes; an ended one is
 //     archived now and the walk continues under it; an archived one (a
 //     reviewer that archived itself) is passed through;
-//   - a descendant the owner started, or attached to, messaged or typed
-//     into since it was created (ownerTouchedSince) is his: it and what it
+//   - a descendant the owner started, or attached to (interactively: a
+//     read-only view does not count), messaged or typed into since it
+//     was created (ownerTouchedSince) is his: it and what it
 //     started are left alone and listed;
 //   - each cascaded archive is audited by Pyre with the reason
 //     "archived with ancestor <session>" (the session first archived);
@@ -156,6 +157,8 @@ func (h *Hub) cascadeArchive(ctx context.Context, from, root string) {
 		switch {
 		case c.Archived:
 			return true // archived already: what it started may still run
+		case c.IsGitHubWait():
+			return false // a GitHub wait outlives its creator and messages the creator's parent (cli/wait_gh.go)
 		case hasArchiveWhenDone(c):
 			return false // its own pending archive cascades when it completes
 		case h.ownerUsing(ctx, c):

@@ -33,7 +33,8 @@ func TestPickPlacementLeastLoaded(t *testing.T) {
 	if err != nil || pl.NodeID != nocodex.NodeID {
 		t.Fatalf("claude: %+v %v", pl, err)
 	}
-	if !strings.Contains(pl.Reason, "least loaded of 3") || !strings.Contains(pl.Reason, "synth-busy") {
+	// synth-busy (9% memory free, swap 88% used) is overloaded: skipped.
+	if !strings.Contains(pl.Reason, "least loaded of 2") || !strings.Contains(pl.Reason, "skipped overloaded synth-busy") {
 		t.Fatalf("reason: %q", pl.Reason)
 	}
 	// Restricted to nodes holding the checkout; tie order follows among.
@@ -144,11 +145,11 @@ func TestAccountFilter(t *testing.T) {
 		limited.NodeID:   {Outcome: c.FallbackWaiting, Reason: "all at their limit"},
 	}}}
 	bg := context.Background()
-	rej, soft := o.accountFilter(bg, nodes, "claude", "", false, false)
+	rej, soft, _ := o.accountFilter(bg, nodes, "claude", "", false, false)
 	if len(rej) != 1 || len(soft) != 0 || !strings.Contains(rej[limited.NodeID], "all at their limit") {
 		t.Fatalf("eligible: %v %v", rej, soft)
 	}
-	rej, _ = o.accountFilter(bg, nodes, "claude", "acct_synth-a", false, false)
+	rej, _, _ = o.accountFilter(bg, nodes, "claude", "acct_synth-a", false, false)
 	if _, bad := rej[ok.NodeID]; bad || len(rej) != 2 || rej[withLogin.NodeID] == "" || rej[limited.NodeID] == "" {
 		t.Fatalf("explicit: %v", rej)
 	}
@@ -156,22 +157,22 @@ func TestAccountFilter(t *testing.T) {
 	// makes it hard.
 	other := synthNode("node_synth-other", 0, 30000, 32000, 0, 0, 0, c.HarnessClaude)
 	o.API.(selectAPI).sel[other.NodeID] = &c.AccountSelection{AccountID: "acct_synth-b"}
-	if rej, soft = o.accountFilter(bg, []c.Node{other}, "claude", "acct_synth-a", false, false); len(rej) != 0 || soft[other.NodeID] == "" {
+	if rej, soft, _ = o.accountFilter(bg, []c.Node{other}, "claude", "acct_synth-a", false, false); len(rej) != 0 || soft[other.NodeID] == "" {
 		t.Fatalf("soft pin: %v %v", rej, soft)
 	}
-	if rej, soft = o.accountFilter(bg, []c.Node{other}, "claude", "acct_synth-a", false, true); rej[other.NodeID] == "" || len(soft) != 0 {
+	if rej, soft, _ = o.accountFilter(bg, []c.Node{other}, "claude", "acct_synth-a", false, true); rej[other.NodeID] == "" || len(soft) != 0 {
 		t.Fatalf("strict pin: %v %v", rej, soft)
 	}
-	rej, _ = o.accountFilter(bg, nodes, "claude", "", true, false)
+	rej, _, _ = o.accountFilter(bg, nodes, "claude", "", true, false)
 	if _, bad := rej[withLogin.NodeID]; bad || len(rej) != 3 {
 		t.Fatalf("ambient: %v", rej)
 	}
-	if rej, soft = o.accountFilter(bg, nodes, "shell", "", false, false); rej != nil || soft != nil {
+	if rej, soft, _ = o.accountFilter(bg, nodes, "shell", "", false, false); rej != nil || soft != nil {
 		t.Fatal("shell has no accounts")
 	}
 	// agy: no managed logins, nothing to balance (every node with agy runs
 	// its own login), so no account dry runs reject a node.
-	if rej, soft = o.accountFilter(bg, nodes, "agy", "", false, false); rej != nil || soft != nil {
+	if rej, soft, _ = o.accountFilter(bg, nodes, "agy", "", false, false); rej != nil || soft != nil {
 		t.Fatal("agy is never filtered by accounts")
 	}
 }
@@ -193,7 +194,7 @@ func TestPlacedCodexWithoutFreeAccountFallsBack(t *testing.T) {
 	o := &Ops{API: api}
 	var pl Placement
 	res, err := o.StartSession(withPlacement(context.Background(), &pl), StartParams{Harness: "codex", Prompt: "review this", FallbackHarness: "claude"})
-	if err != nil || res.Session.Session.Harness != c.HarnessClaude || !strings.Contains(res.Session.Session.Title, codexUnavailableTitle) {
+	if err != nil || res.Session.Session.Harness != c.HarnessClaude || !strings.Contains(res.Session.Session.Title, c.HarnessFallbackTitlePrefix) {
 		t.Fatalf("fallback: %+v %v", res.Session.Session, err)
 	}
 	if !strings.Contains(pl.Reason, "the preflight decides") {
@@ -240,7 +241,7 @@ func TestAccountFilterAgyExplicit(t *testing.T) {
 	other := synthNode("node_synth-other", 0, 30000, 32000, 0, 0, 0, c.HarnessAgy)
 	other.Harnesses[0].Login = &c.HarnessLogin{Email: "someone-else@example.invalid"}
 	o := &Ops{API: agyAccountsAPI{selectAPI{sel: map[string]*c.AccountSelection{}}}}
-	rej, soft := o.accountFilter(context.Background(), []c.Node{mine, other}, "agy", "acct_synth-agy", false, false)
+	rej, soft, _ := o.accountFilter(context.Background(), []c.Node{mine, other}, "agy", "acct_synth-agy", false, false)
 	if len(soft) != 0 || len(rej) != 1 || rej[other.NodeID] == "" {
 		t.Fatalf("explicit agy: %v %v", rej, soft)
 	}
@@ -256,12 +257,12 @@ func TestAccountFilterReserveIsSoft(t *testing.T) {
 		normal.NodeID:  {AccountID: "acct_synth-a"},
 		reserve.NodeID: {AccountID: "acct_synth-r", Reserve: true, Reason: "reserve account: no normal anthropic account has room"},
 	}}}
-	rej, soft := o.accountFilter(context.Background(), []c.Node{normal, reserve}, "claude", "", false, false)
+	rej, soft, _ := o.accountFilter(context.Background(), []c.Node{normal, reserve}, "claude", "", false, false)
 	if len(rej) != 0 || len(soft) != 1 || !strings.Contains(soft[reserve.NodeID], "only a reserve anthropic account has room there") {
 		t.Fatalf("rej %v soft %v", rej, soft)
 	}
 	// An explicit account is not weighed by tier.
-	if _, soft = o.accountFilter(context.Background(), []c.Node{reserve}, "claude", "acct_synth-r", false, false); len(soft) != 0 {
+	if _, soft, _ = o.accountFilter(context.Background(), []c.Node{reserve}, "claude", "acct_synth-r", false, false); len(soft) != 0 {
 		t.Fatalf("explicit reserve: %v", soft)
 	}
 }

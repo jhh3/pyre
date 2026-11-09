@@ -2253,7 +2253,7 @@ func getCommand() *cobra.Command {
 			}
 			service := linkcontext.Service{State: env.state, Connections: env.service, Preferences: env.linkPreferences}
 			prompt := strings.Join(args, "\n")
-			resolution := service.ResolveDetailed(cmd.Context(), prompt, linkcontext.ResolveOptions{Mode: mode, Connection: connectionName})
+			resolution := service.ResolveDetailed(cmd.Context(), prompt, linkcontext.ResolveOptions{Mode: mode, Connection: connectionName, Explicit: true})
 			if len(resolution.Resources) == 0 {
 				if len(resolution.Diagnostics) > 0 {
 					diagnostic := resolution.Diagnostics[0]

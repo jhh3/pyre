@@ -1763,7 +1763,8 @@
         },
         "created_at": "0001-01-01T00:00:00Z",
         "lineage": {},
-        "archived": true
+        "archived": true,
+        "archived_at": null
       },
       "occurred_at": "2026-10-05T09:40:00Z",
       "ingested_at": "2026-10-05T09:40:00Z"
@@ -1783,7 +1784,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthA",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthA",
@@ -1829,7 +1831,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthB",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthB",
@@ -1877,7 +1880,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthC",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthC",
@@ -1923,7 +1927,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthD",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthD",
@@ -1969,7 +1974,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthE",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthE",
@@ -2015,7 +2021,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthF",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthF",
@@ -2061,7 +2068,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthG",
         "lineage": {},
-        "archived": true
+        "archived": true,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthG",
@@ -2108,7 +2116,8 @@
         "created_at": "2026-10-05T08:00:00Z",
         "current_run_id": "run_synthH",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synthH",

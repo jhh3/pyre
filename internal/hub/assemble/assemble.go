@@ -42,6 +42,7 @@ import (
 	"github.com/jhh3/pyre/internal/projects"
 	"github.com/jhh3/pyre/internal/review"
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
+	"github.com/jhh3/pyre/internal/sysstats"
 	"github.com/jhh3/pyre/internal/terminal"
 	"github.com/jhh3/pyre/internal/topology"
 	"github.com/jhh3/pyre/internal/transport"
@@ -134,11 +135,13 @@ func Open(ctx context.Context, cfg Config) (*Stack, error) {
 	}
 	s := &Stack{DB: cfg.DB, log: log}
 	if s.DB == nil {
-		db, err := sqlitex.Open(filepath.Join(cfg.DataDir, DBFile))
+		path := filepath.Join(cfg.DataDir, DBFile)
+		db, err := sqlitex.Open(path)
 		if err != nil {
 			return nil, err
 		}
 		s.DB, s.ownDB = db, true
+		prepareReclaim(ctx, db, path, log)
 	}
 	fail := func(err error) (*Stack, error) {
 		s.Close()
@@ -259,7 +262,7 @@ func Open(ctx context.Context, cfg Config) (*Stack, error) {
 	if cfg.PreviewURL == "" {
 		extra[contracts.PathPreview] = s.Preview // same origin; links use HubURL
 	}
-	s.api = httpapi.New(s.Hub, s.Auth, httpapi.Options{Extra: extra, Logger: log})
+	s.api = httpapi.New(s.Hub, s.Auth, httpapi.Options{Extra: extra, Logger: log, Compress: true, ETags: true})
 	s.Handler = s.api
 	return s, nil
 }
@@ -520,4 +523,22 @@ func (a *syncAttention) RaiseWaiting(ctx context.Context, sessionID string, proj
 func (a *syncAttention) FlagAttention(ctx context.Context, req contracts.FlagAttentionRequest) (contracts.AttentionItem, error) {
 	a.catchUp(ctx)
 	return a.Store.FlagAttention(ctx, req)
+}
+
+// prepareReclaim switches hub.db to incremental auto-vacuum so maintenance
+// can return pages freed by retention to the filesystem (W-dbspace). On a
+// database with much free space this runs a one-time VACUUM before the hub
+// serves (about a second per few hundred MB of live data). A failure is
+// logged, never fatal: the hub runs as before and reuses free pages.
+func prepareReclaim(ctx context.Context, db *sql.DB, path string, log *slog.Logger) {
+	rep, err := sqlitex.PrepareReclaim(ctx, db, path, sqlitex.ReclaimPolicy{DiskAvail: sysstats.DiskAvail})
+	switch {
+	case err != nil:
+		log.Warn("hub.db: switching to incremental vacuum failed", "err", err)
+	case rep.Vacuumed:
+		log.Info("hub.db: vacuumed once to enable incremental vacuum", "before_mb", rep.Before.Pages*rep.Before.PageSize>>20,
+			"after_mb", rep.After.Pages*rep.After.PageSize>>20, "took", rep.Took.Round(time.Millisecond).String())
+	case rep.Skipped != "":
+		log.Info("hub.db: not switched to incremental vacuum yet", "reason", rep.Skipped)
+	}
 }

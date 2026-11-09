@@ -112,7 +112,20 @@ func cmdCompact(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `VACUUM`); err != nil {
+	// Set auto_vacuum=INCREMENTAL on the VACUUM's own connection (the mode
+	// is pending per connection until a VACUUM applies it), so the served
+	// hub can shrink the file later without another offline compact.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
+		conn.Close()
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `VACUUM`)
+	conn.Close()
+	if err != nil {
 		return fmt.Errorf("vacuum: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {

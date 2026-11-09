@@ -42,7 +42,7 @@ func TestUnreachableNamesTheEndpoint(t *testing.T) {
 		{"too long", long, []string{"longer than unix sockets allow"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, nil).with(EnvSocket, tc.sock)
+			e := newEnv(t, nil).with(EnvSocket, tc.sock, EnvSocketWait, "0")
 			r := run(t, e, nil, "sessions")
 			expectCode(t, r, ExitUnavailable)
 			if strings.Contains(r.stderr, "hub unreachable") {
@@ -72,7 +72,7 @@ func TestUnreachableNamesTheEndpoint(t *testing.T) {
 		}
 	}
 	// --json keeps a parseable error with the endpoint in details.
-	r = run(t, newEnv(t, nil).with(EnvSocket, filepath.Join(dir, "nope.sock")), nil, "--json", "sessions")
+	r = run(t, newEnv(t, nil).with(EnvSocket, filepath.Join(dir, "nope.sock"), EnvSocketWait, "0"), nil, "--json", "sessions")
 	if !strings.Contains(r.stderr, `"unreachable":"local_daemon"`) || !strings.Contains(r.stderr, `"socket":`) {
 		t.Fatalf("json error lacks endpoint details: %s", r.stderr)
 	}

@@ -47,6 +47,12 @@
 //     timeout, falling back to the local fact) whether the message was
 //     already accepted by any evidence (read, ack, reply), cancelled or
 //     expired; such mail is settled locally and never pasted.
+//   - In-turn doorbell (input.doorbell): while the run is busy, queued
+//     mail that waited MailNoticeAge or longer is reported to an adapter
+//     that implements MailNotifier, which may tell the agent with one short
+//     notice inside the running turn (never the bodies). The mail itself is
+//     untouched: it stays queued and is pasted at idle unless the agent
+//     read it with the inbox tool meanwhile (pull evidence, above).
 //   - Shutdown never cuts a paste on purpose: Drain stops new attempts and
 //     waits for in-flight ones. An attempt cut anyway is reconciled with a
 //     fresh context; provably unsubmitted input stays queued, only a truly
@@ -82,6 +88,9 @@ type Target struct {
 	Handle   contracts.RunHandle
 	Adapter  contracts.RuntimeAdapter
 	Attached bool // a human terminal client is attached
+	// LimitedUntil: the run's account is at a usage limit until then (the
+	// run reported it and has not finished a turn since); input waits.
+	LimitedUntil time.Time
 }
 
 // InputReadiness is optionally implemented by runtime adapters: a check,
@@ -97,6 +106,18 @@ type InputReadiness interface {
 type DoorbellNotifier interface {
 	DoorbellNotifiedAt(h contracts.RunHandle, messageID string) (time.Time, bool)
 }
+
+// MailNotifier is optionally implemented by runtime adapters with an
+// in-turn doorbell (contracts.CapInputDoorbell): the engine reports the
+// session's queued mail while the run is busy; the adapter decides whether
+// and when to tell the agent (a notice only, never the bodies; bounded per
+// turn) and must not block longer than ctx.
+type MailNotifier interface {
+	NotifyQueuedMail(ctx context.Context, h contracts.RunHandle, mail []contracts.QueuedMail)
+}
+
+// DefaultMailNoticeAge is Config.MailNoticeAge's default.
+const DefaultMailNoticeAge = 60 * time.Second
 
 // DefaultStaleBacklog is Config.StaleBacklog's default.
 const DefaultStaleBacklog = 10 * time.Minute
@@ -163,6 +184,10 @@ type Config struct {
 	// FactsTimeout, default DefaultFactsTimeout).
 	Facts        MessageFacts
 	FactsTimeout time.Duration
+	// MailNoticeAge: queued mail this old (since the node received it) is
+	// reported to a busy run's MailNotifier (default DefaultMailNoticeAge;
+	// negative disables).
+	MailNoticeAge time.Duration
 
 	// OnAccepted, if set, is called after an accepted delivery is recorded
 	// (the runtime is now likely busy; the host should observe the run soon
@@ -220,6 +245,9 @@ func New(cfg Config) *Engine {
 	}
 	if cfg.FactsTimeout <= 0 {
 		cfg.FactsTimeout = DefaultFactsTimeout
+	}
+	if cfg.MailNoticeAge == 0 {
+		cfg.MailNoticeAge = DefaultMailNoticeAge
 	}
 	log := cfg.Logger
 	if log == nil {
@@ -422,6 +450,11 @@ func (e *Engine) gate(t Target, mode contracts.MessageMode) (deliver bool, rejec
 	if !liveForInput(t.Run.State) {
 		return false, "", "run " + t.Run.RunID + " is " + string(t.Run.State)
 	}
+	if !t.LimitedUntil.IsZero() && e.cfg.Clock.Now().Before(t.LimitedUntil) {
+		// Every turn on that account fails at once: a paste would only
+		// produce another failed turn (iss_…).
+		return false, "", "the run's account is at its limit until " + t.LimitedUntil.UTC().Format("15:04Z") + "; held until the reset or an account switch"
+	}
 	safe := structuredSafe(caps, mode)
 	hubNow := e.cfg.HubClock.Now() // leases expire on the hub clock
 	note := ""
@@ -470,6 +503,9 @@ func (e *Engine) ProcessSession(ctx context.Context, sessionID string, force boo
 			queue = append(queue, m)
 		}
 	}
+	if e.noticeDue(msgs) {
+		defer e.mailNotice(ctx, sessionID) // after this pass, under the session lock
+	}
 	var parked staleParks
 	defer parked.remind()
 	for _, m := range steer {
@@ -483,6 +519,79 @@ func (e *Engine) ProcessSession(ctx context.Context, sessionID string, force boo
 			return // preserve order behind a temporarily blocked head
 		}
 	}
+}
+
+// noticeCandidate: mail a busy run's doorbell may announce. Only queued
+// (mode queue), never-attempted mail from someone else: not the session's
+// own messages, and of Pyre's system mail only what the agent waits for
+// (child-report digests, answers to its asks, owner-action outcomes).
+func noticeCandidate(m inbox.Message) bool {
+	if m.State != contracts.DeliveryQueued || m.Attempted || m.Envelope.Mode != contracts.ModeQueue {
+		return false
+	}
+	switch s := m.Envelope.Sender; s.Kind {
+	case contracts.PrincipalSession:
+		return s.ID != m.SessionID
+	case contracts.PrincipalSystem:
+		return noticeSystemSenders[s.ID]
+	}
+	return true
+}
+
+// noticeSystemSenders are the system principals whose mail the agent acts
+// on (hub childDigestSender, askSystem, ownerActionSender).
+var noticeSystemSenders = map[string]bool{"child-reports": true, "asks": true, "approvals": true}
+
+// noticeDue reports whether msgs hold doorbell candidates old enough.
+func (e *Engine) noticeDue(msgs []inbox.Message) bool {
+	if e.cfg.MailNoticeAge < 0 {
+		return false
+	}
+	now := e.cfg.Clock.Now()
+	for _, m := range msgs {
+		if noticeCandidate(m) && now.Sub(m.ReceivedAt) >= e.cfg.MailNoticeAge {
+			return true
+		}
+	}
+	return false
+}
+
+// mailNotice reports the session's doorbell candidates to its busy run's
+// MailNotifier (caller holds the session lock). Mail delivered or read in
+// this pass is gone from the fresh read; young mail is left out.
+func (e *Engine) mailNotice(ctx context.Context, sessionID string) {
+	if ctx.Err() != nil {
+		return
+	}
+	t, ok := e.cfg.Runs.Current(ctx, sessionID)
+	if !ok || t.Adapter == nil || t.Run.State != contracts.RunRunning || !contracts.HasCap(capsOf(t), contracts.CapInputDoorbell) {
+		return
+	}
+	mn, ok := t.Adapter.(MailNotifier)
+	if !ok {
+		return
+	}
+	msgs, err := e.cfg.Inbox.Queued(ctx, sessionID)
+	if err != nil {
+		return
+	}
+	now := e.cfg.Clock.Now()
+	var mail []contracts.QueuedMail
+	for _, m := range msgs {
+		if !noticeCandidate(m) || now.Sub(m.ReceivedAt) < e.cfg.MailNoticeAge {
+			continue
+		}
+		if m.BoundRunID != "" && m.BoundRunID != t.Run.RunID {
+			continue // never delivered to this run
+		}
+		mail = append(mail, contracts.QueuedMail{MessageID: m.Envelope.MessageID, ReceivedAt: m.ReceivedAt})
+	}
+	if len(mail) == 0 {
+		return
+	}
+	nctx, cancel := context.WithTimeout(ctx, e.cfg.DeliverTimeout)
+	defer cancel()
+	mn.NotifyQueuedMail(nctx, t.Handle, mail)
 }
 
 // staleParks collects mail newly left in the inbox by the held-stale rule

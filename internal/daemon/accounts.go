@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
@@ -141,6 +142,34 @@ type RunInfo struct {
 	// changed delivery state within the last minute (input may be on its
 	// way into the harness even though the run still reads idle).
 	RecentInput bool
+	// Cwd is the run's working directory (its checkout when it has one).
+	Cwd string
+}
+
+// QuiesceResult reports how QuiesceRun stopped a run.
+type QuiesceResult struct {
+	Exited       bool
+	TurnInFlight bool
+	Detail       string
+	// Refused: a guarded stop found live background tasks and stopped
+	// nothing (the tasks).
+	Refused []string
+	// Stopped: background tasks the stop ended (an unguarded stop).
+	Stopped []string
+}
+
+// backgroundProbe bounds BackgroundGuard.BackgroundWork.
+const backgroundProbe = 5 * time.Second
+
+// backgroundWork asks the run's adapter for live background tasks.
+func backgroundWork(ctx context.Context, lr *liveRun, rec runRecord) []string {
+	g, ok := lr.adapter.(contracts.BackgroundGuard)
+	if !ok || rec.Handle == nil {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, backgroundProbe)
+	defer cancel()
+	return g.BackgroundWork(cctx, *rec.Handle)
 }
 
 // recentInput reports queued or recently delivered messages for a session.
@@ -179,42 +208,94 @@ func (d *Daemon) CurrentRun(ctx context.Context, sessionID string) (RunInfo, err
 	r := rec.Run
 	return RunInfo{SessionID: r.SessionID, RunID: r.RunID, Harness: r.Harness, Capabilities: r.Capabilities, NativeRef: r.NativeRef,
 		AccountID: r.AccountID, TurnInFlight: r.State == contracts.RunRunning, Live: rec.Phase == phaseLive, State: r.State,
-		RecentInput: d.recentInput(ctx, sessionID, time.Minute)}, nil
+		RecentInput: d.recentInput(ctx, sessionID, time.Minute), Cwd: d.scanInput(rec).Cwd}, nil
 }
 
-// QuiesceRun stops a run (as the adapter supports) and waits until it has
-// ended or ctx is done. turnInFlight reports whether a turn was running.
-func (d *Daemon) QuiesceRun(ctx context.Context, sessionID, runID string) (exited, turnInFlight bool, detail string, err error) {
+// RunBackgroundWork lists a live run's harness background tasks that a stop
+// would end (contracts.BackgroundGuard; decision I67); nil when the run is
+// not live or its adapter cannot tell.
+func (d *Daemon) RunBackgroundWork(ctx context.Context, runID string) []string {
+	lr, live := d.getLive(runID)
+	if !live {
+		return nil
+	}
+	rec, _ := lr.snapshot()
+	if rec.Phase != phaseLive {
+		return nil
+	}
+	return backgroundWork(ctx, lr, rec)
+}
+
+// QuiesceRun stops a run for an account switch (as the adapter supports)
+// and waits until it has ended or ctx is done. TurnInFlight reports
+// whether a turn was running. switchKind (contracts.AccountSwitch*) is
+// recorded on the run before the stop (AdapterDataAccountSwitch) so the hub
+// reports its end as a restart. guard (a proactive move): an adapter that
+// sees live background tasks (contracts.BackgroundGuard) stops nothing and
+// the result names them in Refused (decision I67).
+func (d *Daemon) QuiesceRun(ctx context.Context, sessionID, runID, switchKind string, guard bool) (QuiesceResult, error) {
 	lr, err := d.liveTarget(ctx, sessionID, runID)
 	if err != nil {
 		if contracts.IsCode(err, contracts.ErrConflict) { // already not live
-			return true, false, "run already ended", nil
+			return QuiesceResult{Exited: true, Detail: "run already ended"}, nil
 		}
-		return false, false, "", err
+		return QuiesceResult{}, err
 	}
 	rec, _ := lr.snapshot()
-	turnInFlight = rec.Run.State == contracts.RunRunning
+	res := QuiesceResult{TurnInFlight: rec.Run.State == contracts.RunRunning}
 	if !contracts.HasCap(rec.Run.Capabilities, contracts.CapStop) {
-		return false, turnInFlight, "adapter cannot stop runs", contracts.Errorf(contracts.ErrUnsupported, "adapter %s cannot stop runs", lr.adapter.Name())
+		res.Detail = "adapter cannot stop runs"
+		return res, contracts.Errorf(contracts.ErrUnsupported, "adapter %s cannot stop runs", lr.adapter.Name())
+	}
+	bgGuard, hasGuard := lr.adapter.(contracts.BackgroundGuard)
+	var before []string
+	if hasGuard && !guard {
+		before = backgroundWork(ctx, lr, rec)
 	}
 	marked := d.markStopRequested(ctx, lr, "account fallback")
+	d.setAdapterData(ctx, lr, contracts.AdapterDataAccountSwitch, switchKind)
 	cctx, cancel := context.WithTimeout(ctx, d.cfg.CommandTimeout)
-	rcpt, err := lr.adapter.Stop(cctx, *rec.Handle)
+	var rcpt contracts.CommandReceipt
+	if guard && hasGuard {
+		rcpt, err = bgGuard.StopUnlessBackground(cctx, *rec.Handle)
+	} else {
+		rcpt, err = lr.adapter.Stop(cctx, *rec.Handle)
+	}
 	cancel()
-	if marked && (err != nil || rcpt.Outcome == contracts.OutcomeFailed) {
-		d.clearStopRequested(ctx, lr)
+	if err != nil || rcpt.Outcome == contracts.OutcomeFailed {
+		if marked {
+			d.clearStopRequested(ctx, lr)
+		}
+		d.setAdapterData(ctx, lr, contracts.AdapterDataAccountSwitch, "")
+	}
+	if tasks := contracts.BackgroundRefusal(err); tasks != nil {
+		res.Refused, res.Detail = tasks, rcpt.Detail
+		return res, nil
 	}
 	if err != nil {
-		return false, turnInFlight, "", err
+		return res, err
+	}
+	if hasGuard && !guard {
+		// What the stop ended: the tasks seen before it, and any the
+		// harness's exit dialog listed while it confirmed it.
+		after := bgGuard.BackgroundWork(ctx, *rec.Handle)
+		res.Stopped = before
+		for _, t := range after {
+			if !slices.Contains(res.Stopped, t) {
+				res.Stopped = append(res.Stopped, t)
+			}
+		}
 	}
 	for {
 		d.PollNow(ctx, rec.Run.RunID)
 		if _, live := d.getLive(rec.Run.RunID); !live {
-			return true, turnInFlight, "stopped for account fallback", nil
+			res.Exited, res.Detail = true, "stopped for account fallback"
+			return res, nil
 		}
 		select {
 		case <-ctx.Done():
-			return false, turnInFlight, "timed out waiting for exit", nil
+			res.Detail = "timed out waiting for exit"
+			return res, nil
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
@@ -271,7 +352,8 @@ func (d *Daemon) StartContinuation(ctx context.Context, c ContinuationRequest) (
 		actor = "account-fallback"
 	}
 	sc := contracts.StartRunCommand{Session: prev.Session, RunID: runID, Cwd: prevRun.Cwd,
-		AccountPolicy: policy, SessionToken: tok, PreviousRun: &prevRun, AllowHandoff: !c.NativeOnly, InitialPrompt: c.Prompt}
+		AccountPolicy: policy, SessionToken: tok, PreviousRun: &prevRun, AllowHandoff: !c.NativeOnly, InitialPrompt: c.Prompt,
+		ProjectLead: prevRun.AdapterData[adapterDataProjectLead] == "1"} // no hub here: the previous run's flag
 	cmd := contracts.NodeCommand{CommandID: contracts.NewID(contracts.PrefixCommand), Kind: contracts.CmdResume,
 		Actor: contracts.Principal{Kind: contracts.PrincipalSystem, ID: actor}, IssuedAt: d.now()}
 	res, err := d.startRun(ctx, cmd, sc, true)

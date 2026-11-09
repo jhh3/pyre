@@ -86,3 +86,7 @@ func psRun(name string, args ...string) []byte {
 	out, _ := exec.CommandContext(ctx, name, args...).Output()
 	return out
 }
+
+// leftRunning is not scanned on macOS (ps cannot show a process's cgroup,
+// and the environment it shows is ambiguous): nothing is reported.
+func leftRunning(map[string]leftScan, map[int]bool) map[string]leftProcs { return nil }

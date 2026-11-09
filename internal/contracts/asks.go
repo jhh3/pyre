@@ -73,7 +73,7 @@ type AskState string
 
 const (
 	AskOpen       AskState = "open"
-	AskAnswered   AskState = "answered"   // the owner chose (or answered in chat: Answer.Source)
+	AskAnswered   AskState = "answered"   // the owner chose (Answer.Source "chat": in the session's chat)
 	AskDefaulted  AskState = "defaulted"  // deadline passed; DefaultOption applied
 	AskExpired    AskState = "expired"    // deadline passed with no default
 	AskWithdrawn  AskState = "withdrawn"  // the asker took it back, the owner dismissed it, or its session was archived
@@ -108,19 +108,30 @@ type AskAnswer struct {
 	ByDefault bool              `json:"by_default,omitempty"`
 	At        time.Time         `json:"at"`
 	// Source (additive) is how the owner answered: "" for an answer to the
-	// ask itself (web inbox, CLI, phone), AskSourceChat when he wrote to the
-	// session directly instead (Text is what he wrote; rules in
-	// internal/hub/asks_chat.go).
+	// ask itself (web inbox, CLI, phone), AskSourceChat when he answered by
+	// writing to the session instead (rules in internal/hub/asks_chat.go).
 	Source string `json:"source,omitempty"`
-	// With (additive) lists the other asks the same chat input answered.
+	// With (additive, legacy) lists the other asks the same chat input
+	// answered (asks answered in chat before 2026-10-30).
 	With []string `json:"with,omitempty"`
 }
 
-// AskSourceChat: the owner answered by writing to the asking session
-// itself (typed into it, or a Pyre message to it that is not a reply in a
-// thread). Every open ask of the session filed before that input is
-// answered with its text.
+// AskSourceChat: the owner answered in the asking session's chat, not on
+// the ask. Either his chat text was exactly one of the options of the
+// session's only open ask (By the owner), or the asking session recorded
+// the option he chose there (By the session; Text quotes his words).
+// Before 2026-10-30 any owner chat answered every open ask (OptionID
+// empty); chat alone no longer decides an ask.
 const AskSourceChat = "chat"
+
+// AskOwnerChat (additive) is the owner's latest chat input to the asking
+// session while the ask was open. It does not decide the ask: the ask stays
+// open in his inbox, and the session records the outcome with asks.answer
+// once his words answer it (or withdraws or re-asks).
+type AskOwnerChat struct {
+	Text string    `json:"text"`
+	At   time.Time `json:"at"`
+}
 
 // AskDismissReason is the withdraw reason the owner's clients send to
 // dismiss (archive) an open ask: no option is chosen and the default is
@@ -168,9 +179,12 @@ type Ask struct {
 	ThreadID     string       `json:"thread_id,omitempty"`
 	AttentionID  string       `json:"attention_id,omitempty"`
 	// DecisionMessageID is the message that told the asker the outcome.
-	DecisionMessageID string    `json:"decision_message_id,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	DecisionMessageID string `json:"decision_message_id,omitempty"`
+	// OwnerChat is set when the owner wrote to the asking session while
+	// the ask was open (it stays open).
+	OwnerChat *AskOwnerChat `json:"owner_chat,omitempty"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
 }
 
 // Option returns the option with id, if any.
@@ -258,9 +272,13 @@ type AnswerAskItem struct {
 	Text  string            `json:"text,omitempty"` // free text; required when OptionID is empty
 }
 
-// AnswerAsksRequest answers one or more asks at once (owner only). Each
-// item commits independently; the decisions for one asking session go out
-// as one combined message.
+// AnswerAsksRequest answers one or more asks at once. The owner answers any
+// ask. The asking session may record the owner's answer to its own ask
+// after he answered in its chat: OptionID (or Items) is required and Text
+// quotes his words; the answer gets Source AskSourceChat. Proposals,
+// owner-action requests and asks with a held answer are the owner's only.
+// Each item commits independently; the decisions for one asking session go
+// out as one combined message (none to a session that answered itself).
 type AnswerAsksRequest struct {
 	Mutation
 	Answers []AnswerAskItem `json:"answers"`

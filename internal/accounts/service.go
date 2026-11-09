@@ -53,8 +53,15 @@ type RunController interface {
 	// Quiesce stops the run (interrupt/stop as the adapter supports) and
 	// waits until it has exited or the context ends. TurnInFlight reports
 	// whether a turn was running when the limit hit (its external effects are
-	// uncertain and its instruction must not be replayed).
-	Quiesce(ctx context.Context, sessionID, runID string) (QuiesceResult, error)
+	// uncertain and its instruction must not be replayed). opt.Proactive (a
+	// move between turns): a run with live harness background tasks is not
+	// stopped (QuiesceResult.Refused; decision I67).
+	Quiesce(ctx context.Context, sessionID, runID string, opt QuiesceOptions) (QuiesceResult, error)
+	// BackgroundWork lists the live run's harness background tasks
+	// (shells, monitors, background subagents, Codex exec groups) that a
+	// stop would end; Pyre's own message monitor is not one. Nil: none, or
+	// the harness cannot tell (decision I67).
+	BackgroundWork(ctx context.Context, sessionID, runID string) []string
 	// StartContinuation starts the successor run bound to AccountID (the
 	// daemon calls Resolver.ResolveFor with an explicit policy for it).
 	// Kind native_resume: same session, Resume = NativeRef. Kind handoff:
@@ -80,6 +87,16 @@ type RunInfo struct {
 	RecentInput bool
 	// Live: the run's process is still up.
 	Live bool
+	// Cwd is the run's working directory on this node. A proactive move
+	// relaunches there, so it skips a run whose directory is gone.
+	Cwd string
+}
+
+// QuiesceOptions says what kind of switch stops the run.
+type QuiesceOptions struct {
+	// Proactive: a move between turns (rebalance.go). The stop is refused
+	// when the harness shows live background tasks.
+	Proactive bool
 }
 
 // QuiesceResult reports how a run was stopped.
@@ -87,6 +104,11 @@ type QuiesceResult struct {
 	Exited       bool
 	TurnInFlight bool
 	Detail       string
+	// Refused: a proactive stop found live background tasks and stopped
+	// nothing (the tasks).
+	Refused []string
+	// Stopped: background tasks the stop ended.
+	Stopped []string
 }
 
 // Continuation asks the daemon to start a successor run.
@@ -217,7 +239,10 @@ type Config struct {
 	// SessionSwitchWindow is the circuit breaker for automatic account
 	// switches: at most one per session within it (default 30m). A further
 	// limit inside the window pauses switching for that session (the run is
-	// left as it is and the owner is asked) instead of switching again.
+	// left as it is and the owner is asked) instead of switching again,
+	// unless the account it was moved to reported its own limit with a new
+	// reset (fallback.go confirmedRepeat; at most SessionSwitchMax switches
+	// in the window).
 	SessionSwitchWindow time.Duration
 	// NodeSwitchMax / NodeSwitchWindow pause automatic switching once that
 	// many different accounts ran out on this node within the window
@@ -287,6 +312,8 @@ type Service struct {
 	tok tokenCache
 	// fleet caches the hub's view of other machines' runs (affinity.go).
 	fleet fleetCache
+	// fleetAccts caches the hub's account list per provider (ownaccount.go).
+	fleetAccts fleetAcctCache
 	// rb remembers idle runs and failed moves between sweeps (rebalance.go).
 	rb rebalanceState
 }

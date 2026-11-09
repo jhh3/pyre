@@ -205,11 +205,22 @@ func (m *Model) flushEvents() tea.Cmd {
 	dirty := m.ev.dirty
 	m.ev.dirty = nil
 	var cmds []tea.Cmd
-	if ids := takeSessionIDs(dirty); len(ids) > 0 && !dirty["sessions"] {
+	ids := takeSessionIDs(dirty)
+	if dirty["sessions"] {
+		if st := m.loads["sessions"]; st != nil && m.reloadWait("sessions", st) > 0 && !st.inflight {
+			// The full re-list is due but spaced (throttle.go): it runs
+			// later; the sessions this batch names are patched now.
+			delete(dirty, "sessions")
+			st.stale = true
+		}
+	}
+	if len(ids) > 0 && !dirty["sessions"] {
 		if cmd, ok := m.patchSessions(ids); ok {
 			cmds = append(cmds, cmd)
 		} else {
-			dirty["sessions"] = true
+			// The full list stands in for a patch (no sessions.get_many):
+			// it is not spaced like an event-driven re-list.
+			cmds = append(cmds, m.reload("sessions", nil))
 		}
 	}
 	matches := func(key string) bool {
@@ -228,11 +239,7 @@ func (m *Model) flushEvents() tea.Cmd {
 			st.stale = true
 		}
 	}
-	for _, k := range baseKeys {
-		if st := m.loads[k]; st != nil && st.stale {
-			cmds = append(cmds, m.reload(k, nil))
-		}
-	}
+	cmds = append(cmds, m.reloadStaleBase()...)
 	cmds = append(cmds, m.refreshView(false)...)
 	return tea.Batch(cmds...)
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,7 +33,10 @@ import (
 //     idle; waiting_overdue follows when no new turn started by the time
 //     the child expected the job to finish;
 //   - needs_input: the run waits on an approval or question;
-//   - ended: the run exited or failed.
+//   - ended: the run exited or failed;
+//   - interrupted: pyred found the run's process gone when it started (a
+//     machine restart, or a crash underneath it); replaces the ended
+//     report and says what Pyre did about it (interrupted.go).
 //
 // Detection happens inside the run-state transaction (trackChildTx), which
 // records a durable report row; a background worker renders and sends it
@@ -87,7 +91,9 @@ import (
 //     that is mid-turn is held until the parent's turn ends (at most
 //     childBatchMax); then every report ready for that parent goes out as
 //     one digest message (sender: the system, each section names its child);
-//     a lone report still comes from its child, so a reply threads to it;
+//     a lone report still comes from its child, so a reply threads to it.
+//     A parent that reads its own inbox mid-turn gets them at once the same
+//     way (child_reports.release, childreport_release.go);
 //   - a clean exit whose last message already reached the parent (the
 //     turn's idle report went out, or the child messaged the parent within
 //     childRecentMessage before the turn ended, as for the idle rule) wakes
@@ -146,10 +152,13 @@ const (
 	reportOverdue = "waiting_overdue"
 	reportNeeds   = "needs_input"
 	reportEnded   = "ended"
-	reportQueued  = "pending"
-	reportSent    = "sent"
-	reportSkip    = "skipped"
-	reportFailed  = "failed"
+	// reportInterrupted: the run's process did not survive (a machine
+	// restart, or a crash underneath pyred); see interrupted.go.
+	reportInterrupted = "interrupted"
+	reportQueued      = "pending"
+	reportSent        = "sent"
+	reportSkip        = "skipped"
+	reportFailed      = "failed"
 )
 
 const (
@@ -183,8 +192,12 @@ const (
 	// childReportRetention keeps settled report rows (sent/skipped/failed).
 	childReportRetention = 7 * 24 * time.Hour
 	// childBatchMax: a report held for a busy parent goes out after this
-	// long even if the parent's turn has not ended.
-	childBatchMax = 20 * time.Minute
+	// long even if the parent's turn has not ended. Short: a Claude parent
+	// sees queued mail mid-turn, and a run state that says "running" may be
+	// wrong (a node before iss_… showed a parent
+	// whose turn had ended as running while its background subagent worked,
+	// and its children's reports waited 16 minutes).
+	childBatchMax = 5 * time.Minute
 	// childLaunchSettle: the report of a first turn counted without a
 	// running observation (launchTurnTx) waits this long, so a run that
 	// was idle only before its initial prompt's turn began is not
@@ -321,7 +334,7 @@ func (h *Hub) trackChildTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSt
 				startedAt = sql.NullString{String: persistence.Time(sess.CreatedAt), Valid: true}
 			}
 		}
-	case r.State == contracts.RunWaitingInput:
+	case r.State == contracts.RunWaitingInput || h.waitEndsTurnTx(ctx, tx, r, sess.SessionID, turn, closed):
 		due, suffix := now, ""
 		if turn == 0 && h.launchTurnTx(ctx, tx, r) {
 			// The initial prompt's turn ran between two observations.
@@ -333,15 +346,11 @@ func (h *Hub) trackChildTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSt
 			closed = turn
 			closedAt = sql.NullString{String: persistence.Time(now), Valid: true}
 			seq := strconv.FormatInt(turn, 10) + suffix
-			if w, ok := h.waitForTurnTx(ctx, tx, sess.SessionID, turn); ok { // waiting_on.go
+			if w, ok := h.waitForTurnOrCarryTx(ctx, tx, sess.SessionID, turn, startedAt, now); ok { // waiting_on.go
+				// A quiet wait's report is decided when it is due
+				// (prepareChildReport, quietTurnSkip).
 				if err := enqueue(reportWaiting, reportWaiting+":"+seq, due); err != nil {
 					return err
-				}
-				if w.Quiet { // recorded, not sent: the turn counts as not reported
-					if _, err := tx.ExecContext(ctx, `UPDATE child_reports SET status=?, detail=?, updated_at=? WHERE child_session_id=? AND dedupe_key=? AND status=? AND send_op IS NULL`,
-						reportSkip, reportQuietDetail, persistence.Time(now), sess.SessionID, reportWaiting+":"+seq, reportQueued); err != nil {
-						return err
-					}
 				}
 				if err := enqueue(reportOverdue, "overdue:"+seq, w.Until); err != nil {
 					return err
@@ -376,6 +385,15 @@ func (h *Hub) trackChildTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSt
 		if _, err := tx.ExecContext(ctx, `UPDATE child_reports SET status=?, detail=?, updated_at=? WHERE child_session_id=? AND kind IN (?,?) AND status=? AND turn_started_at IS ?`,
 			reportSkip, reportReplacedDetail, persistence.Time(now), sess.SessionID, reportIdle, reportWaiting, reportQueued, startedAt); err != nil {
 			return err
+		}
+		if interruptedEnd(r) {
+			// Its process did not survive (pyred found it gone): the
+			// interrupted report takes the ended report's place, once
+			// pyred has said what it did about it (trackInterruptTx).
+			if err := enqueue(reportInterrupted, interruptKey(r), interruptDue(r, now)); err != nil {
+				return err
+			}
+			break
 		}
 		if err := enqueue(reportEnded, "ended:"+r.RunID, now); err != nil {
 			return err
@@ -499,6 +517,10 @@ type childReport struct {
 	// when it is (archivedBy): set by prepareChildReport, read by
 	// renderChildReport, so a lone report and a digest part agree.
 	Archiver string
+	// Limit (not stored) is the node's fallback plan for a turn that
+	// failed on an account limit the session stays on (limitreport.go):
+	// set by prepareChildReport, read by renderChildReport.
+	Limit *contracts.FallbackPlan
 }
 
 // childReportPoll bounds how long a report waits when its wake-up was
@@ -554,6 +576,11 @@ func (h *Hub) ProcessChildReports(ctx context.Context) (time.Time, error) {
 	waitNext, err := h.processLeadWaits(ctx)
 	if err != nil {
 		return time.Time{}, err
+	}
+	if t, err := h.processWaitDeadlines(ctx); err != nil { // waiting_on.go
+		return time.Time{}, err
+	} else if !t.IsZero() && (waitNext.IsZero() || t.Before(waitNext)) {
+		waitNext = t
 	}
 	h.resumeClaimedReports(ctx)
 	for range 64 { // bounded per pass
@@ -660,11 +687,11 @@ func (h *Hub) processChildReport(ctx context.Context, cr childReport) {
 			holdHeld, reportHeldDetail, persistence.Time(h.now().Add(childReportRecheck)), persistence.Time(h.now()), cr.ID)
 		return
 	}
-	if urgentReport(cr) {
+	if urgentReport(cr) || h.switchStopFailed(ctx, cr) {
 		h.sendChildReports(ctx, parent, []childReport{cr}, nil)
 		return
 	}
-	if created := persistence.ParseTime(cr.CreatedAt); h.parentBusy(ctx, parent) && h.now().Sub(created) < childBatchMax {
+	if created := persistence.ParseTime(cr.CreatedAt); h.reportPull != cr.Parent && h.parentBusy(ctx, parent) && h.now().Sub(created) < childBatchMax {
 		// Sent with whatever else is ready when the parent's turn ends
 		// (wakeHeldReportsTx), or after childBatchMax.
 		_, _ = h.db.ExecContext(ctx, `UPDATE child_reports SET hold_state=?, detail=?, not_before=?, updated_at=? WHERE report_id=?`,
@@ -700,7 +727,7 @@ func (h *Hub) prepareChildReport(ctx context.Context, cr *childReport) (contract
 	if child.Archived || hasArchiveWhenDone(child) {
 		var at time.Time
 		cr.Archiver, at = h.archivedBy(ctx, child, cr.Parent)
-		if cr.Archiver == archiverParent && !at.Before(h.reportTurnEnd(ctx, *cr)) {
+		if cr.Archiver == archiverParent && !at.Before(h.reportTurnEnd(ctx, *cr)) && !h.switchStranded(ctx, *cr) {
 			return skip(reportParentArchivedDetail)
 		}
 	}
@@ -720,6 +747,14 @@ func (h *Hub) prepareChildReport(ctx context.Context, cr *childReport) (contract
 		// during the settle delay or while the report was held.
 		if r, err := h.getRun(ctx, h.db, cr.RunID); err != nil || r.State != contracts.RunWaitingApproval {
 			return skip("no longer waiting for input")
+		}
+	case reportLimitResumed:
+		if why := h.limitReportStill(ctx, *cr); why != "" { // limitresume.go
+			return skip(why)
+		}
+	case reportWaiting:
+		if why := h.quietTurnSkip(ctx, *cr); why != "" {
+			return skip(why)
 		}
 	case reportOverdue:
 		why, later := h.overdueStill(ctx, *cr)
@@ -742,13 +777,26 @@ func (h *Hub) prepareChildReport(ctx context.Context, cr *childReport) (contract
 		}
 	}
 	if cr.Body == "" {
+		if why := h.limitRepeatSkip(ctx, *cr); why != "" { // limitresume.go
+			return skip(why)
+		}
 		earlier := ""
 		switch cr.Kind {
 		case reportIdle:
-			if h.childMessagedTurn(ctx, *cr) {
+			plan, deferred, why := h.limitPlanOf(ctx, *cr) // limitreport.go
+			if deferred {
+				return parent, prepDone
+			} else if why != "" {
+				return skip(why)
+			}
+			cr.Limit = plan
+			if plan == nil && h.childMessagedTurn(ctx, *cr) {
 				return skip(childMessagedSkip)
 			}
 		case reportEnded:
+			if h.deferForSwitchPlan(ctx, *cr) { // switchreport.go
+				return parent, prepDone
+			}
 			if (cr.Archiver == archiverOwner || cr.Archiver == archiverPyre) && h.turnReported(ctx, *cr) {
 				// An owner bulk archive (or Pyre's sweep) stops idle children
 				// whose turn already reached the parent: nothing new to say.
@@ -1026,6 +1074,41 @@ func (h *Hub) resumeClaimedReports(ctx context.Context) {
 // message instead (its replies would reach the system sender).
 const childReplyHint = "Reply (send_message reply_to) to give it more work; read_session shows the whole transcript; otherwise ack_message.\n"
 
+// undeliveredMailNote tells the parent of an archived child about mail to
+// it that never reached its runtime (queued at the hub or on its node, not
+// taken into a turn, not read or acknowledged): it stays queued and reaches
+// the child only if it is unarchived and resumed. Without it a steer or
+// queued instruction sent just before the archive was lost silently
+// (iss_…). The child's own mail is not counted.
+func (h *Hub) undeliveredMailNote(ctx context.Context, sessionID string) string {
+	rows, err := h.db.QueryContext(ctx, `SELECT message_id FROM messages WHERE recipient_kind=? AND recipient_id=? AND runtime IN (?,?,?) AND consumed_at IS NULL AND ack=? AND NOT (sender_kind=? AND sender_id=?) ORDER BY inbox_cursor`,
+		string(contracts.AddrSession), sessionID, string(contracts.DeliveryQueued), string(contracts.DeliveryNodeReceived), string(contracts.DeliveryAttempting),
+		string(contracts.AckNone), string(contracts.PrincipalSession), sessionID)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	shown := ids
+	if len(shown) > 5 {
+		shown = shown[:5]
+	}
+	list := strings.Join(shown, ", ")
+	if len(ids) > len(shown) {
+		list += fmt.Sprintf(" and %d more", len(ids)-len(shown))
+	}
+	return fmt.Sprintf("Undelivered: %d message(s) sent to it never reached it (%s); they stay queued and reach it only if it is unarchived and resumed.\n", len(ids), list)
+}
+
 // childArchivedHint closes a report of a child that is archived (or
 // archives when its turn ends): there is no live run to reply to.
 const childArchivedHint = "It is archived: read_session shows the whole transcript; to give it more work, unarchive and resume it (or start a new session); otherwise ack_message.\n"
@@ -1128,10 +1211,64 @@ func (h *Hub) coalesceEnded(ctx context.Context, cr childReport) (earlier, skipW
 const reportReplacedDetail = "replaced by the ended report"
 
 // reportQuietDetail is the skip reason of a waiting report whose turn the
-// child marked quiet (waiting_on.go). The parent never got that turn's
-// last message: the overdue and ended reports carry it (turnReported and
-// coalesceEnded do not count it as reported).
+// child marked quiet (waiting_on.go) and whose last message the parent
+// already got in the child's previous report (quietTurnSkip). The overdue
+// and ended reports still carry it (turnReported and coalesceEnded do not
+// count it as reported).
 const reportQuietDetail = "quiet wait (waiting_on quiet)"
+
+// quietTurnSkip decides a quiet wait's waiting report when it is due: it
+// is skipped only when it would be redundant, that is when the child
+// messaged the parent itself as the turn ended (childMessagedSkip, the idle
+// rule) or the turn's last message is the one the parent got in the
+// child's previous report (reportQuietDetail). Otherwise it is sent: a
+// quiet wait no longer hides a turn's new final message
+// (iss_…: a lead set a quiet wait on its build
+// worker and ended its turn, with a background task running, on "Round 2
+// is finished, graded A"; the parent heard nothing). "" when it is sent
+// or the wait is not quiet.
+func (h *Hub) quietTurnSkip(ctx context.Context, cr childReport) string {
+	if w, ok := h.waitForTurnTx(ctx, h.db, cr.Child, reportTurn(cr)); !ok || !w.Quiet {
+		return ""
+	}
+	if h.childMessagedTurn(ctx, cr) {
+		return childMessagedSkip
+	}
+	text, err := h.childLastMessage(ctx, cr)
+	if err != nil {
+		return "" // unknown: sent, saying the message is unavailable
+	}
+	if text = strings.TrimSpace(text); text == "" || h.lastReportCarried(ctx, cr, text) {
+		return reportQuietDetail
+	}
+	return ""
+}
+
+// lastReportCarried reports whether the child's most recent report sent
+// to the parent before cr already carried text as its last message (in
+// full, clipped, or as its whole lead line).
+func (h *Hub) lastReportCarried(ctx context.Context, cr childReport, text string) bool {
+	var body string
+	if err := h.db.QueryRowContext(ctx, `SELECT COALESCE(body,'') FROM child_reports WHERE child_session_id=? AND parent_session_id=? AND status=? AND report_id<?
+		ORDER BY report_id DESC LIMIT 1`, cr.Child, cr.Parent, reportSent, cr.ID).Scan(&body); err != nil || body == "" {
+		return false
+	}
+	summary := "Its last message: " + clipRunes(text, childSummaryMax) // as writeSummary writes it
+	if utf8.RuneCountInString(text) > childSummaryMax {
+		summary += " (read_session for the rest)"
+	}
+	body += "\n" // rendered bodies are trimmed
+	return strings.Contains(body, summary+"\n") || strings.Contains(body, ": "+oneLineText(text, childLeadMax+1)+"\n")
+}
+
+// quietTurnUnreported: the waiting report of the turn an overdue report
+// covers was a quiet one skipped as carrying nothing new (quietTurnSkip).
+func (h *Hub) quietTurnUnreported(ctx context.Context, cr childReport) bool {
+	var st, detail string
+	_ = h.db.QueryRowContext(ctx, `SELECT status, COALESCE(detail,'') FROM child_reports WHERE child_session_id=? AND dedupe_key=?`,
+		cr.Child, reportWaiting+":"+strings.TrimPrefix(cr.Key, "overdue:")).Scan(&st, &detail)
+	return st == reportSkip && detail == reportQuietDetail
+}
 
 // endedCleanly: cr's run exited with a recorded exit code of 0, or Pyre
 // stopped it after its turn ended to archive it when done (archivewhen.go;
@@ -1208,7 +1345,49 @@ func (h *Hub) overdueStill(ctx context.Context, cr childReport) (string, time.Ti
 	if w.Until.After(h.now()) {
 		return "", w.Until
 	}
+	if h.childResumed(ctx, cr) {
+		return "the child resumed after its wait (a turn Pyre did not see start)", time.Time{}
+	}
 	return "", time.Time{}
+}
+
+// childResumeSlack: transcript activity this long after the hub saw the
+// wait's turn end is a later turn (the node's clock may differ a little).
+const childResumeSlack = 15 * time.Second
+
+// childResumed reports whether the child's transcript shows a user,
+// assistant or tool record after its wait's turn ended: a turn the hub
+// never saw start (one shorter than an observation interval). An unreadable
+// transcript says nothing, and the overdue report goes out.
+func (h *Hub) childResumed(ctx context.Context, cr childReport) bool {
+	var closedAt sql.NullString
+	if err := h.db.QueryRowContext(ctx, `SELECT closed_at FROM child_turns WHERE session_id=?`, cr.Child).Scan(&closedAt); err != nil || !closedAt.Valid {
+		return false
+	}
+	fetch := h.childActive
+	if fetch == nil {
+		fetch = h.lastTurnActivity
+	}
+	at, err := fetch(ctx, cr.Child, cr.RunID)
+	return err == nil && at.After(persistence.ParseTime(closedAt.String).Add(childResumeSlack))
+}
+
+// lastTurnActivity is when the run's newest user, assistant or tool
+// record was written (zero when it has none).
+func (h *Hub) lastTurnActivity(ctx context.Context, sessionID, runID string) (time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, h.opt.CommandWait+time.Second)
+	defer cancel()
+	resp, err := h.ReadSession(h.systemCtx(ctx), contracts.ReadSessionRequest{SessionID: sessionID, RunID: runID, Tail: true, Limit: 20})
+	if err != nil {
+		return time.Time{}, err
+	}
+	for i := len(resp.Entries) - 1; i >= 0; i-- {
+		switch resp.Entries[i].Kind {
+		case "user", "assistant", "tool":
+			return resp.Entries[i].At, nil
+		}
+	}
+	return time.Time{}, nil
 }
 
 // childMessagesToParent counts messages the child itself sent the parent
@@ -1224,13 +1403,101 @@ func (h *Hub) childMessagesToParent(ctx context.Context, child, parent, since st
 // childMessagedTurn reports whether the child itself messaged the parent
 // within childRecentMessage before cr's turn ended (reportTurnEnd), so the
 // parent already has that turn's result. A message sent earlier in a long
-// turn (a question, a coordination ask) does not count.
+// turn (a question, a coordination ask) does not count, nor does one the
+// child kept working after (workedAfterSend): a progress note ("final
+// checks running, will push shortly") followed by the push, an
+// archive_session and the final answer is not the result
+// (iss_…: the parent never heard the child
+// finished). An unreadable transcript says nothing.
 func (h *Hub) childMessagedTurn(ctx context.Context, cr childReport) bool {
 	end := h.reportTurnEnd(ctx, cr)
 	if end.IsZero() {
 		end = h.now()
 	}
-	return h.childMessagesToParent(ctx, cr.Child, cr.Parent, persistence.Time(end.Add(-childRecentMessage))) > 0
+	if h.childMessagesToParent(ctx, cr.Child, cr.Parent, persistence.Time(end.Add(-childRecentMessage))) == 0 {
+		return false
+	}
+	fetch := h.childTail
+	if fetch == nil {
+		fetch = h.childTranscriptTail
+	}
+	entries, err := fetch(ctx, cr.Child, cr.RunID)
+	return err != nil || !workedAfterSend(entries)
+}
+
+// childTranscriptTail reads the run's newest transcript entries through its
+// node.
+func (h *Hub) childTranscriptTail(ctx context.Context, sessionID, runID string) ([]contracts.TranscriptEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, h.opt.CommandWait+time.Second)
+	defer cancel()
+	resp, err := h.ReadSession(h.systemCtx(ctx), contracts.ReadSessionRequest{SessionID: sessionID, RunID: runID, Tail: true, Limit: 40})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Entries, nil
+}
+
+// workedAfterSend reports whether a transcript tail shows work (a
+// command, an edit, any tool other than Pyre's own) after the newest
+// message the session sent (send_message, or pyre send in a shell). With
+// no send in the tail, any work in it counts: the message came earlier.
+// Tool entries are "mcp: server.tool" and "command: …" (Codex) or calls
+// joined with "; " as "Name: argument" (Claude, agy).
+func workedAfterSend(entries []contracts.TranscriptEntry) bool {
+	worked := false
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Kind != "tool" {
+			continue
+		}
+		calls := []string{entries[i].Text}
+		if !strings.HasPrefix(entries[i].Text, "command: ") {
+			calls = strings.Split(entries[i].Text, "; ")
+		}
+		for j := len(calls) - 1; j >= 0; j-- {
+			switch c := strings.TrimSpace(calls[j]); {
+			case isSendCall(c):
+				return worked
+			case !isBookkeepingCall(c):
+				worked = true
+			}
+		}
+	}
+	return worked
+}
+
+// isSendCall: a tool call that sends a Pyre message.
+func isSendCall(c string) bool {
+	if cmd, ok := strings.CutPrefix(c, "command: "); ok {
+		return pyreSendRe.MatchString(cmd)
+	}
+	if cmd, ok := strings.CutPrefix(c, "Bash: "); ok {
+		return pyreSendRe.MatchString(cmd)
+	}
+	name, _, _ := strings.Cut(c, ": ")
+	if name == "mcp" { // Codex: "mcp: pyre.send_message (completed)"
+		name = c
+	}
+	return strings.Contains(name, "send_message")
+}
+
+// pyreSendRe matches a pyre send in a shell command line.
+var pyreSendRe = regexp.MustCompile(`(^|[\s/;&|(])pyre(\s+--?[a-z-]+)*\s+send(\s|$)`)
+
+// isBookkeepingCall: a call that is not work on the task: Pyre's own
+// tools (archive_session, ack_message, waiting_on, …), a tool result, a
+// deferred-tool lookup.
+func isBookkeepingCall(c string) bool {
+	if c == "" || c == "tool result" {
+		return true
+	}
+	if strings.HasPrefix(c, "command: ") || strings.HasPrefix(c, "Bash: ") {
+		return false
+	}
+	name, _, _ := strings.Cut(c, ": ")
+	if name == "mcp" { // Codex: "mcp: pyre.archive_session (completed)"
+		name = c
+	}
+	return strings.Contains(name, "pyre") || name == "ToolSearch"
 }
 
 // Who archived a child (or scheduled its archive when done), from the
@@ -1323,12 +1590,29 @@ func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr
 	case reportIdle:
 		text, err := h.childLastMessage(ctx, cr)
 		first := firstSentence(text)
+		if cr.Limit != nil {
+			h.renderLimitIdle(ctx, &b, cr.Limit, title, name, rel, facts) // limitreport.go
+			writeSummary(&b, text, "", err)
+			break
+		}
 		if archiving && archiver == archiverSelf {
 			lead(title+" finished and archived itself", first)
 			fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, finished its last turn and archived itself (Pyre stops it now)%s", name, rel, facts)
 			writeSummary(&b, text, first, err)
 			b.WriteString(h.archiveCascadeNote(ctx, child.SessionID)) // archivecascade.go
+			b.WriteString(h.undeliveredMailNote(ctx, child.SessionID))
 			b.WriteString(childArchivedHint)
+			break
+		}
+		if failure, ok := turnFailure(cr.Reason); ok {
+			// A turn that ended on an error is not a silent "finished" with
+			// no message (iss_…: Codex rejected the
+			// model and the parent saw an empty review).
+			lead(title+"'s turn failed", oneLineText(failure, childLeadMax))
+			fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, ended its turn with an error and is waiting for input%s", name, rel, facts)
+			fmt.Fprintf(&b, "Error: %s\n", oneLineText(failure, 300))
+			writeSummary(&b, text, "", err)
+			b.WriteString(childReplyHint)
 			break
 		}
 		lead(title+" finished", first)
@@ -1338,6 +1622,17 @@ func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr
 	case reportWaiting:
 		what, until := h.reportWait(ctx, cr)
 		text, err := h.childLastMessage(ctx, cr)
+		if w, _ := h.waitForTurnTx(ctx, h.db, cr.Child, reportTurn(cr)); w.Quiet {
+			// A quiet wait's turn with a new last message (quietTurnSkip):
+			// the result, and that the child carries on by itself.
+			first := firstSentence(text)
+			lead(title+" ended a turn and keeps waiting on its own job", first)
+			fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, ended its turn while waiting on %s (expected by %s); it may continue on its own when that finishes%s",
+				name, rel, what, until, facts)
+			b.WriteString("No reply is needed unless you have new work for it. If it has not started a new turn by then, Pyre tells you it looks stalled.\n")
+			writeSummary(&b, text, first, err)
+			break
+		}
 		lead(title+" is waiting on its own job", oneLineText(what, childLeadMax))
 		fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, ended its turn but is not idle: it waits on %s (expected by %s) and reports again when that finishes%s",
 			name, rel, what, until, facts)
@@ -1346,15 +1641,15 @@ func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr
 	case reportOverdue:
 		what, until := h.reportWait(ctx, cr)
 		lead(title+" may be stuck", oneLineText("it waited on "+what+", expected by "+until+", and has not resumed", childLeadMax))
-		w, _ := h.waitForTurnTx(ctx, h.db, cr.Child, reportTurn(cr))
+		unreported := h.quietTurnUnreported(ctx, cr)
 		quiet := ""
-		if w.Quiet {
+		if unreported {
 			quiet = " (a quiet wait: that turn's end was not reported to you)"
 		}
 		fmt.Fprintf(&b, "[pyre auto-report] Session %s, %s, ended a turn waiting on %s, expected by %s, and has not started a new turn since%s%s",
 			name, rel, what, until, quiet, facts)
 		b.WriteString("The watcher or background task that should wake it may have died. Check with read_session, or message it to look at the job.\n")
-		if w.Quiet { // the parent never got this turn's last message
+		if unreported { // the parent did not get it with this turn's end
 			text, err := h.childLastMessage(ctx, cr)
 			writeSummary(&b, text, "", err)
 		}
@@ -1382,7 +1677,28 @@ func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr
 		} else {
 			b.WriteString("No structured approval was reported; it may be waiting on a prompt in its terminal. Tell the owner if you cannot help.\n")
 		}
+	case reportLimitResumed:
+		h.renderLimitResumed(ctx, &b, cr, title, name, rel, facts) // limitresume.go
+	case reportInterrupted:
+		h.renderInterrupted(ctx, &b, child, cr, title, name, rel, machine, facts) // interrupted.go
+		if archiving {
+			b.WriteString(h.archiveCascadeNote(ctx, child.SessionID)) // archivecascade.go
+			b.WriteString(h.undeliveredMailNote(ctx, child.SessionID))
+			b.WriteString(childArchivedHint)
+		}
 	case reportEnded:
+		if sw, ok := h.switchStopOf(ctx, cr); ok && !archiving {
+			// Stopped for an account switch: a restart, not an end
+			// (switchreport.go, decision I67).
+			h.renderSwitchEnded(ctx, &b, sw, title, name, rel, facts)
+			if earlier != "" {
+				fmt.Fprintf(&b, "Its last message is in the earlier report %s.\n", earlier)
+			} else {
+				text, err := h.childLastMessage(ctx, cr)
+				writeSummary(&b, text, "", err)
+			}
+			break
+		}
 		verb := "exited"
 		if cr.RunState == contracts.RunFailed {
 			verb = "failed"
@@ -1438,6 +1754,7 @@ func (h *Hub) renderChildReport(ctx context.Context, child contracts.Session, cr
 		}
 		if archiving {
 			b.WriteString(h.archiveCascadeNote(ctx, child.SessionID)) // archivecascade.go
+			b.WriteString(h.undeliveredMailNote(ctx, child.SessionID))
 			b.WriteString(childArchivedHint)
 		} else if !launch && cr.RunState == contracts.RunExited && cr.ExitCode != nil && *cr.ExitCode == 0 && child.CreatedBy.Kind == contracts.PrincipalSession {
 			// W-lifecycle: ArchiveFinishedChildren follows this report.
@@ -1469,6 +1786,21 @@ func (h *Hub) childLastMessage(ctx context.Context, cr childReport) (string, err
 // writeSummary appends the last message (bounded), or why it is
 // unavailable. A message the lead line already showed whole is not
 // repeated.
+// turnFailure is the error of a run whose last turn failed, from its state
+// reason ("last turn failed: <error>[ · retry …]", the Codex adapter).
+func turnFailure(reason string) (string, bool) {
+	rest, ok := strings.CutPrefix(reason, "last turn failed")
+	if !ok {
+		return "", false
+	}
+	rest, _, _ = strings.Cut(rest, " · ")
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, ":"))
+	if rest == "" {
+		rest = "unknown error"
+	}
+	return rest, true
+}
+
 func writeSummary(b *strings.Builder, text, lead string, err error) {
 	text = strings.TrimSpace(text)
 	switch {
@@ -1550,8 +1882,11 @@ func isLaunchFailure(reason string) bool {
 // parent is waiting on work that will not happen (a launch that tmux
 // refused reached its parent 17 minutes later, issue
 // iss_…).
+//
+// An interrupted report is urgent too: the parent's view of the child
+// (a run "running" again after a resume) hides that its work was cut off.
 func urgentReport(cr childReport) bool {
-	return cr.Kind == reportNeeds || (cr.Kind == reportEnded && cr.RunState == contracts.RunFailed && isLaunchFailure(cr.Reason))
+	return cr.Kind == reportNeeds || cr.Kind == reportInterrupted || (cr.Kind == reportEnded && cr.RunState == contracts.RunFailed && isLaunchFailure(cr.Reason))
 }
 
 func earliest(a, b time.Time) time.Time {

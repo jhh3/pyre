@@ -12,6 +12,7 @@ import (
 
 	"github.com/jhh3/pyre/internal/fileperm"
 	"github.com/jhh3/pyre/internal/osutil"
+	"github.com/jhh3/pyre/internal/supervisor"
 )
 
 // A run's environment (PYRE_SESSION_TOKEN, connection secrets, API keys from
@@ -89,6 +90,16 @@ func execEnvMain(args []string) int {
 		fmt.Fprintln(os.Stderr, "pyre: launch: no program to run")
 		return 127
 	}
+	if lf.Scope != nil {
+		// Before the environment changes: busctl reaches the user bus
+		// through the server's (pyred's) environment. Fails open.
+		desc := "Pyre run " + lf.ScopeName
+		if note, err := joinRunScope(lf.ScopeUnit, desc, *lf.Scope); err != nil {
+			logRunScope(filepath.Dir(file), lf.ScopeName+" unscoped: "+oneLineErr(err))
+		} else {
+			logRunScope(filepath.Dir(file), lf.ScopeName+" "+note)
+		}
+	}
 	set, unset := lf.Set, lf.Unset
 	for _, k := range unset {
 		_ = os.Unsetenv(k)
@@ -121,6 +132,11 @@ type launchFile struct {
 	Set   []string // KEY=VALUE
 	Unset []string
 	Argv  []string
+	// Scope, when set, is the per-run scope the launcher moves itself into
+	// before exec (runscope.go): unit ScopeUnit for session ScopeName.
+	Scope     *supervisor.RunScope
+	ScopeUnit string
+	ScopeName string
 }
 
 // readLaunchFile reads and removes a launch file. It refuses anything but
@@ -169,9 +185,28 @@ func readLaunchFile(file string) (launchFile, error) {
 			lf.Set = append(lf.Set, body)
 		case 'A':
 			lf.Argv = append(lf.Argv, body)
+		case 'G':
+			unit, name, _ := strings.Cut(body, "\t")
+			if !strings.HasPrefix(unit, "pyre-run-") || !strings.HasSuffix(unit, ".scope") || strings.ContainsAny(unit, "/ ") {
+				return launchFile{}, fmt.Errorf("bad scope unit record")
+			}
+			lf.ScopeUnit, lf.ScopeName = unit, name
+			if lf.Scope == nil {
+				lf.Scope = &supervisor.RunScope{}
+			}
+		case 'K':
+			if lf.Scope == nil {
+				lf.Scope = &supervisor.RunScope{}
+			}
+			if err := decodeScopeField(lf.Scope, body); err != nil {
+				return launchFile{}, err
+			}
 		default:
 			return launchFile{}, fmt.Errorf("bad record type %q", rec[0])
 		}
+	}
+	if lf.Scope != nil && (lf.ScopeUnit == "" || lf.Scope.Busctl == "" || lf.Scope.Slice == "") {
+		return launchFile{}, fmt.Errorf("incomplete scope records")
 	}
 	return lf, nil
 }
@@ -234,14 +269,27 @@ func (s *Server) execHelper() (string, error) {
 // remove it. The tmux command line then carries only the launcher and the
 // file path, whatever the size of the prompts in argv.
 func (s *Server) paneCommand(spec SessionSpec) (argv []string, envFile string, err error) {
-	if len(spec.Env) == 0 && len(spec.Unset) == 0 && argvSize(spec.Argv) <= maxInlineArgv {
+	return s.paneCommandScoped(spec, nil)
+}
+
+// paneCommandScoped is paneCommand for a pane that moves into a per-run
+// scope (sc non-nil; runscope.go): it always goes through the launcher.
+func (s *Server) paneCommandScoped(spec SessionSpec, sc *supervisor.RunScope) (argv []string, envFile string, err error) {
+	if sc == nil && len(spec.Env) == 0 && len(spec.Unset) == 0 && argvSize(spec.Argv) <= maxInlineArgv {
 		return escapeSeparators(commandArgs(spec.Argv)), "", nil
 	}
 	helper, err := s.execHelper()
 	if err != nil {
+		if sc != nil {
+			return s.paneCommandScoped(spec, nil) // no launcher to move into a scope: unscoped, as before
+		}
 		return nil, "", err
 	}
-	envFile, err = s.writeEnvFile(encodeLaunch(spec.Env, spec.Unset, spec.Argv))
+	data := encodeLaunch(spec.Env, spec.Unset, spec.Argv)
+	if sc != nil {
+		data = append(data, encodeScope(supervisor.RunScopeUnit(spec.Name, time.Now()), spec.Name, sc)...)
+	}
+	envFile, err = s.writeEnvFile(data)
 	if err != nil {
 		return nil, "", err
 	}

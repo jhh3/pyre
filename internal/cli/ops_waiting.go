@@ -5,9 +5,9 @@ package cli
 // waiting_on: a session about to end its turn while its own CI run, review
 // or watcher is still pending says so; its parent then hears "waiting", not
 // "idle", and hears again if nothing resumed it by the expected time
-// (contracts/waiting_on.go). With quiet, the parent hears nothing for that
-// turn (a lead waiting on its own workers or CI ends its turn instead of
-// polling its inbox).
+// (contracts/waiting_on.go). With quiet, the parent hears that turn's end
+// only when its last message is new (a lead waiting on its own workers or
+// CI ends its turn instead of polling its inbox).
 //
 // `pyre fact add` (the owner): append a settled project fact to the
 // project's fact sheet document (slug "facts"); the hub puts the sheet into
@@ -143,10 +143,10 @@ func (o *Ops) ListFacts(ctx context.Context, p FactParams) (c.DocumentWithRevisi
 func waitingFactMCPTools() []MCPTool {
 	return []MCPTool{
 		compactly(tool("waiting_on", "Waiting on own job",
-			"Before ending your turn while your own CI, review, workers or watcher are pending: your parent hears you wait (not idle), and again if not woken by expect_minutes. quiet: it hears nothing now; end your turn, don't poll inbox.",
+			"Before ending your turn while your own CI, review, workers or watcher are pending: your parent hears you wait (not idle), and again if not woken by expect_minutes. quiet: it hears only a new last message; end your turn, don't poll inbox.",
 			obj(props{"what": str("the job, with its URL, e.g. \"CI on PR #12 https://github.com/o/r/pull/12\""),
 				"expect_minutes": num("when it should be done (default 60, max 1440)"), "clear": boo("drop the marker"),
-				"quiet": boo("don't report this turn's end to your parent; a Monitor, a child's report or a message wakes you (it still hears if you are not woken by expect_minutes, and when your run exits)"), "operation_id": opIDProp}),
+				"quiet": boo("report this turn's end to your parent only if your last message is new (marked still waiting, no reply needed); a Monitor, a child's report or a message wakes you (if nothing wakes you by expect_minutes, Pyre wakes you to check on it and your parent hears; it also hears when your run exits)"), "operation_id": opIDProp}),
 			hints("Waiting on own job", idempotent, true),
 			func(ctx context.Context, o *Ops, p WaitingOnParams) (c.SetWaitingOnResponse, error) {
 				return o.WaitingOn(ctx, p)
@@ -179,7 +179,7 @@ func (a *App) addWaitingFactCommands(root *cobra.Command) {
 	}
 	wait.Flags().IntVar(&wp.ExpectMinutes, "expect", 0, "minutes until it should be done (default 60)")
 	wait.Flags().BoolVar(&wp.Clear, "clear", false, "drop the marker")
-	wait.Flags().BoolVar(&wp.Quiet, "quiet", false, "don't report this turn's end to the parent (overdue and exit still are)")
+	wait.Flags().BoolVar(&wp.Quiet, "quiet", false, "report this turn's end to the parent only with a new last message (overdue and exit always are)")
 	root.AddCommand(wait)
 
 	fact := &cobra.Command{

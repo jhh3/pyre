@@ -15,7 +15,7 @@ import (
 // Ask nudge (owner request 2026-10-14): leads ended turns with decisions for
 // the owner written only in their chat, which he does not read, and filed no
 // asks. When a top-level session's turn ends with an owner-directed question
-// (askdetect) and it filed no ask in that turn, the Stop hook blocks the stop
+// or request for a choice (askdetect.DecisionAsk) and it filed no ask in that turn, the Stop hook blocks the stop
 // once and tells it to file the ask. Not for sessions with a parent (they
 // report to it), not when the owner typed this turn's prompt himself (he is
 // in the chat), and never twice in one turn.
@@ -56,7 +56,7 @@ func askNudge(stateDir string, rec hookRecord, p map[string]any, now time.Time) 
 	if msg == "" {
 		msg = lastAssistantText(str(p, "transcript_path"))
 	}
-	if _, ok := askdetect.OwnerQuestion(msg); !ok {
+	if _, ok := askdetect.DecisionAsk(msg); !ok {
 		return nil
 	}
 	recs, first, err := tailEvents(stateDir)

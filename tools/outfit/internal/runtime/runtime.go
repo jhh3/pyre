@@ -932,7 +932,11 @@ func (e Executor) runCLI(ctx context.Context, mode kit.Mode, operation kit.Opera
 	}
 	output, err := command.Output()
 	if exit := new(exec.ExitError); errors.As(err, &exit) {
-		return Result{Raw: exit.Stderr}, fmt.Errorf("%s failed: %s", filepath.Base(binary), strings.TrimSpace(string(exit.Stderr)))
+		// Keep stdout: some CLIs print their answer and still exit non-zero
+		// (gh pr checks exits 8 while checks are pending, 1 if any failed,
+		// with empty stderr), which otherwise surfaced as a blank "gh failed:".
+		detail := commandFailureDetail(output, exit.Stderr, secret, credentials.Method)
+		return Result{Raw: []byte(detail), Status: exit.ExitCode()}, fmt.Errorf("%s exited %d: %s", filepath.Base(binary), exit.ExitCode(), detail)
 	}
 	if err != nil {
 		return Result{}, err

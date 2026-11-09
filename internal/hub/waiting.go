@@ -122,7 +122,7 @@ func (h *Hub) trackLeadTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSta
 	case r.State == contracts.RunRunning:
 		if turn == 0 || closed >= turn {
 			turn++
-			// asks_chat.go: the prompt that started this turn may answer the
+			// asks_chat.go: the prompt that started this turn may reply to the
 			// session's open asks (closedAt: when the previous turn ended).
 			if err := h.queueAskChatTx(ctx, tx, sess.SessionID, r.RunID, turn, closedAt, now); err != nil {
 				return err
@@ -135,7 +135,7 @@ func (h *Hub) trackLeadTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSta
 		if err := drop(); err != nil { // the previous turn's check is moot
 			return err
 		}
-	case r.State == contracts.RunWaitingInput:
+	case r.State == contracts.RunWaitingInput || h.waitEndsTurnTx(ctx, tx, r, sess.SessionID, turn, closed):
 		if turn == 0 && prev == contracts.RunRunning {
 			// First transition seen for a session already mid-turn.
 			turn = 1
@@ -146,7 +146,7 @@ func (h *Hub) trackLeadTx(ctx context.Context, tx *sql.Tx, prev contracts.RunSta
 		}
 		closed = turn
 		closedAt = sql.NullString{String: persistence.Time(now), Valid: true}
-		if _, waiting := h.waitForTurnTx(ctx, tx, sess.SessionID, turn); waiting {
+		if _, waiting := h.waitForTurnOrCarryTx(ctx, tx, sess.SessionID, turn, startedAt, now); waiting {
 			break // it waits on its own job, not on the owner (waiting_on.go)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO lead_waits(session_id,run_id,turn_seq,turn_started_at,not_before,attempts,created_at) VALUES(?,?,?,?,?,0,?)

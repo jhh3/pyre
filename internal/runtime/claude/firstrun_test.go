@@ -146,7 +146,7 @@ func TestFakeOnboardingAnswered(t *testing.T) {
 	var rec automations
 	f := newFakeEnv(t, func(o *Options) { o.StartupWait = 2 * time.Second; o.OnAutomation = rec.add })
 	profile := filepath.Join(f.dir, "cfg")
-	h := f.launchIn("run_onb1", profile, map[string]string{"FAKE_THEME_PICKER": "always"}, nil, "first-run prompt marker")
+	h := f.launchIn("run_onb1", profile, map[string]string{"FAKE_THEME_PICKER": "always", "FAKE_PLUGIN_HOST": "1"}, nil, "first-run prompt marker")
 	// Launch drives the screens for StartupWait only; after that the node's
 	// observation loop does (each Observe may press). On a slow runner the
 	// second screen can be drawn after Launch returned, so observe as the

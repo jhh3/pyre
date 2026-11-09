@@ -320,7 +320,14 @@ type LinkLookup struct {
 	Operation  string            `json:"operation" yaml:"operation"`
 	Arguments  map[string]string `json:"arguments,omitempty" yaml:"arguments,omitempty"`
 	HeavyReads []LinkHeavyRead   `json:"heavyReads,omitempty" yaml:"heavyReads,omitempty"`
+	// Download names a built-in file fetcher (see DownloadKinds) that turns
+	// the matched URL into a local file through the connection's own
+	// credential instead of running an operation. Operation stays empty.
+	Download string `json:"download,omitempty" yaml:"download,omitempty"`
 }
+
+// DownloadKinds lists the built-in link file fetchers a lookup may name.
+var DownloadKinds = map[string]bool{"slack-file": true}
 
 // LinkHeavyRead declares additional read-only evidence fetched when automatic
 // link context runs in heavy mode. Arguments reference the validated arguments

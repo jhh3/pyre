@@ -19,6 +19,12 @@ type startCapture struct {
 	sels  map[string]*c.AccountSelection
 	// harnesses: what an unlisted node reports (GetNode).
 	harnesses []c.HarnessInfo
+	// accounts: ListAccounts (usage cards for placement).
+	accounts []c.AccountView
+}
+
+func (s *startCapture) ListAccounts(context.Context, c.ListAccountsRequest) (c.Page[c.AccountView], error) {
+	return c.Page[c.AccountView]{Items: s.accounts}, nil
 }
 
 func (s *startCapture) InvokeNodeAction(_ context.Context, r c.NodeActionRequest) (c.NodeActionResult, error) {
@@ -30,7 +36,7 @@ func (s *startCapture) InvokeNodeAction(_ context.Context, r c.NodeActionRequest
 		return c.NodeActionResult{}, c.Errorf(c.ErrUnsupported, "synthetic: no node actions")
 	}
 	b, _ := json.Marshal(sel)
-	return c.NodeActionResult{Result: b}, nil
+	return c.NodeActionResult{Outcome: c.OutcomeSucceeded, Result: b}, nil
 }
 
 func (s *startCapture) GetNode(_ context.Context, r c.GetRequest) (c.Node, error) {

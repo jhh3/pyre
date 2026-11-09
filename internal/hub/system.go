@@ -29,7 +29,8 @@ func (h *Hub) Hello(ctx context.Context, req contracts.HelloRequest) (contracts.
 
 func (h *Hub) features() []string {
 	f := []string{"system", "sessions", "runs", "leases", "approvals", "messages", "events", "accounts", "node_actions", "connections",
-		contracts.FeatureSessionsGetMany, contracts.FeatureAsks, contracts.FeatureAskHold, contracts.FeatureGrants, contracts.FeatureIssues}
+		contracts.FeatureSessionsGetMany, contracts.FeatureAsks, contracts.FeatureAskHold, contracts.FeatureGrants, contracts.FeatureIssues,
+		contracts.FeatureNodeAvoid}
 	add := func(ok bool, name string) {
 		if ok {
 			f = append(f, name)
@@ -75,7 +76,7 @@ func (h *Hub) SendMessage(ctx context.Context, req contracts.SendMessageRequest)
 		h.withDelivery(ctx, &mv) // W-stuckmail
 		if p, ok := contracts.PrincipalFrom(ctx); ok && mv.Envelope.Recipient.Kind == contracts.AddrSession {
 			h.ownerActive(p, mv.Envelope.Recipient.ID) // owner activity: a message (or reply) to the session
-			h.answerChatMessage(ctx, p, mv.Envelope)   // asks_chat.go: the owner's chat answers its open asks
+			h.noteChatMessage(ctx, p, mv.Envelope)     // asks_chat.go: the owner's chat is noted on its open asks
 			// Messaging it engages with it: its mail to him so far is read (the
 			// deriver answers its items from the event).
 			h.ownerEngaged(p, mv.Envelope.Recipient.ID, "You messaged the session.")
@@ -120,7 +121,13 @@ func (h *Hub) AckMessage(ctx context.Context, req contracts.AckMessageRequest) (
 	return mv, err
 }
 
+// ReissueMessage applies the stale-attempt rule (staleattempt.go) to the
+// original first, so a reissue is not refused for an attempt that is
+// already known stale but waits for the next maintenance pass.
 func (h *Hub) ReissueMessage(ctx context.Context, req contracts.ReissueMessageRequest) (contracts.MessageView, error) {
+	if _, err := h.requeueStaleAttempt(ctx, req.MessageID, h.now().Add(-store.StaleAttemptAfter)); err != nil && !contracts.IsCode(err, contracts.ErrNotFound) {
+		return contracts.MessageView{}, err
+	}
 	return h.msgs.ReissueMessage(ctx, req)
 }
 

@@ -438,6 +438,37 @@ func TestReissueRules(t *testing.T) {
 	}
 }
 
+// The client may reissue a rejected steer as queued mail (decision I65):
+// the new envelope carries the override; an unknown mode is refused.
+func TestReissueModeOverride(t *testing.T) {
+	e := newEnv(t, Limits{})
+	v, err := e.s.SendMessage(as(sesA), contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: "op_1"}, Recipient: toB, Mode: contracts.ModeSteer, Body: contracts.MessageBody{Text: "rebase on main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := v.Envelope.MessageID
+	if _, err := e.receipt("node_l", 1, m, "run_b1", contracts.DeliveryRejected, contracts.EvidenceNone); err != nil {
+		t.Fatal(err)
+	}
+	re := func(op string, mode contracts.MessageMode) (contracts.MessageView, error) {
+		return e.s.ReissueMessage(as(sesA), contracts.ReissueMessageRequest{Mutation: contracts.Mutation{OperationID: op}, MessageID: m, AcceptDuplicateRisk: true, Mode: mode})
+	}
+	if _, err := re("op_r1", "loud"); !contracts.IsCode(err, contracts.ErrInvalid) {
+		t.Fatalf("bad mode: want invalid, got %v", err)
+	}
+	nv, err := re("op_r2", contracts.ModeQueue)
+	if err != nil || nv.Envelope.Mode != contracts.ModeQueue || nv.Envelope.Reissues != m || nv.Envelope.Body.Text != "rebase on main" {
+		t.Fatalf("reissue as queue: %v %+v", err, nv.Envelope)
+	}
+	if ov := e.get(m); ov.Envelope.Mode != contracts.ModeSteer {
+		t.Fatalf("original changed: %+v", ov.Envelope)
+	}
+	sv, err := re("op_r3", "")
+	if err != nil || sv.Envelope.Mode != contracts.ModeSteer {
+		t.Fatalf("default keeps the original mode: %v %+v", err, sv.Envelope)
+	}
+}
+
 func TestResolveAndCancel(t *testing.T) {
 	e := newEnv(t, Limits{})
 	m := e.send(sesA, "op_1", "", toB, "x").Envelope.MessageID

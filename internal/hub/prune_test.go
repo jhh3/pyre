@@ -116,3 +116,74 @@ func TestReportDedupPruneUsesKeyAndKeepsWindow(t *testing.T) {
 		t.Fatalf("dedup prune plan %q scans node_reports", detail)
 	}
 }
+
+// W-dbspace: operation records are kept a week (they were kept 30 days:
+// about 750 MB on server), the product's own records are never pruned, and
+// the retention pass returns free pages beyond the reserve to the
+// filesystem once hub.db is in incremental auto-vacuum mode.
+func TestRetentionKeepsAWeekOfOperationsAndReclaimsSpace(t *testing.T) {
+	x := newHarness(t)
+	x.connect(nodeMac, 0)
+	x.start(owner, "op_w1", nodeMac)
+	x.start(owner, "op_w2", nodeMac)
+	x.start(owner, "op_w3", nodeMac)
+	for op, age := range map[string]time.Duration{"op_w1": 8 * 24 * time.Hour, "op_w2": 6 * 24 * time.Hour} {
+		if _, err := x.db.Exec(`UPDATE operations SET created_at=? WHERE operation_id=?`, sqlitex.FormatTime(time.Now().Add(-age)), op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := map[string]int{}
+	for _, table := range []string{"sessions", "runs", "messages", "message_receipts"} {
+		kept[table] = x.count(table)
+	}
+
+	// hub.db as assemble opens it: incremental mode, then 12 MiB freed.
+	if _, err := sqlitex.PrepareReclaim(t.Context(), x.db, x.path, sqlitex.ReclaimPolicy{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.db.Exec(`CREATE TABLE scratch(v BLOB); WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 3072)
+		INSERT INTO scratch(v) SELECT randomblob(4000) FROM n; DELETE FROM scratch`); err != nil {
+		t.Fatal(err)
+	}
+	oldKeep, oldMax := reclaimKeepBytes, reclaimMaxBytes
+	reclaimKeepBytes, reclaimMaxBytes = 2<<20, 8<<20
+	t.Cleanup(func() { reclaimKeepBytes, reclaimMaxBytes = oldKeep, oldMax })
+	before, _ := sqlitex.Space(t.Context(), x.db)
+
+	if err := x.h.RunMaintenance(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var ops []string
+	rows, err := x.db.Query(`SELECT operation_id FROM operations WHERE operation_id LIKE 'op_w%' ORDER BY 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id string
+		_ = rows.Scan(&id)
+		ops = append(ops, id)
+	}
+	rows.Close()
+	if strings.Join(ops, ",") != "op_w2,op_w3" {
+		t.Fatalf("operations left %v, want the 8-day-old one pruned and the rest kept", ops)
+	}
+	for table, n := range kept {
+		if got := x.count(table); got != n {
+			t.Fatalf("%s %d -> %d: retention touched a kept table", table, n, got)
+		}
+	}
+	mid, _ := sqlitex.Space(t.Context(), x.db)
+	if released := (before.Pages - mid.Pages) * before.PageSize; released < 8<<20 || released > 9<<20 {
+		t.Fatalf("first pass released %d bytes, want the 8 MiB bound (before %+v after %+v)", released, before, mid)
+	}
+
+	// The next pass (after PruneInterval) releases down to the reserve.
+	x.clock.Add(time.Hour + time.Second)
+	if err := x.h.RunMaintenance(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := sqlitex.Space(t.Context(), x.db)
+	if after.FreeBytes() > 2<<20 || after.FreeBytes() < 2<<20-int64(after.PageSize) {
+		t.Fatalf("free after second pass %d bytes, want the 2 MiB reserve", after.FreeBytes())
+	}
+}

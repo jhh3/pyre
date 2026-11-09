@@ -74,15 +74,16 @@ func TestGHAPIReadOnlyClassification(t *testing.T) {
 	}
 }
 
-func TestCLIReadOnlyKeepsOtherCommandsOnTheVerbRule(t *testing.T) {
+func TestCLIReadOnlyRoutesByBinary(t *testing.T) {
 	cases := []struct {
 		binary string
 		argv   []string
 		read   bool
 	}{
 		{"gh", []string{"pr", "list"}, true},
-		{"gh", []string{"pr", "view", "1"}, false},
+		{"gh", []string{"pr", "view", "1"}, true},
 		{"gh", []string{"pr", "merge", "1"}, false},
+		{"other", []string{"pr", "view", "1"}, false},
 		{"/opt/tools/gh", []string{"api", "repos/OWNER/REPO"}, true},
 		{"stripe", []string{"api", "repos/OWNER/REPO"}, false},
 		{"stripe", []string{"customers", "list"}, true},

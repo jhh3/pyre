@@ -81,6 +81,8 @@ func SchemaRequirements() []codexschema.Req {
 		{Kind: cr, Method: "turn/interrupt", Why: "Interrupt"},
 		{Kind: cr, Method: "thread/turns/list", Why: "Reconcile/ReadTranscript"},
 		{Kind: cr, Method: "thread/backgroundTerminals/clean", Why: "Interrupt (experimental)"},
+		{Kind: cr, Method: "thread/backgroundTerminals/list", Why: "exec process groups (spare.go, experimental)"},
+		{Type: "ThreadBackgroundTerminal", Fields: []string{"itemId", "processId", "command", "osPid"}, Why: "exec process groups (spare.go)"},
 		{Kind: cr, Method: "account/read", Fields: []string{"refreshToken"}, Why: "ReadAccount"},
 		{Kind: cr, Method: "account/rateLimits/read", Why: "ReadRateLimits (WP13)"},
 		{Kind: cr, Method: "config/value/write", Why: "TUI folder trust (ensureTrust)"},

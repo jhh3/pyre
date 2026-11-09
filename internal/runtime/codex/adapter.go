@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
@@ -34,6 +35,7 @@ import (
 	"github.com/jhh3/pyre/internal/runtime/hostsel"
 	"github.com/jhh3/pyre/internal/runtime/sessionhost"
 	"github.com/jhh3/pyre/internal/runtime/tmux"
+	"github.com/jhh3/pyre/internal/secretegress"
 	"github.com/jhh3/pyre/internal/winenv"
 )
 
@@ -85,6 +87,15 @@ type Options struct {
 	// finished background command (bgwake.go); false (the session is
 	// archived or being archived) drops the notice. Must be bounded by ctx.
 	WakeAllowed func(ctx context.Context, sessionID string) bool
+	// MailNotice turns on the in-turn mail doorbell (mailnotice.go,
+	// capability input.doorbell): a busy run's agent is told by one short
+	// turn/steer notice that Pyre mail waits for it. Runs without the pyre
+	// MCP server (no inbox tool) do not get it.
+	MailNotice bool
+	// OwnerCodexHome is the owner's own CODEX_HOME, whose hook trust an
+	// account profile mirrors (hooktrust.go; default $CODEX_HOME, else
+	// ~/.codex). Never written.
+	OwnerCodexHome string
 	// TranscriptHomes are further CODEX_HOMEs (globs) searched for a
 	// thread's rollout besides the machine's own login: the accounts'
 	// shared store and the account profiles (ResumeOwner, pyre run).
@@ -96,6 +107,9 @@ type Options struct {
 	// StartWait bounds app-server start + socket connect (default 20s).
 	StartWait time.Duration
 	Now       func() time.Time
+	// Logger receives the adapter's own notes (deferred thread unloads,
+	// spare.go); nil discards them.
+	Logger *slog.Logger
 }
 
 // Adapter implements contracts.RuntimeAdapter for Codex.
@@ -109,6 +123,7 @@ type Adapter struct {
 
 	turnsPage  int           // thread/turns/list page size for sessions.read (0: 50; tests)
 	wakeSettle time.Duration // bgwake quiet window (0: wakeSettle; tests)
+	deferMax   time.Duration // how long a thread stays loaded for its live groups (0: deferCap; tests)
 
 	// userOnlyDir makes an app-server socket directory private to the
 	// current user (fileperm.UserOnlyDir; tests observe it).
@@ -135,6 +150,15 @@ type runRef struct {
 	trustChecked atomic.Int64
 	// retrying is set while a capacity retry turn is being started.
 	retrying atomic.Bool
+	// reviving is set while Pyre restarts a dead app-server for the run
+	// (serverlost.go).
+	reviving atomic.Bool
+	// tuiFor is the app-server instance the TUI was started against;
+	// tuiRelaunch is set while a stale TUI is relaunched (tuirelaunch.go).
+	tuiFor      atomic.Value
+	tuiRelaunch atomic.Bool
+	// hooks watches the TUI's "Hooks need review" screen (hookreview.go).
+	hooks hookReview
 	// readMu serializes sessions.read; turns are its kept settled pages.
 	readMu sync.Mutex
 	turns  *turnCache
@@ -190,6 +214,7 @@ func New(o Options) (*Adapter, error) {
 	a := &Adapter{o: o, srv: srv, homes: map[string]*homeServer{}, runs: map[string]*runRef{},
 		userOnlyDir: fileperm.UserOnlyDir}
 	go a.sweepLoop(context.Background()) // unload threads no live run owns (unload.go)
+	go a.deferLoop(context.Background()) // unload threads kept for live background processes (spare.go)
 	return a, nil
 }
 
@@ -209,6 +234,9 @@ func (a *Adapter) Capabilities() []string {
 	}
 	if !a.o.DisableTUI {
 		caps = append(caps, contracts.CapAttachNative, contracts.CapAttachReadOnly, contracts.CapAttachCodexRemote, contracts.CapScreen)
+	}
+	if a.o.MailNotice {
+		caps = append(caps, contracts.CapInputDoorbell)
 	}
 	return caps
 }
@@ -344,6 +372,8 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 		hs.release(ctx, l.RunID)
 		return contracts.RunHandle{}, contracts.Errorf(contracts.ErrUnavailable, "%v", err)
 	}
+	// The owner's hook trust, before the thread loads its hooks.
+	untrustedHooks := a.mirrorHookTrust(ctx, c, l.ProfileDir, l.Cwd)
 	tcfg, err := mergeThreadConfig(withSessionEnv(threadConfig(l.Env), l.SessionEnv, l.SessionUnset), managedCfg)
 	if err != nil {
 		hs.release(ctx, l.RunID)
@@ -364,6 +394,21 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 			hs.release(ctx, l.RunID)
 			return contracts.RunHandle{}, contracts.Errorf(contracts.ErrInvalid, "resume ref %+v is not a codex thread", *l.Resume)
 		}
+		// A thread still loaded (by an earlier run, or a read of one) carries
+		// that run's config, and Codex attaches a resume to a subscribed
+		// loaded thread without applying its overrides: the new run's
+		// PYRE_* environment and `pyre mcp` would never reach it
+		// (iss_…). Unload it so this resume
+		// cold-loads it with this run's settings; the earlier run has ended.
+		if hs.isDeferred(l.Resume.ID) {
+			// Kept loaded after an automatic stop for its live background
+			// processes (spare.go): this run takes it over, and the reload
+			// below ends them as before.
+			a.cancelDeferral(cctx, hs, l.Resume.ID, "a new run ("+l.RunID+") resumed the thread; reloading it ends the processes")
+		}
+		if loaded, lerr := threadLoaded(cctx, c, l.Resume.ID); lerr == nil && loaded {
+			_ = hs.releaseLoaded(cctx, c, l.Resume.ID)
+		}
 		err = c.call(cctx, "thread/resume", threadResumeParams{ThreadID: l.Resume.ID, Cwd: l.Cwd, ApprovalPolicy: approval, Sandbox: sandbox, Model: model, ExcludeTurns: true, Config: tcfg}, &r)
 	} else {
 		err = c.call(cctx, "thread/start", threadStartParams{Cwd: l.Cwd, ApprovalPolicy: approval, Sandbox: sandbox, Model: model, DeveloperInstructions: l.AgentGuide, Config: tcfg}, &r)
@@ -379,6 +424,7 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	if l.Resume == nil {
 		a.materialize(cctx, c, r.Thread.ID, l)
 	}
+	hs.setConfiguredFor(r.Thread.ID, l.RunID) // loaded with this run's settings
 	meta := runMeta{RunID: l.RunID, SessionID: l.SessionID, ThreadID: r.Thread.ID, Home: l.ProfileDir, Executable: hs.exe, HomeKey: hs.key, Socket: hs.sock,
 		Cwd: l.Cwd, ApprovalPolicy: approval, Sandbox: sandbox, Model: model, Unset: l.Unset, LaunchedAt: a.o.Now().UTC()}
 	mb, _ := json.MarshalIndent(meta, "", "  ")
@@ -387,9 +433,11 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	}
 	ts := newThreadState(l.RunID, l.SessionID, r.Thread.ID)
 	ts.config = tcfg
+	ts.decoys = secretegress.ReadDecoys(l.StateDir)
 	ts.setStatus(r.Thread.Status, a.o.Now())
 	hs.register(ts)
 	rr := &runRef{meta: meta, stateDir: l.StateDir, hs: hs, ts: ts, subOwner: c}
+	rr.hooks.noteUntrusted(untrustedHooks)
 	a.mu.Lock()
 	a.runs[l.RunID] = rr
 	a.mu.Unlock()
@@ -399,6 +447,10 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 		TmuxSocket: a.srv.SocketPath(), TmuxTarget: l.RunID, StateDir: l.StateDir,
 		NativeRef: &contracts.NativeRef{Kind: "codex_thread", ID: r.Thread.ID},
 		Data:      map[string]string{"codex_thread_id": r.Thread.ID, "home_key": hs.key, "app_server_socket": hs.sock},
+	}
+	if a.o.MailNotice && tcfg["mcp_servers.pyre"] == nil {
+		// No pyre MCP server in this thread: no inbox tool to read mail with.
+		h.Data[contracts.HandleCapsUnavailable] = contracts.CapInputDoorbell
 	}
 	if !a.o.DisableTUI {
 		a.ensureTrust(ctx, c, rr)
@@ -536,6 +588,13 @@ func threadConfig(env map[string]string) map[string]any {
 	for k, v := range pyreEnv {
 		cfg["shell_environment_policy.set."+k] = v
 	}
+	for _, k := range secretegress.DecoyNames {
+		// The run's decoy credentials (decision I79) reach the thread's
+		// commands like its Pyre identity; never the MCP server's env.
+		if v := env[k]; v != "" {
+			cfg["shell_environment_policy.set."+k] = v
+		}
+	}
 	if t := env["TMPDIR"]; t != "" {
 		// The run's temp dir (pyred's per-run TMPDIR, or the profile's):
 		// the shared app-server inherited its own.
@@ -621,7 +680,11 @@ func (a *Adapter) tuiArgv(rr *runRef) []string {
 	// resuming a remote task") and exits 1. Bypass is applied to the thread
 	// itself on the app-server (approval_policy never, sandbox
 	// danger-full-access), which the remote TUI's turns inherit.
-	return []string{rr.hs.bin(), "resume", rr.meta.ThreadID, "--remote", "unix://" + rr.hs.sock, "-C", rr.meta.Cwd}
+	// No update check: an npm-installed TUI shows "Update available" before
+	// it resumes the thread and sits there unattended, so the thread loses
+	// its only subscriber besides pyred (server, 2026-10-23; resumeConfig).
+	return []string{rr.hs.bin(), "resume", rr.meta.ThreadID, "--remote", "unix://" + rr.hs.sock, "-C", rr.meta.Cwd,
+		"-c", "check_for_update_on_startup=false"}
 }
 
 // ensureTrust records the run's cwd as a trusted project in the app-server's
@@ -675,16 +738,21 @@ func (a *Adapter) startTUI(ctx context.Context, rr *runRef, env map[string]strin
 	}
 	err := a.srv.NewSession(ctx, tmux.SessionSpec{Name: rr.meta.RunID, Cwd: rr.meta.Cwd, Env: a.tuiEnv(rr), Unset: unset, Argv: a.tuiArgv(rr), Width: 200, Height: 50})
 	if err == nil {
+		a.noteTUI(rr)
 		a.watchTrust(rr)
+		rr.hooks.tuiStarted(a.o.Now())
 	}
 	return err
 }
 
-// respawnTUI restarts a TUI pane the human quit.
+// respawnTUI restarts a TUI pane the human quit, or one left on an
+// app-server that is gone (tuirelaunch.go).
 func (a *Adapter) respawnTUI(ctx context.Context, rr *runRef) error {
 	err := a.srv.RespawnPane(ctx, rr.meta.RunID, tmux.SessionSpec{Cwd: rr.meta.Cwd, Env: a.tuiEnv(rr), Unset: rr.meta.Unset, Argv: a.tuiArgv(rr)})
 	if err == nil {
+		a.noteTUI(rr)
 		a.watchTrust(rr)
+		rr.hooks.tuiStarted(a.o.Now())
 	}
 	return err
 }
@@ -746,8 +814,14 @@ func (a *Adapter) run(h contracts.RunHandle) (*runRef, error) {
 	}
 	ts := newThreadState(meta.RunID, meta.SessionID, meta.ThreadID)
 	ts.config = readThreadConfig(h.StateDir)
-	hs.register(ts)
+	ts.decoys = secretegress.ReadDecoys(h.StateDir)
 	rr = &runRef{meta: meta, stateDir: h.StateDir, hs: hs, ts: ts}
+	if stopped(h.StateDir) {
+		// A read of an ended run: the thread may belong to a later run of
+		// the session now, whose state must not be replaced.
+		return rr, nil
+	}
+	hs.register(ts)
 	a.mu.Lock()
 	if existing := a.runs[h.RunID]; existing != nil {
 		rr = existing
@@ -776,6 +850,13 @@ func (a *Adapter) client(ctx context.Context, rr *runRef, start bool) (*rpcClien
 	rr.ts.mu.Lock()
 	owner := rr.subOwner
 	rr.ts.mu.Unlock()
+	if owner != c && stopped(rr.stateDir) {
+		// An ended run (a transcript read, a reconcile) never resumes its
+		// thread: that would load it without any run's config, and a later
+		// run resuming the loaded thread would get its overrides ignored
+		// (iss_…).
+		return c, nil
+	}
 	if owner != c {
 		var r threadResponse
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -783,8 +864,16 @@ func (a *Adapter) client(ctx context.Context, rr *runRef, start bool) (*rpcClien
 		rr.ts.mu.Lock()
 		cfg := rr.ts.config
 		rr.ts.mu.Unlock()
+		// After a pyred restart the thread is usually still loaded, with
+		// background commands running: re-adopting the same run attaches
+		// without overrides; another run's loaded thread is reloaded with
+		// this run's config (server.go).
+		cfg = rr.hs.resumeConfig(cctx, c, rr.meta.ThreadID, rr.meta.RunID, cfg)
 		if err := c.call(cctx, "thread/resume", threadResumeParams{ThreadID: rr.meta.ThreadID, ExcludeTurns: true, Config: cfg}, &r); err != nil {
 			return nil, err
+		}
+		if cfg != nil {
+			rr.hs.setConfiguredFor(rr.meta.ThreadID, rr.meta.RunID)
 		}
 		rr.ts.mu.Lock()
 		rr.ts.setStatus(r.Thread.Status, a.o.Now())
@@ -803,9 +892,19 @@ func (a *Adapter) Recover(ctx context.Context, h contracts.RunHandle) (contracts
 	if stopped(h.StateDir) {
 		return h, contracts.Errorf(contracts.ErrNotFound, "run %s was stopped", h.RunID)
 	}
+	a.mu.Lock()
+	fresh := a.runs[h.RunID] == nil
+	a.mu.Unlock()
 	rr, err := a.run(h)
 	if err != nil {
 		return h, err
+	}
+	if fresh {
+		// What the previous pyred held, and exits while it was down, are
+		// read back from the rollout (bgrecover.go).
+		rr.ts.mu.Lock()
+		rr.ts.armBackfill()
+		rr.ts.mu.Unlock()
 	}
 	_ = rr.hs.addRef(h.RunID)
 	c, err := a.client(ctx, rr, true)
@@ -815,6 +914,15 @@ func (a *Adapter) Recover(ctx context.Context, h contracts.RunHandle) (contracts
 			return h, contracts.Errorf(contracts.ErrNotFound, "codex thread %s: %v", rr.meta.ThreadID, re)
 		}
 		return h, contracts.Errorf(contracts.ErrUnavailable, "%v", err)
+	}
+	rr.ts.mu.Lock()
+	var bf *backfill
+	if rr.ts.status.Type != "active" {
+		bf = rr.ts.takeBackfill() // recovered idle: now; else when the running turn ends
+	}
+	rr.ts.mu.Unlock()
+	if bf != nil {
+		go a.backfillExits(rr.ts, bf, "", "")
 	}
 	// Rebuild acceptance evidence from the thread (no runtime dedupe).
 	a.scanTurns(ctx, c, rr, 5, "")
@@ -878,9 +986,14 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 	}
 	if _, err := a.client(ctx, rr, false); err != nil {
 		obs.State, obs.StateReason = contracts.RunUnknown, "codex app-server unreachable: "+err.Error()
+		if errors.Is(err, errNoServer) && a.reviveLost(rr) {
+			obs.StateReason += " (it died with the run's work in it; restarting)"
+		}
 		return obs, nil
 	}
 	a.recheckTrust(rr, now)
+	a.relaunchStaleTUI(rr)
+	a.checkHookReview(ctx, rr, now)
 	ts := rr.ts
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -890,6 +1003,7 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 	obs.Activity = ts.activity
 	obs.Doing = ts.doingNow() // the daemon keeps it only while the run is running
 	obs.LimitEvent = ts.limit
+	obs.SecurityAlerts = append([]contracts.SecurityAlert(nil), ts.security...)
 	pending := false
 	order := ts.order
 	if len(order) > 50 {
@@ -932,10 +1046,28 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 	if pending && obs.State != contracts.RunWaitingApproval {
 		obs.State, obs.StateReason = contracts.RunWaitingApproval, "approval pending"
 	}
+	if obs.State == contracts.RunWaitingInput && capRetryPending(ts, rr.retrying.Load()) {
+		// A capacity failure Pyre continues by itself (capretry.go) does not
+		// end the agent's turn: idle here would send the parent a "finished,
+		// waiting for input" report with a mid-work commentary message as
+		// the result (server, Nov 2026, iss_…).
+		obs.State, obs.StateReason = contracts.RunWaitingBackground, "last turn failed"
+		if e := ts.lastErr; e != nil {
+			obs.StateReason += ": " + oneLine(e.Message, 160)
+		}
+		if ts.retryAt.IsZero() {
+			obs.StateReason += " · Pyre is continuing it now"
+		} else {
+			obs.StateReason += fmt.Sprintf(" · Pyre continues it at %s (retry %d/%d)", ts.retryAt.Local().Format("15:04"), ts.capRetries+1, len(capBackoff))
+		}
+	}
+	// The TUI's "Hooks need review" screen needs the owner even when the
+	// turn underneath it ended (iss_…).
+	rr.observeHookReview(&obs)
 	switch {
 	case obs.State == contracts.RunRunning || obs.State == contracts.RunWaitingApproval:
 		ts.turnsObserved = ts.turnsStarted
-	case obs.State == contracts.RunWaitingInput && ts.turnsObserved < ts.turnsStarted:
+	case (obs.State == contracts.RunWaitingInput || obs.State == contracts.RunWaitingBackground) && ts.turnsObserved < ts.turnsStarted:
 		// A turn started and ended between two observations (win-home,
 		// Oct 2026: a launch prompt answered in 1.6 s, the daemon observes
 		// every 2 s): report it working once, so the transition to
@@ -1143,7 +1275,8 @@ func (a *Adapter) Attach(ctx context.Context, h contracts.RunHandle, req contrac
 		return contracts.AttachDescriptor{}, contracts.Errorf(contracts.ErrUnavailable, "%v", err)
 	}
 	p, err := a.srv.Pane(ctx, h.RunID)
-	if err != nil || p.Dead {
+	stale := err == nil && !p.Dead && rr.tuiInstance() != "" && rr.tuiInstance() != rr.hs.instanceNow()
+	if err != nil || p.Dead || stale {
 		a.ensureTrust(ctx, c, rr)
 	}
 	switch {
@@ -1151,7 +1284,7 @@ func (a *Adapter) Attach(ctx context.Context, h contracts.RunHandle, req contrac
 		if err := a.startTUI(ctx, rr, nil, rr.meta.Unset); err != nil {
 			return contracts.AttachDescriptor{}, contracts.Errorf(contracts.ErrUnavailable, "start TUI: %v", err)
 		}
-	case p.Dead: // the human quit the TUI; the thread lives on in the app-server
+	case p.Dead, stale: // the human quit the TUI, or its app-server is gone (tuirelaunch.go); the thread lives on
 		if err := a.respawnTUI(ctx, rr); err != nil {
 			return contracts.AttachDescriptor{}, contracts.Errorf(contracts.ErrUnavailable, "respawn TUI: %v", err)
 		}
@@ -1171,8 +1304,16 @@ func (a *Adapter) receipt(o contracts.CommandOutcome, accepted bool, detail stri
 // Interrupt: turn/interrupt (bounded; interrupting a finished turn never
 // answers), then thread/backgroundTerminals/clean because commands keep
 // running after an interrupt. An idle thread with commands still running
-// is cleaned too: an agent waiting on one (bgwake.go) is stopped.
+// is cleaned too: an agent waiting on one (bgwake.go) is stopped. The
+// receipt says how many background process groups the clean killed
+// (spare.go; Codex kills exited commands' groups too).
 func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contracts.CommandReceipt, error) {
+	return a.interrupt(ctx, h, true)
+}
+
+// interrupt is Interrupt; count reads the process groups before the clean
+// to report what it killed.
+func (a *Adapter) interrupt(ctx context.Context, h contracts.RunHandle, count bool) (contracts.CommandReceipt, error) {
 	rr, err := a.run(h)
 	if err != nil {
 		return a.receipt(contracts.OutcomeFailed, false, err.Error()), nil
@@ -1189,30 +1330,47 @@ func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contrac
 	active, done := rr.ts.activeTurn, rr.ts.turnDone
 	waiting := len(rr.ts.runningCmds) > 0
 	rr.ts.mu.Unlock()
-	if active == "" {
-		if !waiting {
-			return a.receipt(contracts.OutcomeSucceeded, true, "nothing to interrupt"), nil
+	if active == "" && !waiting {
+		return a.receipt(contracts.OutcomeSucceeded, true, "nothing to interrupt"), nil
+	}
+	var before []liveGroup
+	scanned := false
+	if count {
+		before, scanned = rr.hs.liveGroups(ctx, c, rr.meta.ThreadID)
+	}
+	killed := func() string {
+		if !scanned {
+			return ""
 		}
+		return "; " + killedLine(before)
+	}
+	if active == "" {
 		// An idle agent waiting on commands it left running (bgwake.go):
 		// interrupting it stops that wait.
 		cerr := a.cleanTerminals(ctx, c, rr)
-		return a.receipt(contracts.OutcomeSucceeded, true, fmt.Sprintf("nothing to interrupt (no active turn); background commands stopped (backgroundTerminals/clean err=%v)", cerr)), nil
+		return a.receipt(contracts.OutcomeSucceeded, true, fmt.Sprintf("nothing to interrupt (no active turn); background commands stopped (backgroundTerminals/clean err=%v)", cerr)+killed()), nil
 	}
-	ictx, cancel := context.WithTimeout(ctx, a.o.InterruptTimeout)
-	ierr := c.call(ictx, "turn/interrupt", turnInterruptParams{ThreadID: rr.meta.ThreadID, TurnID: active}, nil)
-	cancel()
-	completed := false
-	select {
-	case <-done:
-		completed = true
-	case <-time.After(a.o.InterruptTimeout):
-	}
+	completed, ierr := a.interruptTurn(ctx, c, rr, active, done)
 	cerr := a.cleanTerminals(ctx, c, rr)
-	detail := fmt.Sprintf("turn/interrupt err=%v; backgroundTerminals/clean err=%v", ierr, cerr)
+	detail := fmt.Sprintf("turn/interrupt err=%v; backgroundTerminals/clean err=%v", ierr, cerr) + killed()
 	if completed {
 		return a.receipt(contracts.OutcomeSucceeded, true, "turn interrupted; "+detail), nil
 	}
 	return a.receipt(contracts.OutcomeIndeterminate, true, "turn completion not observed; "+detail), nil
+}
+
+// interruptTurn sends turn/interrupt for the active turn and waits (bounded)
+// for it to end. It leaves the background terminals alone.
+func (a *Adapter) interruptTurn(ctx context.Context, c *rpcClient, rr *runRef, active string, done chan struct{}) (bool, error) {
+	ictx, cancel := context.WithTimeout(ctx, a.o.InterruptTimeout)
+	ierr := c.call(ictx, "turn/interrupt", turnInterruptParams{ThreadID: rr.meta.ThreadID, TurnID: active}, nil)
+	cancel()
+	select {
+	case <-done:
+		return true, ierr
+	case <-time.After(a.o.InterruptTimeout):
+		return false, ierr
+	}
 }
 
 // cleanTerminals stops the thread's background terminals. Their exits
@@ -1229,12 +1387,66 @@ func (a *Adapter) cleanTerminals(ctx context.Context, c *rpcClient, rr *runRef) 
 	rr.ts.mu.Lock()
 	rr.ts.wakes, rr.ts.wakeMute = nil, time.Now().Add(wakeMuteAfterClean)
 	rr.ts.mu.Unlock()
+	writeCleanedAt(rr.stateDir, time.Now()) // a recovered run never wakes for these (bgrecover.go)
 	return err
 }
 
 // Stop interrupts an active turn, unsubscribes, closes the TUI and releases
-// the home's app-server ref (SIGTERM when no other run uses it).
+// the home's app-server ref (SIGTERM when no other run uses it). Cleaning
+// and unloading the thread kills every process group of its exec sessions,
+// exited ones included; the receipt says how many had live processes.
 func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.CommandReceipt, error) {
+	return a.stop(ctx, h, false)
+}
+
+// StopSparing is Pyre's own stop (contracts.StopSparer; archive when done,
+// the archive cascade): when process groups of the thread's exec sessions
+// still have live processes, the run ends but the thread is neither cleaned
+// nor unloaded until they exit (spare.go, decision I62).
+func (a *Adapter) StopSparing(ctx context.Context, h contracts.RunHandle) (contracts.CommandReceipt, error) {
+	return a.stop(ctx, h, true)
+}
+
+var _ contracts.StopSparer = (*Adapter)(nil)
+
+// BackgroundWork lists the thread's exec process groups that still have
+// live processes (contracts.BackgroundGuard, decision I67): a stop that
+// unloads the thread kills them. It asks a connected app-server for its
+// background terminals but never starts one.
+func (a *Adapter) BackgroundWork(ctx context.Context, h contracts.RunHandle) []string {
+	rr, err := a.run(h)
+	if err != nil {
+		return nil
+	}
+	live, scanned := rr.hs.liveGroups(ctx, rr.hs.connected(), rr.meta.ThreadID)
+	if !scanned {
+		return nil
+	}
+	out := make([]string, 0, len(live))
+	for _, g := range live {
+		what := g.Command
+		if what == "" && len(g.Members) > 0 {
+			what = firstN(g.Members[0].Cmd, 60)
+		}
+		out = append(out, fmt.Sprintf("exec: %s (pgid %d)", clipCmd(what), g.PGID))
+	}
+	return out
+}
+
+// StopUnlessBackground stops the run unless its exec process groups still
+// have live processes (contracts.BackgroundGuard); then nothing is stopped.
+func (a *Adapter) StopUnlessBackground(ctx context.Context, h contracts.RunHandle) (contracts.CommandReceipt, error) {
+	if tasks := a.BackgroundWork(ctx, h); len(tasks) > 0 {
+		msg := fmt.Sprintf("not stopped: %d background process group(s) still have live processes: %s", len(tasks), strings.Join(tasks, "; "))
+		return a.receipt(contracts.OutcomeFailed, false, msg),
+			contracts.Errorf(contracts.ErrConflict, "%s", msg).WithDetail(contracts.DetailBackgroundWork, tasks)
+	}
+	return a.stop(ctx, h, false)
+}
+
+var _ contracts.BackgroundGuard = (*Adapter)(nil)
+
+func (a *Adapter) stop(ctx context.Context, h contracts.RunHandle, spare bool) (contracts.CommandReceipt, error) {
 	rr, err := a.run(h)
 	if err != nil {
 		return a.receipt(contracts.OutcomeFailed, false, err.Error()), nil
@@ -1247,34 +1459,73 @@ func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.Co
 	// wait for it (bounded), so the turn is seen below and interrupted.
 	a.syncDeliver(ctx, rr)
 	c, cerr := a.client(ctx, rr, false)
+	var live []liveGroup
+	scanned, keep := false, false
 	if cerr == nil {
+		live, scanned = rr.hs.liveGroups(ctx, c, rr.meta.ThreadID)
+		keep = spare && scanned && len(live) > 0
 		rr.ts.mu.Lock()
-		active := rr.ts.activeTurn
+		active, done := rr.ts.activeTurn, rr.ts.turnDone
 		rr.ts.mu.Unlock()
 		if active != "" {
-			_, _ = a.Interrupt(ctx, h)
+			if keep {
+				_, _ = a.interruptTurn(ctx, c, rr, active, done) // the turn ends; its commands keep running
+			} else {
+				_, _ = a.interrupt(ctx, h, false)
+			}
 		}
-		uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_ = c.call(uctx, "thread/unsubscribe", threadIDParams{ThreadID: rr.meta.ThreadID}, nil)
-		cancel()
+		if !keep {
+			uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_ = c.call(uctx, "thread/unsubscribe", threadIDParams{ThreadID: rr.meta.ThreadID}, nil)
+			cancel()
+		}
 	}
 	_ = a.srv.TerminateSession(ctx, h.RunID, 3*time.Second)
-	if cerr == nil {
+	deferred := false
+	if keep {
+		// Stays loaded and subscribed (Codex unloads an unsubscribed
+		// thread 30 minutes later), owned by no run.
+		deferred = a.deferThread(rr.hs, deferral{ThreadID: rr.meta.ThreadID, RunID: h.RunID, SessionID: rr.meta.SessionID, By: "stop"}, live)
+	}
+	killed := ""
+	if cerr == nil && !deferred {
+		if keep { // the deferral could not be recorded: stop as before
+			uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_ = c.call(uctx, "thread/unsubscribe", threadIDParams{ThreadID: rr.meta.ThreadID}, nil)
+			cancel()
+		}
 		// Unsubscribing leaves the thread loaded with its MCP servers and
 		// background terminals; with the TUI gone, unload it (unload.go).
-		_ = unloadThread(ctx, c, rr.meta.ThreadID)
+		if unloadThread(ctx, c, rr.meta.ThreadID) == nil {
+			rr.hs.forgetGroups(rr.meta.ThreadID)
+		}
+		if scanned {
+			killed = killedLine(live)
+		}
 	}
-	b, _ := json.Marshal(map[string]any{"at": a.o.Now().UTC(), "thread_id": rr.meta.ThreadID})
+	st := map[string]any{"at": a.o.Now().UTC(), "thread_id": rr.meta.ThreadID}
+	if deferred {
+		st["unload_deferred_for_pgids"] = groupIDs(live)
+	}
+	b, _ := json.Marshal(st)
 	_ = writeFileAtomic(filepath.Join(h.StateDir, "stopped.json"), b)
 	_ = os.Remove(filepath.Join(h.StateDir, threadConfigFile)) // the run's session token is no longer needed
+	rr.hs.clearConfigured(rr.meta.ThreadID, h.RunID)
 	rr.hs.unregister(rr.meta.ThreadID)
 	remaining := rr.hs.dropRef(h.RunID)
 	detail := "thread unsubscribed; TUI closed"
+	if deferred {
+		detail = fmt.Sprintf("TUI closed; thread kept loaded: %d background process group(s) still have live processes (%s); Pyre unloads it once they exit (checked every %s, at most %s)",
+			len(live), describeGroups(live), deferRecheck, a.deferLimit())
+	}
 	if remaining == 0 {
 		rr.hs.stop(ctx)
 		detail += "; app-server stopped (no other runs on this home)"
 	} else {
 		detail += fmt.Sprintf("; app-server kept (%d other ref(s))", remaining)
+	}
+	if killed != "" {
+		detail += "; " + killed
 	}
 	a.mu.Lock()
 	delete(a.runs, h.RunID)
@@ -1291,6 +1542,9 @@ func (a *Adapter) Answer(ctx context.Context, h contracts.RunHandle, ap contract
 	rr, err := a.run(h)
 	if err != nil {
 		return a.receipt(contracts.OutcomeFailed, false, ""), err
+	}
+	if strings.HasPrefix(ap.RequestID, hookReviewRequestPrefix) {
+		return a.answerHookReview(ctx, rr, ap, optionID)
 	}
 	c, err := a.client(ctx, rr, false)
 	if err != nil {
@@ -1382,6 +1636,14 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 	rr.readMu.Lock()
 	sel, gap, stale := a.readTurns(ctx, c, rr, h.RunID, start, limit, req.Tail)
 	rr.readMu.Unlock()
+	if stale != nil && len(sel) == 0 && stopped(h.StateDir) {
+		// An ended run's thread is not resumed (client), and may not be
+		// loaded: its rollout file has the turns.
+		if rsel, ok := rolloutTranscript(h.StateDir, rr.meta, h.RunID, req, limit); ok {
+			sel, gap, stale = rsel, false, nil
+			resp.Freshness.Reason = "run ended; read from the rollout file"
+		}
+	}
 	resp.Entries, resp.Gap = sel, gap
 	if stale != nil {
 		resp.Freshness.Stale, resp.Freshness.Reason = true, stale.Error()
@@ -1416,6 +1678,13 @@ type turnCache struct {
 	seq    int64                       // items before cursor
 	win    []contracts.TranscriptEntry // newest entries before cursor, ascending Seq
 	floor  int64                       // every entry with Seq <= seq and > floor is in win
+	marks  []turnMark                  // where each settled page starts (TranscriptFullText)
+}
+
+// turnMark is a settled page's listing cursor and the items before it.
+type turnMark struct {
+	cursor string
+	seq    int64
 }
 
 func (a *Adapter) pageSize() int {
@@ -1462,9 +1731,11 @@ func (a *Adapter) readTurns(ctx context.Context, c *rpcClient, rr *runRef, runID
 			stale = err
 			break
 		}
-		page := a.turnEntries(runID, r.Data, &seq)
+		before := seq
+		page := a.turnEntries(runID, r.Data, &seq, false)
 		all = append(all, page...)
 		if settled && r.NextCursor != "" && len(r.Data) > 0 && allSettled(r.Data) {
+			next.marks = append(next.marks[:len(next.marks):len(next.marks)], turnMark{cursor, before})
 			next.cursor, next.seq = r.NextCursor, seq
 			next.win = append(next.win, page...)
 			if n := len(next.win); n > tailWindow {
@@ -1499,6 +1770,81 @@ func (a *Adapter) readTurns(ctx context.Context, c *rpcClient, rr *runRef, runID
 	return sel, gap, stale
 }
 
+// TranscriptFullText returns the whole text (newlines kept, no cut) of the
+// run's entries numbered seqs (the daemon's full sessions.read), from the
+// source a read uses: the app-server's turns, listed from the kept settled
+// page before the oldest seq, else the run's rollout file when its
+// app-server is gone. A seq with no entry is left out.
+func (a *Adapter) TranscriptFullText(ctx context.Context, h contracts.RunHandle, seqs []int64) (map[int64]string, error) {
+	rr, err := a.run(h)
+	if err != nil || len(seqs) == 0 {
+		return nil, err
+	}
+	c, err := a.client(ctx, rr, false)
+	if err != nil {
+		if !errors.Is(err, errNoServer) && !stopped(h.StateDir) {
+			return nil, err
+		}
+		return rolloutFullText(h.StateDir, rr.meta, seqs)
+	}
+	rr.readMu.Lock()
+	out, err := a.turnsFullText(ctx, c, rr, seqs)
+	rr.readMu.Unlock()
+	if err != nil && len(out) == 0 && stopped(h.StateDir) {
+		return rolloutFullText(h.StateDir, rr.meta, seqs)
+	}
+	return out, err
+}
+
+// turnsFullText lists the thread's turns (full items) from the kept mark
+// before the oldest of seqs, or from the first turn, up to the newest, and
+// returns those entries' uncut text. Callers hold rr.readMu.
+func (a *Adapter) turnsFullText(ctx context.Context, c *rpcClient, rr *runRef, seqs []int64) (map[int64]string, error) {
+	want := make(map[int64]bool, len(seqs))
+	lo, hi := seqs[0], seqs[0]
+	for _, q := range seqs {
+		want[q] = true
+		lo, hi = min(lo, q), max(hi, q)
+	}
+	var from turnMark
+	if tc := rr.turns; tc != nil && tc.client == c && tc.thread == rr.meta.ThreadID {
+		for _, m := range tc.marks { // ascending
+			if m.seq < lo {
+				from = m
+			}
+		}
+		if tc.seq < lo {
+			from = turnMark{tc.cursor, tc.seq}
+		}
+	}
+	out := make(map[int64]string, len(seqs))
+	cursor, seq := from.cursor, from.seq
+	for i := 0; i < 20 && seq < hi; i++ {
+		var r turnsListResponse
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := c.call(cctx, "thread/turns/list", turnsListParams{ThreadID: rr.meta.ThreadID, Cursor: cursor, Limit: a.pageSize(), ItemsView: "full", SortDirection: "asc"}, &r)
+		cancel()
+		if err != nil {
+			if i == 0 && cursor != "" {
+				// The kept cursor may no longer exist: list from the start.
+				cursor, seq, i = "", 0, -1
+				continue
+			}
+			return out, err
+		}
+		for _, e := range a.turnEntries("", r.Data, &seq, true) {
+			if want[e.Seq] {
+				out[e.Seq] = e.Text
+			}
+		}
+		if r.NextCursor == "" || len(r.Data) == 0 {
+			break
+		}
+		cursor = r.NextCursor
+	}
+	return out, nil
+}
+
 func allSettled(ts []turn) bool {
 	for _, t := range ts {
 		if t.Status == "" || t.Status == "inProgress" {
@@ -1509,7 +1855,9 @@ func allSettled(ts []turn) bool {
 }
 
 // turnEntries converts a page of turns; seq counts every decodable item.
-func (a *Adapter) turnEntries(runID string, turns []turn, seq *int64) []contracts.TranscriptEntry {
+// Text longer than 2000 bytes is cut and folded onto one line unless full
+// (TranscriptFullText).
+func (a *Adapter) turnEntries(runID string, turns []turn, seq *int64, full bool) []contracts.TranscriptEntry {
 	var out []contracts.TranscriptEntry
 	for _, t := range turns {
 		// Entries are stamped with their turn's start (items have no time
@@ -1530,8 +1878,8 @@ func (a *Adapter) turnEntries(runID string, turns []turn, seq *int64) []contract
 				e.Kind, e.Text = "user", it.userText()
 				if strings.HasPrefix(e.Text, "[pyre-msg:") || it.ClientID != "" && safeIDRe.MatchString(it.ClientID) && header.HasMarker(e.Text, it.ClientID) {
 					e.Kind, e.MessageID = "pyre_message", it.ClientID
-				} else if strings.HasPrefix(it.ClientID, wakeIDPrefix) {
-					e.Kind = "system" // Pyre's background-command notice, not typed input
+				} else if strings.HasPrefix(it.ClientID, wakeIDPrefix) || strings.HasPrefix(it.ClientID, mailNoticeIDPrefix) {
+					e.Kind = "system" // Pyre's background-command or mail notice, not typed input
 				}
 			case "agentMessage":
 				e.Kind, e.Text = "assistant", it.Text
@@ -1556,7 +1904,7 @@ func (a *Adapter) turnEntries(runID string, turns []turn, seq *int64) []contract
 			default:
 				continue
 			}
-			if len(e.Text) > 2000 {
+			if len(e.Text) > 2000 && !full {
 				e.Text, e.Truncated = oneLine(e.Text, 2000), true
 			}
 			out = append(out, e)

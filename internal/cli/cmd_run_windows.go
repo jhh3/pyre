@@ -59,3 +59,6 @@ func stdoutKind() int {
 }
 
 func childSysProcAttr(group bool) *syscall.SysProcAttr { return nil }
+
+// signalStalled ends a stalled child (Windows has no SIGTERM to ask with).
+func signalStalled(p *os.Process, group, kill bool) { _ = p.Kill() }

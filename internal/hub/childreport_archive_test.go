@@ -323,3 +323,45 @@ func TestChildReportSelfArchiveAfterMessagingParent(t *testing.T) {
 		}
 	}
 }
+
+// A child that archives itself with mail to it still undelivered (queued
+// while its turn ran, never taken into a turn): the parent's report says
+// so and names the messages (iss_…).
+func TestChildReportSelfArchiveNamesUndeliveredMail(t *testing.T) {
+	f := newChildFixture(t, nil)
+	sid := f.child.Session.SessionID
+	f.observe(contracts.RunRunning, "working")
+	if _, err := archiveWhenDone(f.x, sesPrincipal(sid), "op_synth-self-archive", sid, true); err != nil {
+		t.Fatal(err)
+	}
+	m, err := f.x.h.SendMessage(as(sesPrincipal(f.parent.Session.SessionID)), contracts.SendMessageRequest{Mutation: contracts.Mutation{OperationID: "op_synth-late-mail"},
+		Recipient: contracts.Address{Kind: contracts.AddrSession, ID: sid}, Mode: contracts.ModeQueue, Body: contracts.MessageBody{Text: "synthetic: recheck the final SHA"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.finishTurn(false)
+	f.process()
+	f.process()
+	msgs := f.live()
+	if len(msgs) != 1 {
+		t.Fatalf("want one report, got %d: %v", len(msgs), f.statuses())
+	}
+	text := msgs[0].Body.Text
+	if !strings.Contains(text, "Undelivered: 1 message(s) sent to it never reached it ("+m.Envelope.MessageID+")") {
+		t.Fatalf("report does not name the undelivered mail:\n%s", text)
+	}
+
+	// No pending mail: no such line.
+	g := newChildFixture(t, nil)
+	gid := g.child.Session.SessionID
+	g.observe(contracts.RunRunning, "working")
+	if _, err := archiveWhenDone(g.x, sesPrincipal(gid), "op_synth-self-archive", gid, true); err != nil {
+		t.Fatal(err)
+	}
+	g.finishTurn(false)
+	g.process()
+	g.process()
+	if ms := g.live(); len(ms) != 1 || strings.Contains(ms[0].Body.Text, "Undelivered") {
+		t.Fatalf("clean archive report: %v", ms)
+	}
+}

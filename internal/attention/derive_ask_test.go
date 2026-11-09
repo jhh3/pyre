@@ -33,6 +33,14 @@ func TestDeriveAskLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs := e.jobs()
+	// The owner writing to the session in chat leaves it as it is.
+	chatted := ask
+	chatted.OwnerChat = &contracts.AskOwnerChat{Text: "unrelated question", At: t0}
+	emit(chatted)
+	e.drain()
+	if g := e.byGroup("ask:ask_synth-1"); len(g) != 1 || g[0].State != contracts.AttnRead || e.jobs() != jobs {
+		t.Fatalf("after chat: %+v jobs %d->%d", g, jobs, e.jobs())
+	}
 	merged := ask
 	merged.Count = 2
 	emit(merged)

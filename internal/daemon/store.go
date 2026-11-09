@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
@@ -180,6 +181,40 @@ func (s *store) latestRunForSession(ctx context.Context, sessionID string) (runR
 		return r, false, nil
 	}
 	return r, err == nil, err
+}
+
+// runsByNativeID maps each of ids that is a run's native session ID (a
+// Claude session UUID) to those runs.
+func (s *store) runsByNativeID(ctx context.Context, ids []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	for len(ids) > 0 {
+		batch := ids[:min(len(ids), 500)]
+		ids = ids[len(batch):]
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT run_id, json_extract(CAST(run AS TEXT), '$.native_ref.id') AS nid FROM daemon_runs WHERE nid IN (?`+strings.Repeat(`,?`, len(batch)-1)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var runID, nid string
+			if err := rows.Scan(&runID, &nid); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[nid] = append(out[nid], runID)
+		}
+		err = rows.Err()
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // recentRunCwds lists the distinct working directories of runs created

@@ -228,12 +228,13 @@ func cmdServe(ctx context.Context, args []string, stderr io.Writer) error {
 	runtimeStats := fs.String("dev-runtime-stats", "", "testing: rewrite this file every 30s with the hub's goroutine/heap/fd counters (soak leak checks)")
 	cpuProfile := fs.String("dev-cpuprofile", "", "testing: write a CPU profile of the whole serve run to this file (written at shutdown)")
 	devCmdRet := fs.Duration("dev-command-retention", 0, "testing: keep finished node commands this long instead of 7 days")
-	devOpRet := fs.Duration("dev-operation-retention", 0, "testing: keep idempotency records this long instead of 30 days")
+	devOpRet := fs.Duration("dev-operation-retention", 0, "testing: keep idempotency records this long instead of 7 days")
 	devPrune := fs.Duration("dev-prune-interval", 0, "testing: prune finished commands and idempotency records this often instead of hourly")
 	devMaxEvents := fs.Int("dev-max-events", 0, "testing: keep at most this many events instead of 200000")
 	auditMaxAge := fs.Duration("audit-max-age", 0, "keep audit log entries (pyre audit) this long (default 2160h = 90 days)")
 	auditMaxRows := fs.Int("audit-max-rows", 0, "keep at most this many audit log entries (default 100000)")
 	requireGrants := fs.Bool("require-connection-grants", false, "sessions need an explicit grant for every connection (default: a session uses connections verified on its own node, or verified for remote use on another node, without one)")
+	limitResume := fs.Bool("limit-auto-resume", true, "resume sessions that stopped on an account limit by themselves once an account has room (false: they wait to be resumed)")
 	previewURL := fs.String("preview-url", "", "origin of the preview listener used in minted preview links (default: --hub-url host with the --preview-listen port)")
 	var hosts, alsoListen multiFlag
 	fs.Var(&hosts, "tls-host", "DNS name or IP for a newly generated certificate (repeatable)")
@@ -274,7 +275,7 @@ func cmdServe(ctx context.Context, args []string, stderr io.Writer) error {
 	if pURL == "" && *previewListen != "" {
 		pURL = derivePreviewURL(*hubURL, *previewListen)
 	}
-	hopts := hub.Options{CommandRetention: *devCmdRet, OperationRetention: *devOpRet, PruneInterval: *devPrune}
+	hopts := hub.Options{CommandRetention: *devCmdRet, OperationRetention: *devOpRet, PruneInterval: *devPrune, LimitAutoResumeOff: !*limitResume}
 	if *devMaxEvents > 0 {
 		r := events.DefaultRetention
 		r.MaxEvents = *devMaxEvents

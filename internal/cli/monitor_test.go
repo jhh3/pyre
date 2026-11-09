@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -69,8 +70,8 @@ func TestMonitorLoopWakesOnlyOnChange(t *testing.T) {
 		t.Fatalf("for: %v after %d checks", err, i)
 	}
 
-	// While the target is mid-turn, changes are held and only the latest
-	// is sent once it is idle.
+	// While the target is mid-turn, changes are held and sent once it is
+	// idle, quoting the latest.
 	busy := 3
 	m.Target = func(ctx context.Context) monitorTargetState {
 		if busy > 0 {
@@ -97,6 +98,126 @@ func TestMonitorLoopWakesOnlyOnChange(t *testing.T) {
 	outputs, i, sent = []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}, 0, nil
 	if err := m.run(context.Background()); err != nil || len(sent) != monitorWakeBudget+1 || !strings.Contains(sent[len(sent)-1], "has stopped: its output changed more than 6 times") || i != monitorWakeBudget+2 {
 		t.Fatalf("budget: %v, %d sent after %d checks: %q", err, len(sent), i, sent[len(sent)-1])
+	}
+}
+
+// A value that comes and goes while the target is busy is named in the
+// report: the change that triggered it is never replaced by the latest
+// output alone, and a report whose before and after are identical says it
+// changed back instead of a bare "changed" (iss_…).
+func TestMonitorReportNamesHeldIntermediates(t *testing.T) {
+	newLoop := func(outputs []string, busyChecks int) (*monitorLoop, *[]string, *bytes.Buffer) {
+		now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		var sent []string
+		var log bytes.Buffer
+		i := 0
+		m := &monitorLoop{To: "ses_synth-target", Label: "job", Cmd: "cat exit.txt 2>/dev/null || echo running", Every: time.Minute, Out: &log, UntilChange: true,
+			Now: func() time.Time { return now },
+			Sleep: func(ctx context.Context, d time.Duration) error {
+				now = now.Add(d)
+				if i >= len(outputs) {
+					return context.Canceled
+				}
+				return nil
+			},
+			Check: func(ctx context.Context, cmd string) string { i++; return outputs[i-1] },
+			Send:  func(ctx context.Context, text string) error { sent = append(sent, text); return nil },
+			Target: func(ctx context.Context) monitorTargetState {
+				if i >= 1 && busyChecks > 0 { // the baseline check sees an idle target
+					busyChecks--
+					return monitorTargetState{Busy: true, Why: "running"}
+				}
+				return monitorTargetState{}
+			},
+		}
+		return m, &sent, &log
+	}
+
+	// running → 101 → running between report opportunities.
+	m, sent, log := newLoop([]string{"running", "101", "running"}, 1)
+	if err := m.run(context.Background()); err != nil {
+		t.Fatalf("flip: %v\nlog:\n%s", err, log)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("flip sent %d: %q\nlog:\n%s", len(*sent), *sent, log)
+	}
+	s := (*sent)[0]
+	for _, want := range []string{"output changed and changed back", "changed to 101 and back to running", "sequence: running → 101 → running", "has stopped (until-change)"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("flip report lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "previous: running") || strings.Contains(s, "output changed (") {
+		t.Fatalf("flip report reads as a bare change from running to running:\n%s", s)
+	}
+
+	// running → 101 → done: the latest is quoted, the trigger is listed.
+	m, sent, log = newLoop([]string{"running", "101", "done"}, 1)
+	_ = m.run(context.Background())
+	if len(*sent) != 1 || !strings.Contains((*sent)[0], "output changed (") || !strings.Contains((*sent)[0], "```\ndone\n```") ||
+		!strings.Contains((*sent)[0], "previous: running") || !strings.Contains((*sent)[0], "sequence: running → 101 → done") {
+		t.Fatalf("sequence %q\nlog:\n%s", *sent, log)
+	}
+
+	// A long hold keeps the trigger and the latest intermediates, and says
+	// how many it left out.
+	outs := []string{"a"}
+	for k := range 20 {
+		outs = append(outs, fmt.Sprintf("v%d", k), "a")
+	}
+	m, sent, log = newLoop(outs, len(outs)-2)
+	m.UntilChange = false
+	_ = m.run(context.Background())
+	if len(*sent) != 1 {
+		t.Fatalf("long hold sent %q\nlog:\n%s", *sent, log)
+	}
+	s = (*sent)[0]
+	if !strings.Contains(s, "changed to v0 → … (") || !strings.Contains(s, "→ v19 and back to a") || strings.Count(s, " → ") > 2*(monitorMaxBetween+3) {
+		t.Fatalf("long hold report:\n%s", s)
+	}
+
+	// A plain change without intermediates reads as before.
+	m, _, _ = newLoop(nil, 0)
+	if msg := m.message("x", monitorHeld{Prev: "y", HavePrev: true}, false); !strings.Contains(msg, "output changed (") || !strings.Contains(msg, "previous: y") || strings.Contains(msg, "sequence:") {
+		t.Fatalf("plain change: %s", msg)
+	}
+}
+
+// --initial with --until-change reports the baseline and keeps watching:
+// the baseline report is not the change (iss_…).
+func TestMonitorInitialBaselineIsNotTheUntilChange(t *testing.T) {
+	outputs := []string{"RUNNING", "RUNNING", "RUNNING", "exit 0: 12 passed"}
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	var sent []string
+	var log bytes.Buffer
+	i := 0
+	m := &monitorLoop{To: "ses_synth-target", Label: "job", Cmd: "if test -s exit; then cat results; else echo RUNNING; fi", Every: time.Minute, For: 30 * time.Minute,
+		UntilChange: true, Initial: true, Out: &log, Self: "ses_synth-mon",
+		Now: func() time.Time { return now },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			now = now.Add(d)
+			if i >= len(outputs) {
+				return context.Canceled // ran out of outputs without stopping
+			}
+			return nil
+		},
+		Check:  func(ctx context.Context, cmd string) string { i++; return outputs[i-1] },
+		Send:   func(ctx context.Context, text string) error { sent = append(sent, text); return nil },
+		Target: func(ctx context.Context) monitorTargetState { return monitorTargetState{} },
+	}
+	if err := m.run(context.Background()); err != nil {
+		t.Fatalf("run: %v (stopped early or never stopped)\nsent %q\nlog:\n%s", err, sent, log.String())
+	}
+	if i != len(outputs) || len(sent) != 2 {
+		t.Fatalf("%d checks, sent %d: %q\nlog:\n%s", i, len(sent), sent, log.String())
+	}
+	if !strings.Contains(sent[0], "first result") || !strings.Contains(sent[0], "RUNNING") ||
+		strings.Contains(sent[0], "has stopped") || !strings.Contains(sent[0], "keeps watching") {
+		t.Fatalf("baseline report: %s", sent[0])
+	}
+	if !strings.Contains(sent[1], "output changed (") || !strings.Contains(sent[1], "12 passed") ||
+		!strings.Contains(sent[1], "previous: RUNNING") || !strings.Contains(sent[1], "has stopped (until-change)") {
+		t.Fatalf("change report: %s", sent[1])
 	}
 }
 

@@ -11,6 +11,63 @@ import (
 	c "github.com/jhh3/pyre/internal/contracts"
 )
 
+// pyre nodes marks the caller's own machine ($PYRE_NODE_ID): "(this
+// machine)" after its name in text, "self": true in JSON. Its hostname is
+// listed too, since a machine's Pyre name and OS hostname can differ.
+func TestNodesMarkThisMachine(t *testing.T) {
+	h := newHub(t)
+	e := newEnv(t, h).with(EnvNodeID, "node_synth-linux")
+
+	r := run(t, e, nil, "nodes")
+	expectCode(t, r, 0)
+	if !strings.Contains(r.stdout, "HOSTNAME") || strings.Count(r.stdout, "(this machine)") != 1 {
+		t.Fatalf("nodes text:\n%s", r)
+	}
+	for _, line := range strings.Split(r.stdout, "\n") {
+		if strings.Contains(line, "(this machine)") && !strings.HasPrefix(line, "synth-linux (this machine) ") {
+			t.Fatalf("wrong machine marked: %q", line)
+		}
+	}
+
+	r = run(t, e, nil, "--json", "nodes")
+	expectCode(t, r, 0)
+	page := mustJSON[c.Page[struct {
+		c.Node
+		Self bool `json:"self"`
+	}]](t, r)
+	selves := 0
+	for _, n := range page.Items {
+		if n.Self {
+			selves++
+			if n.NodeID != "node_synth-linux" {
+				t.Fatalf("self on %s", n.NodeID)
+			}
+		}
+	}
+	if selves != 1 || len(page.Items) < 2 {
+		t.Fatalf("nodes json: %d self of %d\n%s", selves, len(page.Items), r)
+	}
+
+	r = run(t, e, nil, "nodes", "show", "synth-linux")
+	if expectCode(t, r, 0); !strings.HasPrefix(r.stdout, "synth-linux (this machine)  node_synth-linux") {
+		t.Fatalf("nodes show:\n%s", r)
+	}
+	r = run(t, e, nil, "--json", "nodes", "show", "synth-linux")
+	if expectCode(t, r, 0); !strings.Contains(r.stdout, `"self": true`) {
+		t.Fatalf("nodes show json:\n%s", r)
+	}
+
+	// Another machine, or a caller with no node: nothing marked.
+	r = run(t, e.with(EnvNodeID, "node_synth-elsewhere"), nil, "--json", "nodes")
+	if expectCode(t, r, 0); strings.Contains(r.stdout, `"self"`) {
+		t.Fatalf("self on another machine's listing:\n%s", r)
+	}
+	r = run(t, e.with(EnvNodeID, ""), nil, "nodes")
+	if expectCode(t, r, 0); strings.Contains(r.stdout, "(this machine)") {
+		t.Fatalf("marked without a node:\n%s", r)
+	}
+}
+
 func TestJSONOutputIsTheContractType(t *testing.T) {
 	h := newHub(t)
 	e := newEnv(t, h)
@@ -246,6 +303,12 @@ func TestStartIsStandaloneAndRecordsParent(t *testing.T) {
 	expectCode(t, r, 0)
 	if tags := mustJSON[c.StartSessionResponse](t, r).Session.Session.Tags; !slices.Contains(tags, c.TagReportNone) {
 		t.Fatalf("--no-report: tags %v", tags)
+	}
+	// --no-lead starts a bounded worker that never leads its project (I63).
+	r = run(t, agentA, nil, "--json", "start", "--harness", "claude", "--cwd", "/home/synth/peer3", "--no-lead")
+	expectCode(t, r, 0)
+	if tags := mustJSON[c.StartSessionResponse](t, r).Session.Session.Tags; !slices.Contains(tags, c.TagRoleWorker) {
+		t.Fatalf("--no-lead: tags %v", tags)
 	}
 
 	// The same operation ID returns the same session instead of launching twice.

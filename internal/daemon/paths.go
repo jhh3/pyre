@@ -60,12 +60,18 @@ type LocalStatus struct {
 	LiveRuns    int               `json:"live_runs"`
 	Actions     []string          `json:"actions"`
 	Diagnostics DiagnosticsResult `json:"diagnostics"`
+	// OwnerCredential: pyred holds an owner client credential
+	// (--owner-credential), so a local call without a bearer acts as the
+	// owner on the hub too. Without one such a call reaches only node-local
+	// state; the hub refuses what pyred forwards for it.
+	OwnerCredential bool `json:"owner_credential"` // always sent: absent means an older pyred
 }
 
 func (d *Daemon) localStatusHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := LocalStatus{NodeID: d.nodeID, NodeName: d.cfg.NodeName, StateDir: d.cfg.StateDir, Socket: d.SocketPath(),
-			Versions: d.versions(), LiveRuns: len(d.liveRuns()), Actions: d.Actions(), Diagnostics: d.Diagnostics(r.Context())}
+			Versions: d.versions(), LiveRuns: len(d.liveRuns()), Actions: d.Actions(), Diagnostics: d.Diagnostics(r.Context()),
+			OwnerCredential: d.cfg.OwnerToken != ""}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
 	})

@@ -195,10 +195,11 @@ func TestAskCreateMergeDecidedAndDuplicate(t *testing.T) {
 	if _, err := x.h.GetAsk(as(owner), contracts.GetRequest{ID: "ask_synthMissing"}); !contracts.IsCode(err, contracts.ErrNotFound) {
 		t.Fatalf("get missing: %v", err)
 	}
-	// Only the owner answers.
-	if _, err := x.h.AnswerAsks(as(parentP), contracts.AnswerAsksRequest{Mutation: contracts.Mutation{OperationID: "op_synth-ans2"},
-		Answers: []contracts.AnswerAskItem{{AskID: a.AskID, OptionID: "a"}}}); !contracts.IsCode(err, contracts.ErrForbidden) {
-		t.Fatalf("session answering: %v", err)
+	// A session only records the owner's chat answer to its own open ask
+	// (asks_chat_test.go); nothing else.
+	if r, err := x.h.AnswerAsks(as(parentP), contracts.AnswerAsksRequest{Mutation: contracts.Mutation{OperationID: "op_synth-ans2"},
+		Answers: []contracts.AnswerAskItem{{AskID: a.AskID, OptionID: "a"}}}); err != nil || len(r.Results) != 1 || r.Results[0].Error == nil {
+		t.Fatalf("session answering: %+v %v", r, err)
 	}
 }
 

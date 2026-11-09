@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/jhh3/pyre/internal/contracts"
 )
 
 func ownedBy(st os.FileInfo, uid int) bool {
@@ -80,6 +83,166 @@ func sessionProcesses(sessionID string, sids []int) []int {
 	return pids
 }
 
+// leftRunning lists, per session in scan, this user's live processes the
+// session started: their own environment names it as PYRE_SESSION_ID, or
+// their cgroup is the scope of one of its runs (pyre-run-<run_id>-<suffix>
+// .scope, supervisor runscope.go; a setsid -f job stays in it). Processes
+// started after the session's leftScan.before (its run's exit path, such
+// as a SessionEnd hook's detached helper), in skip (just stopped), zombies
+// and pyred itself are left out. One pass over /proc for all sessions; at
+// most contracts.LeftRunningMax listed per session, all counted. Nothing
+// is signalled.
+func leftRunning(scan map[string]leftScan, skip map[int]bool) map[string]leftProcs {
+	if len(scan) == 0 {
+		return nil
+	}
+	byRun := map[string]string{}
+	for sid, s := range scan {
+		for _, id := range s.runs {
+			byRun[id] = sid
+		}
+	}
+	clock := newProcClock()
+	self := os.Getpid()
+	out := map[string]leftProcs{}
+	forEachProc(func(pid int, dir string) {
+		if pid == self || skip[pid] || procZombie(dir) {
+			return
+		}
+		sid := ""
+		if env, err := os.ReadFile(filepath.Join(dir, "environ")); err == nil {
+			for _, kv := range bytes.Split(env, []byte{0}) {
+				if v, ok := bytes.CutPrefix(kv, []byte("PYRE_SESSION_ID=")); ok {
+					if _, want := scan[string(v)]; want {
+						sid = string(v)
+					}
+					break
+				}
+			}
+		}
+		if sid == "" {
+			if cg, err := os.ReadFile(filepath.Join(dir, "cgroup")); err == nil {
+				sid = byRun[runScopeRun(string(cg))]
+			}
+		}
+		if sid == "" || clock.startedAfter(dir, scan[sid].before) {
+			return
+		}
+		lp := out[sid]
+		lp.count++
+		if len(lp.procs) < contracts.LeftRunningMax {
+			lp.procs = append(lp.procs, contracts.LeftProcess{PID: pid, Command: procCommand(dir)})
+		}
+		out[sid] = lp
+	})
+	return out
+}
+
+// clockTicks is USER_HZ, the unit of /proc/<pid>/stat starttime (100 on
+// every Linux architecture Pyre ships for).
+const clockTicks = 100
+
+// procClock maps wall-clock times onto the boot-relative clock of
+// /proc/<pid>/stat starttime: /proc/uptime (CLOCK_BOOTTIME, 10 ms) read
+// once, against the wall clock at that moment. Exact to about 10 ms, where
+// /proc/stat btime is whole seconds.
+type procClock struct {
+	wall   time.Time
+	uptime time.Duration
+	ok     bool
+}
+
+func newProcClock() procClock {
+	b, err := os.ReadFile("/proc/uptime")
+	now := time.Now()
+	if err != nil {
+		return procClock{}
+	}
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		return procClock{}
+	}
+	sec, err := strconv.ParseFloat(f[0], 64)
+	if err != nil {
+		return procClock{}
+	}
+	return procClock{wall: now, uptime: time.Duration(sec * float64(time.Second)), ok: true}
+}
+
+// startedAfter reports whether the process at dir started after t. It is
+// false when t is zero or either time cannot be read (the process counts).
+func (c procClock) startedAfter(dir string, t time.Time) bool {
+	if t.IsZero() || !c.ok {
+		return false
+	}
+	start, ok := procStartTicks(dir)
+	if !ok {
+		return false
+	}
+	at := c.uptime - c.wall.Sub(t) // t on the boot clock
+	return time.Duration(start)*time.Second/clockTicks > at
+}
+
+// procStartTicks is the process's starttime (/proc/<pid>/stat field 22:
+// clock ticks after boot).
+func procStartTicks(dir string) (uint64, bool) {
+	b, err := os.ReadFile(filepath.Join(dir, "stat"))
+	if err != nil {
+		return 0, false
+	}
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 {
+		return 0, false
+	}
+	f := strings.Fields(string(b[i+1:])) // f[0] is field 3 (state)
+	if len(f) < 20 {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(f[19], 10, 64)
+	return v, err == nil
+}
+
+// runScopeRun is the run ID of the per-run scope a /proc/<pid>/cgroup file
+// names ("" when none): pyre-run-<run_id>-<suffix>.scope.
+func runScopeRun(cgroup string) string {
+	const pre = "/pyre-run-"
+	i := strings.LastIndex(cgroup, pre)
+	if i < 0 {
+		return ""
+	}
+	unit := cgroup[i+len(pre):]
+	if j := strings.IndexAny(unit, "/\n"); j >= 0 {
+		unit = unit[:j]
+	}
+	unit, ok := strings.CutSuffix(unit, ".scope")
+	if !ok {
+		return ""
+	}
+	if k := strings.LastIndexByte(unit, '-'); k > 0 {
+		return unit[:k]
+	}
+	return ""
+}
+
+// procZombie: the process exited and was not reaped yet.
+func procZombie(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, "stat"))
+	if err != nil {
+		return true // gone
+	}
+	i := bytes.LastIndexByte(b, ')')
+	return i < 0 || i+2 >= len(b) || b[i+2] == 'Z' || b[i+2] == 'X'
+}
+
+// procCommand is the process's command line, redacted and clipped.
+func procCommand(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return leftCommand(strings.ReplaceAll(string(bytes.TrimRight(b, "\x00")), "\x00", " "))
+}
+
 // getsid reads pid's terminal session ID from /proc/<pid>/stat (the field
 // after state, ppid and pgrp; the command name before them may hold spaces).
 func getsid(pid int) (int, error) {
@@ -115,4 +278,17 @@ func forEachProc(fn func(pid int, dir string)) {
 		}
 		fn(pid, dir)
 	}
+}
+
+// leftCommandMax bounds a listed command line (runes).
+const leftCommandMax = 80
+
+// leftCommand is a command line as listed in LeftRunning: redacted like
+// the memory guard's (it reaches the parent session) and clipped.
+func leftCommand(cmd string) string {
+	cmd = guardRedact(strings.Join(strings.Fields(cmd), " "))
+	if r := []rune(cmd); len(r) > leftCommandMax {
+		cmd = string(r[:leftCommandMax]) + "…"
+	}
+	return cmd
 }

@@ -25,3 +25,6 @@ func NativeSelf() (time.Duration, int64, error) { return 0, 0, errNotWindows }
 
 // NativeMemory returns physical memory total/available bytes (Windows only).
 func NativeMemory() (total, avail uint64, err error) { return 0, 0, errNotWindows }
+
+// winUptime is the Windows time since boot (Windows only).
+func winUptime() (time.Duration, error) { return 0, errNotWindows }

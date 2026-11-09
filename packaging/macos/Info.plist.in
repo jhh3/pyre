@@ -23,6 +23,8 @@
   <string>@VERSION@</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Pyre sessions automate apps you ask them to, such as closing a browser tab.</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

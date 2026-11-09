@@ -7,6 +7,7 @@ package search
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -14,23 +15,47 @@ import (
 
 // ParseFile parses a whole transcript file's complete lines (tests, tools).
 func ParseFile(path, format string) ([]Entry, error) {
+	var out []Entry
+	_, _, err := ScanFile(path, format, 0, 0, func(e Entry, _ int64) { out = append(out, e) })
+	return out, err
+}
+
+// ScanFile parses a transcript file's complete lines from byte offset off,
+// numbering entries after seq (the end and seq of an earlier scan, or 0, 0),
+// and calls fn with each entry and the offset of its line. It returns the
+// offset after the last complete line and the seq there, from which a
+// later scan of the grown file continues.
+func ScanFile(path, format string, off, seq int64, fn func(e Entry, off int64)) (int64, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return off, seq, err
 	}
 	defer f.Close()
-	p := newParser(format, 0)
-	var out []Entry
+	if off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return off, seq, err
+		}
+	}
+	p := newParser(format, seq)
 	br := bufio.NewReaderSize(f, 256<<10)
 	for {
 		line, err := br.ReadBytes('\n')
-		if err != nil {
-			return out, nil
+		if err != nil { // EOF: a trailing partial line waits for its newline
+			return off, p.seq(), nil
 		}
 		if e, ok := p.line(line[:len(line)-1]); ok {
-			out = append(out, e)
+			fn(e, off)
 		}
+		off += int64(len(line))
 	}
+}
+
+// CodexLineFull parses one complete rollout line as the index does but
+// keeps its whole text (no maxEntryText cut; Seq is not set): a full
+// transcript read of an entry a scan found on this line.
+func CodexLineFull(b []byte) (Entry, bool) {
+	p := codexParser{full: true}
+	return p.line(b)
 }
 
 // Transcript formats.
@@ -247,8 +272,12 @@ func agyToolSummary(name string, args json.RawMessage) string {
 
 // codexParser reads rollout files. Messages are taken from response_item
 // records (present in every rollout version); the injected environment and
-// instruction preambles are skipped. Seq counts kept entries.
-type codexParser struct{ n int64 }
+// instruction preambles are skipped. Seq counts kept entries. full keeps
+// the whole text (CodexLineFull).
+type codexParser struct {
+	n    int64
+	full bool
+}
 
 type codexLine struct {
 	Timestamp string `json:"timestamp"`
@@ -317,7 +346,9 @@ func (p *codexParser) line(b []byte) (Entry, bool) {
 	default:
 		return e, false
 	}
-	e.Text = clipText(e.Text)
+	if !p.full {
+		e.Text = clipText(e.Text)
+	}
 	if e.Text == "" {
 		return e, false
 	}

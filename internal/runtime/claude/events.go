@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jhh3/pyre/internal/contracts"
 	"github.com/jhh3/pyre/internal/osutil"
 )
 
@@ -22,6 +23,7 @@ const (
 	fileBroker     = "broker.json"      // approval broker config (presence enables it)
 	fileRun        = "run.json"         // launch record
 	fileExit       = "exit.json"        // exit status captured before the pane is removed
+	fileSysPrompt  = "system-prompt.md" // appended system prompt (--append-system-prompt-file)
 	dirPending     = "pending"          // approval requests written by the hook
 	dirAnswers     = "answers"          // answers written by Answer()
 	dirInject      = "inject"           // Stop-hook injection queue
@@ -50,6 +52,12 @@ type hookRecord struct {
 	MessageID      string          `json:"message_id,omitempty"`
 	HookPID        int             `json:"hook_pid,omitempty"`
 	Payload        json.RawMessage `json:"payload,omitempty"`
+	// Security is a PreToolUse call flagged by the secret/decoy check
+	// (secretcheck.go, decision I79); the command in it is redacted.
+	Security *contracts.SecurityAlert `json:"security,omitempty"`
+	// Blocked is why the hook refused this PreToolUse call (killguard.go):
+	// the tool never ran.
+	Blocked string `json:"blocked,omitempty"`
 
 	offset int64 // byte offset of the line (not serialized)
 }

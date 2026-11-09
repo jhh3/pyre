@@ -12,6 +12,10 @@
 //     Requests that are not idempotent and carry no operation id are never
 //     retried (every mutation in the v1 API carries one, and reads and upload
 //     chunks are idempotent by contract).
+//   - In socket mode with Options.DaemonRestartWait, a call whose dial
+//     finds no pyred (socket missing or refusing, as during a pyred
+//     restart) is retried for that long; nothing was sent, so this holds
+//     for every request.
 //   - API errors are returned as *contracts.Error. Transport failures are
 //     *contracts.Error{Code: unavailable, Retryable: true}. Context
 //     cancellation returns the context's error.
@@ -80,7 +84,18 @@ type Options struct {
 	RetryMax  time.Duration
 	// MaxChunkBytes bounds one UploadChunk body (default 8 MiB).
 	MaxChunkBytes int64
+	// DaemonRestartWait (socket mode) keeps retrying a call for this long
+	// while the local pyred's socket is missing or refuses connections, as
+	// it is while pyred restarts for an upgrade (0 = no such wait; the
+	// pyre CLI uses DefaultDaemonRestartWait). Nothing reached pyred, so
+	// even a request that is not idempotent is safe to send again. A
+	// one-attempt call (MaxAttempts 1, WithMaxAttempts(ctx, 1)) never
+	// waits. Notices (WithNotices) say "pyred restarting, retrying".
+	DaemonRestartWait time.Duration
 }
+
+// DefaultDaemonRestartWait covers a local pyred restart (a few seconds).
+const DefaultDaemonRestartWait = 30 * time.Second
 
 // Client is an HTTP implementation of contracts.API. It is safe for
 // concurrent use.
@@ -234,6 +249,9 @@ type request struct {
 	// readAll buffers the whole success body inside the retry loop, so a
 	// connection dropped mid-response is retried like any transport error.
 	readAll bool
+	// ifNoneMatch is the ETag of the kept answer (conditional.go); a 304
+	// then succeeds with response.notModified.
+	ifNoneMatch string
 }
 
 // call performs an RPC op.
@@ -246,11 +264,33 @@ func (c *Client) call(ctx context.Context, op string, in any, out any, idempoten
 		}
 		body = b
 	}
-	resp, err := c.do(ctx, request{method: http.MethodPost, path: contracts.RPCPath(op), body: body, contentType: "application/json", idempotent: idempotent, extraWait: extraWait, readAll: true})
+	req := request{method: http.MethodPost, path: contracts.RPCPath(op), body: body, contentType: "application/json", idempotent: idempotent, extraWait: extraWait, readAll: true}
+	var condK string
+	var kept condEntry
+	if contracts.ConditionalOps[op] && out != nil && c.base != nil {
+		condK = condKey(c.base.String(), c.token, op, body)
+		if e, ok := sharedCond.get(condK); ok {
+			kept, req.ifNoneMatch = e, e.etag
+		}
+	}
+	resp, err := c.do(ctx, req)
 	if err != nil {
 		return err
 	}
 	reportFreshness(ctx, op, resp.Header)
+	if resp.notModified {
+		if err := decodeBytes(kept.body, out); err != nil {
+			sharedCond.drop(condK)
+			return err
+		}
+		if snap := notModifiedSnapshot(resp.Header); snap != nil {
+			_ = json.Unmarshal(snap, out)
+		}
+		return nil
+	}
+	if condK != "" {
+		sharedCond.put(condK, resp.Header.Get("ETag"), resp.data)
+	}
 	return decodeBytes(resp.data, out)
 }
 
@@ -281,6 +321,8 @@ type response struct {
 	*http.Response
 	cancel context.CancelFunc
 	data   []byte // set when request.readAll
+	// notModified: the hub answered 304 to request.ifNoneMatch (no body).
+	notModified bool
 }
 
 // do runs req with retries. On success without readAll the caller must
@@ -293,6 +335,8 @@ func (c *Client) do(ctx context.Context, req request) (*response, error) {
 	if n, ok := ctx.Value(maxAttemptsKey{}).(int); ok && n > 0 && n < maxAttempts {
 		maxAttempts = n
 	}
+	var downSince time.Time
+	downTries := 0
 	for attempt := 0; ; attempt++ {
 		resp, retryAfter, err := c.once(ctx, req)
 		if err == nil {
@@ -300,6 +344,28 @@ func (c *Client) do(ctx context.Context, req request) (*response, error) {
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		var down daemonDownError
+		if errors.As(err, &down) {
+			if wait := c.opts.DaemonRestartWait; wait > 0 && maxAttempts > 1 {
+				now := time.Now()
+				if downSince.IsZero() {
+					downSince = now
+					notify(ctx, fmt.Sprintf("pyred restarting, retrying for up to %s (nothing serving %s yet)", wait, down.path))
+				}
+				if left := wait - now.Sub(downSince); left > 0 {
+					pause := min(c.backoff(downTries), daemonRetryMax, left)
+					downTries++
+					attempt-- // the wait, not the attempt budget, bounds these
+					if err := c.sleep(ctx, pause); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				down.err.Message += fmt.Sprintf(" (waited %s for pyred to come back)", wait)
+				return nil, down.err
+			}
+			err = down.err
 		}
 		var final noRetryError
 		if errors.As(err, &final) {
@@ -369,6 +435,9 @@ func (c *Client) newHTTPRequest(ctx context.Context, req request) (*http.Request
 	if req.contentType != "" {
 		hr.Header.Set("Content-Type", req.contentType)
 	}
+	if req.ifNoneMatch != "" {
+		hr.Header.Set("If-None-Match", req.ifNoneMatch)
+	}
 	return hr, nil
 }
 
@@ -391,6 +460,11 @@ func (c *Client) once(ctx context.Context, req request) (*response, time.Duratio
 	resp, err := c.hc.Do(hr)
 	if err != nil {
 		cancel()
+		var se *SocketDialError
+		if errors.As(err, &se) && se.restartable() && ctx.Err() == nil {
+			return nil, 0, daemonDownError{err: se.apiError(), path: se.Path}
+		}
+		c.dropIdle()
 		return nil, 0, transportError(ctx, err)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -401,12 +475,18 @@ func (c *Client) once(ctx context.Context, req request) (*response, time.Duratio
 		defer resp.Body.Close()
 		data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 		if err != nil {
+			c.dropIdle()
 			return nil, 0, transportError(ctx, err)
 		}
 		if len(data) > maxResponseBytes {
 			return nil, 0, contracts.Errorf(contracts.ErrPayloadTooLarge, "client: hub response exceeds %d bytes", maxResponseBytes)
 		}
 		return &response{Response: resp, cancel: func() {}, data: data}, 0, nil
+	}
+	if resp.StatusCode == http.StatusNotModified && req.ifNoneMatch != "" && req.readAll {
+		cancel()
+		_ = resp.Body.Close()
+		return &response{Response: resp, cancel: func() {}, notModified: true}, 0, nil
 	}
 	defer cancel()
 	defer resp.Body.Close()
@@ -415,6 +495,18 @@ func (c *Client) once(ctx context.Context, req request) (*response, time.Duratio
 		err = noRetryError{err}
 	}
 	return nil, c.retryAfter(resp.Header.Get("Retry-After")), err
+}
+
+// dropIdle closes the pooled idle connections after a failed round trip, so
+// the retry dials the hub afresh: after a hub restart (or a network change
+// that leaves a half-open TCP connection) a pooled connection may be dead
+// without the pool having noticed, and reusing it would cost another
+// attempt timeout. A long-lived client (`pyre mcp`, pyred's proxy) thus
+// reconnects on its next attempt.
+func (c *Client) dropIdle() {
+	if c.hc != nil {
+		c.hc.CloseIdleConnections()
+	}
 }
 
 func (c *Client) retryAfter(v string) time.Duration {
@@ -525,6 +617,26 @@ func (e *SocketDialError) Unwrap() error { return e.Err }
 // maxSocketPath is the conservative unix socket path limit (sun_path is
 // 104 bytes on macOS, 108 on Linux, including the terminator).
 const maxSocketPath = 103
+
+// restartable reports a dial failure a restarting pyred explains: its
+// socket is gone, or left behind with nothing listening yet.
+func (e *SocketDialError) restartable() bool {
+	return len(e.Path) <= maxSocketPath && (errors.Is(e.Err, fs.ErrNotExist) || errors.Is(e.Err, syscall.ECONNREFUSED))
+}
+
+// daemonDownError is a request that never reached the local pyred because
+// its socket is missing or refuses connections (Client.do waits
+// Options.DaemonRestartWait for it to come back). err is what the caller
+// gets.
+type daemonDownError struct {
+	err  *contracts.Error
+	path string
+}
+
+func (e daemonDownError) Error() string { return e.err.Error() }
+
+// daemonRetryMax bounds one pause while waiting for a restarting pyred.
+const daemonRetryMax = 2 * time.Second
 
 func (e *SocketDialError) apiError() *contracts.Error {
 	const todo = "start pyred on this machine, point PYRE_SOCKET at its socket (<state dir>/pyred.sock), or unset PYRE_SOCKET to use the hub (PYRE_HUB or `pyre pair`)"

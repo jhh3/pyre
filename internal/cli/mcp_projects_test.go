@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,12 @@ func TestMCPCreateProjectAndAssociate(t *testing.T) {
 	var started c.StartSessionResponse
 	if isErr || json.Unmarshal(out, &started) != nil || started.Session.Session.ProjectID == nil || *started.Session.Session.ProjectID != prj.ProjectID {
 		t.Fatalf("start_session with project: %s", out)
+	}
+	// no_lead: a bounded worker in the project (I63).
+	out, isErr = cl.tool("start_session", map[string]any{"node": "synth-mac", "harness": "claude", "cwd": "/home/synth/mcp-proj", "project": "synthetic-mcp-proj", "no_lead": true})
+	var worker c.StartSessionResponse
+	if isErr || json.Unmarshal(out, &worker) != nil || !slices.Contains(worker.Session.Session.Tags, c.TagRoleWorker) {
+		t.Fatalf("start_session no_lead: %s", out)
 	}
 
 	// Attach an existing standalone session, then detach it.

@@ -357,6 +357,20 @@ func TestCLIUsesArgvWithoutShellExpansion(t *testing.T) {
 	}
 }
 
+// gh pr checks prints its table and exits 8 (pending) with empty stderr; the
+// failure must carry the exit code and that output, not a blank "gh failed:".
+func TestCLINonZeroExitKeepsStdoutAndExitCode(t *testing.T) {
+	mode := kit.Mode{Executor: kit.Executor{Kind: "cli", Binary: "sh"}}
+	op := kit.Operation{CLI: &kit.CLIOperation{Args: []string{"-c", "echo 'CI pending'; exit 8"}}}
+	result, err := (Executor{}).Run(context.Background(), mode, op, nil, nil)
+	if err == nil {
+		t.Fatal("non-zero exit must be an error")
+	}
+	if !strings.Contains(err.Error(), "sh exited 8: CI pending") || result.Status != 8 || !strings.Contains(string(result.Raw), "CI pending") {
+		t.Fatalf("err=%v status=%d raw=%q", err, result.Status, result.Raw)
+	}
+}
+
 func TestDeclaredCLIStreamWritesLiveOutputAndStopsWithContext(t *testing.T) {
 	binary, err := os.Executable()
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -40,6 +41,10 @@ const (
 	EnvRunID        = "PYRE_RUN_ID"
 	EnvNodeID       = "PYRE_NODE_ID"
 	EnvWebURL       = "PYRE_WEB_URL" // the web app the TUI links to (overrides web_url)
+	// EnvSocketWait overrides how long a call through PYRE_SOCKET waits for
+	// a restarting pyred (a Go duration; "0" = fail at once; default
+	// client.DefaultDaemonRestartWait).
+	EnvSocketWait = "PYRE_SOCKET_WAIT"
 )
 
 // ConfigVersion is stamped into client.json.
@@ -169,7 +174,7 @@ type Connection struct {
 	Mode        string // "hub" | "socket"
 	HubURL      string // hub mode
 	Socket      string // socket mode
-	Source      string // where the endpoint came from: "--hub", "PYRE_HUB", "PYRE_SOCKET", "config <path>"
+	Source      string // where the endpoint came from: "--hub", "PYRE_HUB", "PYRE_SOCKET", "config <path>", SourceLocalPyred
 	TokenSource string // "PYRE_SESSION_TOKEN", "PYRE_TOKEN", "config", "none"
 	// Pin is the hub TLS pin in use (--pin, PYRE_HUB_PIN, or the config's
 	// for the same hub); a public fingerprint, not a secret.
@@ -187,6 +192,7 @@ func (c *Connection) Describe() string {
 // Resolve picks the endpoint and credential:
 //
 //	endpoint:   --hub / PYRE_HUB  >  PYRE_SOCKET (local daemon)  >  client config
+//	            >  this machine's pyred socket (DefaultDaemonSocket, CheckOwnSocket)
 //	credential: PYRE_SESSION_TOKEN  >  PYRE_TOKEN  >  client config token
 //
 // The config token and TLS pin are only sent to the hub URL they were
@@ -228,14 +234,29 @@ func Resolve(o ConnOptions) (*Connection, error) {
 		conn.Mode, conn.Socket, conn.Source = "socket", sock, EnvSocket
 	default:
 		loadCfg()
-		if cfgErr != nil {
-			if errors.Is(cfgErr, ErrNoConfig) {
-				return nil, contracts.Errorf(contracts.ErrUnavailable,
-					"no hub configured (%v): run `pyre pair` (paste the link) or `pyre login --hub URL --token -`, or set PYRE_HUB", cfgErr)
+		switch {
+		case cfgErr == nil:
+			conn.Mode, conn.HubURL, conn.Source = "hub", cfg.HubURL, "config "+cfgPath
+		case errors.Is(cfgErr, ErrNoConfig):
+			// No hub and no config (a plain ssh shell on a node): use this
+			// machine's pyred socket, as a session there does.
+			local := DefaultDaemonSocket(getenv)
+			why := CheckOwnSocket(local)
+			if why == nil {
+				why = actsForOwner(local)
 			}
-			return nil, cfgErr
+			if why == nil {
+				conn.Mode, conn.Socket, conn.Source = "socket", local, SourceLocalPyred
+				break
+			}
+			msg := fmt.Sprintf("no hub configured (%v): run `pyre pair` (paste the link) or `pyre login --hub URL --token -`, or set PYRE_HUB", cfgErr)
+			if !errors.Is(why, fs.ErrNotExist) {
+				msg += fmt.Sprintf("; this machine's pyred socket %s was not used: %v", local, why)
+			}
+			return nil, contracts.Errorf(contracts.ErrUnavailable, "%s", msg)
+		default:
+			return nil, cfgErr // a config that is there but unusable is not skipped
 		}
-		conn.Mode, conn.HubURL, conn.Source = "hub", cfg.HubURL, "config "+cfgPath
 	}
 	// A config is relevant when it describes the same hub, or for the local
 	// daemon socket (same user, local trust).
@@ -267,6 +288,14 @@ func Resolve(o ConnOptions) (*Connection, error) {
 	if conn.Mode == "socket" {
 		base = "http://pyred.local"
 		copts.HTTPClient = UnixSocketHTTPClient(conn.Socket)
+		copts.DaemonRestartWait = client.DefaultDaemonRestartWait // ride out a pyred restart
+		if v := strings.TrimSpace(getenv(EnvSocketWait)); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil || d < 0 {
+				return nil, contracts.Errorf(contracts.ErrInvalid, "%s=%q: want a duration such as 30s, or 0", EnvSocketWait, v)
+			}
+			copts.DaemonRestartWait = d
+		}
 	} else {
 		copts.CertSHA256 = pin
 		conn.Pin = pin
@@ -276,6 +305,109 @@ func Resolve(o ConnOptions) (*Connection, error) {
 		return nil, err
 	}
 	return conn, nil
+}
+
+// SourceLocalPyred is Connection.Source when no hub, PYRE_SOCKET or client
+// config is set and the CLI uses this machine's pyred socket instead.
+const SourceLocalPyred = "this machine's pyred"
+
+// socketForeignOwner is fileperm.ForeignOwner (a test seam: a test cannot
+// create a socket another user owns without root).
+var socketForeignOwner = fileperm.ForeignOwner
+
+// DefaultDaemonSocket returns where this user's pyred, run with default
+// settings, serves its local socket: <state>/pyred.sock, the state directory
+// chosen as daemon.DefaultStateDir does (PYRE_STATE_DIR; macOS
+// ~/Library/Application Support/pyre; Linux $XDG_STATE_HOME/pyre or
+// ~/.local/state/pyre; Windows %LOCALAPPDATA%\Pyre). It reads only getenv
+// (no HOME: ""), so an isolated environment never finds the user's pyred.
+func DefaultDaemonSocket(getenv func(string) string) string {
+	if d := getenv(EnvStateDir); d != "" {
+		return filepath.Join(d, "pyred.sock")
+	}
+	if d := winenv.StateDir(getenv); d != "" {
+		return filepath.Join(d, "pyred.sock")
+	}
+	home := getenv("HOME")
+	if home == "" {
+		return ""
+	}
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, "Library", "Application Support", "pyre", "pyred.sock")
+	}
+	if x := getenv("XDG_STATE_HOME"); x != "" {
+		return filepath.Join(x, "pyre", "pyred.sock")
+	}
+	return filepath.Join(home, ".local", "state", "pyre", "pyred.sock")
+}
+
+// CheckOwnSocket reports why path is not a usable pyred socket of this
+// user: missing (fs.ErrNotExist), a symlink or not a socket, owned by
+// another user, open to group/others (pyred makes it 0600 in its 0700
+// state directory), or nothing listening. Only a process running as this
+// user can bind a socket this user owns, so using it gives no access beyond
+// what any process of the user already has through it.
+func CheckOwnSocket(path string) error {
+	if path == "" {
+		return fs.ErrNotExist
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSocket == 0 {
+		return errors.New("not a unix socket (symlinks are refused)")
+	}
+	if owner, bad := socketForeignOwner(path, st); bad {
+		return fmt.Errorf("owned by %s, not the current user", owner)
+	}
+	if desc, bad := fileperm.Exposed(path, st); bad {
+		return fmt.Errorf("refusing a socket with %s: pyred makes it user-only (0600)", desc)
+	}
+	c, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return errors.New("nothing is listening on it (is pyred running? see `pyred status`)")
+	}
+	c.Close()
+	return nil
+}
+
+// localStatusPath mirrors daemon.PathLocalStatus (this package does not
+// link the daemon).
+const localStatusPath = "/v1/local/status"
+
+// actsForOwner asks the pyred at sock whether a call without a bearer acts
+// as the owner on the hub (it holds an owner credential). Without one pyred
+// forwards such calls to the hub with no credential and the hub refuses
+// them, so falling back to it would only turn "no hub configured" into
+// "missing bearer token" (and `pyre hello` into pyred's own answer while
+// the hub is down).
+func actsForOwner(sock string) error {
+	hc := UnixSocketHTTPClient(sock)
+	hc.Timeout = 3 * time.Second
+	resp, err := hc.Get("http://pyred.local" + localStatusPath)
+	if err != nil {
+		return fmt.Errorf("its status did not answer: %v", err)
+	}
+	defer resp.Body.Close()
+	var st struct {
+		OwnerCredential *bool `json:"owner_credential"`
+		Versions        struct {
+			Pyred string `json:"pyred"`
+		} `json:"versions"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st) != nil {
+		return fmt.Errorf("its status did not answer (HTTP %d)", resp.StatusCode)
+	}
+	switch {
+	case st.OwnerCredential == nil:
+		// An older pyred's status does not say (owner_credential is new).
+		return fmt.Errorf("pyred %s is too old to say whether it holds an owner credential", st.Versions.Pyred)
+	case !*st.OwnerCredential:
+		return errors.New("it holds no owner credential (pyred --owner-credential), so it cannot act for you on the hub " +
+			"(a Pyre session on this machine can: its PYRE_SESSION_TOKEN carries the session's identity)")
+	}
+	return nil
 }
 
 // UnixSocketHTTPClient returns an HTTP client whose every connection dials

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -10,15 +11,60 @@ import (
 // (invalidate); the next reader refetches it once, and concurrent readers
 // share that fetch. maxAge bounds staleness when the event stream is down.
 type cached[T any] struct {
-	mu      sync.Mutex
-	val     T
-	have    bool
-	gen     uint64 // bumped by invalidate
-	loaded  uint64 // gen the value was fetched at
-	at      time.Time
-	maxAge  time.Duration
-	loading chan struct{}
-	err     error
+	mu     sync.Mutex
+	val    T
+	have   bool
+	gen    uint64 // bumped by invalidate
+	loaded uint64 // gen the value was fetched at
+	at     time.Time
+	maxAge time.Duration
+	// liveMaxAge replaces maxAge while live reports the hub event stream
+	// delivering (events then keep the value exact; the age is only a
+	// safety net). Zero: maxAge always.
+	liveMaxAge time.Duration
+	live       *atomic.Bool
+	loading    chan struct{}
+	err        error
+}
+
+// ageLimit is the staleness bound in force (caller holds c.mu).
+func (c *cached[T]) ageLimit() time.Duration {
+	if c.liveMaxAge > 0 && c.live != nil && c.live.Load() {
+		return c.liveMaxAge
+	}
+	return c.maxAge
+}
+
+// freshLocked reports whether the value may be served as is.
+func (c *cached[T]) freshLocked(now time.Time) bool {
+	age := c.ageLimit()
+	return c.have && c.loaded == c.gen && (age <= 0 || now.Sub(c.at) < age)
+}
+
+// peekFresh returns the value and its generation when it may be served as
+// is (not invalidated, not too old).
+func (c *cached[T]) peekFresh(now time.Time) (T, uint64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.freshLocked(now) {
+		var zero T
+		return zero, 0, false
+	}
+	return c.val, c.gen, true
+}
+
+// patch replaces a fresh value read at generation gen with v, keeping its
+// load time (the safety-net age still counts from the last full fetch).
+// It reports false, changing nothing, when the value was invalidated or
+// refetched since.
+func (c *cached[T]) patch(gen uint64, v T) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.have || c.gen != gen || c.loaded != gen || c.loading != nil {
+		return false
+	}
+	c.val = v
+	return true
 }
 
 func (c *cached[T]) invalidate() {
@@ -45,8 +91,7 @@ func (c *cached[T]) peek() (T, bool) {
 // older than maxAge.
 func (c *cached[T]) get(ctx context.Context, now time.Time, fetch func(context.Context) (T, error)) (T, error) {
 	c.mu.Lock()
-	fresh := c.have && c.loaded == c.gen && (c.maxAge <= 0 || now.Sub(c.at) < c.maxAge)
-	if fresh {
+	if c.freshLocked(now) {
 		v := c.val
 		c.mu.Unlock()
 		return v, nil

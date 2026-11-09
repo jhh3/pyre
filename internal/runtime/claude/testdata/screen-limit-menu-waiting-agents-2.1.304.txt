@@ -1,0 +1,23 @@
+✻ Waiting for 1 background agent to finish
+
+● I'll proceed in order: guards first, then re-timing. The second fix touches different files, so I'll
+  start it in parallel now.
+
+  Ran 1 shell command
+
+● implementer(Speed up synthetic lowering)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Called pyre
+
+● Two synthetic fixes are running in parallel; neither has landed yet.
+
+✻ Waiting for 2 background agents to finish
+2 background task updates waiting while this panel is open
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   What do you want to do?
+
+   ❯ 1. Stop and wait for limit to reset
+     2. Wait here, then continue automatically at 6pm
+
+   Enter to confirm · Esc to cancel

@@ -18,7 +18,7 @@
                                                    │ Harnesses
                                                    │ ✓ claude  2.1.289  15 capabilities
                                                    │ ✗ codex   unavailable: codex executable not fo…
-                                                   │ ✓ shell   tmux 3.4  4 capabilities
+                                                   │ ✓ shell   tmux 3.4  5 capabilities
                                                    │
                                                    │ Sessions by memory
                                                    │ 2.3G 112%  outfit API client            23 pro…

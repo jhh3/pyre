@@ -204,6 +204,14 @@ type StartRunCommand struct {
 	// Resume, if set, continues from a previous run.
 	PreviousRun  *Run `json:"previous_run,omitempty"`
 	AllowHandoff bool `json:"allow_handoff,omitempty"`
+	// ProjectLead (additive) says the session leads its project: it is in
+	// one with no parent, or its parent is outside it (a delegated lead).
+	// The node tells the run ($PYRE_PROJECT_LEAD, the guide) so a
+	// delegated lead keeps the project page like a top-level one. It is
+	// true at launch only: a parent that joins the project later leads from
+	// then on, so the page reminder asks for the live role
+	// (LaunchContext.Role). Older hubs omit it.
+	ProjectLead bool `json:"project_lead,omitempty"`
 }
 
 // DeliverCommand hands a stored message to the recipient's node.
@@ -219,6 +227,12 @@ type RunCommand struct {
 	SessionID string `json:"session_id"`
 	RunID     string `json:"run_id"`
 	Reason    string `json:"reason,omitempty"`
+	// Automatic (additive, stop only): Pyre stops the run by itself
+	// (archive when done, the archive cascade), not because the owner or an
+	// agent asked. An adapter that can (StopSparer) leaves live work the
+	// agent preserved running (decision I62). Older nodes ignore it and
+	// stop as before.
+	Automatic bool `json:"automatic,omitempty"`
 }
 
 type AttachCommand struct {

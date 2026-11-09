@@ -167,6 +167,8 @@ type item struct {
 	Cwd              string `json:"cwd,omitempty"`
 	AggregatedOutput string `json:"aggregatedOutput,omitempty"`
 	DurationMs       *int64 `json:"durationMs,omitempty"`
+	ProcessID        string `json:"processId,omitempty"` // unified exec process (the model's session_id)
+	Source           string `json:"source,omitempty"`    // unifiedExecStartup: started by exec_command
 	Status           string `json:"status,omitempty"`
 	Kind             string `json:"kind,omitempty"`
 	AgentThreadID    string `json:"agentThreadId,omitempty"`

@@ -1,6 +1,9 @@
 package contracts
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Monitors (additive): a monitor is a shell session started by `pyre
 // monitor add` that runs a check on a timer and messages the session it
@@ -18,6 +21,11 @@ const (
 	// of its command, machine and directory), so a repeat of the same
 	// `pyre monitor add` reuses the live monitor.
 	TagMonitorKeyPrefix = "monitor-key:"
+	// TagWaitGitHub marks a monitor that is a GitHub wait (`pyre wait
+	// gh-pr` / `gh-run`): it outlives the session that created it (the
+	// archive cascade skips it) and messages that session's parent once
+	// the session has ended.
+	TagWaitGitHub = "wait-gh"
 	// MonitorTitlePrefix starts every monitor's title.
 	MonitorTitlePrefix = "monitor: "
 )
@@ -38,6 +46,20 @@ func (s Session) IsMonitor() bool {
 	}
 	for _, t := range s.Tags {
 		if t == TagMonitor {
+			return true
+		}
+	}
+	return false
+}
+
+// IsGitHubWait reports whether s is a GitHub wait (a monitor tagged
+// TagWaitGitHub).
+func (s Session) IsGitHubWait() bool {
+	if !s.IsMonitor() {
+		return false
+	}
+	for _, t := range s.Tags {
+		if t == TagWaitGitHub {
 			return true
 		}
 	}
@@ -77,4 +99,27 @@ func (s Session) MonitorKey() string {
 		}
 	}
 	return ""
+}
+
+// AdapterDataMonitorArgs (Run.AdapterData, additive) records a monitor
+// run's shell arguments (a JSON array: the `pyre monitor run ...` command
+// line), so pyred's restart recovery, `pyre resume` and `pyre node resume`
+// can relaunch a monitor whose process a reboot or crash killed with the
+// same command, interval, flags and target. Nonsecret: the command is
+// already in the monitor's title and screen. Runs started before it
+// existed have none and cannot be relaunched (re-create them with
+// `pyre monitor add`).
+const AdapterDataMonitorArgs = "pyre.monitor_args"
+
+// MonitorRelaunchArgs returns r's recorded monitor arguments (nil when none).
+func MonitorRelaunchArgs(r Run) []string {
+	raw := r.AdapterData[AdapterDataMonitorArgs]
+	if raw == "" {
+		return nil
+	}
+	var args []string
+	if json.Unmarshal([]byte(raw), &args) != nil {
+		return nil
+	}
+	return args
 }

@@ -17,7 +17,7 @@ import (
 
 // ---- sessions ----
 
-const sesCols = `session_id,harness,title,project_id,created_by,created_at,current_run_id,lineage,tags,archived,icon,owner_active_at`
+const sesCols = `session_id,harness,title,project_id,created_by,created_at,current_run_id,lineage,tags,archived,icon,owner_active_at,archived_at,unarchived_at`
 
 // sessionIconMigrations add the session icon column (W-archive2). A
 // separate namespace keeps the core hub migration registry untouched.
@@ -31,12 +31,26 @@ var sessionOwnerActiveMigrations = []sqlitex.Migration{{Namespace: "hub_session_
 ALTER TABLE sessions ADD COLUMN owner_active_at TEXT;
 `}}
 
+// sessionArchivedAtMigrations add when a session was archived. Sessions
+// already archived take their last update as the best known time.
+var sessionArchivedAtMigrations = []sqlitex.Migration{{Namespace: "hub_session_archived_at", Version: 1, Name: "session_archived_at", SQL: `
+ALTER TABLE sessions ADD COLUMN archived_at TEXT;
+UPDATE sessions SET archived_at = updated_at WHERE archived = 1;
+`}}
+
+// sessionUnarchivedAtMigrations add when a session was last unarchived
+// (explicitly or by a resume): the automatic archivers leave it alone until
+// it runs and ends again (Session.KeptFromAutoArchive).
+var sessionUnarchivedAtMigrations = []sqlitex.Migration{{Namespace: "hub_session_unarchived_at", Version: 1, Name: "session_unarchived_at", SQL: `
+ALTER TABLE sessions ADD COLUMN unarchived_at TEXT;
+`}}
+
 func scanSession(sc interface{ Scan(...any) error }) (contracts.Session, error) {
 	var s contracts.Session
 	var harness, createdBy, createdAt, lineage, tags string
-	var project, current, ownerActive sql.NullString
+	var project, current, ownerActive, archivedAt, unarchivedAt sql.NullString
 	var archived int
-	if err := sc.Scan(&s.SessionID, &harness, &s.Title, &project, &createdBy, &createdAt, &current, &lineage, &tags, &archived, &s.Icon, &ownerActive); err != nil {
+	if err := sc.Scan(&s.SessionID, &harness, &s.Title, &project, &createdBy, &createdAt, &current, &lineage, &tags, &archived, &s.Icon, &ownerActive, &archivedAt, &unarchivedAt); err != nil {
 		return s, err
 	}
 	s.Harness = contracts.Harness(harness)
@@ -48,6 +62,11 @@ func scanSession(sc interface{ Scan(...any) error }) (contracts.Session, error) 
 	_ = persistence.FromJSON(tags, &s.Tags)
 	s.Archived = archived != 0
 	s.OwnerActiveAt = persistence.ParseTimePtr(ownerActive)
+	if s.Archived {
+		s.ArchivedAt = persistence.ParseTimePtr(archivedAt)
+	} else {
+		s.UnarchivedAt = persistence.ParseTimePtr(unarchivedAt)
+	}
 	return s, nil
 }
 
@@ -73,9 +92,12 @@ func (h *Hub) updateSessionTx(ctx context.Context, tx *sql.Tx, s contracts.Sessi
 	if s.Tags == nil {
 		s.Tags = []string{}
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE sessions SET title=?, project_id=?, current_run_id=?, lineage=?, tags=?, archived=?, updated_at=?, icon=? WHERE session_id=?`,
+	now := persistence.Time(h.now())
+	_, err := tx.ExecContext(ctx, `UPDATE sessions SET title=?, project_id=?, current_run_id=?, lineage=?, tags=?, archived=?, updated_at=?, icon=?,
+		archived_at = CASE WHEN ?=1 THEN COALESCE(archived_at, ?) END,
+		unarchived_at = CASE WHEN ?=1 THEN NULL WHEN archived=1 THEN ? ELSE unarchived_at END WHERE session_id=?`,
 		s.Title, persistence.ProjectArg(s.ProjectID), persistence.NullStr(s.CurrentRunID), persistence.JSON(s.Lineage), persistence.JSON(s.Tags),
-		boolInt(s.Archived), persistence.Time(h.now()), s.Icon, s.SessionID)
+		boolInt(s.Archived), now, s.Icon, boolInt(s.Archived), now, boolInt(s.Archived), now, s.SessionID)
 	if err == nil && s.Archived {
 		err = h.withdrawSessionAsksTx(ctx, tx, s.SessionID) // W-asks: an archived session's asks are withdrawn
 	}
@@ -253,6 +275,9 @@ func (h *Hub) observeRunTx(ctx context.Context, tx *sql.Tx, nodeID string, r con
 		}
 	}
 	if err := h.trackChildTx(ctx, tx, existing.State, r); err != nil { // W-childnotify
+		return err
+	}
+	if err := h.trackInterruptTx(ctx, tx, existing.Run, isNew, r); err != nil { // interrupted.go
 		return err
 	}
 	h.noteRunTransition(existing.State, r) // W-archive2

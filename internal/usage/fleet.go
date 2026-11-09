@@ -120,7 +120,7 @@ func Utilizations(cards []Card, now time.Time) []Utilization {
 	for _, c := range cards {
 		var key string
 		switch {
-		case c.Account == nil && c.State == Ambient:
+		case c.Account == nil: // the own login (Ambient, or AtLimit on a reported quota)
 			note(c.Provider)
 			if contracts.ManagedLogins(harnessFor(c.Provider)) {
 				continue // claude/codex own logins: not observed, not counted

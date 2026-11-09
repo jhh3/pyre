@@ -203,3 +203,46 @@ func TestCardsAgyOwnLogin(t *testing.T) {
 		t.Fatalf("google cards %+v", google)
 	}
 }
+
+// agy's own login at its quota (HarnessInfo.Limit, decision I72) is "at
+// limit" until the reset, then "not managed" again.
+func TestCardsAgyOwnLoginLimited(t *testing.T) {
+	reset := now.Add(13 * time.Hour)
+	nodes := []contracts.Node{{NodeID: "node_synth-b", Name: "synth-linux", Harnesses: []contracts.HarnessInfo{
+		{Harness: contracts.HarnessAgy, Available: true, Limit: &contracts.LimitEvent{Kind: "usage_limit", ResetAt: &reset, At: now}}}}}
+	google := func(at time.Time) Card {
+		for _, c := range Cards(nil, nodes, at) {
+			if c.Provider == contracts.ProviderGoogle {
+				return c
+			}
+		}
+		t.Fatal("no google card")
+		return Card{}
+	}
+	if c := google(now); c.State != AtLimit || c.Until == nil || !c.Until.Equal(reset) || c.Why != "quota reached" {
+		t.Fatalf("limited %+v", c.Assessment)
+	}
+	if c := google(reset.Add(time.Second)); c.State != Ambient {
+		t.Fatalf("after the reset %+v", c.Assessment)
+	}
+	// Still counted as the machine's own agy login in fleet utilization.
+	if u := Utilizations(Cards(nil, nodes, now), now); len(u) == 0 {
+		t.Fatal("own login left out of utilization")
+	}
+}
+
+// agy's own login whose fresh /usage reading has a window used up is "at
+// limit" until that window resets (decision I74).
+func TestCardsAgyUsageWindowUsedUp(t *testing.T) {
+	reset := now.Add(3 * time.Hour)
+	nodes := []contracts.Node{{NodeID: "node_synth-b", Name: "synth-linux", Harnesses: []contracts.HarnessInfo{
+		{Harness: contracts.HarnessAgy, Available: true, Usage: &contracts.HarnessUsage{ObservedAt: now,
+			Windows: []contracts.UsageWindow{{Name: "five_hour", UsedPercent: 100, ResetAt: &reset}}}}}}}
+	cs := Cards(nil, nodes, now)
+	if len(cs) != 1 || cs[0].State != AtLimit || cs[0].Until == nil || !cs[0].Until.Equal(reset) {
+		t.Fatalf("used up %+v", cs)
+	}
+	if cs := Cards(nil, nodes, reset.Add(time.Second)); cs[0].State == AtLimit {
+		t.Fatalf("after the reset %+v", cs[0].Assessment)
+	}
+}

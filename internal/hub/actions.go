@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
 	"github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/credentials"
 	"github.com/jhh3/pyre/internal/persistence"
 )
 
@@ -73,13 +75,36 @@ func (h *Hub) ReadSession(ctx context.Context, req contracts.ReadSessionRequest)
 	if run.SessionID != sess.SessionID {
 		return contracts.ReadSessionResponse{}, contracts.Errorf(contracts.ErrInvalid, "run %s belongs to another session", runID)
 	}
+	// A run that failed before it started (a resume whose working directory
+	// was gone) has no transcript on its node: say so and read the newest
+	// run of the session that did start (iss_…).
+	note := ""
+	if neverStarted(run) {
+		note = fmt.Sprintf("run %s failed before it started: %s", run.RunID, run.StateReason)
+		prev, ok, err := h.lastStartedRun(ctx, sess.SessionID)
+		if err != nil {
+			return contracts.ReadSessionResponse{}, err
+		}
+		if !ok {
+			return contracts.ReadSessionResponse{Entries: []contracts.TranscriptEntry{}, RunID: run.RunID, Note: note + "; no run of this session started",
+				Freshness: contracts.Freshness{ObservedAt: h.now(), Source: "hub"}}, nil
+		}
+		note += "; showing run " + prev.RunID + ", the last one that started"
+		run, runID = prev, prev.RunID
+	}
 	if !contracts.HasCap(run.Capabilities, contracts.CapTranscript) && !contracts.HasCap(run.Capabilities, contracts.CapScreen) {
 		return contracts.ReadSessionResponse{}, contracts.Errorf(contracts.ErrUnsupported, "run adapter supports neither transcript.read nor screen.read").WithRef(contracts.KindRun, runID)
 	}
 	if err := h.requireConnected(ctx, run.NodeID); err != nil {
 		return contracts.ReadSessionResponse{}, err
 	}
+	if req.Seq < 0 {
+		return contracts.ReadSessionResponse{}, contracts.Errorf(contracts.ErrInvalid, "seq must be positive")
+	}
 	req.RunID = runID
+	// Narrowed here as well as on the node: a pyred from before seq reads
+	// still answers with the right page.
+	req = req.SeqWindow()
 	var cmd commandRec
 	wait := h.opt.CommandWait
 	if err := h.tx(ctx, func(tx *sql.Tx) error {
@@ -109,7 +134,19 @@ func (h *Hub) ReadSession(ctx context.Context, req contracts.ReadSessionRequest)
 	if resp.Freshness.Source == "" {
 		resp.Freshness = contracts.Freshness{ObservedAt: h.now(), Source: "node:" + run.NodeID}
 	}
-	return resp, nil
+	resp.RunID, resp.Note = runID, note
+	if req.Full && !resp.Full {
+		resp.FullNote = "node " + run.NodeID + " runs a pyred without full reads; entries keep the default cut (update pyred there)"
+	}
+	if !resp.Full {
+		// Nodes redact every read (a full one since full reads exist); a
+		// default read from a pyred older than that is redacted here.
+		for i := range resp.Entries {
+			resp.Entries[i].Text = credentials.RedactTranscript(resp.Entries[i].Text)
+		}
+		resp.Screen = credentials.RedactTranscript(resp.Screen)
+	}
+	return req.PickSeq(resp)
 }
 
 // AttachSession asks the run's node for an attach descriptor. Web-terminal
@@ -240,8 +277,10 @@ var sessionActions = map[string]bool{
 	contracts.ActionConnCheck: true, contracts.ActionConnInvoke: true, contracts.ActionConnList: true,
 	contracts.ActionMemorySearch: true, contracts.ActionMemoryGet: true, contracts.ActionMemoryStatus: true,
 	contracts.ActionDirList: true, contracts.ActionInventory: true, contracts.ActionUpdateList: true, contracts.ActionAccountList: true,
+	contracts.ActionUpdateAutoStatus: true, // read-only automatic updater state (pyre update ls)
 	contracts.ActionTranscriptSearch: true, // read-only, like sessions.read (W-search)
 	contracts.ActionAccountSelect:    true, // dry run: the Codex launch preflight (cli harnessPreflight)
+	contracts.ActionNeedsCheck:       true, // read-only presence check for start --needs (placement)
 }
 
 // InvokeNodeAction routes a typed action to a node and waits up to
@@ -268,6 +307,12 @@ func (h *Hub) InvokeNodeAction(ctx context.Context, req contracts.NodeActionRequ
 	if req.Action == contracts.ActionConnInvoke && req.NodeID == "" {
 		// Route to the node holding the connection (catalog RouteInvoke).
 		if req.NodeID, err = h.routeConnectionInvoke(ctx, p, req.Params); err != nil {
+			return contracts.NodeActionResult{}, err
+		}
+	}
+	if req.Action == contracts.ActionMemorySearch && req.NodeID == "" {
+		// Route to a node whose Hive answers (memoryroute.go).
+		if req.NodeID, err = h.routeMemorySearch(ctx); err != nil {
 			return contracts.NodeActionResult{}, err
 		}
 	}
@@ -315,7 +360,7 @@ func (h *Hub) InvokeNodeAction(ctx context.Context, req contracts.NodeActionRequ
 	if err != nil {
 		return contracts.NodeActionResult{}, err
 	}
-	res := contracts.NodeActionResult{CommandID: rec.CommandID, Outcome: pendingOutcome(rec), Result: rec.Result, Error: rec.Error}
+	res := contracts.NodeActionResult{CommandID: rec.CommandID, Outcome: pendingOutcome(rec), Result: rec.Result, Error: rec.Error, NodeID: rec.NodeID}
 	if rec.State == cmdExpired || rec.State == cmdCancelled {
 		res.Error = contracts.AsError(commandError(rec))
 	}
@@ -439,4 +484,32 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// neverStarted: the run failed at launch (no process, no transcript).
+func neverStarted(r contracts.Run) bool {
+	return r.State == contracts.RunFailed && isLaunchFailure(r.StateReason)
+}
+
+// lastStartedRun is the session's newest run that did not fail at launch.
+func (h *Hub) lastStartedRun(ctx context.Context, sessionID string) (contracts.Run, bool, error) {
+	rows, err := h.db.QueryContext(ctx, `SELECT run FROM runs WHERE session_id=? ORDER BY started_at DESC, run_id DESC`, sessionID)
+	if err != nil {
+		return contracts.Run{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return contracts.Run{}, false, err
+		}
+		var r contracts.Run
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			return contracts.Run{}, false, err
+		}
+		if !neverStarted(r) {
+			return r, true, nil
+		}
+	}
+	return contracts.Run{}, false, rows.Err()
 }

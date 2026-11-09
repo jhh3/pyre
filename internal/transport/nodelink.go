@@ -135,7 +135,10 @@ type NodeLinkConfig struct {
 	// MaxOutbox bounds unacknowledged durable reports; Enqueue fails with
 	// capacity_exhausted beyond it. Default 100000.
 	MaxOutbox int
-	// CommandRetention keeps finished command records for dedup. Default 30d.
+	// CommandRetention keeps finished command records for dedup. Default
+	// 7 days, the hub's own retention of finished commands: the hub only
+	// resends a command it still holds unfinished, so an older record
+	// suppresses nothing. (It was 30 days: 150k rows, 367 MB on server.)
 	CommandRetention time.Duration
 	// OnStateChange observes state transitions (called synchronously).
 	OnStateChange func(LinkStatus)
@@ -281,7 +284,7 @@ func NewNodeLink(cfg NodeLinkConfig) (*NodeLink, error) {
 		cfg.MaxOutbox = 100000
 	}
 	if cfg.CommandRetention <= 0 {
-		cfg.CommandRetention = 30 * 24 * time.Hour
+		cfg.CommandRetention = 7 * 24 * time.Hour
 	}
 	if err := sqlitex.Migrate(context.Background(), cfg.DB, NodeLinkMigrations...); err != nil {
 		return nil, err

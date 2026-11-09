@@ -4,8 +4,10 @@ import (
 	"context"
 	"path"
 	"strings"
+	"time"
 
 	c "github.com/jhh3/pyre/internal/contracts"
+	"github.com/jhh3/pyre/internal/repoindex"
 )
 
 // launchCheckout turns `--project P --repo R [--worktree B] [--cwd D]` into a
@@ -17,7 +19,7 @@ import (
 // --worktree the binding is the source repository the isolated worktree is
 // created from. An explicit --cwd always wins: it either selects one of
 // several bindings or names an unrecorded directory to use as the shared
-// checkout.
+// checkout. Fresh or branch go to freshProjectCheckout instead.
 func (o *Ops) launchCheckout(ctx context.Context, projectID *string, nodeID string, p StartParams) (*c.CheckoutRequest, string, error) {
 	cwd := p.Cwd
 	if p.Worktree == "" && p.Repo == "" {
@@ -32,21 +34,7 @@ func (o *Ops) launchCheckout(ctx context.Context, projectID *string, nodeID stri
 		if projectID == nil {
 			return nil, "", usagef("--repo names a repository of a project; pass --project too (or use --cwd alone for a plain directory)")
 		}
-		proj, err := o.API.GetProject(ctx, c.GetRequest{ID: *projectID})
-		if err != nil {
-			return nil, "", err
-		}
-		known := false
-		var repoIDs []string
-		for _, r := range proj.Repos {
-			repoIDs = append(repoIDs, r.RepoID)
-			known = known || r.RepoID == p.Repo
-		}
-		if !known {
-			return nil, "", usagef("project %s has no repo %q (repos: %s); add it with `pyre project update %s --repo %s=<url>`",
-				proj.Name, p.Repo, orDash(strings.Join(repoIDs, ", ")), proj.Name, p.Repo)
-		}
-		b, found, err := pickBinding(proj, nodeID, p.Repo, cwd)
+		proj, b, found, err := o.projectRepoBinding(ctx, *projectID, nodeID, p.Repo, cwd)
 		if err != nil {
 			return nil, "", err
 		}
@@ -79,6 +67,71 @@ func (o *Ops) launchCheckout(ctx context.Context, projectID *string, nodeID stri
 		return nil, "", usagef("--worktree needs the source repository: pass --cwd (or --project with --repo and a recorded checkout)")
 	}
 	return co, cwd, nil
+}
+
+// projectRepoBinding checks that repo is one of the project's repositories
+// and picks its recorded checkout on node (pickBinding).
+func (o *Ops) projectRepoBinding(ctx context.Context, projectID, nodeID, repo, cwd string) (c.Project, c.CheckoutBinding, bool, error) {
+	proj, err := o.API.GetProject(ctx, c.GetRequest{ID: projectID})
+	if err != nil {
+		return proj, c.CheckoutBinding{}, false, err
+	}
+	known := false
+	var repoIDs []string
+	for _, r := range proj.Repos {
+		repoIDs = append(repoIDs, r.RepoID)
+		known = known || r.RepoID == repo
+	}
+	if !known {
+		return proj, c.CheckoutBinding{}, false, usagef("project %s has no repo %q (repos: %s); add it with `pyre project update %s --repo %s=<url>`",
+			proj.Name, repo, orDash(strings.Join(repoIDs, ", ")), proj.Name, repo)
+	}
+	b, found, err := pickBinding(proj, nodeID, repo, cwd)
+	return proj, b, found, err
+}
+
+// freshProjectCheckout is `--project P --repo R` with fresh or branch: an
+// explicit fresh or branch wins over the project's checkout mode, shared
+// included (iss_…); the recorded checkout is only
+// the source. The worktree is a quick launch's (worktree.create): at <node's
+// worktree root>/<repo>/<branch>, on exactly that branch or a conflict
+// naming it, and a retry with the same operation ID gets the recorded one
+// back. The session's checkout record names the worktree, which the node
+// reuses as it is.
+func (o *Ops) freshProjectCheckout(ctx context.Context, projectID *string, nodeID string, p StartParams, opID string) (*c.CheckoutRequest, c.WorktreeCreateResult, error) {
+	var wt c.WorktreeCreateResult
+	branch := p.Branch
+	if p.Worktree != "" && branch != "" && p.Worktree != branch {
+		return nil, wt, usagef("branch %q and worktree %q disagree; give one", branch, p.Worktree)
+	}
+	if branch == "" {
+		branch = p.Worktree
+	}
+	if p.Repo == "" || projectID == nil {
+		return nil, wt, usagef("fresh and branch need the repository: pass --repo with --project (or, without a project, a repository name)")
+	}
+	proj, b, found, err := o.projectRepoBinding(ctx, *projectID, nodeID, p.Repo, p.Cwd)
+	if err != nil {
+		return nil, wt, err
+	}
+	src := p.Cwd
+	if found {
+		src = b.Path
+	}
+	if src == "" {
+		return nil, wt, usagef("project %s has no checkout of repo %s on that node to make the fresh worktree from; record one with `pyre project update %s --checkout <node>:/abs/path:%s:shared`, or pass --cwd",
+			proj.Name, p.Repo, proj.Name, p.Repo)
+	}
+	slug := p.Title
+	if slug == "" {
+		slug = p.Prompt
+	}
+	wctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	if wt, err = repoindex.CreateVia(wctx, o.API, nodeID, c.WorktreeCreateParams{Repos: []string{src}, Branch: branch, Slug: slug}, opID+".worktrees"); err != nil {
+		return nil, wt, err
+	}
+	return &c.CheckoutRequest{RepoID: p.Repo, Mode: c.CheckoutWorktree, Branch: wt.Branch, Path: wt.Cwd}, wt, nil
 }
 
 // pickBinding chooses the project's checkout of repo on node. With cwd set it

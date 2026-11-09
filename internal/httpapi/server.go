@@ -79,6 +79,13 @@ type Options struct {
 	StreamWriteTimeout time.Duration
 	MaxStreams         int
 
+	// Compress gzips large RPC answers to requests that accept gzip, and
+	// ETags tags contracts.ConditionalOps answers and answers a matching
+	// If-None-Match with 304 (encode.go). The hub sets both; the local
+	// node socket gains nothing from either.
+	Compress bool
+	ETags    bool
+
 	// AllowedOrigins lists host patterns allowed to open WebSockets from a
 	// browser (see coder/websocket OriginPatterns). Empty = same host only;
 	// non-browser clients that send no Origin are always allowed.
@@ -256,6 +263,8 @@ type logInfo struct {
 	principal string
 	internal  error
 	cancelled error // the client cancelled or disconnected; not a server fault
+	// rawBytes is the JSON size of a gzipped answer (bytes is the wire size).
+	rawBytes int64
 }
 
 func (s *server) wrap(next http.Handler) http.Handler {
@@ -281,6 +290,10 @@ func (s *server) wrap(next http.Handler) http.Handler {
 	})
 }
 
+// slowRequest is the duration above which a successful request is logged at Info.
+// Long-poll ops (*.wait, e.g. inbox.wait) hold ~50 s by design, so they are exempt.
+const slowRequest = 5 * time.Second
+
 func (s *server) accessLog(r *http.Request, rec *statusRecorder, info *logInfo, d time.Duration) {
 	if s.opts.Logger == nil {
 		return
@@ -302,7 +315,18 @@ func (s *server) accessLog(r *http.Request, rec *statusRecorder, info *logInfo, 
 	if info.principal != "" {
 		attrs = append(attrs, "principal", info.principal)
 	}
-	s.opts.Logger.Info("http", attrs...)
+	if info.rawBytes > 0 {
+		attrs = append(attrs, "raw_bytes", info.rawBytes)
+	}
+	// Successful fast requests are the bulk of traffic (long-polls, inbox
+	// checks every few seconds per session); at Info they filled server's
+	// syslog with 13 GB in a day. Keep them at Debug; failures and slow
+	// requests stay at Info.
+	if status < 400 && (d < slowRequest || strings.HasSuffix(info.op, ".wait")) {
+		s.opts.Logger.Debug("http", attrs...)
+	} else {
+		s.opts.Logger.Info("http", attrs...)
+	}
 	if info.internal != nil {
 		s.opts.Logger.Error("internal error", "path", RedactPath(r.URL.Path), "op", info.op, "err", info.internal.Error())
 	} else if info.cancelled != nil {
@@ -428,6 +452,38 @@ func writeErrorStatus(w http.ResponseWriter, status int, ce *contracts.Error) {
 		}
 	}
 	writeJSON(w, status, contracts.ErrorBody{Error: ce})
+}
+
+// writeOpError answers a failed operation. An error that only says the
+// request's context ended (context canceled, or a store query it aborted)
+// is answered as retryable "unavailable", never as a generic internal
+// error: either the client went away (and reads nothing) or the server is
+// shutting down, which cancels in-flight requests after a short grace (a
+// hub restarting for an upgrade). The caller then retries the same
+// idempotent request (an upload chunk's byte range, a mutation's
+// operation id) against the restarted server.
+func writeOpError(w http.ResponseWriter, r *http.Request, err error) {
+	noteInternal(r, err)
+	if interrupted(r, err) {
+		WriteError(w, ErrInterrupted())
+		return
+	}
+	WriteError(w, err)
+}
+
+// ErrInterrupted is the answer to a request the server stopped serving
+// before it finished (writeOpError).
+func ErrInterrupted() *contracts.Error {
+	return contracts.Errorf(contracts.ErrUnavailable, "request interrupted: the server stopped serving it (restarting?); retry")
+}
+
+// interrupted reports an error that would otherwise reach the client as
+// "internal error" and stems from the request's context ending.
+func interrupted(r *http.Request, err error) bool {
+	if publicError(err).Code != contracts.ErrInternal {
+		return false // a definite answer (not found, conflict, ...) stays as is
+	}
+	return r.Context().Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // noteInternal records a non-public error for the server-side log. An

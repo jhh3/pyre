@@ -96,3 +96,44 @@ func TestAutoTitlePrecedence(t *testing.T) {
 		t.Fatalf("empty title accepted: %v", err)
 	}
 }
+
+func promptTitleEvent(sessionID, runID, title string) contracts.Event {
+	ev := titleEvent(sessionID, runID, title)
+	ev.Payload, _ = json.Marshal(autotitle.Suggestion{SessionID: sessionID, RunID: runID, Title: title, Source: autotitle.SourcePrompt})
+	return ev
+}
+
+// A session is named from its first prompt once: a plugin envelope is never
+// a title, and a later run's (resume, account switch-over) first prompt does
+// not rename it; a native title from that run still may.
+func TestAutoTitleEnvelopeAndLaterRuns(t *testing.T) {
+	x := newHarness(t)
+	x.connect(nodeMac, 0)
+	v := x.start(owner, "op_env", nodeMac)
+	sid, rid := v.Session.SessionID, v.Run.RunID
+	x.report(nodeMac, contracts.ReportEvent, promptTitleEvent(sid, rid, "The pyre-session plugin sent a message"))
+	if got := x.session(sid).Session.Title; got != "work" {
+		t.Fatalf("envelope applied: %q", got)
+	}
+	x.report(nodeMac, contracts.ReportEvent, promptTitleEvent(sid, rid, "Fix the synthetic uploader retries"))
+	if got := x.session(sid).Session.Title; got != "Fix the synthetic uploader retries" {
+		t.Fatalf("first prompt not applied: %q", got)
+	}
+	x.endRun(sid)
+	rv, err := x.h.ResumeSession(as(owner), contracts.ResumeRequest{Mutation: contracts.Mutation{OperationID: "op_env_resume"}, SessionID: sid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := rv.Session.Run.RunID
+	if r2 == rid {
+		t.Fatal("resume reused the run")
+	}
+	x.report(nodeMac, contracts.ReportEvent, promptTitleEvent(sid, r2, "Continue where you left off"))
+	if got := x.session(sid).Session.Title; got != "Fix the synthetic uploader retries" {
+		t.Fatalf("later run's first prompt renamed the session: %q", got)
+	}
+	x.report(nodeMac, contracts.ReportEvent, titleEvent(sid, r2, "Synthetic uploader retry backoff"))
+	if got := x.session(sid).Session.Title; got != "Synthetic uploader retry backoff" {
+		t.Fatalf("native title from a later run not applied: %q", got)
+	}
+}

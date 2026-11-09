@@ -101,8 +101,11 @@ func TestServeFCMAndLogFile(t *testing.T) {
 	if err != nil || !res.Enabled {
 		t.Fatalf("push registration with FCM configured: %+v %v", res, err)
 	}
-	for i := 0; i < 40; i++ { // enough requests to rotate a 4 KiB log
-		_, _ = cl.WhoAmI(context.Background())
+	// Successful fast requests log at Debug; rejected ones stay at Info,
+	// so unauthenticated calls are what fill the 4 KiB log.
+	unauth := client.New("https://"+addr, "synthetic-wrong-token", client.Options{CertSHA256: cred.HubCertSHA256, MaxAttempts: 1, Timeout: 2 * time.Second})
+	for i := 0; i < 60; i++ { // enough requests to rotate a 4 KiB log
+		_, _ = unauth.WhoAmI(context.Background())
 	}
 	cancel()
 	select {
@@ -123,7 +126,7 @@ func TestServeFCMAndLogFile(t *testing.T) {
 	if st, _ := os.Stat(logPath); st.Mode().Perm() != 0o600 {
 		t.Fatalf("log mode %v", st.Mode().Perm())
 	}
-	if strings.Contains(string(b), cred.Token) || strings.Contains(string(b), "synthetic-device-token") {
+	if strings.Contains(string(b), cred.Token) || strings.Contains(string(b), "synthetic-device-token") || strings.Contains(string(b), "synthetic-wrong-token") {
 		t.Fatal("secret in hub log")
 	}
 }

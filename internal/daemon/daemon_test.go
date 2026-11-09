@@ -950,6 +950,52 @@ func TestResumeHandoffNeedsAllowHandoff(t *testing.T) {
 	}
 }
 
+// shellLaunches is a fake shell adapter that records the initial prompts
+// it was asked to type.
+type shellLaunches struct {
+	*daemontest.Adapter
+	mu      sync.Mutex
+	prompts map[string]string
+}
+
+func (s *shellLaunches) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contracts.RunHandle, error) {
+	s.mu.Lock()
+	s.prompts[l.RunID] = l.InitialPrompt
+	s.mu.Unlock()
+	return s.Adapter.Launch(ctx, l)
+}
+
+// A shell types its initial prompt as a command, so a resumed shell
+// session (always a handoff: shells have no conversation) gets only the
+// prompt the resume names, never the agent handoff text.
+func TestShellResumeNeverTypesHandoffText(t *testing.T) {
+	fake := daemontest.New(daemontest.NewWorld(), contracts.HarnessShell)
+	fake.Caps = []string{contracts.CapStop, contracts.CapScreen, contracts.CapShellInitialPrompt} // no native resume
+	sa := &shellLaunches{Adapter: fake, prompts: map[string]string{}}
+	n := startNode(t, t.TempDir(), Config{Adapters: []contracts.RuntimeAdapter{sa}})
+	cwd := t.TempDir()
+	sc := startCmd("ses_shr", "run_shr1", contracts.HarnessShell, cwd)
+	sc.InitialPrompt = "make test"
+	n.start(sc)
+	n.do(command(contracts.CmdStop, contracts.RunCommand{SessionID: "ses_shr", RunID: "run_shr1"}))
+	prev := n.run("run_shr1").Run
+	for run, prompt := range map[string]string{"run_shr2": "", "run_shr3": "ls -la"} {
+		rc := contracts.ResumeCommand{StartRunCommand: startCmd("ses_shr", run, contracts.HarnessShell, cwd)}
+		rc.PreviousRun, rc.AllowHandoff, rc.InitialPrompt = &prev, true, prompt
+		n.do(command(contracts.CmdResume, rc))
+		n.d.WaitLaunches()
+		if r := n.run(run).Run; r.ContinuationKind != contracts.ContinuationHandoff {
+			t.Fatalf("%s = %+v", run, r)
+		}
+		n.do(command(contracts.CmdStop, contracts.RunCommand{SessionID: "ses_shr", RunID: run}))
+	}
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	if sa.prompts["run_shr1"] != "make test" || sa.prompts["run_shr2"] != "" || sa.prompts["run_shr3"] != "ls -la" {
+		t.Fatalf("typed prompts = %q", sa.prompts)
+	}
+}
+
 // TestSessionForNative: a harness-native session ID (what Hive records for
 // a captured transcript) maps back to the Pyre session, its latest run and
 // project; an unknown native ID is not attributed.

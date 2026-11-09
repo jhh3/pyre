@@ -23,9 +23,9 @@
 // so a running run keeps its executable across activations (InUseByRuns). At
 // least one healthy previous version is kept while anything references it;
 // Prune never removes the active version, a version in use, or the newest
-// rollback target. Nothing upgrades automatically: there is no code path
-// that stages or activates a version unless update.stage/update.activate is
-// explicitly requested, and staging never changes the default.
+// rollback target. Staging never changes the default. The one automatic
+// path is Auto (auto.go): pyred keeps codex at its latest stable release
+// through the same Stage/Activate, never downgrading.
 //
 // Activating pyred additionally checks protocol compatibility
 // (CheckProtocolCompat) against the hub's supported range and refuses with an

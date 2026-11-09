@@ -199,18 +199,92 @@ func TestCodexWakeCoalesces(t *testing.T) {
 	rec.waitWakes(t, 1)
 }
 
-// A command that finishes inside the turn that started it is no wake.
+// A command that finishes inside the turn that started it, which then
+// polled it (write_stdin after the exit), is no wake.
 func TestCodexWakeNotForInTurnCompletion(t *testing.T) {
 	t.Parallel()
 	e, rec := newWakeEnv(t, nil)
 	h := e.launch(e.a, "run_w4", e.home, nil, nil)
 	e.wait(e.a, h, 5*time.Second, idle)
-	dlv(t, e.a, h, "msg_w4", "run FAKE_BG_MS=100:f FAKE_SLEEP_MS=600", contracts.ModeQueue)
+	dlv(t, e.a, h, "msg_w4", "run FAKE_BG_MS=100:f FAKE_SLEEP_MS=600 FAKE_POLL=f", contracts.ModeQueue)
 	e.wait(e.a, h, 5*time.Second, idle)
 	time.Sleep(800 * time.Millisecond)
 	if n, _ := wakeEntries(t, e.a, h); len(n) != 0 || rec.wakes() != 0 {
 		t.Fatalf("in-turn completion woke the thread: %+v", n)
 	}
+}
+
+// iss_…: a yielded command exits while its own
+// turn still runs, the model never polls it again and ends the turn (on
+// `pyre waiting-on --quiet`): the idle run is woken with the result.
+func TestCodexWakeForUnseenInTurnCompletion(t *testing.T) {
+	t.Parallel()
+	e, rec := newWakeEnv(t, nil)
+	h := e.launch(e.a, "run_w4b", e.home, nil, nil)
+	e.wait(e.a, h, 5*time.Second, idle)
+	dlv(t, e.a, h, "msg_w4b", "run FAKE_BG_MS=100:u FAKE_SLEEP_MS=600 then pyre waiting-on --quiet", contracts.ModeQueue)
+	got := waitNotices(t, e.a, h, 1, 5*time.Second)
+	for _, want := range []string{"[pyre] background command finished: `bg-u` (exit 0", "bg u done", "no turn of yours saw the command finish"} {
+		if !strings.Contains(got[0].Text, want) {
+			t.Errorf("notice lacks %q:\n%s", want, got[0].Text)
+		}
+	}
+	e.wait(e.a, h, 5*time.Second, idle)
+	time.Sleep(600 * time.Millisecond)
+	if n, _ := wakeEntries(t, e.a, h); len(n) != 1 {
+		t.Fatalf("want exactly one wake turn, got %d", len(n))
+	}
+	rec.waitWakes(t, 1)
+}
+
+// iss_…: in a long turn the in-turn holds fill
+// with exec_command calls that returned their exit (40 here, 50 in the
+// incident) before the yielded command exits: it is still held, judged
+// and woken.
+func TestCodexWakeForUnseenInTurnCompletionAfterManyExecs(t *testing.T) {
+	t.Parallel()
+	e, rec := newWakeEnv(t, nil)
+	h := e.launch(e.a, "run_w4c", e.home, nil, nil)
+	e.wait(e.a, h, 5*time.Second, idle)
+	dlv(t, e.a, h, "msg_w4c", "run FAKE_EXECS=40 FAKE_BG_MS=300:late FAKE_SLEEP_MS=900 then pyre waiting-on --quiet", contracts.ModeQueue)
+	got := waitNotices(t, e.a, h, 1, 5*time.Second)
+	if !strings.Contains(got[0].Text, "[pyre] background command finished: `bg-late` (exit 0") {
+		t.Errorf("notice:\n%s", got[0].Text)
+	}
+	e.wait(e.a, h, 5*time.Second, idle)
+	time.Sleep(600 * time.Millisecond)
+	if n, _ := wakeEntries(t, e.a, h); len(n) != 1 {
+		t.Fatalf("want exactly one wake turn, got %d", len(n))
+	}
+	rec.waitWakes(t, 1)
+}
+
+// iss_…: a wake turn never stops the run's other
+// background commands. The first finishes and wakes the agent; the second
+// keeps running through that wake turn, finishes normally and wakes it again.
+func TestCodexWakeKeepsOtherBackgroundCommands(t *testing.T) {
+	t.Parallel()
+	e, rec := newWakeEnv(t, nil)
+	h := e.launch(e.a, "run_w4c", e.home, nil, nil)
+	e.wait(e.a, h, 5*time.Second, idle)
+	dlv(t, e.a, h, "msg_w4c", "start FAKE_BG_MS=300:p FAKE_BG_MS=2500:q", contracts.ModeQueue)
+	first := waitNotices(t, e.a, h, 1, 5*time.Second)
+	if !strings.Contains(first[0].Text, "`bg-p` (exit 0") || strings.Contains(first[0].Text, "bg-q") {
+		t.Fatalf("first notice:\n%s", first[0].Text)
+	}
+	e.wait(e.a, h, 5*time.Second, idle) // the wake turn ended; q still runs
+	rr, _ := e.a.run(h)
+	rr.ts.mu.Lock()
+	_, running := rr.ts.runningCmds["exec-bg-q"]
+	rr.ts.mu.Unlock()
+	if !running {
+		t.Fatal("bg-q no longer running after the first wake turn")
+	}
+	got := waitNotices(t, e.a, h, 2, 6*time.Second)
+	if txt := got[1].Text; !strings.Contains(txt, "`bg-q` (exit 0") || !strings.Contains(txt, "bg q done") {
+		t.Fatalf("second notice (bg-q killed or missing):\n%s", txt)
+	}
+	rec.waitWakes(t, 2)
 }
 
 // Interrupt cleans the thread's background terminals: the processes it
@@ -335,8 +409,8 @@ func TestCodexNoteCommandDone(t *testing.T) {
 	if !ts.noteCommandDone(cmd("x3"), "turn-3", now) {
 		t.Error("ambiguous completion not queued tentatively")
 	}
-	ts.dropTurnWakes("turn-3") // turn-3 was the active one after all
-	if len(ts.wakes) != 1 || ts.wakes[0].ItemID != "x2" || ts.wakes[0].Command != "make test" {
+	ts.settleTurnWakes("turn-3", "completed") // turn-3 was the active one after all; x3 never yielded
+	if len(ts.wakes) != 1 || ts.wakes[0].ItemID != "x2" || ts.wakes[0].Command != "make test" || ts.wakes[0].InTurn {
 		t.Fatalf("queue %+v", ts.wakes)
 	}
 	ts.setStatus(threadStatus{Type: "idle"}, now)
@@ -358,6 +432,226 @@ func TestCodexNoteCommandDone(t *testing.T) {
 	}
 }
 
+// Unit: an exec_command completion inside its own turn is held and becomes
+// an InTurn candidate when the turn completes (not when it is interrupted).
+func TestCodexSettleTurnWakes(t *testing.T) {
+	now := time.Now()
+	exec := func(id, pid string) item {
+		return item{Type: "commandExecution", ID: id, Command: "sleep 30", Status: "completed", Source: execStartup, ProcessID: pid}
+	}
+	for _, tc := range []struct {
+		status string
+		want   []string
+	}{{"completed", []string{"e3", "e1"}}, {"failed", []string{"e3", "e1"}}, {"interrupted", nil}} {
+		ts := newThreadState("run_u", "ses_u", "thr_u")
+		ts.setStatus(threadStatus{Type: "active"}, now)
+		ts.activeTurn = "turn-1"
+		if ts.noteCommandDone(exec("e1", "61711"), "turn-1", now) {
+			t.Fatal("in-turn completion queued at once")
+		}
+		plain := exec("e2", "")
+		plain.Source = "agent"
+		ts.noteCommandDone(plain, "turn-1", now) // not exec_command's: never held
+		ts.activeTurn = ""                       // after a pyred restart: queued tentatively
+		ts.noteCommandDone(exec("e3", "4242"), "turn-1", now)
+		ts.settleTurnWakes("turn-1", tc.status)
+		var got []string
+		for _, w := range ts.wakes {
+			if !w.InTurn {
+				t.Errorf("%s: %s not marked InTurn", tc.status, w.ItemID)
+			}
+			got = append(got, w.ItemID)
+		}
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") || len(ts.inTurn) != 0 {
+			t.Errorf("%s: queue %v, held %d", tc.status, got, len(ts.inTurn))
+		}
+		ts.setStatus(threadStatus{Type: "idle"}, now)
+		if ts.noteCommandDone(exec("e1", "61711"), "turn-1", now) && tc.status != "interrupted" {
+			t.Errorf("%s: e1 queued twice", tc.status)
+		}
+	}
+}
+
+// writeRollout writes a synthetic rollout (one JSON object per line).
+func writeRollout(t *testing.T, lines ...map[string]any) string {
+	t.Helper()
+	var b strings.Builder
+	for _, l := range lines {
+		j, _ := json.Marshal(l)
+		b.Write(j)
+		b.WriteByte('\n')
+	}
+	p := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(p, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func rCall(kind, id, input string) map[string]any {
+	k := "input"
+	if kind == "function_call" {
+		k = "arguments"
+	}
+	return map[string]any{"type": "response_item", "payload": map[string]any{"type": kind, "call_id": id, "name": "exec", k: input}}
+}
+
+func rOut(kind, id string, out any) map[string]any {
+	return map[string]any{"type": "response_item", "payload": map[string]any{"type": kind + "_output", "call_id": id, "output": out}}
+}
+
+func rDone(id, pid string) map[string]any {
+	return map[string]any{"type": "event_msg", "payload": map[string]any{"type": "item_completed",
+		"item": map[string]any{"type": "CommandExecution", "id": id, "process_id": pid, "status": "failed", "exit_code": 1}}}
+}
+
+// codeOut is a code-mode tool output: the script's text parts, the tool
+// result as escaped JSON inside one of them (as codex 0.163 writes it).
+func codeOut(result string) []any {
+	return []any{map[string]any{"type": "input_text", "text": "Script completed\nOutput:\n"}, map[string]any{"type": "input_text", "text": result}}
+}
+
+// Unit: the rollout tells whether the model got an exit. Shapes follow
+// real codex 0.163 rollouts (iss_…, synthetic text).
+func TestCodexExitsSeen(t *testing.T) {
+	// The incident: exec_command yielded session 61711; the exit came while
+	// the turn ran other commands; nothing polled 61711 again.
+	incident := writeRollout(t,
+		rCall("custom_tool_call", "c1", `text(await tools.exec_command({cmd:"python3 inspect.py","yield_time_ms":1000}));`),
+		rOut("custom_tool_call", "c1", codeOut(`{"chunk_id":"a","wall_time_seconds":1.0,"session_id":61711,"output":""}`)),
+		rCall("custom_tool_call", "c2", `text(await tools.exec_command({cmd:"ls review"}));`),
+		rDone("exec-61711", "61711"),
+		rOut("custom_tool_call", "c2", codeOut(`{"chunk_id":"b","exit_code":0,"output":"x"}`)),
+		rCall("custom_tool_call", "c3", `text(await tools.exec_command({cmd:"pyre waiting-on --quiet 'frames'"}));`),
+		rOut("custom_tool_call", "c3", codeOut(`{"chunk_id":"c","exit_code":0,"output":"recorded"}`)),
+	)
+	if got := exitsSeen(incident, []execRef{{"exec-61711", "61711"}}); len(got) != 1 || got["exec-61711"] {
+		t.Fatalf("incident: %v (want unseen)", got)
+	}
+	// Polled after the exit (code mode): seen.
+	polled := writeRollout(t,
+		rCall("custom_tool_call", "c1", `text(await tools.exec_command({cmd:"cargo test"}));`),
+		rOut("custom_tool_call", "c1", codeOut(`{"chunk_id":"a","session_id":37867,"output":"$ tsgo"}`)),
+		rDone("exec-37867", "37867"),
+		rCall("custom_tool_call", "c2", `text(await tools.write_stdin({session_id:37867,chars:"","yield_time_ms":1000}));`),
+		rOut("custom_tool_call", "c2", codeOut(`{"chunk_id":"b","exit_code":0,"output":""}`)),
+	)
+	if got := exitsSeen(polled, []execRef{{"exec-37867", "37867"}}); !got["exec-37867"] {
+		t.Fatalf("polled: %v (want seen)", got)
+	}
+	// A poll before the exit only: unseen. Classic function calls.
+	early := writeRollout(t,
+		rCall("function_call", "f1", `{"cmd":"make","yield_time_ms":1000}`),
+		rOut("function_call", "f1", "Chunk ID: a\nProcess running with session ID 4242\nOutput:\n"),
+		rCall("function_call", "f2", `{"session_id":4242,"chars":""}`),
+		rOut("function_call", "f2", "Process running with session ID 4242\n"),
+		rDone("exec-4242", "4242"),
+		rCall("function_call", "f3", `{"session_id":42420,"chars":""}`), // another process
+		rOut("function_call", "f3", "Process exited with code 0\n"),
+	)
+	if got := exitsSeen(early, []execRef{{"exec-4242", "4242"}}); len(got) != 1 || got["exec-4242"] {
+		t.Fatalf("early poll: %v (want unseen)", got)
+	}
+	// exec_command returned the exit itself (never yielded): seen. A
+	// script that kept polling the process and returned after the exit:
+	// seen. A command whose completion is not in the rollout: absent.
+	direct := writeRollout(t,
+		rCall("custom_tool_call", "c1", `text(await tools.exec_command({cmd:"true"}));`),
+		rDone("exec-1", "11"),
+		rOut("custom_tool_call", "c1", codeOut(`{"chunk_id":"a","exit_code":0,"output":""}`)),
+		rCall("custom_tool_call", "c2", `let r=await tools.exec_command({cmd:"make"}); while(r.session_id) r=await tools.write_stdin({session_id:r.session_id});`),
+		rDone("exec-2", "22"),
+		rOut("custom_tool_call", "c2", codeOut(`{"session_id":22} {"exit_code":0}`)),
+	)
+	got := exitsSeen(direct, []execRef{{"exec-1", "11"}, {"exec-2", "22"}, {"exec-3", "33"}})
+	if !got["exec-1"] || !got["exec-2"] {
+		t.Fatalf("direct/script: %v (want both seen)", got)
+	}
+	if _, ok := got["exec-3"]; ok {
+		t.Fatalf("missing completion judged: %v", got)
+	}
+	if got := exitsSeen(filepath.Join(t.TempDir(), "none.jsonl"), []execRef{{"exec-1", "11"}}); len(got) != 0 {
+		t.Fatalf("missing rollout: %v", got)
+	}
+}
+
+// Unit: a script that yields a session and keeps running past its exit
+// writes the yield after the exit; that is not the model getting the exit.
+// Shape of codex 0.162.0 on devbox (iss_…,
+// synthetic text): one script ran exec_command (yield_time_ms 1000,
+// session 57675), then a second exec_command; 57675 exited 2.4 s before the
+// script's output, which named it only as running.
+func TestCodexExitsSeenYieldAfterExit(t *testing.T) {
+	incident := writeRollout(t,
+		rCall("custom_tool_call", "c1", `text(await tools.exec_command({cmd:"git checkout --detach abc; npm run build",yield_time_ms:1000}));
+text(await tools.exec_command({cmd:"git push origin abc:refs/heads/ci/x"}));`),
+		rDone("exec-57675", "57675"),
+		rDone("exec-73729", "73729"),
+		rOut("custom_tool_call", "c1", codeOut(`{"chunk_id":"a","wall_time_seconds":1.0,"session_id":57675,"output":"> build\n"}`+"\n"+`{"chunk_id":"b","exit_code":0,"output":"pushed"}`)),
+		rCall("custom_tool_call", "c2", `text(await tools.mcp__pyre__waiting_on({what:"build (command session57675)",quiet:true}));`),
+		rOut("custom_tool_call", "c2", codeOut(`{"type":"text","text":"recorded"}`)),
+	)
+	if got := exitsSeen(incident, []execRef{{"exec-57675", "57675"}}); len(got) != 1 || got["exec-57675"] {
+		t.Fatalf("yield after exit: %v (want unseen)", got)
+	}
+	// Classic: parallel calls whose outputs are written after the exit; the
+	// yield names the session, the other call is another process.
+	classic := writeRollout(t,
+		rCall("function_call", "f1", `{"cmd":"make","yield_time_ms":1000}`),
+		rCall("function_call", "f2", `{"cmd":"sleep 3"}`),
+		rDone("exec-4242", "4242"),
+		rOut("function_call", "f1", "Chunk ID: a\nProcess running with session ID 4242\nOutput:\n"),
+		rOut("function_call", "f2", "Chunk ID: b\nProcess exited with code 0\nOutput:\n"),
+	)
+	if got := exitsSeen(classic, []execRef{{"exec-4242", "4242"}}); len(got) != 1 || got["exec-4242"] {
+		t.Fatalf("classic yield after exit: %v (want unseen)", got)
+	}
+	// A literal poll after the exit whose output still reports the session
+	// running, then another command's exit: unseen.
+	pollRunning := writeRollout(t,
+		rCall("custom_tool_call", "c1", `text(await tools.exec_command({cmd:"make",yield_time_ms:1000}));`),
+		rOut("custom_tool_call", "c1", codeOut(`{"chunk_id":"a","session_id":515,"output":""}`)),
+		rCall("custom_tool_call", "c2", `text(await tools.write_stdin({session_id:515,chars:""})); text(await tools.exec_command({cmd:"sleep 2"}));`),
+		rDone("exec-515", "515"),
+		rOut("custom_tool_call", "c2", codeOut(`{"chunk_id":"b","session_id":515,"output":""} {"chunk_id":"c","exit_code":0,"output":""}`)),
+	)
+	if got := exitsSeen(pollRunning, []execRef{{"exec-515", "515"}}); len(got) != 1 || got["exec-515"] {
+		t.Fatalf("poll that reported running: %v (want unseen)", got)
+	}
+	// One script yielded the session and polled it by variable until the
+	// exit: seen.
+	varPoll := writeRollout(t,
+		rCall("custom_tool_call", "c1", `const r=await tools.exec_command({cmd:"make",yield_time_ms:1000}); text(r); text(await tools.write_stdin({session_id:r.session_id,yield_time_ms:30000}));`),
+		rDone("exec-616", "616"),
+		rOut("custom_tool_call", "c1", codeOut(`{"chunk_id":"a","session_id":616,"output":""} {"chunk_id":"b","exit_code":2,"output":"error"}`)),
+	)
+	if got := exitsSeen(varPoll, []execRef{{"exec-616", "616"}}); !got["exec-616"] {
+		t.Fatalf("variable poll: %v (want seen)", got)
+	}
+}
+
+// Unit: a full queue drops the in-turn candidates that ran shortest, then
+// the oldest; never a long-running one for a burst of quick ones.
+func TestCodexCapWakes(t *testing.T) {
+	ms := func(n int64) *int64 { return &n }
+	var ws []bgDone
+	ws = append(ws, bgDone{ItemID: "after-old"}, bgDone{ItemID: "build", InTurn: true, DurationMs: ms(27000)})
+	for i := 0; i < wakeQueueMax; i++ {
+		ws = append(ws, bgDone{ItemID: fmt.Sprintf("q%d", i), InTurn: true, DurationMs: ms(int64(i))})
+	}
+	ws = capWakes(ws)
+	if len(ws) != wakeQueueMax || ws[0].ItemID != "after-old" || ws[1].ItemID != "build" || ws[2].ItemID != "q2" {
+		t.Fatalf("kept %v…", ws[:3])
+	}
+	var after []bgDone
+	for i := 0; i < wakeQueueMax+3; i++ {
+		after = append(after, bgDone{ItemID: fmt.Sprintf("a%d", i)})
+	}
+	if after = capWakes(after); len(after) != wakeQueueMax || after[0].ItemID != "a3" {
+		t.Fatalf("after-turn completions: oldest dropped, got %v", after[0])
+	}
+}
+
 func TestCodexWakeNotice(t *testing.T) {
 	zero, one := 0, 1
 	d := int64(65_400)
@@ -376,6 +670,22 @@ func TestCodexWakeNotice(t *testing.T) {
 	if n := wakeNotice([]bgDone{{Command: "true", Status: "failed"}}); !strings.Contains(n, "`true` (failed, exit code unknown). No output.") {
 		t.Fatalf("%s", n)
 	}
+	// I61: an exit 143 is Codex's parent-death SIGTERM, not a failed job.
+	term := 143
+	for _, linux := range []bool{true, false} {
+		prev := parentDeathSIGTERM
+		parentDeathSIGTERM = linux
+		n := wakeNotice([]bgDone{{Command: "bash render.sh", ExitCode: &term, Output: "frame 1754"}})
+		parentDeathSIGTERM = prev
+		if !strings.Contains(n, "`bash render.sh` (exit 143). Exit 143 is SIGTERM, not sent by Pyre") ||
+			!strings.Contains(n, "children may still be running") || !strings.Contains(n, "Last output:\nframe 1754") ||
+			strings.Contains(n, "app-server thread") != linux {
+			t.Fatalf("exit 143 notice (linux %v):\n%s", linux, n)
+		}
+	}
+	if strings.Contains(single, "SIGTERM") {
+		t.Fatalf("exit 1 notice names SIGTERM:\n%s", single)
+	}
 	var many []bgDone
 	for i := 0; i < 10; i++ {
 		many = append(many, bgDone{Command: "job", ExitCode: &zero, Output: strings.Repeat("ü", 3000)})
@@ -388,7 +698,7 @@ func TestCodexWakeNotice(t *testing.T) {
 	if !strings.Contains(m, "ü") || strings.ContainsRune(m, '\uFFFD') {
 		t.Fatal("tail cut inside a rune")
 	}
-	if got := wakeDetail([]bgDone{{Command: "deploy --token=sk-synthetic12345678"}, {Command: "echo hi"}}); strings.Contains(got, "sk-synthetic") || !strings.Contains(got, "echo hi") {
+	if got := wakeDetail(nil, []bgDone{{Command: "deploy --token=sk-synthetic12345678"}, {Command: "echo hi"}}, nil); strings.Contains(got, "sk-synthetic") || !strings.Contains(got, "echo hi") {
 		t.Fatalf("audit detail %q", got)
 	}
 }
@@ -399,7 +709,7 @@ func TestCodexWakeTranscriptKind(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"type": "userMessage", "id": "u1", "clientId": wakeIDPrefix + "1",
 		"content": []any{map[string]any{"type": "text", "text": "[pyre] background command finished: `x` (exit 0). No output."}}})
 	var seq int64
-	es := a.turnEntries("run_t", []turn{{ID: "t", Status: "completed", Items: []json.RawMessage{raw}}}, &seq)
+	es := a.turnEntries("run_t", []turn{{ID: "t", Status: "completed", Items: []json.RawMessage{raw}}}, &seq, false)
 	if len(es) != 1 || es[0].Kind != "system" {
 		t.Fatalf("%+v", es)
 	}
@@ -531,4 +841,97 @@ func TestCodexWakeWaitsForCapacityContinue(t *testing.T) {
 	}
 	rr.retrying.Store(false)
 	waitNotices(t, e.a, h, 1, 5*time.Second)
+}
+
+// The app-server dies (the kernel OOM-killed it) while a turn runs that
+// yielded a watcher command: Pyre restarts it and starts one turn saying
+// the turn was cut off and the command lost
+// (iss_…).
+func TestCodexWakeAfterAppServerDies(t *testing.T) {
+	t.Parallel()
+	e, rec := newWakeEnv(t, nil)
+	h := e.launch(e.a, "run_lost", e.home, nil, nil)
+	e.wait(e.a, h, 5*time.Second, idle)
+	if r := dlv(t, e.a, h, "msg_l1", "watch it FAKE_BG_MS=60000:watcher FAKE_SLEEP_MS=60000", contracts.ModeQueue); r.State != contracts.DeliveryAccepted {
+		t.Fatalf("%+v", r)
+	}
+	e.wait(e.a, h, 5*time.Second, running)
+	rr, _ := e.a.run(h)
+	end := time.Now().Add(3 * time.Second)
+	for {
+		rr.ts.mu.Lock()
+		n := len(rr.ts.runningCmds)
+		rr.ts.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("the watcher never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(filepath.Join(e.o.StateRoot, "codex", homeKey(e.home), "fake-starts.log"))
+	var pid int
+	if _, err := fmt.Sscan(string(b), &pid); err != nil || pid <= 0 {
+		t.Fatalf("fake-starts.log %q", b)
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = p.Kill()
+	// The daemon observes every run every 2 s; one observation finds the
+	// server gone with the run's work in it.
+	end = time.Now().Add(10 * time.Second)
+	for starts(t, e, e.home) < 2 {
+		if time.Now().After(end) {
+			obs, _ := e.a.Observe(context.Background(), h, "")
+			t.Fatalf("app-server not restarted: %+v", obs)
+		}
+		_, _ = e.a.Observe(context.Background(), h, "")
+		time.Sleep(50 * time.Millisecond)
+	}
+	got := waitNotices(t, e.a, h, 1, 10*time.Second)
+	txt := got[0].Text
+	for _, want := range []string{"[pyre] The Codex app-server running this session exited at", "Pyre restarted it", "Your turn was cut off", "`bg-watcher`", "redo what is still needed"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("notice lacks %q:\n%s", want, txt)
+		}
+	}
+	if n := starts(t, e, e.home); n != 2 {
+		t.Fatalf("app-server started %d times, want 2", n)
+	}
+	rec.waitWakes(t, 1)
+	e.wait(e.a, h, 5*time.Second, idle)
+	time.Sleep(600 * time.Millisecond)
+	if n, _ := wakeEntries(t, e.a, h); len(n) != 1 {
+		t.Fatalf("want exactly one notice, got %d", len(n))
+	}
+}
+
+func TestCodexLostNotice(t *testing.T) {
+	at := time.Date(2026, 10, 27, 5, 51, 11, 0, time.UTC)
+	one := lostNotice(&serverLoss{At: at, Turn: true, Cmds: []string{"while systemctl --user is-active --quiet u; do sleep 10; done"}})
+	for _, want := range []string{"exited at " + at.Local().Format("15:04:05 MST"), "Your turn was cut off", "This command was still running and Codex lost it: `while systemctl"} {
+		if !strings.Contains(one, want) {
+			t.Errorf("notice lacks %q:\n%s", want, one)
+		}
+	}
+	idleOnly := lostNotice(&serverLoss{At: at, Cmds: []string{"a", "b"}})
+	if strings.Contains(idleOnly, "turn was cut off") || !strings.Contains(idleOnly, "These 2 commands") || !strings.Contains(idleOnly, "\n2. `b`") {
+		t.Errorf("idle notice:\n%s", idleOnly)
+	}
+	both := wakeText(&serverLoss{At: at, Turn: true}, []bgDone{{Command: "make", Status: "completed"}}, nil)
+	if !strings.HasPrefix(both, "[pyre] The Codex app-server") || !strings.Contains(both, "[pyre] background command finished: `make`") {
+		t.Errorf("combined notice:\n%s", both)
+	}
+	var ts threadState
+	ts.status = threadStatus{Type: "idle"}
+	if ts.noteServerLost(at); ts.lost != nil {
+		t.Fatal("an idle thread without commands lost nothing")
+	}
+	ts.closing, ts.runningCmds = true, map[string]string{"x": "y"}
+	if ts.noteServerLost(at); ts.lost != nil {
+		t.Fatal("a closing thread is not reported")
+	}
 }

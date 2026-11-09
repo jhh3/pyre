@@ -1,0 +1,1 @@
+{"state":"failure","sha":"c208475aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","statuses":[{"context":"ci/synth-deploy","state":"failure","target_url":"https://ci.synth.example/build/1","description":"Build failed"}]}

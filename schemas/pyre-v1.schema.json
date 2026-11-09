@@ -1967,6 +1967,15 @@
         "planned_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "stopped_tasks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "$ref": "#/$defs/LimitEvent"
         }
       },
       "type": "object",
@@ -2221,6 +2230,78 @@
         "stale"
       ]
     },
+    "GitHubBudget": {
+      "properties": {
+        "core": {
+          "$ref": "#/$defs/GitHubLimit"
+        },
+        "graphql": {
+          "$ref": "#/$defs/GitHubLimit"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "calls_last_hour": {
+          "type": "integer"
+        },
+        "top_sessions": {
+          "items": {
+            "$ref": "#/$defs/GitHubCaller"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "core",
+        "graphql",
+        "calls_last_hour"
+      ]
+    },
+    "GitHubCaller": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "calls": {
+          "type": "integer"
+        },
+        "throttled": {
+          "type": "integer"
+        },
+        "refused": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "session_id",
+        "calls"
+      ]
+    },
+    "GitHubLimit": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "remaining": {
+          "type": "integer"
+        },
+        "reset": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "limit",
+        "remaining"
+      ]
+    },
     "GrantDecision": {
       "properties": {
         "allowed": {
@@ -2284,6 +2365,9 @@
         },
         "usage": {
           "$ref": "#/$defs/HarnessUsage"
+        },
+        "limit": {
+          "$ref": "#/$defs/LimitEvent"
         }
       },
       "type": "object",
@@ -2437,6 +2521,9 @@
         },
         "memory_freshness": {
           "$ref": "#/$defs/Freshness"
+        },
+        "role": {
+          "$ref": "#/$defs/ProjectRole"
         }
       },
       "type": "object",
@@ -2445,6 +2532,29 @@
         "bytes",
         "truncated",
         "references"
+      ]
+    },
+    "LimitEvent": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "reset_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "kind",
+        "at"
       ]
     },
     "Lineage": {
@@ -2727,6 +2837,12 @@
             "type": "string"
           },
           "type": "object"
+        },
+        "avoid": {
+          "items": {
+            "$ref": "#/$defs/NodeAvoid"
+          },
+          "type": "array"
         }
       },
       "type": "object",
@@ -2754,12 +2870,57 @@
         "result": true,
         "error": {
           "$ref": "#/$defs/Error"
+        },
+        "node_id": {
+          "type": "string"
         }
       },
       "type": "object",
       "required": [
         "command_id",
         "outcome"
+      ]
+    },
+    "NodeAvoid": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "hard": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "set_by": {
+          "$ref": "#/$defs/Principal"
+        },
+        "owner_set": {
+          "type": "boolean"
+        },
+        "updated_by": {
+          "$ref": "#/$defs/Principal"
+        },
+        "set_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "node_id",
+        "hard",
+        "set_by",
+        "owner_set",
+        "set_at",
+        "expires_at"
       ]
     },
     "NodeCommand": {
@@ -3019,6 +3180,18 @@
             "$ref": "#/$defs/RunUsage"
           },
           "type": "array"
+        },
+        "memory_protection": {
+          "type": "string"
+        },
+        "github": {
+          "$ref": "#/$defs/GitHubBudget"
+        },
+        "tools": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "type": "object"
         }
       },
       "type": "object",
@@ -3352,6 +3525,39 @@
         "created_by",
         "created_at",
         "updated_at"
+      ]
+    },
+    "ProjectRole": {
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "lead_session_id": {
+          "type": "string"
+        },
+        "lead": {
+          "type": "boolean"
+        },
+        "page_owner_session_id": {
+          "type": "string"
+        },
+        "page_owner": {
+          "type": "boolean"
+        },
+        "co_leads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "page_updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "lead"
       ]
     },
     "ProposeRevisionRequest": {
@@ -3802,10 +4008,18 @@
         "archived": {
           "type": "boolean"
         },
+        "archived_at": {
+          "type": "string",
+          "format": "date-time"
+        },
         "icon": {
           "type": "string"
         },
         "owner_active_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "unarchived_at": {
           "type": "string",
           "format": "date-time"
         }
@@ -3819,7 +4033,8 @@
         "created_by",
         "created_at",
         "lineage",
-        "archived"
+        "archived",
+        "archived_at"
       ]
     },
     "SessionFlag": {
@@ -3890,6 +4105,18 @@
         },
         "archive_cascade": {
           "$ref": "#/$defs/ArchiveCascade"
+        },
+        "archive_pending": {
+          "type": "boolean"
+        },
+        "archive_pending_with": {
+          "type": "string"
+        },
+        "archive_canceled": {
+          "items": {
+            "$ref": "#/$defs/CascadeSession"
+          },
+          "type": "array"
         }
       },
       "type": "object",
@@ -3956,6 +4183,9 @@
           "type": "string"
         },
         "report_to_parent": {
+          "type": "boolean"
+        },
+        "ignore_avoid": {
           "type": "boolean"
         }
       },

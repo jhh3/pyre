@@ -89,6 +89,7 @@ var derivedKinds = []contracts.EventKind{
 	contracts.EvUpdateResult,
 	contracts.EvAskChanged,
 	contracts.EvStandingGrantChanged,
+	contracts.EvSecurityAlert,
 }
 
 const (
@@ -156,6 +157,8 @@ func derive(ctx context.Context, ev contracts.Event, lk Lookup) []change {
 		return deriveAsk(ev)
 	case contracts.EvStandingGrantChanged:
 		return deriveStandingGrant(ev)
+	case contracts.EvSecurityAlert:
+		return deriveSecurity(ctx, ev, lk)
 	}
 	return nil
 }
@@ -1122,6 +1125,9 @@ func deriveAsk(ev contracts.Event) []change {
 	group := "ask:" + a.AskID
 	switch a.State {
 	case contracts.AskOpen:
+		if a.OwnerChat != nil && a.Count <= 1 {
+			return nil // the owner wrote to the session meanwhile: still open, not new attention
+		}
 		// The session filed (or repeated) an ask: its question in chat is
 		// in the inbox as this ask now.
 		var waiting []change

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,33 +14,32 @@ import (
 	"github.com/jhh3/pyre/internal/storage/sqlitex"
 )
 
-// Answer in chat (owner request 2026-10-19: "asks don't seem to go ahead
-// when I respond in chat"). The owner often answers a session's question
-// by writing to the session itself instead of answering the ask. The rule
-// is deliberately simple:
+// Owner chat and open asks. The owner often replies to a session by
+// writing to it instead of answering its ask, and often writes about
+// something else (owner report 2026-10-30, iss_…:
+// "and all my vortex desktops are reachable via a single url from my
+// phone right?" decided a yes/no on the production cloud image). So chat
+// never silently decides an ask:
 //
-//   - Owner input to the session itself answers every open ask the session
-//     filed before it: anything the owner types into the session (TUI or
-//     web terminal, a local tmux attach, the harness's own window), and a
-//     Pyre message from the owner to the session that is not a reply in a
-//     thread (`pyre send`, the TUI composer, the web inbox's reply to a
-//     "waiting on you" item). Each ask becomes "answered" with Answer.Source
-//     "chat", Answer.Text the owner's words and Answer.With the other asks
-//     the same input answered; its deadline default can no longer fire, and
-//     its inbox item is resolved by the attention deriver (ask.changed).
+//   - Owner input to the session itself (anything typed into it after the
+//     asking turn, a Pyre message from him that is not a reply in a thread)
+//     is recorded on each open ask the session filed before it
+//     (Ask.OwnerChat: his words and when). The ask stays open in his inbox
+//     with its options, and its default still applies at the deadline.
+//   - The asking session reads his words in its chat; when they answer the
+//     ask it records the outcome with asks.answer (answer_ask: the option
+//     he chose and his words quoted; Answer.Source "chat", By the session),
+//     or withdraws or re-asks.
+//   - One narrow exception decides at once: the session has exactly one
+//     such ask (not batched) and his whole text is one of its options (its
+//     label or id, ignoring case, spaces and a trailing "." or "!"). The
+//     ask is answered with that option, By the owner, Source "chat".
 //   - A reply in a thread (an ask's thread in the web inbox, a reply to a
-//     session's message) answers nothing: it is delivered to the session
-//     as a message ("what do you think is better?"), and the session
-//     answers, withdraws or re-asks. To make a reply the answer, the owner
-//     uses "Answer with this" in the web inbox (asks.answer with text) or
-//     `pyre ask answer <id> --text`.
-//   - Not answered in chat: proposals (approve/reject writes a grant or a
-//     fact), owner-action requests, and asks with a held answer (the
-//     owner's queued choice is sent instead).
-//
-// The asking session already has the owner's words (it was typed into it,
-// or the message is delivered), so the decision it is told is an info
-// message (stored in its inbox, never injected): no extra turn.
+//     session's message) records nothing: it is delivered to the session.
+//     To make a reply the answer, the owner uses "Answer with this" in the
+//     web inbox (asks.answer with text) or `pyre ask answer <id> --text`.
+//   - Proposals (approve/reject writes a grant or a fact), owner-action
+//     requests and asks with a held answer are never touched by chat.
 //
 // Typed input is seen through the session's transcript, ordered by the
 // hub's own turn count, never by comparing clocks (the transcript's times
@@ -58,7 +56,7 @@ import (
 // The check row (ask_chat_checks) is read by its own worker, outside every
 // lock and in parallel with a short timeout per read: it reads the run's
 // transcript tail through the node and takes the newest prompt (the one
-// that started the turn). Only a prompt a person typed answers: kind
+// that started the turn). Only a prompt a person typed counts: kind
 // "user", no Pyre message marker, not harness meta, a plugin, a task
 // notification or one of Pyre's own prompts (ownerChatText).
 
@@ -77,6 +75,8 @@ CREATE TABLE ask_chat_runs (
 	session_id TEXT PRIMARY KEY,
 	run_id TEXT NOT NULL -- the run whose turn the hub last saw start
 );
+`}, {Namespace: "hub_ask_chat", Version: 2, Name: "ask_owner_chat", SQL: `
+ALTER TABLE asks ADD COLUMN owner_chat TEXT NOT NULL DEFAULT ''; -- contracts.AskOwnerChat JSON: chat seen while open
 `}}
 
 const (
@@ -100,7 +100,7 @@ const (
 // hold the others; a variable for tests).
 var askChatReadTimeout = 5 * time.Second
 
-// askChatOwner answers asks for input typed into a session (the owner, as
+// askChatOwner is the owner as seen typing into a session (the owner, as
 // seen through its transcript).
 var askChatOwner = contracts.Principal{Kind: contracts.PrincipalOwner, ID: "owner", Name: "the owner (in the session)"}
 
@@ -143,7 +143,7 @@ func clipAnswer(text string) string {
 	return text
 }
 
-// chatAnswerable lists sessionID's open asks that chat input may answer
+// chatAnswerable lists sessionID's open asks that chat input is recorded on
 // (oldest first): filed before the time before (hub clock; zero: any) and,
 // when beforeTurn is set, in an earlier lead turn than it.
 func (h *Hub) chatAnswerable(ctx context.Context, q queryer, sessionID string, before time.Time, beforeTurn int64) ([]contracts.Ask, error) {
@@ -181,45 +181,80 @@ func (h *Hub) filedTurnTx(ctx context.Context, tx *sql.Tx, sessionID string) int
 	return turn
 }
 
-// answerInChat answers asks with the owner's chat text (each commits on its
-// own; one already decided is skipped) and tells the asking session in an
-// info message. It returns the asks it answered.
-func (h *Hub) answerInChat(ctx context.Context, p contracts.Principal, asks []contracts.Ask, text string) []contracts.Ask {
+// chatOption is the option text names when text is exactly one of a's
+// options (its label or id, ignoring case, spaces and a trailing "." or
+// "!"); batched asks have none.
+func chatOption(a contracts.Ask, text string) (string, bool) {
+	if len(a.Items) > 0 {
+		return "", false
+	}
+	norm := func(s string) string {
+		return strings.ToLower(strings.Join(strings.Fields(strings.TrimRight(strings.TrimSpace(s), ".!")), " "))
+	}
+	t := norm(text)
+	if t == "" {
+		return "", false
+	}
+	for _, o := range a.Options {
+		if t == norm(o.Label) || t == norm(o.ID) {
+			return o.ID, true
+		}
+	}
+	return "", false
+}
+
+// noteChat records the owner's chat text on asks (Ask.OwnerChat; each
+// stays open) or, when asks is one ask and the text is exactly one of its
+// options, answers it with that option. It returns the asks it changed.
+func (h *Hub) noteChat(ctx context.Context, p contracts.Principal, asks []contracts.Ask, text string) []contracts.Ask {
 	if len(asks) == 0 || text == "" {
 		return nil
 	}
-	ids := make([]string, len(asks))
-	for i, a := range asks {
-		ids[i] = a.AskID
+	if len(asks) == 1 {
+		if opt, ok := chatOption(asks[0], text); ok {
+			var d contracts.Ask
+			err := h.tx(ctx, func(tx *sql.Tx) error {
+				var err error
+				d, err = h.decideAskTx(ctx, tx, asks[0], contracts.AskAnswered,
+					contracts.AskAnswer{OptionID: opt, Text: text, By: p, At: h.now(), Source: contracts.AskSourceChat}, "")
+				return err
+			})
+			if err != nil {
+				return nil // decided meanwhile (that decision stands) or a transient failure (the default still applies)
+			}
+			h.sendDecisions(ctx, []contracts.Ask{d}, p)
+			return []contracts.Ask{d}
+		}
 	}
-	var decided []contracts.Ask
+	now := h.now()
+	note := persistence.JSON(contracts.AskOwnerChat{Text: text, At: now})
+	var out []contracts.Ask
 	for _, a := range asks {
-		with := slices.DeleteFunc(slices.Clone(ids), func(id string) bool { return id == a.AskID })
-		if len(with) == 0 {
-			with = nil
-		}
-		var d contracts.Ask
-		err := h.tx(ctx, func(tx *sql.Tx) error {
-			var err error
-			d, err = h.decideAskTx(ctx, tx, a, contracts.AskAnswered,
-				contracts.AskAnswer{Text: text, By: p, At: h.now(), Source: contracts.AskSourceChat, With: with}, "")
-			return err
+		_ = h.tx(ctx, func(tx *sql.Tx) error {
+			res, err := tx.ExecContext(ctx, `UPDATE asks SET owner_chat=?, updated_at=? WHERE ask_id=? AND state=?`,
+				note, persistence.Time(now), a.AskID, string(contracts.AskOpen))
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return nil // decided meanwhile
+			}
+			if a, err = h.getAskFull(ctx, tx, a.AskID); err != nil {
+				return err
+			}
+			out = append(out, a)
+			return h.emitAsk(ctx, tx, a)
 		})
-		if err != nil {
-			continue // decided meanwhile (that decision stands) or a transient failure (the default still applies)
-		}
-		decided = append(decided, d)
 	}
-	h.sendDecisions(ctx, decided, p)
-	return decided
+	return out
 }
 
-// answerChatMessage: the owner's message env to a session answers its open
-// asks when it is chat: not a reply in a thread and not an info note (it is
-// queued for the session whether or not the session is running now). Asks
-// filed after the message was sent are not answered (both times are the
-// hub's).
-func (h *Hub) answerChatMessage(ctx context.Context, p contracts.Principal, env contracts.MessageEnvelope) {
+// noteChatMessage: the owner's message env to a session is recorded on its
+// open asks when it is chat: not a reply in a thread and not an info note
+// (it is queued for the session whether or not the session is running
+// now). Asks filed after the message was sent are left alone (both times
+// are the hub's).
+func (h *Hub) noteChatMessage(ctx context.Context, p contracts.Principal, env contracts.MessageEnvelope) {
 	if !isOwner(p) || env.Recipient.Kind != contracts.AddrSession || env.ThreadID != "" || env.InReplyTo != "" || env.Mode == contracts.ModeInfo {
 		return
 	}
@@ -231,13 +266,13 @@ func (h *Hub) answerChatMessage(ctx context.Context, p contracts.Principal, env 
 	if err != nil {
 		return
 	}
-	h.answerInChat(ctx, p, asks, clipAnswer(strings.TrimSpace(env.Body.Text)))
+	h.noteChat(ctx, p, asks, clipAnswer(strings.TrimSpace(env.Body.Text)))
 }
 
 // queueAskChatTx runs when a top-level session's turn turn starts (inside
 // the transaction that stores the transition, trackLeadTx); prevEnd is when
 // its previous turn ended. It records a check of the prompt that started
-// the turn when that prompt may answer an open ask (rules above).
+// the turn when that prompt may reply to an open ask (rules above).
 func (h *Hub) queueAskChatTx(ctx context.Context, tx *sql.Tx, sessionID, runID string, turn int64, prevEnd sql.NullString, now time.Time) error {
 	var lastRun sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT run_id FROM ask_chat_runs WHERE session_id=?`, sessionID).Scan(&lastRun); err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -373,7 +408,7 @@ func (h *Hub) kickAskChats() {
 
 // processAskChat reads the transcript tail of c's run and, when the
 // newest prompt (the one that started c's turn) is the owner's typing,
-// answers the open asks filed in earlier turns with it. The row is deleted
+// records it on the open asks filed in earlier turns (noteChat). The row is deleted
 // unless a transient failure defers it (a newer check replaces it).
 func (h *Hub) processAskChat(ctx context.Context, c askChat) {
 	done := func() {
@@ -413,7 +448,7 @@ func (h *Hub) processAskChat(ctx context.Context, c askChat) {
 		return
 	}
 	if text, ok := ownerChatText(e.Text); ok {
-		h.answerInChat(ctx, askChatOwner, open, text)
+		h.noteChat(ctx, askChatOwner, open, text)
 	}
 	done()
 }

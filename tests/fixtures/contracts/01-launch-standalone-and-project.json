@@ -72,7 +72,8 @@
             "attach.native_terminal",
             "attach.read_only",
             "stop",
-            "screen.read"
+            "screen.read",
+            "launch.shell_prompt"
           ],
           "probed_at": "2026-10-04T11:55:00Z"
         }
@@ -199,7 +200,8 @@
             "attach.native_terminal",
             "attach.read_only",
             "stop",
-            "screen.read"
+            "screen.read",
+            "launch.shell_prompt"
           ],
           "probed_at": "2026-10-04T11:55:00Z"
         }
@@ -296,7 +298,8 @@
         "created_at": "2026-10-04T11:30:00Z",
         "current_run_id": "run_synth-standalone-1",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synth-standalone-1",
@@ -366,7 +369,8 @@
         "created_at": "2026-10-04T11:30:00Z",
         "current_run_id": "run_synth-project-1",
         "lineage": {},
-        "archived": false
+        "archived": false,
+        "archived_at": null
       },
       "run": {
         "run_id": "run_synth-project-1",
@@ -544,7 +548,8 @@
             "created_at": "2026-10-04T11:30:00Z",
             "current_run_id": "run_synth-standalone-1",
             "lineage": {},
-            "archived": false
+            "archived": false,
+            "archived_at": null
           },
           "run": {
             "run_id": "run_synth-standalone-1",
@@ -642,7 +647,8 @@
             "created_at": "2026-10-04T11:30:00Z",
             "current_run_id": "run_synth-project-1",
             "lineage": {},
-            "archived": false
+            "archived": false,
+            "archived_at": null
           },
           "run": {
             "run_id": "run_synth-project-1",

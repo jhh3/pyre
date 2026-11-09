@@ -10,7 +10,7 @@
                   │                                                                                  │
                   │ "share link fix" created 1 worktree:                                             │
                   │                                                                                  │
-                  │   ~/code/notes-app/.worktrees/share-link  pyre/share-link                        │
+                  │   ~/worktrees/notes-app/share-link  pyre/share-link                              │
                   │                                                                                  │
                   │ The main checkout and anything uncommitted always stay.                          │
                   │                                                                                  │

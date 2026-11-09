@@ -320,3 +320,93 @@ func TestRealCodexBackgroundWake(t *testing.T) {
 		t.Fatalf("want exactly one wake (got %d notices, %d automation reports)", len(ns), rec.wakes())
 	}
 }
+
+// TestRealCodexAgentWake: a local collaboration agent that finishes after
+// the root's turn ended wakes the root with a new turn (agentwake.go).
+// Same gating and isolation as TestRealCodexBackgroundWake, plus
+// PYRE_REAL_CODEX_HOME (a logged-in CODEX_HOME; default: the default login).
+func TestRealCodexAgentWake(t *testing.T) {
+	if os.Getenv("PYRE_REAL_HARNESS") != "1" {
+		t.Skip("set PYRE_REAL_HARNESS=1 to run against the real codex")
+	}
+	cwd := os.Getenv("PYRE_REAL_CODEX_CWD")
+	if cwd == "" {
+		t.Fatal("PYRE_REAL_CODEX_CWD required (scratch dir)")
+	}
+	codex := os.Getenv("PYRE_REAL_CODEX")
+	if codex == "" {
+		codex, _ = exec.LookPath("codex")
+	}
+	dir, _ := os.MkdirTemp("", "pa")
+	defer os.RemoveAll(dir)
+	rec := &automations{}
+	o := Options{NodeID: "node_real", TmuxSocket: filepath.Join(dir, "tmux", "t.sock"), StateRoot: filepath.Join(dir, "st"),
+		CodexBin: codex, ApprovalPolicy: "never", Sandbox: "read-only", DisableTUI: true, OnAutomation: rec.add,
+		AppServerArgs: []string{"-c", `model_reasoning_effort="low"`}, DeliverTimeout: 30 * time.Second}
+	a, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	defer a.srv.KillServer(ctx)
+	if pr, _ := a.Probe(ctx); !pr.Available {
+		t.Fatalf("codex unavailable: %s", pr.Reason)
+	} else {
+		t.Logf("codex %s", pr.Version)
+	}
+	h, err := a.Launch(ctx, contracts.ResolvedLaunch{RunID: "run_raw", SessionID: "ses_raw", Harness: contracts.HarnessCodex, Cwd: cwd,
+		StateDir: filepath.Join(dir, "runs", "run_raw"), ProfileDir: os.Getenv("PYRE_REAL_CODEX_HOME"), Unset: []string{"OPENAI_API_KEY", "CODEX_API_KEY"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Stop(ctx, h)
+	t0 := time.Now()
+	waitState := func(label string, d time.Duration, want contracts.RunState) {
+		t.Helper()
+		end := time.Now().Add(d)
+		for time.Now().Before(end) {
+			if obs, _ := a.Observe(ctx, h, ""); obs.State == want {
+				t.Logf("%6.1fs %s: %s", time.Since(t0).Seconds(), label, want)
+				return
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		t.Fatalf("%s: never %s", label, want)
+	}
+	waitState("launched", 30*time.Second, contracts.RunWaitingInput)
+	r, err := a.Deliver(ctx, h, contracts.DeliveryInput{MessageID: "msg_raw", AttemptID: "dlv_raw",
+		Text: "Spawn one collaboration subagent named probe with this task: run the shell command `sleep 40` once, then reply with the single word probe-done. Do not wait for it, list agents or call any other tool after spawning; end your turn immediately by replying with the single word spawned."})
+	if err != nil || r.State != contracts.DeliveryAccepted {
+		t.Fatalf("deliver: %+v %v", r, err)
+	}
+	waitState("first turn ended", 120*time.Second, contracts.RunWaitingInput)
+	var notice string
+	end := time.Now().Add(240 * time.Second)
+	for notice == "" && time.Now().Before(end) {
+		if ns, _ := wakeEntries(t, a, h); len(ns) > 0 {
+			notice = ns[0].Text
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	_, all := wakeEntries(t, a, h)
+	for _, e := range all {
+		t.Logf("transcript %-12s %s", e.Kind, oneLine(e.Text, 200))
+	}
+	if notice == "" {
+		t.Fatal("no wake turn after the local agent finished")
+	}
+	t.Logf("%6.1fs wake notice:\n%s", time.Since(t0).Seconds(), notice)
+	if !strings.Contains(notice, "local agent") || !strings.Contains(notice, "probe") {
+		t.Fatalf("unexpected notice")
+	}
+	waitState("wake turn ended", 120*time.Second, contracts.RunWaitingInput)
+	_, all = wakeEntries(t, a, h)
+	for _, e := range all {
+		t.Logf("transcript %-12s %s", e.Kind, oneLine(e.Text, 200))
+	}
+	time.Sleep(5 * time.Second)
+	if ns, _ := wakeEntries(t, a, h); len(ns) != 1 || rec.wakes() != 1 {
+		t.Fatalf("want exactly one wake (got %d notices, %d automation reports)", len(ns), rec.wakes())
+	}
+}

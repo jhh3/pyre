@@ -31,6 +31,9 @@ func TestOwnerQuestion(t *testing.T) {
 		{"blockquote question", "You wrote:\n\n> Should I keep the old dashboard? Do you want both?\n\nI kept both and linked them from the home page.", false, ""},
 		{"inline code question", "The flag `--ask \"should I retry?\"` now defaults to off.", false, ""},
 		{"url query", "Report: https://example.test/r?id=7 is live.", false, ""},
+		{"descriptive your input", "Risk: this only changes how computer control on Windows tells your input apart from Vortex's.", false, ""},
+		{"conditional status", "A third, final review is running. If it's clean, I'll merge.", false, ""},
+		{"want your input", "I want your input on the rollout order before Friday.", true, "I want your input on the rollout order before Friday."},
 		{"dont need your input", "I don't need your input on this one; it's reversible.", false, ""},
 	}
 	for _, c := range cases {
@@ -115,6 +118,8 @@ func TestMailAsks(t *testing.T) {
 		{"Done. Waiting for your review.", true},
 		{"See https://example.test/x?y=1 for the run. Merged.", false},
 		{"Merged #12. Nothing needs you.", false},
+		{"PR 41 is green. Please approve it.", true},
+		{"Merged #12; it reports the next version for your approval.", false},
 		{"```\nwhy?\n```\nMerged.", false},
 	} {
 		if got := MailAsks(c.msg); got != c.want {
@@ -214,5 +219,161 @@ func TestUnquote(t *testing.T) {
 		if got := unquote(in); got != want {
 			t.Errorf("unquote(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Statements about asks made earlier or to come, status lines and reports
+// of approvals already filed are not asks; real requests are, with or
+// without a "?" (iss_…: a triage coordinator's
+// status turns kept being sent back with the ask nudge).
+func TestOwnerQuestionStatementsAndRequests(t *testing.T) {
+	// The turn that was nudged first (synthetic names and paths).
+	report := "The fix for VOY-1100, the slides editor losing edits, is up as PR #3765 (https://example.test/pull/3765). It's pushed and CI is green, but it isn't merged yet.\n\n" +
+		"- **Cause:** after one refused save, the editor kept treating every later save as done.\n" +
+		"- **Why it's not merged yet:** the second review found 5 serious issues. The worker is running one more review.\n" +
+		"- **Your approval:** it adds two screens users will see, the close dialog and a \"kept both versions\" notice. Screenshots are in `~/Downloads/voy-1100/`.\n\n" +
+		"When the review is clean I'll send the PR to you for approval."
+	notOwner := []string{
+		report,
+		"Nothing is waiting on you yet. When the third review is clean, I'll file the #3765 approval in your Pyre inbox.",
+		"The VOY-1100 worker is still running. Pyre reported its turn as finished when the session hit its length limit, but it picked straight back up. It's fixing what the third review found and rewriting the save check in full, then it reports the new version for your approval.",
+		"Filed the #3765 approval in your Pyre inbox.",
+		"I'll ask for your approval once the review is clean.",
+		"The worker will need your sign-off after the third review.",
+		"Your decision from Tuesday is applied: the old dashboard is gone.",
+		"Approved by the second reviewer; merging now.",
+		"Let me know if anything needs your approval.",
+		"Let me know when you want the next batch.",
+		"Please note: the build cache was cleared.",
+		// A third thing's requirement, not the session asking.
+		"That's your personal media drive (the Hawaii footage, films, DaVinci), and writing to its top level needs your password.",
+		"The drive needs your password.",
+		"Writing there requires your login.",
+		"That repo needs your SSO.",
+		"Mounting it needs your sudo password.",
+		"The NAS share needs your login before anything can write to it.",
+	}
+	for _, msg := range notOwner {
+		if q, ok := OwnerQuestion(msg); ok {
+			t.Errorf("OwnerQuestion(%.70q) = %q, want none", msg, q)
+		}
+	}
+	owner := []struct{ msg, q string }{
+		{"Should I merge it?", "Should I merge it?"},
+		{"Can you run aws login?", "Can you run aws login?"},
+		{"Approve the PR when you get a chance.", "Approve the PR when you get a chance."},
+		{"Tests pass. Want me to open the PR now?", "Tests pass. Want me to open the PR now?"},
+		{"PR 41 is ready.\n\n- **Next:** please approve PR 41 before 5 PM.", "Next: please approve PR 41"},
+		{"Please run aws login in your terminal.", "Please run aws login"},
+		{"Let me know which layout you prefer.", "Let me know which layout"},
+		{"Can you re-auth the GitHub CLI when you're back.", "Can you re-auth"},
+		{"Merged the docs. Confirm the new pricing copy before I publish.", "Merged the docs."},
+		{"I'd like your approval on the new close dialog.", "I'd like your approval"},
+		{"Your approval is needed on the close dialog.", "Your approval is needed"},
+		{"The release is waiting for your approval.", "The release is waiting"},
+		{"I need your approval to merge PR 41.", "I need your approval"},
+		{"This needs your approval before I merge.", "This needs your approval"},
+		{"Waiting for your sign-off on the copy.", "Waiting for your sign-off"},
+		{"I need your sudo password to write to the drive.", "I need your sudo password"},
+		{"The deploy needs your final sign-off.", "The deploy needs your final sign-off"},
+	}
+	for _, c := range owner {
+		if q, ok := OwnerQuestion(c.msg); !ok {
+			t.Errorf("OwnerQuestion(%q) = none, want a hit", c.msg)
+		} else if !strings.HasPrefix(q, c.q) {
+			t.Errorf("OwnerQuestion(%q) = %q, want prefix %q", c.msg, q, c.q)
+		}
+		if QuestionKey(c.msg) == "" {
+			t.Errorf("QuestionKey(%q) = none", c.msg)
+		}
+	}
+}
+
+// A question the message reports (another session asked it, or it was
+// already handled) is not an ask, and a message that says nothing else
+// needs the owner asks only with a direct question (owner report
+// 2026-10-30: a lead's bug report describing a hidden yes/no question was
+// sent back with the ask nudge).
+func TestOwnerQuestionReported(t *testing.T) {
+	report := "New Pyre bug, and one of your decisions got hidden by it. A fix session is working on it.\n" +
+		"- **What happened:**\n" +
+		"  - At about 5:01 PM the \"Vortex phone remote control research\" session asked you a yes/no question: should the production cloud image move?\n" +
+		"  - Your next chat message to that session was about something else …\n" +
+		"  - Pyre counted that message as your answer, so the question disappeared from your inbox even though you never decided it.\n" +
+		"- **Your hidden question:** I'll tell you whether it's back in your inbox when the fix lands. Nothing else needs you."
+	notOwner := []string{
+		report,
+		"At 5:01 PM the research session asked you a yes/no question: should the production cloud image move? It's back in your inbox now.",
+		"Earlier the deploy lead asked: should we roll back the canary? I answered from your recorded decision; it rolled back at 6:12 PM.",
+		"The billing lead is asking whether we should raise the Team price? That ask is in your Pyre inbox.",
+		"The research session's question — should the production image move? — was answered by your 4 PM reply.",
+		"Should the production cloud image move? — asked by the research session, already in your inbox.",
+		"Fix is merged. Should the image move? That one is the research session's, and it is handling it. Nothing else needs you.",
+		"- **Status:** the review is green. Which region wins is the lead's to decide.\n- Nothing needs you.",
+	}
+	for _, msg := range notOwner {
+		if q, ok := OwnerQuestion(msg); ok {
+			t.Errorf("OwnerQuestion(%.70q) = %q, want none", msg, q)
+		}
+		if k := QuestionKey(msg); k != "" {
+			t.Errorf("QuestionKey(%.70q) = %q, want none", msg, k)
+		}
+	}
+	owner := []struct{ msg, q string }{
+		{"Nothing else needs you. Should I merge it?", "Nothing else needs you. Should I merge it?"},
+		{"The flaky test is fixed. Want me to retry the deploy? Nothing else needs you.", "The flaky test is fixed."},
+		{report + "\n\nShould I merge it?", "Should I merge it?"},
+		{report + "\n\nWant me to retry?", "Want me to retry?"},
+		{"Nothing else needs you.\n\n- **Next:** should I merge PR 41?", "Next: should I merge PR 41?"},
+		{"The research session asked you: should the image move? Should I answer it with your default?", "The research session asked you"},
+		{"I asked you earlier: should I merge PR 41?", "I asked you earlier"},
+		{"Should I keep asking if the endpoint is down?", "Should I keep asking"},
+		{"Nothing else needs you, but please approve PR 41 before 5 PM.", "Nothing else needs you, but please approve"},
+	}
+	for _, c := range owner {
+		if q, ok := OwnerQuestion(c.msg); !ok {
+			t.Errorf("OwnerQuestion(%.70q) = none, want a hit", c.msg)
+		} else if !strings.HasPrefix(q, c.q) {
+			t.Errorf("OwnerQuestion(%.70q) = %q, want prefix %q", c.msg, q, c.q)
+		}
+		if QuestionKey(c.msg) == "" {
+			t.Errorf("QuestionKey(%.70q) = none", c.msg)
+		}
+	}
+}
+
+// The Stop hook's stricter check: a status line that only says something
+// waits on the owner (already flagged with flag_attention) is no decision
+// (iss_…); questions, requests and waits on a
+// choice still are.
+func TestDecisionAsk(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{"issue status line", "Updated the project page (revision 81): Codex fix in flight, Stripe login still waiting on you.", false},
+		{"issue login waiting", "Merged PR 41 and restarted the worker. Stripe login is still waiting on you; everything else is moving.", false},
+		{"issue needs you", "Project page updated (revision 82). Two lanes running, the Stripe login on server needs you, the rest is on track.", false},
+
+		{"question", "Tests pass on the branch.\n\nWant me to open the PR now?", true},
+		{"should I", "Both layouts render. Should I ship the dark one?", true},
+		{"request", "The branch is ready. Please approve PR 41 when you get a chance.", true},
+		{"wait on decisions", "Draft is in reports/q4.md.\n\nThe report is still waiting on your 3 decisions: the target customer, the GPU credit rate, and the supplier list.", true},
+		{"wait on go-ahead", "PR 41 merge is waiting on your go-ahead.", true},
+		{"wait then pick", "Both mockups are up. Waiting on you to pick a layout.", true},
+		{"your call", "Both layouts work. Your call on which one ships.", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q, ok := DecisionAsk(c.msg)
+			if ok != c.want {
+				t.Fatalf("DecisionAsk(%q) = %v (%q), want %v", c.msg, ok, q, c.want)
+			}
+		})
+	}
+	// OwnerQuestion (the hub's waiting item) still sees the plain wait.
+	if _, ok := OwnerQuestion(cases[0].msg); !ok {
+		t.Fatalf("OwnerQuestion lost the plain wait")
 	}
 }

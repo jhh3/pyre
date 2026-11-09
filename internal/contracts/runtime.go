@@ -54,6 +54,11 @@ const (
 	// only the path (run adapter data pyre.env_file). A node without it
 	// would hand the argument to the harness, so clients refuse it there.
 	CapLaunchEnvFile = "launch.env_file"
+	// CapShellInitialPrompt (additive): a shell session's initial prompt is
+	// typed into the shell once its rc files have run, then Enter (the
+	// shell adapter). A node without it dropped the prompt silently, so
+	// clients refuse a prompt for a shell there.
+	CapShellInitialPrompt = "launch.shell_prompt"
 	// StartArgEnvFile carries the environment file's path in start and
 	// resume args (daemon.EnvFileArg; pyre start/resume --env-file).
 	// StartArgEnvFile+"=none" on a resume drops the session's file.
@@ -78,7 +83,20 @@ const (
 	// with its exit code and last output when it finishes; completions
 	// during a turn are delivered, coalesced, once the thread is idle.
 	CapWakeBackground = "wake.background_command"
+	// CapInputDoorbell (additive): while the run is busy in a turn, queued
+	// mail that has waited a while is announced inside that turn by one
+	// short notice (count and age, never the bodies; Codex turn/steer); the
+	// agent reads it with the pyre inbox tool. The mail itself stays queued
+	// and is delivered at idle as usual unless the agent read it.
+	CapInputDoorbell = "input.doorbell"
 )
+
+// QueuedMail is one queued message a busy run's agent may be told about
+// (input.doorbell): its id and when the recipient node received it.
+type QueuedMail struct {
+	MessageID  string
+	ReceivedAt time.Time
+}
 
 // HandleCapsUnavailable (v1.6) is a RunHandle.Data key an adapter sets at
 // Launch: comma-separated capabilities it advertises in general (probe)
@@ -237,8 +255,12 @@ type Observation struct {
 	LimitEvent *LimitEvent `json:"limit_event,omitempty"`
 	// Receipts are acceptance evidence discovered asynchronously (e.g. hook
 	// receipts for marked input).
-	Receipts   []DeliveryReceipt `json:"receipts,omitempty"`
-	NextCursor string            `json:"next_cursor"`
+	Receipts []DeliveryReceipt `json:"receipts,omitempty"`
+	// SecurityAlerts (additive) are the run's flagged tool calls the
+	// adapter knows of (bounded, newest last); the daemon reports each
+	// AlertID once.
+	SecurityAlerts []SecurityAlert `json:"security_alerts,omitempty"`
+	NextCursor     string          `json:"next_cursor"`
 }
 
 // LimitEvent describes a detected limit/login failure.
@@ -295,4 +317,59 @@ type RuntimeAdapter interface {
 	// ResumeSpec returns how to continue a previous run (native ref to pass
 	// in ResolvedLaunch.Resume) or ErrUnsupported.
 	ResumeSpec(ctx context.Context, prev Run, sameAccount bool) (ContinuationKind, *NativeRef, error)
+}
+
+// StopSparer is implemented by adapters whose stop can spare live work an
+// agent preserved (decision I62). The daemon calls StopSparing instead of
+// Stop for an automatic stop (RunCommand.Automatic). The run ends as with
+// Stop; what the harness would kill with it (Codex: the process groups of
+// the thread's exec sessions, exited ones included) is left running, and the
+// harness cleanup that kills it waits until it is gone.
+type StopSparer interface {
+	StopSparing(ctx context.Context, h RunHandle) (CommandReceipt, error)
+}
+
+// BackgroundGuard is implemented by adapters that can see live harness
+// background work a stop would end: Claude's background shells, Monitor
+// tasks and background subagents, Codex's exec process groups (decision
+// I67). Pyre's own message monitor is never counted. A proactive account
+// move uses it to leave such a run where it is.
+type BackgroundGuard interface {
+	// BackgroundWork lists the run's live background tasks (short
+	// nonsecret descriptions); none known: nil.
+	BackgroundWork(ctx context.Context, h RunHandle) []string
+	// StopUnlessBackground stops the run like Stop unless the harness
+	// shows live background work first (Claude: its exit dialog lists
+	// tasks besides Pyre's monitor); then nothing is stopped and the
+	// error is ErrConflict with detail DetailBackgroundWork ([]string).
+	StopUnlessBackground(ctx context.Context, h RunHandle) (CommandReceipt, error)
+}
+
+// DetailBackgroundWork is the error detail of a stop refused by
+// BackgroundGuard.StopUnlessBackground: the live tasks.
+const DetailBackgroundWork = "background_work"
+
+// BackgroundRefusal returns the tasks of a stop refused for live background
+// work (BackgroundGuard), or nil.
+func BackgroundRefusal(err error) []string {
+	if err == nil || !IsCode(err, ErrConflict) {
+		return nil
+	}
+	switch v := AsError(err).Details[DetailBackgroundWork].(type) {
+	case []string:
+		if len(v) > 0 {
+			return v
+		}
+	case []any: // decoded from JSON
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
 }

@@ -58,12 +58,46 @@ func AfterReboot(nodeName string) string {
 // underneath it (diedAt: when the old process was last seen alive; zero
 // when unknown).
 func AfterCrash(diedAt, resumedAt time.Time) string {
+	return AfterInterrupt(Interrupt{DiedAt: diedAt, ResumedAt: resumedAt})
+}
+
+// Interrupt describes why a resumed session's previous process is gone.
+type Interrupt struct {
+	Machine          string    // the node's name ("" unknown)
+	MachineRestarted bool      // the machine booted after the run started
+	BootAt           time.Time // when it booted (zero unknown)
+	DiedAt           time.Time // when the old process was last seen alive (zero unknown)
+	ResumedAt        time.Time
+	InPlace          bool // the same run was restarted (its adapter reloaded the thread), not a new run
+}
+
+// AfterInterrupt is Pyre's note to a session it resumed after its process
+// did not survive: a machine restart, or a crash underneath pyred. Pyre
+// never replays the interrupted instruction, so the note says to check the
+// last step before redoing it.
+func AfterInterrupt(n Interrupt) string {
 	died := "your previous process died"
-	if !diedAt.IsZero() {
-		died += " at about " + PT(diedAt)
+	if !n.DiedAt.IsZero() {
+		died += " at about " + PT(n.DiedAt)
 	}
-	return fmt.Sprintf("[from Pyre] Pyre restarted after a crash: %s and Pyre resumed you at %s. %s "+
-		"If you were started by another session, check in with it before continuing. No reply needed.", died, PT(resumedAt), lostBackground)
+	how := "Pyre resumed you"
+	if n.InPlace {
+		how = "Pyre restarted you in the same conversation"
+	}
+	head := "Pyre restarted after a crash: " + died
+	if n.MachineRestarted {
+		machine := "This machine"
+		if n.Machine != "" {
+			machine = n.Machine
+		}
+		head = machine + " restarted"
+		if !n.BootAt.IsZero() {
+			head += " (it booted at " + PT(n.BootAt) + ")"
+		}
+		head += ": " + died + " with it"
+	}
+	return fmt.Sprintf("[from Pyre] %s and %s at %s. Tool calls that were in flight did not finish and nothing was replayed. %s "+
+		"If you were started by another session, check in with it before continuing. No reply needed.", head, how, PT(n.ResumedAt), lostBackground)
 }
 
 // pacific is where the owner reads times. The pyred and pyre binaries

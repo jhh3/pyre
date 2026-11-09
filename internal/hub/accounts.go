@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jhh3/pyre/internal/audit"
 	"github.com/jhh3/pyre/internal/contracts"
@@ -139,6 +140,9 @@ func (h *Hub) ingestObservationTx(ctx context.Context, tx *sql.Tx, nodeID string
 		return err
 	}
 	wasLimited := h.accountLimitedTx(ctx, tx, o.AccountID)
+	var prevEl sql.NullString
+	_ = tx.QueryRowContext(ctx, `SELECT json_extract(observation,'$.eligibility') FROM account_observations WHERE account_id=? AND reporting_node=?`,
+		o.AccountID, nodeID).Scan(&prevEl)
 	// Keep the newest observation per (account, node).
 	res, err := tx.ExecContext(ctx, `INSERT INTO account_observations(account_id,reporting_node,observed_at,observation) VALUES(?,?,?,?)
 		ON CONFLICT(account_id,reporting_node) DO UPDATE SET observed_at=excluded.observed_at, observation=excluded.observation
@@ -149,6 +153,17 @@ func (h *Hub) ingestObservationTx(ctx context.Context, tx *sql.Tx, nodeID string
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil // older than what we have
+	}
+	if o.Eligibility == contracts.EligibleYes && prevEl.String != string(contracts.EligibleYes) {
+		// The account regained room on this node: sessions waiting for
+		// one may resume now (limitresume.go).
+		prov := o.Provider
+		if a, err := h.getAccount(ctx, tx, o.AccountID); prov == "" && err == nil {
+			prov = a.Provider
+		}
+		if err := h.noteAccountRoomTx(ctx, tx, nodeID, prov, o.ObservedAt); err != nil {
+			return err
+		}
 	}
 	if limited := h.accountLimitedTx(ctx, tx, o.AccountID); limited != wasLimited {
 		r := auditRec{Action: contracts.AuditAccountCooldownEnded, Automatic: true, NodeID: nodeID, AccountID: o.AccountID, ToNote: audit.UsageNote(&o)}
@@ -284,6 +299,9 @@ func (h *Hub) ingestFallbackTx(ctx context.Context, tx *sql.Tx, nodeID string, f
 		return err
 	}
 	h.auditFallbackTx(ctx, tx, nodeID, f)
+	if err := h.armLimitResumeTx(ctx, tx, nodeID, f); err != nil { // limitresume.go
+		return err
+	}
 	ref := contracts.ObjectRef{Kind: contracts.KindSession, ID: f.SessionID}
 	if err := h.emitPayload(ctx, tx, contracts.EvFallbackPlanned, ref, f.SessionID, sess.ProjectID, "node:"+nodeID, seq, f); err != nil {
 		return err
@@ -343,7 +361,11 @@ func (h *Hub) presentObservation(o contracts.AccountObservation) contracts.Accou
 	if h.now().Sub(o.ObservedAt) > h.opt.AccountStaleAfter {
 		o.Stale = true
 		if o.Detail == "" {
-			o.Detail = fmt.Sprintf("observation is %s old", h.now().Sub(o.ObservedAt).Round(1e9))
+			// A fixed time, not an age: the text then stays the same from
+			// one read to the next, so an unchanged accounts.list matches
+			// its ETag (contracts/conditional.go) instead of differing by
+			// the second.
+			o.Detail = fmt.Sprintf("observation from %s is older than %s", o.ObservedAt.UTC().Format(time.RFC3339), h.opt.AccountStaleAfter)
 		}
 	}
 	if o.Stale && o.Eligibility == contracts.EligibleYes {

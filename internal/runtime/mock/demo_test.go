@@ -30,6 +30,9 @@ func demoFleet() *c.FixtureBundle {
 		if h == c.HarnessCodex {
 			cs = codexCaps
 		}
+		if h == c.HarnessShell {
+			cs = append(append([]string(nil), caps...), c.CapShellInitialPrompt)
+		}
 		if !ok {
 			cs = []string{}
 		}

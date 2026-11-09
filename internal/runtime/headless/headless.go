@@ -212,6 +212,7 @@ func (x *Adapter) Exited(h contracts.RunHandle, code *int, signal, nativeID stri
 		switch {
 		case nativeID != "" && x.s.ValidNative(nativeID):
 			st.NativeID = nativeID
+		case st.NativeID != "": // reported while it ran (Native)
 		case st.ResumeFrom != "":
 			st.NativeID = st.ResumeFrom
 		case x.s.FindNative != nil:
@@ -227,6 +228,29 @@ func (x *Adapter) Exited(h contracts.RunHandle, code *int, signal, nativeID stri
 	})
 	if err == nil && st.NativeID != "" {
 		x.s.NativeKnown(h.RunID, h.StateDir, st, st.NativeID)
+	}
+	return err
+}
+
+// Native records the conversation the CLI saw in the output while the
+// child still runs, so the run's transcript reads (pyre read) and its
+// activity show before it ends; without it a long run looked hung until
+// its exit report named the conversation. The first report wins; the exit
+// report's id still replaces it.
+func (x *Adapter) Native(h contracts.RunHandle, nativeID string) error {
+	if !x.s.ValidNative(nativeID) {
+		return contracts.Errorf(contracts.ErrInvalid, "headless run %s: %q is not a %s id", h.RunID, nativeID, x.s.NativeKind)
+	}
+	changed := false
+	st, err := x.update(h, func(st *State) error {
+		if st.Phase == phaseExited || st.NativeID != "" {
+			return nil
+		}
+		st.NativeID, changed = nativeID, true
+		return nil
+	})
+	if err == nil && changed {
+		x.s.NativeKnown(h.RunID, h.StateDir, st, nativeID)
 	}
 	return err
 }

@@ -73,7 +73,8 @@ export function outcome(ask: Ask) {
       if (ask.proposal?.state === 'applied')
         return { tone: 'ok' as const, chip: 'Approved', text: ask.proposal.kind === 'fact' ? 'Approved: added to the fact sheet' : 'Approved: go-ahead recorded' };
       if (ask.proposal?.state === 'failed') return { tone: 'neutral' as const, chip: 'Approved', text: `Approved, not recorded: ${ask.proposal.error ?? ''}` };
-      if (ask.answer?.source === 'chat') return { tone: 'ok' as const, chip: 'Answered', text: `You answered in chat: ${ask.answer.text ?? ''}` };
+      if (ask.answer?.source === 'chat')
+        return { tone: 'ok' as const, chip: 'Answered', text: ask.answer.option_id ? `You chose in chat: ${label}` : `You answered in chat: ${ask.answer.text ?? ''}` };
       return { tone: 'ok' as const, chip: 'Answered', text: label ? `You chose: ${label}` : 'Answered' };
     case 'defaulted':
       return { tone: 'neutral' as const, chip: 'Defaulted', text: `Defaulted to: ${label}` };

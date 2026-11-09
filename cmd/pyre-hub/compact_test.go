@@ -61,4 +61,8 @@ func TestCompact(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM commands`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("commands left: %d %v", n, err)
 	}
+	// The served hub can keep shrinking it (W-dbspace).
+	if sp, err := sqlitex.Space(t.Context(), db); err != nil || sp.AutoVacuum != sqlitex.AutoVacuumIncremental {
+		t.Fatalf("auto_vacuum after compact: %+v %v", sp, err)
+	}
 }

@@ -376,6 +376,15 @@ func (m *Manager) externalVersion(ctx context.Context, tool, path string) string
 // live run and beyond the newest Keep healthy previous versions. Records of
 // failed versions are kept for the report; their payloads are already gone.
 func (m *Manager) Prune(ctx context.Context) ([]contracts.ToolVersion, error) {
+	return m.prune(ctx, "")
+}
+
+// PruneTool is Prune for one tool.
+func (m *Manager) PruneTool(ctx context.Context, tool string) ([]contracts.ToolVersion, error) {
+	return m.prune(ctx, tool)
+}
+
+func (m *Manager) prune(ctx context.Context, only string) ([]contracts.ToolVersion, error) {
 	runs := m.activeRuns(ctx)
 	if m.opt.Runs != nil && runs == nil {
 		if _, err := m.opt.Runs.ActiveRuns(ctx); err != nil {
@@ -385,6 +394,9 @@ func (m *Manager) Prune(ctx context.Context) ([]contracts.ToolVersion, error) {
 	var removed []contracts.ToolVersion
 	err := m.mutate(func(st *stateFile) error {
 		for tool, recs := range st.Tools {
+			if only != "" && tool != only {
+				continue
+			}
 			sort.SliceStable(recs, func(i, j int) bool { return recs[i].InstalledAt.After(recs[j].InstalledAt) })
 			keptPrev := 0
 			var keep []versionRecord

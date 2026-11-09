@@ -630,8 +630,66 @@ func writeExit(dir string, r exitRecord) {
 // no Stop hook).
 const stateGrace = 3 * time.Second
 
-// derive combines the hook state with the screen (si nil: unavailable).
+// idleSettle: a turn end (waiting_input) is reported only once the run has
+// looked idle this long: no hook from any conversation and, when the
+// screen is readable, the input box without "esc to cancel". Until then
+// the run stays running, so a parent is never told a turn finished on a
+// passing state (iss_…).
+const idleSettle = 3 * time.Second
+
+// idleUnseenMax: hooks say the turn ended but the screen shows no input
+// box (a layout the parser does not know); after this long the hooks win,
+// so an unknown screen cannot keep a finished run "running" for good.
+const idleUnseenMax = time.Minute
+
+// derive combines the hook state with the screen (si nil: unavailable) and
+// holds a turn end back until it is stable (idleSettle).
 func (a *Adapter) derive(rs *runState, si *screenInfo, now time.Time) (contracts.RunState, string) {
+	if si != nil {
+		if si.HasInputBox && si.Dialog == "" && !si.Working() {
+			if rs.idleSince.IsZero() {
+				rs.idleSince = now
+			}
+		} else {
+			rs.idleSince = time.Time{}
+		}
+	}
+	state, reason := a.deriveNow(rs, si, now)
+	if state != contracts.RunWaitingInput || !rs.started {
+		return state, reason
+	}
+	since := rs.lastEvent
+	if si != nil {
+		if !si.HasInputBox && now.Sub(rs.lastEvent) < idleUnseenMax {
+			return contracts.RunRunning, "turn ending (agy's input prompt is not visible yet)"
+		}
+		if rs.idleSince.After(since) {
+			since = rs.idleSince
+		}
+	}
+	if now.Sub(since) < idleSettle {
+		return contracts.RunRunning, "turn ending (waiting for the idle state to settle)"
+	}
+	return state, reason
+}
+
+// subQuiet: with subagents open, an idle screen reads as an interrupt
+// (Escape fires no Stop hook, for the subagents it cancels either) only
+// once no conversation has fired a hook for this long; a subagent
+// between hooks is still working.
+const subQuiet = 30 * time.Second
+
+// interruptQuiet reports whether the hooks have been quiet long enough for
+// an idle screen to mean the turn was interrupted.
+func interruptQuiet(rs *runState, now time.Time) bool {
+	if rs.openSubs() > 0 {
+		return now.Sub(rs.lastEvent) >= subQuiet
+	}
+	return now.Sub(rs.lastEvent) >= stateGrace
+}
+
+// deriveNow is the state the hooks and the current screen show.
+func (a *Adapter) deriveNow(rs *runState, si *screenInfo, now time.Time) (contracts.RunState, string) {
 	state, reason := rs.hookState()
 	if si == nil {
 		return state, reason
@@ -648,20 +706,20 @@ func (a *Adapter) derive(rs *runState, si *screenInfo, now time.Time) (contracts
 		return state, reason
 	case si.Working():
 		return contracts.RunRunning, "turn in progress"
-	case si.Idle() && state == contracts.RunRunning && now.Sub(rs.lastEvent) >= stateGrace:
+	case si.Idle() && state == contracts.RunRunning && interruptQuiet(rs, now):
 		return contracts.RunWaitingInput, "turn ended (interrupted; no Stop hook)"
-	case state == contracts.RunRunning && !si.InputEmpty() && si.Footer != "" && !strings.Contains(si.Footer, "esc to cancel") &&
-		now.Sub(rs.lastEvent) >= stateGrace:
+	case state == contracts.RunRunning && interruptQuiet(rs, now) && !si.InputEmpty() && si.Footer != "" && !strings.Contains(si.Footer, "esc to cancel"):
 		// A draft in the box hides "? for shortcuts" (the footer shows only
 		// the model); a running turn still says "esc to cancel" over a draft
 		// (verified on 1.4.2). So no "esc to cancel" after an interrupt with
 		// text in the box means the turn ended.
 		return contracts.RunWaitingInput, "turn ended (interrupted; no Stop hook; a draft is in the input box)"
+	case si.Idle() && state == contracts.RunWaitingInput && strings.Contains(si.Footer, "task(s)"):
+		// agy's footer counts its background tasks ("1 task(s) · /tasks"):
+		// one finishing wakes the conversation.
+		return contracts.RunWaitingBackground, reason + "; background task(s) still running"
 	case si.Idle() && state != contracts.RunRunning:
-		if strings.Contains(si.Footer, "task(s)") {
-			return contracts.RunWaitingInput, reason + "; background task(s) still running"
-		}
-		return contracts.RunWaitingInput, reason
+		return state, reason
 	}
 	return state, reason
 }
@@ -690,6 +748,10 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 	}
 	if state == contracts.RunRunning && rs.lastTool != "" && rs.toolAt.After(rs.lastStop.At) {
 		obs.Doing = "used " + rs.lastTool
+	}
+	if rs.limit != nil {
+		le := *rs.limit
+		obs.LimitEvent = &le
 	}
 	obs.Receipts, obs.NextCursor = a.receipts(h, rs, cursor)
 	e.mu.Unlock()
@@ -806,8 +868,10 @@ func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contrac
 	if err != nil || p.Dead {
 		return a.receipt(contracts.OutcomeFailed, false, "run is not live"), nil
 	}
-	if st, _, _ := a.current(ctx, h); st != contracts.RunRunning && st != contracts.RunWaitingApproval {
-		return a.receipt(contracts.OutcomeSucceeded, true, "nothing to interrupt (state "+string(st)+")"), nil
+	if st, why, _ := a.current(ctx, h); (st != contracts.RunRunning && st != contracts.RunWaitingApproval) || strings.HasPrefix(why, "turn ending") {
+		// "turn ending": the turn is over and only settling (derive); an
+		// Escape there would land on agy's idle prompt (and its draft).
+		return a.receipt(contracts.OutcomeSucceeded, true, "nothing to interrupt (state "+string(st)+": "+why+")"), nil
 	}
 	if err := a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEscape); err != nil {
 		return a.receipt(contracts.OutcomeFailed, false, err.Error()), nil
@@ -815,7 +879,7 @@ func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contrac
 	end := time.Now().Add(stateGrace + 3*time.Second)
 	for time.Now().Before(end) {
 		time.Sleep(250 * time.Millisecond)
-		if st, _, _ := a.current(ctx, h); st == contracts.RunWaitingInput {
+		if st, _, _ := a.current(ctx, h); st == contracts.RunWaitingInput || st == contracts.RunWaitingBackground {
 			return a.receipt(contracts.OutcomeSucceeded, true, "turn ended after Escape"), nil
 		}
 	}
@@ -834,6 +898,9 @@ func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.Co
 		return a.receipt(contracts.OutcomeFailed, false, err.Error()), nil
 	}
 	method := "kill-session"
+	if !p.Dead {
+		sessionhost.MarkTree(ctx, a.srv, h.TmuxTarget) // /exit orphans its plugin and MCP servers
+	}
 	if !p.Dead && a.gracefulExit(ctx, h) {
 		method = "/exit"
 	}

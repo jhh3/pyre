@@ -240,7 +240,7 @@ func TestNewSessionClicksPromptTitle(t *testing.T) {
 		t.Fatalf("create params: %+v", p)
 	}
 	if req.Harness != contracts.HarnessCodex || req.NodeID != "node_synth-mac" || req.Title != "tile cache" ||
-		req.InitialPrompt != "fix the tile cache\nand add a test" || !strings.HasSuffix(req.Cwd, "/atlas/.worktrees/tile-cache") {
+		req.InitialPrompt != "fix the tile cache\nand add a test" || !strings.HasSuffix(req.Cwd, "/worktrees/atlas/tile-cache") {
 		t.Fatalf("start request: %+v", req)
 	}
 }
@@ -463,7 +463,7 @@ func TestArchiveOffersSessionWorktreeRemoval(t *testing.T) {
 	selectSession(t, h, sid)
 	h.Key("i")
 	h.WaitFor("worktrees in info", 3*sec, func() bool { return h.Contains("Worktrees") && h.Contains("fresh") })
-	if !h.Contains("~/code/notes-app/.worktrees/share-link") {
+	if !h.Contains("~/worktrees/notes-app/share-link") {
 		t.Fatalf("info overlay:\n%s", h.View())
 	}
 	h.Key("esc")
@@ -487,7 +487,7 @@ func TestArchiveOffersSessionWorktreeRemoval(t *testing.T) {
 	}
 	var p contracts.WorktreeRemoveParams
 	_ = json.Unmarshal(rm[0].Request.(contracts.NodeActionRequest).Params, &p)
-	if p.SessionID != sid || len(p.Paths) != 1 || p.Paths[0] != "/Users/demo/code/notes-app/.worktrees/share-link" {
+	if p.SessionID != sid || len(p.Paths) != 1 || p.Paths[0] != "/Users/demo/worktrees/notes-app/share-link" {
 		t.Fatalf("remove params: %+v", p)
 	}
 }

@@ -98,3 +98,37 @@ func TestResolveCheckoutWorktreeStartsAtOriginMain(t *testing.T) {
 		t.Fatalf("unreachable origin: err = %v", err)
 	}
 }
+
+// A project start with fresh or branch (iss_…)
+// sends the worktree worktree.create already made as both cwd and the
+// checkout's path: the node reuses it as it is, without another worktree.
+func TestResolveCheckoutReusesCreatedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git missing")
+	}
+	repo := filepath.Join(t.TempDir(), "video-editor")
+	wt := filepath.Join(t.TempDir(), "video-editor", "merge-importer-codex")
+	os.MkdirAll(repo, 0o755)
+	gitT := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.email=t@example.invalid", "-c", "user.name=t"}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+		return string(out)
+	}
+	gitT("init", "-q", "-b", "main")
+	gitT("commit", "-q", "--allow-empty", "-m", "init")
+	gitT("worktree", "add", "-q", "-b", "merge-importer-codex", wt)
+	d := &Daemon{}
+	sc := contracts.StartRunCommand{Cwd: wt, Checkout: &contracts.CheckoutRequest{RepoID: "video-editor", Mode: contracts.CheckoutWorktree, Branch: "merge-importer-codex", Path: wt}}
+	cwd, b, err := d.resolveCheckout(context.Background(), sc)
+	if err != nil || cwd != wt || b == nil || b.Mode != contracts.CheckoutWorktree || b.Path != wt || b.Branch != "merge-importer-codex" || b.RepoID != "video-editor" {
+		t.Fatalf("reuse: %q %+v %v", cwd, b, err)
+	}
+	if n := strings.Count(gitT("worktree", "list", "--porcelain"), "worktree "); n != 2 {
+		t.Fatalf("worktrees: %d", n)
+	}
+}

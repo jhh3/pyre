@@ -652,25 +652,25 @@ func TestStatusCardBuckets(t *testing.T) {
 	}
 	old := now.Add(-2 * time.Hour)
 	pg := c.ProjectPage{ProjectID: pid, StatusUpdatedAt: &old}
-	sc := statusCard(pg, views, now)
+	sc := statusCard(pg, views, nil, now)
 	if fmt.Sprint(ids(sc.Working)) != "[ses_synthbusy]" || fmt.Sprint(ids(sc.Stuck)) != "[ses_synthquiet ses_synthdead]" && fmt.Sprint(ids(sc.Stuck)) != "[ses_synthdead ses_synthquiet]" ||
 		fmt.Sprint(ids(sc.Idle)) != "[ses_synthdone]" || fmt.Sprint(ids(sc.NeedsYou)) != "[ses_synthasks]" || !sc.Stale {
 		t.Fatalf("buckets: working %v stuck %v idle %v needs %v stale %v", ids(sc.Working), ids(sc.Stuck), ids(sc.Idle), ids(sc.NeedsYou), sc.Stale)
 	}
 	fresh := now.Add(-10 * time.Minute)
-	if statusCard(c.ProjectPage{StatusUpdatedAt: &fresh}, views, now).Stale {
+	if statusCard(c.ProjectPage{StatusUpdatedAt: &fresh}, views, nil, now).Stale {
 		t.Fatal("fresh update is stale")
 	}
-	if statusCard(pg, views[:1], now).Stale {
+	if statusCard(pg, views[:1], nil, now).Stale {
 		t.Fatal("stale with nothing running")
 	}
-	if statusCard(pg, []c.SessionView{views[0], views[5]}, now).Stale {
+	if statusCard(pg, []c.SessionView{views[0], views[5]}, nil, now).Stale {
 		t.Fatal("stale with only a failed session")
 	}
-	if !statusCard(pg, []c.SessionView{views[2]}, now).Stale {
+	if !statusCard(pg, []c.SessionView{views[2]}, nil, now).Stale {
 		t.Fatal("a quiet working session is running work")
 	}
-	if statusCard(c.ProjectPage{ProjectID: pid}, views, now).Stale {
+	if statusCard(c.ProjectPage{ProjectID: pid}, views, nil, now).Stale {
 		t.Fatal("stale without any page or card")
 	}
 }
@@ -1342,5 +1342,30 @@ func TestMailIndexKeepsAckOnTie(t *testing.T) {
 	x.apply(later)
 	if got := x.msgs["msg_synth-tie"].Status.Ack; got != c.AckNone {
 		t.Fatalf("a newer status must win: %s", got)
+	}
+}
+
+// Leads follow the hub's page rule: a top-level session, or a delegated
+// lead whose parent is outside the project; a child of a session in the
+// same project is not one, nor a child whose parent is unknown.
+func TestIsLeadDelegated(t *testing.T) {
+	p, q := "prj_synthp", "prj_synthq"
+	view := func(id string, project *string, parent string) c.SessionView {
+		return c.SessionView{Session: c.Session{SessionID: id, ProjectID: project, Lineage: c.Lineage{ParentSessionID: parent}}}
+	}
+	byID := map[string]c.SessionView{}
+	for _, v := range []c.SessionView{
+		view("ses_synthcoord", &q, ""), view("ses_synthlead", &p, "ses_synthcoord"),
+		view("ses_synthchild", &p, "ses_synthlead"), view("ses_synthtop", &p, ""), view("ses_synthfree", nil, "ses_synthtop"),
+	} {
+		byID[v.Session.SessionID] = v
+	}
+	for id, want := range map[string]bool{"ses_synthcoord": true, "ses_synthlead": true, "ses_synthchild": false, "ses_synthtop": true, "ses_synthfree": false} {
+		if got := isLead(byID[id], byID); got != want {
+			t.Errorf("%s: lead %v, want %v", id, got, want)
+		}
+	}
+	if isLead(view("ses_synthorphan", &p, "ses_synthunknown"), byID) {
+		t.Error("an unknown parent reads as not leading")
 	}
 }

@@ -68,6 +68,25 @@ func doorbellCommand(o runOpts, exe, pyreCLI string) ([]string, string) {
 	return []string{exe, "inbox-watch"}, ""
 }
 
+// EnvCodexDoorbell disables the Codex in-turn mail notice (input.doorbell)
+// when set to 0/false/off/no.
+const EnvCodexDoorbell = "PYRE_CODEX_DOORBELL"
+
+// codexMailNotice reports whether Codex runs get the in-turn mail notice
+// (codex mailnotice.go) and, if not, why: the agent reads the mail with the
+// pyre MCP inbox tool, so it is off without a pyre CLI, or with
+// PYRE_CODEX_DOORBELL=0.
+func codexMailNotice(pyreCLI string) (bool, string) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvCodexDoorbell))) {
+	case "0", "false", "off", "no":
+		return false, EnvCodexDoorbell + " disables it"
+	}
+	if pyreCLI == "" {
+		return false, "no pyre CLI next to pyred or on PATH (the agent needs the pyre MCP inbox tool)"
+	}
+	return true, ""
+}
+
 // buildAdapters creates the native adapters (WP07) on one shared,
 // Pyre-owned tmux server at <state>/tmux/pyre.sock. An adapter that cannot
 // be constructed is logged and skipped; harness availability (installed,
@@ -107,9 +126,13 @@ func buildAdapters(o runOpts, nodeID string, log *slog.Logger) (builtAdapters, e
 	}
 	b.rates = &rateRelay{}
 	b.wake = &wakeRelay{}
+	mailNotice, mailNoticeOff := codexMailNotice(findPyreCLI())
+	if mailNoticeOff != "" {
+		log.Info("codex in-turn mail notice (input.doorbell) disabled", "reason", mailNoticeOff)
+	}
 	cx, err := codex.New(codex.Options{NodeID: nodeID, TmuxSocket: sock, SSHAlias: o.sshAlias, StateRoot: filepath.Join(o.state, "rt"),
 		ApprovalPolicy: "on-request", Sandbox: "workspace-write", TrustWorkspace: trustFunc(o.trustDirs), OnRateLimits: b.rates.call, OnAutomation: b.auto.call,
-		WakeAllowed: b.wake.call, TranscriptHomes: codexTranscriptHomes(profileRoot(o.state, os.Getenv, userHome()))})
+		WakeAllowed: b.wake.call, MailNotice: mailNotice, TranscriptHomes: codexTranscriptHomes(profileRoot(o.state, os.Getenv, userHome())), Logger: log})
 	if err != nil {
 		log.Warn("codex adapter unavailable", "err", err)
 	} else {

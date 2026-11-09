@@ -142,8 +142,8 @@ trust boundary is the machine (the hub credential lives there anyway).
   facts: "Sent 9:41 AM · waiting: <session> is working (...)", "Delivered to
   <session> at 9:41 AM", "Read by the agent at 9:42 AM", "<session> replied
   at 9:50 AM", or "Not delivered: <why>". Times are America/Los_Angeles.
-- **Projects**: one card per project with its leads (top-level sessions in
-  the project), open asks, whether something waits on you, the lead's
+- **Projects**: one card per project with its leads (sessions in the project
+  with no parent, or whose parent is outside it), open asks, whether something waits on you, the lead's
   progress and phase, a "Stale" chip, and the start of the project page; the
   project view opens with a live status card, then the page (markdown,
   maintained by the lead), sessions (leads first), asks (open, then the last

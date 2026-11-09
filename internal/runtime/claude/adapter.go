@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -119,6 +120,12 @@ type Options struct {
 	// loaded; paste remains the fallback (older Claude Code, module not
 	// loaded, steering mid-turn).
 	DisablePluginDelivery bool
+	// PluginStallAfter: when the module has left every plugin attempt
+	// unclaimed (withdrawn unsent) while the hooks showed the session idle
+	// for this long, Deliver treats the module as stalled and pastes
+	// instead, until a main turn ends or the module claims again
+	// (default 2m; incident 2026-10-23).
+	PluginStallAfter time.Duration
 	// DisableApprovalBroker leaves permission prompts to the TUI only.
 	DisableApprovalBroker bool
 	// ApprovalWait is how long the PermissionRequest hook waits for a Pyre
@@ -165,6 +172,15 @@ type runEntry struct {
 	// waitStartup and Observe both drive them) and guards onb.
 	startupMu sync.Mutex
 	onb       onboardingPresses
+
+	// pluginMiss: start of the first plugin attempt in the current streak
+	// that the module left unclaimed while the session was idle (under mu;
+	// zero = none). See Adapter.pluginStalled.
+	pluginMiss time.Time
+
+	// dialogTasks: what Claude's exit dialog listed (besides Pyre's
+	// monitor) when a stop confirmed it (under mu; BackgroundWork).
+	dialogTasks []string
 }
 
 // onboardingPresses tracks Enter presses on Claude's onboarding screens.
@@ -231,6 +247,9 @@ func New(o Options) (*Adapter, error) {
 	}
 	if o.DoorbellPasteHold <= 0 {
 		o.DoorbellPasteHold = 3 * time.Minute
+	}
+	if o.PluginStallAfter <= 0 {
+		o.PluginStallAfter = 2 * time.Minute
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -406,6 +425,14 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 			// Claude keeps only the last --append-system-prompt.
 			appendPrompt = append(appendPrompt, val)
 			continue
+		case name == "--append-system-prompt-file" && hasVal:
+			// Likewise a file: Claude keeps one, and Pyre passes its own.
+			b, err := os.ReadFile(val)
+			if err != nil {
+				return contracts.RunHandle{}, contracts.Errorf(contracts.ErrInvalid, "argument --append-system-prompt-file: %v", err)
+			}
+			appendPrompt = append(appendPrompt, string(b))
+			continue
 		case name == "--dangerously-load-development-channels" && hasVal:
 			devChannels = append(devChannels, val)
 		}
@@ -508,8 +535,16 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 	case ownMode:
 		argv = append(argv, "--permission-mode", a.o.PermissionMode)
 	}
+	// Prompt text stays off the command line: `pkill -f <word>` matched a
+	// brief and killed unrelated agents (issue iss_…).
+	sysPrompt := filepath.Join(l.StateDir, fileSysPrompt)
 	if g := strings.Join(append(nonEmpty(l.AgentGuide), appendPrompt...), "\n\n"); g != "" {
-		argv = append(argv, "--append-system-prompt", g)
+		if err := writeFileAtomic(sysPrompt, []byte(g)); err != nil {
+			return contracts.RunHandle{}, err
+		}
+		argv = append(argv, "--append-system-prompt-file", sysPrompt)
+	} else {
+		_ = os.Remove(sysPrompt)
 	}
 	// A chosen model and effort (pyre start --model/--effort; "" keeps
 	// Claude's default). Claude Code takes aliases (opus, sonnet, ...) or
@@ -536,8 +571,15 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 		argv = append(argv, "--plugin-dir="+dir) // "=" form: the flag is repeatable
 	}
 	argv = append(argv, l.Args...)
-	if l.InitialPrompt != "" {
-		argv = append(argv, l.InitialPrompt)
+	// The first prompt goes to the plugin spool (submitted once Claude is
+	// idle), or is pasted after startup (deliverLaunchPrompt).
+	launchSpool := ""
+	if l.InitialPrompt != "" && spec.Module != nil {
+		b, _ := json.Marshal(injection{MessageID: launchPromptID(l.RunID), Text: l.InitialPrompt, At: a.o.Now().UTC()})
+		launchSpool = filepath.Join(l.StateDir, claudeplugin.SpoolDir, injectionName(0, launchPromptID(l.RunID))+".msg")
+		if err := writeFileAtomic(launchSpool, b); err != nil {
+			return contracts.RunHandle{}, err
+		}
 	}
 
 	env := map[string]string{}
@@ -608,7 +650,92 @@ func (a *Adapter) Launch(ctx context.Context, l contracts.ResolvedLaunch) (contr
 		h.PID = p.PID
 	}
 	a.waitStartup(ctx, h)
+	if l.InitialPrompt != "" {
+		h.Data["initial_prompt"] = a.deliverLaunchPrompt(ctx, h, l.InitialPrompt, launchSpool)
+	}
 	return h, nil
+}
+
+// launchPromptID names the launch prompt's plugin spool entry (no Pyre
+// message has this id, so its evidence produces no receipt).
+func launchPromptID(runID string) string {
+	if id := "launch-" + runID; safeID(id) {
+		return id
+	}
+	return "launch"
+}
+
+// launchPluginGrace is how long after SessionStart the plugin module may
+// take to report alive before the launch prompt is pasted instead.
+const launchPluginGrace = 5 * time.Second
+
+// deliverLaunchPrompt makes sure the first prompt enters once and reports
+// how. The plugin module submits the spooled entry when Claude is idle; a
+// module that does not come up (within StartupWait, or launchPluginGrace
+// after SessionStart) loses its entry to a withdrawal (a rename its claim
+// cannot also win) and the prompt is pasted.
+func (a *Adapter) deliverLaunchPrompt(ctx context.Context, h contracts.RunHandle, prompt, spool string) string {
+	if spool != "" {
+		end := time.Now().Add(a.o.StartupWait)
+		for started := false; ; {
+			if !started {
+				e := a.entry(h)
+				e.mu.Lock()
+				a.refresh(h, e)
+				started = e.rs.hasStart
+				e.mu.Unlock()
+				if started && time.Now().Add(launchPluginGrace).Before(end) {
+					end = time.Now().Add(launchPluginGrace)
+				}
+			}
+			if _, err := os.Stat(spool); err != nil {
+				return "submitted by the pyre-session plugin"
+			}
+			if PluginAlive(h.StateDir, a.o.Now()) {
+				return "queued for the pyre-session plugin (submitted once Claude is idle)"
+			}
+			if p, err := a.srv.Pane(ctx, h.TmuxTarget); err != nil || p.Dead || ctx.Err() != nil || time.Now().After(end) {
+				break
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+		if os.Rename(spool, strings.TrimSuffix(spool, ".msg")+".withdrawn") != nil {
+			return "submitted by the pyre-session plugin"
+		}
+	}
+	return a.pasteLaunchPrompt(ctx, h, prompt)
+}
+
+// pasteLaunchPrompt types the first prompt into the input box, under the
+// paste path's gates, without a Pyre marker (it is the owner's brief).
+func (a *Adapter) pasteLaunchPrompt(ctx context.Context, h contracts.RunHandle, prompt string) string {
+	_, refusal, err := a.gate(ctx, h)
+	switch {
+	case err != nil:
+		return "not delivered: " + err.Error()
+	case refusal != nil:
+		return "not delivered: " + refusal.Detail
+	}
+	if err := a.srv.Paste(ctx, h.TmuxTarget, "pyre-launch", []byte(prompt)); err != nil {
+		return "not delivered: paste: " + err.Error()
+	}
+	how := ""
+	for i := 0; i < 30 && how == ""; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if si, err := a.screen(ctx, h.TmuxTarget); err == nil {
+			how = si.pasteVisible("\x00", prompt) // no marker: collapsed or tail
+		}
+	}
+	if how == "" {
+		return "not submitted: pasted text not recognised in the input box; Enter not pressed"
+	}
+	if cs, err := a.srv.ListClients(ctx, h.TmuxTarget); err != nil || tmux.WritableClients(cs) > 0 {
+		return "not submitted: a human is on the terminal; the prompt waits in the input box"
+	}
+	if err := a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEnter); err != nil {
+		return "unknown: Enter failed: " + err.Error()
+	}
+	return "pasted (recognised by " + how + ")"
 }
 
 // skillNotes dedupes installSkills log lines (config dir + skill name).
@@ -1118,14 +1245,28 @@ func (a *Adapter) observeApprovals(h contracts.RunHandle, rs *runState, state co
 			aps = a.evalApprovals(h, rs, state)
 		}
 	}
+	// A permission prompt on the screen that no pending broker request
+	// covers (a hard-coded safety prompt or a subagent's, which fire no
+	// PermissionRequest hook) is an approval of its own (tuiprompt.go).
+	if si != nil {
+		brokerOpen := false
+		for _, ap := range aps {
+			brokerOpen = brokerOpen || ap.State == contracts.ApprovalPending
+		}
+		rs.observeTUIPrompt(si, brokerOpen, now)
+	}
+	aps = append(aps, rs.tuiApprovals(h, now)...)
 	waiting := false
 	for _, ap := range aps {
 		if ap.State == contracts.ApprovalPending || ap.State == contracts.ApprovalExpired {
 			waiting = true
 			state = contracts.RunWaitingApproval
-			if ap.State == contracts.ApprovalExpired {
+			switch {
+			case isTUIRequest(ap.RequestID):
+				reason = "permission prompt pending in its terminal (" + ap.Title + "); answer it with pyre approve"
+			case ap.State == contracts.ApprovalExpired:
 				reason = "needs human: permission prompt waiting in its terminal (remote answer window expired; attach to answer it, or interrupt to cancel)"
-			} else {
+			default:
 				reason = "permission request pending (" + ap.Title + ")"
 			}
 		}
@@ -1173,6 +1314,7 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 		obs.Doing = rs.doingNow()
 	}
 	obs.LimitEvent = rs.limit
+	obs.SecurityAlerts = append([]contracts.SecurityAlert(nil), rs.security...)
 	for _, id := range rs.subOrder {
 		s := rs.subagents[id]
 		so := contracts.SubagentObservation{ID: s.ID, Kind: s.Kind, State: "running"}
@@ -1226,6 +1368,12 @@ func (a *Adapter) Observe(ctx context.Context, h contracts.RunHandle, cursor str
 				} else if stuck {
 					reason = fmt.Sprintf(notStartedReason, int(a.o.FirstRunScreenWait.Seconds()))
 				}
+			} else if state == contracts.RunWaitingInput && si.DialogKind == "limit" {
+				// Claude's usage-limit menu after a turn failed at a limit:
+				// the limit itself is the news (the StopFailure hook reported
+				// it to account fallback), not a question for the owner.
+				// Delivery and stop close the menu first (closeLimitMenu).
+				reason += "; " + limitMenuReason
 			} else if state == contracts.RunWaitingInput && si.Dialog != "" && !si.HasInputBox {
 				state, reason = contracts.RunWaitingApproval, "needs human: "+si.Dialog+" (attach to answer it in the terminal)"
 			}
@@ -1392,6 +1540,47 @@ func (a *Adapter) Interrupt(ctx context.Context, h contracts.RunHandle) (contrac
 // SessionEnd), and falls back to kill-session. The tmux session is removed
 // after the exit status is recorded.
 func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.CommandReceipt, error) {
+	return a.stop(ctx, h, false)
+}
+
+// StopUnlessBackground is the stop of a proactive account move
+// (contracts.BackgroundGuard, decision I67): nothing is stopped while the
+// last Stop hook listed live background tasks, or when Claude's exit
+// dialog lists any besides Pyre's monitor (the dialog is cancelled with
+// Escape and the session stays as it was). It never interrupts a turn and
+// never falls back to kill-session.
+func (a *Adapter) StopUnlessBackground(ctx context.Context, h contracts.RunHandle) (contracts.CommandReceipt, error) {
+	if tasks := a.BackgroundWork(ctx, h); len(tasks) > 0 {
+		return a.backgroundRefusal(tasks, "its last turn ended with them running")
+	}
+	return a.stop(ctx, h, true)
+}
+
+// BackgroundWork lists the live background tasks of the last main-turn
+// Stop hook, plus any an exit dialog listed (contracts.BackgroundGuard).
+func (a *Adapter) BackgroundWork(ctx context.Context, h contracts.RunHandle) []string {
+	e := a.entry(h)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	a.refresh(h, e)
+	out := slices.Clone(e.rs.bgTasks)
+	for _, t := range e.dialogTasks {
+		if !slices.Contains(out, t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+var _ contracts.BackgroundGuard = (*Adapter)(nil)
+
+func (a *Adapter) backgroundRefusal(tasks []string, how string) (contracts.CommandReceipt, error) {
+	msg := fmt.Sprintf("not stopped: %d live background task(s) would stop with it (%s): %s", len(tasks), how, strings.Join(tasks, "; "))
+	return a.receipt(contracts.OutcomeFailed, false, msg),
+		contracts.Errorf(contracts.ErrConflict, "%s", msg).WithDetail(contracts.DetailBackgroundWork, tasks)
+}
+
+func (a *Adapter) stop(ctx context.Context, h contracts.RunHandle, guard bool) (contracts.CommandReceipt, error) {
 	now := a.o.Now()
 	p, err := a.srv.Pane(ctx, h.TmuxTarget)
 	if err != nil {
@@ -1402,8 +1591,15 @@ func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.Co
 	}
 	method := "kill-session"
 	if !p.Dead {
-		if a.gracefulExit(ctx, h) {
+		sessionhost.MarkTree(ctx, a.srv, h.TmuxTarget) // /exit orphans its plugin and MCP servers
+		ok, refused, why := a.gracefulExit(ctx, h, guard)
+		switch {
+		case len(refused) > 0:
+			return a.backgroundRefusal(refused, "Claude's exit dialog listed them; the dialog was cancelled")
+		case ok:
 			method = "/exit"
+		case guard:
+			return a.receipt(contracts.OutcomeFailed, false, "not stopped: "+why), contracts.Errorf(contracts.ErrConflict, "not stopped: %s", why)
 		}
 	}
 	if p2, err := a.srv.Pane(ctx, h.TmuxTarget); err == nil {
@@ -1419,60 +1615,133 @@ func (a *Adapter) Stop(ctx context.Context, h contracts.RunHandle) (contracts.Co
 	return a.receipt(contracts.OutcomeSucceeded, true, "stopped via "+method), nil
 }
 
-func (a *Adapter) gracefulExit(ctx context.Context, h contracts.RunHandle) bool {
+// gracefulExit types /exit and waits for the process to end. guard (a
+// stop that must not end background work): a running turn is not
+// interrupted, and an exit dialog that lists tasks besides Pyre's monitor
+// is cancelled (refused names them). why says what kept the exit from
+// happening.
+func (a *Adapter) gracefulExit(ctx context.Context, h contracts.RunHandle, guard bool) (ok bool, refused []string, why string) {
 	e := a.entry(h)
 	e.deliverMu.Lock()
 	defer e.deliverMu.Unlock()
 	if cs, err := a.srv.ListClients(ctx, h.TmuxTarget); err != nil || tmux.WritableClients(cs) > 0 {
-		return false
+		return false, nil, "a terminal is attached"
 	}
 	state, _, _ := a.derived(h)
 	if state == contracts.RunRunning || state == contracts.RunWaitingApproval {
+		if guard {
+			return false, nil, "the session is " + string(state)
+		}
 		_ = a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEscape)
 		time.Sleep(800 * time.Millisecond)
 	}
 	si, err := a.screen(ctx, h.TmuxTarget)
+	if err == nil && si.DialogKind == "limit" && a.closeLimitMenu(ctx, h, si) {
+		si, err = a.screen(ctx, h.TmuxTarget)
+	}
 	if err != nil || !si.InputEmpty() {
-		return false
+		return false, nil, "the prompt is not empty"
 	}
 	if err := a.srv.Paste(ctx, h.TmuxTarget, "pyre-exit", []byte("/exit")); err != nil {
-		return false
+		return false, nil, "could not type /exit"
 	}
-	ok := false
+	typed := false
 	for i := 0; i < 10; i++ {
 		time.Sleep(150 * time.Millisecond)
 		if si, err := a.screen(ctx, h.TmuxTarget); err == nil && si.HasInputBox && strings.TrimSpace(si.InputText()) == "/exit" {
-			ok = true
+			typed = true
 			break
 		}
 	}
-	if !ok {
+	if !typed {
 		a.clearInput(ctx, h.TmuxTarget)
-		return false
+		return false, nil, "/exit did not show in the prompt"
 	}
 	if err := a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEnter); err != nil {
-		return false
+		return false, nil, "could not press Enter"
 	}
 	end := time.Now().Add(a.o.StopWait)
 	answered := false
 	for time.Now().Before(end) {
 		time.Sleep(200 * time.Millisecond)
 		if p, err := a.srv.Pane(ctx, h.TmuxTarget); err != nil || p.Dead {
-			return true
+			return true, nil, ""
 		}
 		// A background task (e.g. Pyre's own message monitor) makes Claude
 		// ask before exiting. Stopping was requested, so confirm "Exit and
-		// stop tasks" — only while that option is the selected one.
-		if !answered {
-			if si, err := a.screen(ctx, h.TmuxTarget); err == nil && exitStopsTasksSelected(si.Lines) {
-				answered = a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEnter) == nil
-				if answered {
-					a.automation(h, contracts.AutomationExitConfirmed, "")
-				}
+		// stop tasks" — only while that option is the selected one. A
+		// guarded stop cancels instead when other tasks are listed.
+		if answered {
+			continue
+		}
+		si, err := a.screen(ctx, h.TmuxTarget)
+		if err != nil || !exitStopsTasksSelected(si.Lines) {
+			continue
+		}
+		tasks := exitDialogTasks(si.Lines)
+		if guard && len(tasks) > 0 {
+			a.cancelExitDialog(ctx, h)
+			return false, tasks, ""
+		}
+		answered = a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEnter) == nil
+		if answered {
+			detail := ""
+			if len(tasks) > 0 {
+				e.mu.Lock()
+				e.dialogTasks = tasks
+				e.mu.Unlock()
+				detail = fmt.Sprintf("%d background task(s) besides Pyre's monitor", len(tasks)) // a count: never screen text
 			}
+			a.automation(h, contracts.AutomationExitConfirmed, detail)
+		}
+	}
+	return false, nil, "it did not exit within " + a.o.StopWait.String()
+}
+
+// limitMenuReason is added to the state reason of a run whose failed turn
+// left Claude's usage-limit menu on screen.
+const limitMenuReason = "Claude's usage-limit menu is open (Pyre closes it before the next message or a stop)"
+
+// closeLimitMenu closes Claude's usage-limit menu with Escape, its "Stop"
+// (the failed turn has already ended; nothing else changes), so a message
+// or /exit reaches the input box. A menu where the owner chose to wait and
+// continue automatically ("Don’t continue automatically" offered) is left
+// alone: Escape could cancel that choice. Callers hold the input (no
+// writable client attached). It reports whether the input box is back.
+func (a *Adapter) closeLimitMenu(ctx context.Context, h contracts.RunHandle, si screenInfo) bool {
+	if si.LimitAutoResume {
+		return false
+	}
+	if err := a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEscape); err != nil {
+		return false
+	}
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if s, err := a.screen(ctx, h.TmuxTarget); err == nil && s.DialogKind != "limit" && s.HasInputBox {
+			return true
 		}
 	}
 	return false
+}
+
+// cancelExitDialog answers Claude's exit dialog with Escape ("Esc to
+// cancel") and leaves the prompt empty again.
+func (a *Adapter) cancelExitDialog(ctx context.Context, h contracts.RunHandle) {
+	_ = a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEscape)
+	for i := 0; i < 15; i++ {
+		time.Sleep(200 * time.Millisecond)
+		si, err := a.screen(ctx, h.TmuxTarget)
+		if err != nil {
+			return
+		}
+		if !exitDialogShown(si.Lines) {
+			a.clearInput(ctx, h.TmuxTarget)
+			return
+		}
+		if i == 7 { // the first Escape was lost
+			_ = a.srv.SendKeys(ctx, h.TmuxTarget, tmux.KeyEscape)
+		}
+	}
 }
 
 // automation reports a dialog the adapter answered by itself (once per run
@@ -1502,15 +1771,65 @@ func exitStopsTasksSelected(lines []string) bool {
 	return false
 }
 
+// exitDialogShown reports Claude's "Background work is running" dialog.
+func exitDialogShown(lines []string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, "Background work is running") {
+			return true
+		}
+	}
+	return false
+}
+
+// exitDialogTasks lists what the exit dialog says will stop, Pyre's own
+// message monitor left out. Claude Code 2.1.3xx:
+//
+//	Background work is running
+//	The following will stop when you exit:
+//
+//	monitor · New Pyre messages for this session
+//	shell · until grep -q synced …
+//
+//	❯ 1. Exit and stop tasks
+//
+// Every other line between the heading and the options counts, so an
+// unfamiliar layout errs toward keeping the session where it is.
+func exitDialogTasks(lines []string) []string {
+	var out []string
+	in := false
+	for _, l := range lines {
+		t := strings.TrimSpace(strings.Trim(strings.TrimSpace(l), "│|"))
+		switch {
+		case strings.Contains(t, "Background work is running"):
+			in, out = true, nil
+			continue
+		case !in:
+			continue
+		case strings.Contains(t, "Exit and stop tasks") || strings.HasPrefix(t, "❯") || strings.HasPrefix(t, "1."):
+			return out
+		case t == "" || strings.Contains(t, "will stop when you exit") || strings.Trim(t, "─━-") == "":
+			continue
+		case strings.Contains(t, claudeplugin.MonitorDescription) || strings.Contains(t, " inbox-watch"):
+			continue
+		}
+		out = append(out, oneLine(t, 100))
+	}
+	return out
+}
+
 // Answer submits a broker answer for a pending PermissionRequest. The
 // receipt reports Effect "submitted"; Observe later reports "effective" or
-// "superseded" (answered in the TUI first).
+// "superseded" (answered in the TUI first). A terminal prompt (tui_ request,
+// tuiprompt.go) is answered by selecting its option in the dialog.
 func (a *Adapter) Answer(ctx context.Context, h contracts.RunHandle, ap contracts.Approval, optionID, text string) (contracts.CommandReceipt, error) {
 	if a.o.DisableApprovalBroker {
 		return a.receipt(contracts.OutcomeUnsupported, false, ""), contracts.Errorf(contracts.ErrUnsupported, "approval broker disabled; answer in the terminal")
 	}
 	if ap.RunID != "" && ap.RunID != h.RunID {
 		return a.receipt(contracts.OutcomeFailed, false, ""), contracts.Errorf(contracts.ErrConflict, "approval belongs to run %s, not %s", ap.RunID, h.RunID)
+	}
+	if isTUIRequest(ap.RequestID) {
+		return a.answerTUI(ctx, h, ap, optionID)
 	}
 	rid := ap.RequestID
 	if !safeID(rid) || readPending(h.StateDir, rid) == nil {
@@ -1574,6 +1893,9 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 	e := a.entry(h)
 	e.mu.Lock()
 	a.refresh(h, e)
+	if req.Tail {
+		a.awaitStopFlush(ctx, h, e)
+	}
 	path := e.rs.tPath
 	e.mu.Unlock()
 	limit := req.Limit
@@ -1604,6 +1926,48 @@ func (a *Adapter) ReadTranscript(ctx context.Context, h contracts.RunHandle, req
 		resp.Screen = strings.TrimRight(screen, "\n")
 	}
 	return resp, nil
+}
+
+// stopFlushWait bounds how long a tail read waits for the final message of
+// a turn that just ended to reach the transcript.
+const (
+	stopFlushWait = 3 * time.Second
+	stopFlushPoll = 50 * time.Millisecond
+)
+
+// awaitStopFlush waits (e.mu held) until the transcript shows the message
+// the latest Stop reported: Claude Code writes it after the hook fires, and
+// the hub's turn-end report reads the tail right then, so it relayed the
+// previous turn's last message (iss_…). A message
+// that does not appear in time is not waited for again.
+func (a *Adapter) awaitStopFlush(ctx context.Context, h contracts.RunHandle, e *runEntry) {
+	for i := 0; e.rs.stopMsg != "" && i < int(stopFlushWait/stopFlushPoll); i++ {
+		e.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			e.mu.Lock()
+			return
+		case <-time.After(stopFlushPoll):
+		}
+		e.mu.Lock()
+		a.refresh(h, e)
+	}
+	e.rs.stopMsg = ""
+}
+
+// TranscriptFullText returns the uncut text of the run's shown transcript
+// entries numbered seqs (the daemon's full sessions.read); a seq with no
+// shown entry is left out.
+func (a *Adapter) TranscriptFullText(ctx context.Context, h contracts.RunHandle, seqs []int64) (map[int64]string, error) {
+	e := a.entry(h)
+	e.mu.Lock()
+	a.refresh(h, e)
+	path := e.rs.tPath
+	e.mu.Unlock()
+	if path == "" {
+		return nil, nil
+	}
+	return a.tails.fullText(path, seqs)
 }
 
 // ResumeSpec: native `--resume <id>` keeps the same Claude session id when

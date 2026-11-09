@@ -52,7 +52,11 @@ func cardNote(now time.Time, cd usage.Card, sessionTitle, nodeName func(string) 
 		if cd.Until != nil && cd.Obs != nil && resetShown(cd.Obs.Windows, *cd.Until) {
 			notes = append(notes, "limit reached")
 		} else if cd.Until != nil {
-			notes = append(notes, "until "+usage.Clock(now, *cd.Until)+" ("+usage.In(now, *cd.Until)+")")
+			n := "until " + usage.Clock(now, *cd.Until) + " (" + usage.In(now, *cd.Until) + ")"
+			if (cd.Account == nil || cd.Own) && cd.Why != "" {
+				n = cd.Why + " " + n // the own login: "quota reached until …" (decision I72)
+			}
+			notes = append(notes, n)
 		} else {
 			notes = append(notes, cd.Why)
 		}

@@ -481,9 +481,13 @@ func (b *Backend) ReissueMessage(ctx context.Context, req c.ReissueMessageReques
 		if req.Body != nil {
 			body = *req.Body
 		}
+		mode := m.Envelope.Mode
+		if req.Mode != "" {
+			mode = req.Mode
+		}
 		nr := c.SendMessageRequest{
 			Mutation: c.Mutation{OperationID: req.OperationID, CorrelationID: req.CorrelationID}, Recipient: m.Envelope.Recipient,
-			ProjectID: m.Envelope.ProjectID, ThreadID: m.Envelope.ThreadID, Mode: m.Envelope.Mode, Body: body,
+			ProjectID: m.Envelope.ProjectID, ThreadID: m.Envelope.ThreadID, Mode: mode, Body: body,
 			Attachments: m.Envelope.Attachments, RequestAck: m.Envelope.RequestAck,
 		}
 		mv, err := b.sendLocked(p, nr, m.Envelope.MessageID)

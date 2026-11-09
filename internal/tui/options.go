@@ -63,6 +63,9 @@ type Options struct {
 	RefreshInterval time.Duration
 	// Debounce coalesces bursts of events into one refresh (default 250ms).
 	Debounce time.Duration
+	// ReloadGap spaces event-driven re-lists of the accounts, nodes and
+	// full sessions lists (default 15s; <0 disables; throttle.go).
+	ReloadGap time.Duration
 	// LoadTimeout bounds every API call (default 20s). A timed-out load keeps
 	// the previous data and labels it with its age.
 	LoadTimeout time.Duration
@@ -158,6 +161,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Debounce <= 0 {
 		o.Debounce = time.Second
+	}
+	if o.ReloadGap == 0 {
+		o.ReloadGap = 15 * time.Second
 	}
 	if o.LoadTimeout <= 0 {
 		o.LoadTimeout = 20 * time.Second

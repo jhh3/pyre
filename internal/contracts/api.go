@@ -281,6 +281,10 @@ type NodeActionResult struct {
 	Outcome   CommandOutcome `json:"outcome"`
 	Result    RawJSON        `json:"result,omitempty"`
 	Error     *Error         `json:"error,omitempty"`
+	// NodeID (additive) is the node the action was sent to: the one the
+	// hub chose when the request left node_id empty (connection.invoke,
+	// memory.search). Older hubs omit it.
+	NodeID string `json:"node_id,omitempty"`
 }
 
 // ---- principal context ----

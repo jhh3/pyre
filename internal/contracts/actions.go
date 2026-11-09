@@ -5,26 +5,31 @@ import "time"
 // Node action names for NodeActionRequest.Action. Payload types follow.
 // Integration packages implement handlers on the node; the hub only routes.
 const (
-	ActionInventory       = "inventory"        // {} -> NodeInventory
-	ActionEnvPlan         = "env.plan"         // EnvPlanParams -> ChangePlan
-	ActionEnvApply        = "env.apply"        // EnvApplyParams -> EnvironmentGeneration
-	ActionEnvDrift        = "env.drift"        // {} -> []DriftItem
-	ActionEnvRollback     = "env.rollback"     // EnvRollbackParams -> EnvironmentGeneration
-	ActionEnvResolve      = "env.resolve"      // EnvPlanParams -> EnvironmentGeneration (preview, no apply)
-	ActionUpdateStage     = "update.stage"     // UpdateParams -> ToolVersion
-	ActionUpdateActivate  = "update.activate"  // UpdateParams -> ToolVersion
-	ActionUpdateRollback  = "update.rollback"  // UpdateParams -> ToolVersion
-	ActionUpdateList      = "update.list"      // {} -> []ToolVersion
-	ActionUpdatePrune     = "update.prune"     // {tool} -> []ToolVersion (keeps a rollback target and in-use versions)
-	ActionUpdateSwapPlan  = "update.swap_plan" // {} -> daemon self-update drain plan
-	ActionEnvProfileSet   = "env.profile.set"  // desired profile document (hub -> node)
-	ActionEnvProfileGet   = "env.profile.get"
-	ActionEnvAdoptPreview = "env.adopt.preview" // {} -> adoption preview (nothing moved)
-	ActionConnCheck       = "connection.check"  // ConnectionParams -> ConnectionAvailability
-	ActionConnInvoke      = "connection.invoke" // ConnectionInvokeParams -> ConnectionInvokeResult
-	ActionConnGrant       = "connection.grant"  // ConnectionGrantParams -> Connection
-	ActionConnRevoke      = "connection.revoke" // ConnectionGrantParams -> Connection
-	ActionConnList        = "connection.list"   // {} -> []Connection
+	ActionInventory      = "inventory"        // {} -> NodeInventory
+	ActionEnvPlan        = "env.plan"         // EnvPlanParams -> ChangePlan
+	ActionEnvApply       = "env.apply"        // EnvApplyParams -> EnvironmentGeneration
+	ActionEnvDrift       = "env.drift"        // {} -> []DriftItem
+	ActionEnvRollback    = "env.rollback"     // EnvRollbackParams -> EnvironmentGeneration
+	ActionEnvResolve     = "env.resolve"      // EnvPlanParams -> EnvironmentGeneration (preview, no apply)
+	ActionUpdateStage    = "update.stage"     // UpdateParams -> ToolVersion
+	ActionUpdateActivate = "update.activate"  // UpdateParams -> ToolVersion
+	ActionUpdateRollback = "update.rollback"  // UpdateParams -> ToolVersion
+	ActionUpdateList     = "update.list"      // {} -> []ToolVersion
+	ActionUpdatePrune    = "update.prune"     // {tool} -> []ToolVersion (keeps a rollback target and in-use versions)
+	ActionUpdateSwapPlan = "update.swap_plan" // {} -> daemon self-update drain plan
+	// ActionUpdateAuto runs the automatic updater's check now (in the
+	// background; the result returns at once with Running set).
+	ActionUpdateAuto = "update.auto" // AutoUpdateParams -> []AutoUpdateStatus
+	// ActionUpdateAutoStatus reads the automatic updater's state (read-only).
+	ActionUpdateAutoStatus = "update.auto.status" // AutoUpdateParams -> []AutoUpdateStatus
+	ActionEnvProfileSet    = "env.profile.set"    // desired profile document (hub -> node)
+	ActionEnvProfileGet    = "env.profile.get"
+	ActionEnvAdoptPreview  = "env.adopt.preview" // {} -> adoption preview (nothing moved)
+	ActionConnCheck        = "connection.check"  // ConnectionParams -> ConnectionAvailability
+	ActionConnInvoke       = "connection.invoke" // ConnectionInvokeParams -> ConnectionInvokeResult
+	ActionConnGrant        = "connection.grant"  // ConnectionGrantParams -> Connection
+	ActionConnRevoke       = "connection.revoke" // ConnectionGrantParams -> Connection
+	ActionConnList         = "connection.list"   // {} -> []Connection
 	// Cross-node credential provisioning (sealed transfer; only ciphertext
 	// crosses the hub). Payload types live in internal/connections.
 	ActionConnProvisionOffer  = "connection.provision_offer"
@@ -43,7 +48,22 @@ const (
 	ActionMemoryStatus        = "memory.status"        // {} -> MemoryStatus
 	ActionDirList             = "dir.list"             // DirListParams -> DirListResult (launch picker)
 	ActionDiagnostics         = "diagnostics"          // {} -> Diagnostics
+	ActionNeedsCheck          = "needs.check"          // NeedsCheckParams -> NeedsCheckResult (placement --needs)
 )
+
+// NeedsCheckParams asks a node whether it has command-line tools (on
+// pyred's PATH or the usual user bin folders) and paths (absolute, or ~/...
+// under its home). Presence only: nothing is run.
+type NeedsCheckParams struct {
+	Tools []string `json:"tools,omitempty"`
+	Paths []string `json:"paths,omitempty"`
+}
+
+// NeedsCheckResult answers NeedsCheckParams: each asked name -> present.
+type NeedsCheckResult struct {
+	Tools map[string]bool `json:"tools"`
+	Paths map[string]bool `json:"paths"`
+}
 
 type NodeInventory struct {
 	NodeID            string                       `json:"node_id"`
@@ -97,6 +117,33 @@ type UpdateParams struct {
 	Digest  Digest `json:"digest,omitempty"`
 	// SimulateHealthFailure is honored only in test mode.
 	SimulateHealthFailure bool `json:"simulate_health_failure,omitempty"`
+}
+
+// AutoUpdateParams selects the tool of update.auto / update.auto.status
+// ("" = every automatically updated tool).
+type AutoUpdateParams struct {
+	Tool string `json:"tool,omitempty"`
+}
+
+// AutoUpdateStatus is one tool's automatic updater state on a node.
+type AutoUpdateStatus struct {
+	Tool    string `json:"tool"`
+	Enabled bool   `json:"enabled"`
+	// Current is the version new runs launch (managed active, else the
+	// user's own install found on PATH).
+	Current string `json:"current,omitempty"`
+	// Latest is the newest stable release seen at CheckedAt; LatestSource
+	// is the artifact for this node's platform.
+	Latest       string     `json:"latest,omitempty"`
+	LatestSource string     `json:"latest_source,omitempty"`
+	CheckedAt    *time.Time `json:"checked_at,omitempty"`
+	NextCheckAt  *time.Time `json:"next_check_at,omitempty"`
+	Running      bool       `json:"running,omitempty"` // a check is in progress
+	// Outcome of the last check: up_to_date, updated, check_failed,
+	// stage_failed, activate_failed, skipped_failed (that version failed
+	// before; the next release is tried).
+	Outcome string `json:"outcome,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 type ConnectionParams struct {
@@ -181,7 +228,31 @@ type MemorySearchResult struct {
 	Hits      []MemoryHit `json:"hits"`
 	Truncated bool        `json:"truncated"`
 	Freshness Freshness   `json:"freshness"`
+	// ServedBy (additive) names the node whose Hive answered when it is not
+	// the node asked: a node without Hive has the hub route the search to
+	// one that advertises NodeCapMemoryHive. Empty when the asked node
+	// answered.
+	ServedBy *MemoryServedBy `json:"served_by,omitempty"`
 }
+
+// MemoryServedBy is the node that answered a routed memory search.
+type MemoryServedBy struct {
+	NodeID string `json:"node_id"`
+	Name   string `json:"name,omitempty"`
+}
+
+// NodeCapMemoryHive is the node capability (Node.Capabilities) of a pyred
+// whose Hive answers memory.search (the hive CLI or its read-only index).
+// The hub routes a memory.search sent without node_id to a connected node
+// that advertises it (preferring the hub's own machine). It is set at
+// hello, so Hive installed later shows after pyred reconnects; older
+// pyreds never advertise it.
+const NodeCapMemoryHive = "memory.hive"
+
+// MemoryNoNodeReason is the "reason" detail of the ErrUnavailable a hub
+// returns for a memory.search without node_id when no connected node
+// advertises NodeCapMemoryHive.
+const MemoryNoNodeReason = "no_memory_node"
 
 type MemoryStatus struct {
 	Backend      string     `json:"backend"` // "hive" | "unavailable"
