@@ -22,7 +22,7 @@ func TestSlackFileIDAcceptsEveryURLForm(t *testing.T) {
 			t.Errorf("slackFileID(%q) = %q, %v", raw, got, ok)
 		}
 	}
-	for _, raw := range []string{"", "U08K5RVBYA0", "image.png", "f0cg67esgrw"} {
+	for _, raw := range []string{"", "U00000000A0", "image.png", "f0cg67esgrw"} {
 		if _, ok := slackFileID(raw); ok {
 			t.Errorf("slackFileID(%q) accepted", raw)
 		}
@@ -60,7 +60,7 @@ func fakeSlack(t *testing.T, files ...fakeSlackFile) *httptest.Server {
 				size = int64(len(file.body))
 			}
 			_ = json.NewEncoder(response).Encode(map[string]any{"ok": true, "file": map[string]any{
-				"id": file.id, "name": file.name, "title": file.name, "mimetype": file.mime, "size": size, "user": "U08K5RVBYA0",
+				"id": file.id, "name": file.name, "title": file.name, "mimetype": file.mime, "size": size, "user": "U00000000A0",
 				"url_private_download": server.URL + "/files-pri/T1-" + file.id + "/download/" + file.name,
 			}})
 			return
